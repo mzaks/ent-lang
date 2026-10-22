@@ -38,6 +38,17 @@ system move() {
   }
 }
 
-schedule frame() { show() ahead() move() }
+// A car more after the second frame: which cars the index holds changed,
+// so it is made anew.
+system join() {
+  spawn { Car { lane: 0, key: 7 }, Spot { x: 7.0 } }
+}
 
-main { loop { frame() } until Run.step == 2 }
+schedule frame() {
+  show()
+  ahead()
+  move()
+  join() run_if Run.step == 2
+}
+
+main { loop { frame() } until Run.step == 4 }

@@ -3232,22 +3232,67 @@ LogicalResult Parser::parseIndex() {
   std::string n = *name;
   std::string text;
   llvm::raw_string_ostream out(text);
+  // Each copied field by the binding it is read through (`c1.x`).
+  auto through = [&](const Copy &copy) {
+    return "c" + std::to_string(llvm::find(of, copy.component) - of.begin()) +
+           "." + copy.field;
+  };
+  std::string bindings;
+  for (auto [number, component] : llvm::enumerate(of))
+    bindings += ", c" + std::to_string(number) + ": " + component;
+  SmallVector<std::string> fields{"key", "who"};
+  for (const Copy &copy : copies)
+    fields.push_back(copy.name);
   out << "transient unique " << n << "_fresh: bool\n"
+      << "transient unique " << n << "_whole: bool\n"
+      // Every entity told its row.
       << "proc " << n << "_number(order: " << n << ", held: mut "
       << of.front() << ") {\n"
       << "  for row in 0..len(order) { held[order[row].who]." << rowField
       << " = row }\n}\n"
-      << "system " << n << "_update() {\n  " << n << " = []\n  for e";
-  for (auto [number, component] : llvm::enumerate(of))
-    out << ", c" << number << ": " << component;
-  out << " by c0." << *key << " {\n    " << n << " += { key: c0." << *key
-      << ", who: e";
+      // The rows in order again, where few are out of it: each that is
+      // below the one before goes down past those above it (insertion),
+      // and the entities of the rows that moved are told their rows.
+      << "proc " << n << "_settle(order: mut " << n << ", held: mut "
+      << of.front() << ") {\n"
+      << "  for i in 1..len(order) {\n"
+      << "    if order[i].key < order[i - 1].key {\n";
+  for (const std::string &field : fields)
+    out << "      let " << field << "_ = order[i]." << field << "\n";
+  out << "      var j = i\n"
+      << "      while j > 0 && order[j - 1].key > key_ {\n";
+  for (const std::string &field : fields)
+    out << "        order[j]." << field << " = order[j - 1]." << field << "\n";
+  out << "        held[order[j].who]." << rowField << " = j\n"
+      << "        j -= 1\n      }\n";
+  for (const std::string &field : fields)
+    out << "      order[j]." << field << " = " << field << "_\n";
+  out << "      held[who_]." << rowField << " = j\n"
+      << "    }\n  }\n}\n"
+      // Made again: where the same entities are in it, each writes its
+      // key and what is copied into its own row, and the rows are put in
+      // order again; else all are put in order by their keys.
+      << "system " << n << "_update() {\n"
+      << "  if " << n << "_whole {\n"
+      << "    for e" << bindings << ", w: mut " << n << "[c0." << rowField
+      << ", 1] {\n      w[0].key = c0." << *key << "\n";
   for (const Copy &copy : copies)
-    out << ", " << copy.name << ": c"
-        << llvm::find(of, copy.component) - of.begin() << "." << copy.field;
-  out << " }\n  }\n  " << n << "_number(" << n << ", " << of.front()
-      << ")\n  " << n << "_fresh = true\n}\n"
+    out << "      w[0]." << copy.name << " = " << through(copy) << "\n";
+  out << "    }\n    " << n << "_settle(" << n << ", " << of.front()
+      << ")\n  } else {\n"
+      << "    " << n << " = []\n"
+      << "    for e" << bindings << " by c0." << *key << " {\n"
+      << "      " << n << " += { key: c0." << *key << ", who: e";
+  for (const Copy &copy : copies)
+    out << ", " << copy.name << ": " << through(copy);
+  out << " }\n    }\n    " << n << "_number(" << n << ", " << of.front()
+      << ")\n    " << n << "_whole = true\n  }\n"
+      << "  " << n << "_fresh = true\n}\n"
+      // Out of date: its keys or what it copies changed, or (`moved`)
+      // which entities it holds.
       << "system " << n << "_stale() { " << n << "_fresh = false }\n"
+      << "system " << n << "_moved() {\n  " << n << "_fresh = false\n  "
+      << n << "_whole = false\n}\n"
       << "fn " << n << "_find(order: " << n << ", key: " << spelled
       << ") -> i32 {\n"
       << "  var low = 0\n  var high = len(order)\n"
@@ -3296,6 +3341,7 @@ LogicalResult Parser::parseIndex() {
                                strings({resolve(of.front()), rowField})),
           builder.getNamedAttr("update", builder.getStringAttr(resolve(n + "_update"))),
           builder.getNamedAttr("stale", builder.getStringAttr(resolve(n + "_stale"))),
+          builder.getNamedAttr("moved", builder.getStringAttr(resolve(n + "_moved"))),
           builder.getNamedAttr("fresh", builder.getStringAttr(resolve(n + "_fresh"))),
       }));
   indexes[bufferName.getValue()] = {resolve(of.front()), rowField, keyType,

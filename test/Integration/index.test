@@ -1,8 +1,9 @@
 // An index (docs/syntax.md): the cars by a key of lane and place, rows
 // that hold each car and its place, where each car's row is, and the
 // first row of a lane by halving. Made again after `move` changed the
-// keys and places, before `show` reads it in the next frame. The same on
-// one core and on all.
+// keys and places, before `show` reads it in the next frame: each car's
+// row given its key and place, then the rows put in order again. Made
+// anew after `join` gave it a car more. The same on one core and on all.
 // RUN: %ent run %S/Inputs/index.ent 2>/dev/null > %t.one
 // RUN: %ent run --parallel %S/Inputs/index.ent 2>/dev/null > %t.all
 // RUN: cmp %t.one %t.all
@@ -25,3 +26,13 @@
 // CHECK-NEXT: row 3: key 4294967311 x 115.0
 // CHECK:      lane 1 starts at row 3
 // CHECK-NEXT: car at 125.0 lane 0: row 1, next row has x 85.0
+// The car that joined, in its place, and the rows after it one further.
+// CHECK:      row 0: key 7 x 7.0
+// CHECK-NEXT: row 1: key 10 x 110.0
+// CHECK:      row 6: key 4294967336 x 140.0
+// CHECK-NEXT: lane 1 starts at row 4
+// And again after the next move, as the cars came to be in order.
+// CHECK:      row 0: key 32 x 32.0
+// CHECK-NEXT: row 1: key 35 x 135.0
+// CHECK:      lane 1 starts at row 4
+// CHECK-NOT:  {{^}}row

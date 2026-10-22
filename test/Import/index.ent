@@ -4,7 +4,8 @@
 // An index (docs/syntax.md): a buffer the program keeps, a field of the
 // first component where each entity's row is, and what the index declares
 // for itself; --ent-indexes runs `Traffic_update` before what reads it
-// where `Traffic_stale` has run after what changed it.
+// where `Traffic_moved` (which entities it holds) or `Traffic_stale`
+// (their keys or what it copies) has run after what changed it.
 
 component Car { key: i64 } capacity 64
 component Spot { x: f32 } capacity 64
@@ -36,8 +37,11 @@ schedule frame() {
 // CHECK-LABEL: ent.system @early()
 // CHECK: %[[ROW:.*]] = arith.constant 0 : i32
 // CHECK: ent.spawn (@Car, @Spot)(%{{.*}}, %[[ROW]], %{{.*}}) : i64, i32, f32
-// CHECK: ent.buffer @Traffic (key: i64, who: !ent.entity, x: f32) capacity 64 {ent.index = {copies = ["Spot", "x"], fresh = "Traffic_fresh", key = ["Car", "key"], of = ["Car", "Spot"], row = ["Car", "row_in_Traffic"], stale = "Traffic_stale", update = "Traffic_update"}{{.*}}ent.transient}
+// CHECK: ent.buffer @Traffic (key: i64, who: !ent.entity, x: f32) capacity 64 {ent.index = {copies = ["Spot", "x"], fresh = "Traffic_fresh", key = ["Car", "key"], moved = "Traffic_moved", of = ["Car", "Spot"], row = ["Car", "row_in_Traffic"], stale = "Traffic_stale", update = "Traffic_update"}{{.*}}ent.transient}
 // CHECK-LABEL: ent.system @Traffic_update()
+// CHECK: ent.read @Traffic_whole "value"
+// CHECK: ent.query
+// CHECK: ent.invoke proc @Traffic_settle
 // CHECK: ent.query {{.*}} by @Car "key"
 // CHECK: ent.append @Traffic
 // CHECK: ent.invoke proc @Traffic_number
@@ -48,11 +52,11 @@ schedule frame() {
 
 // RUNS-LABEL: ent.schedule @frame()
 // RUNS-NEXT: ent.run @early()
-// RUNS-NEXT: ent.run @Traffic_stale()
+// RUNS-NEXT: ent.run @Traffic_moved()
 // RUNS-NEXT: ent.run @Traffic_update() if
 // RUNS: ent.run @count()
 // RUNS-NEXT: ent.run @late()
-// RUNS-NEXT: ent.run @Traffic_stale()
+// RUNS-NEXT: ent.run @Traffic_moved()
 // RUNS-NEXT: ent.run @move()
 // RUNS-NEXT: ent.run @Traffic_stale()
 // RUNS-NEXT: ent.run @Traffic_update() if

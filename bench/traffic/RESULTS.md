@@ -109,3 +109,24 @@ As the order by hand (8.34 and 3.92): `Traffic.row(me)`, a car's row
 looked up by its id, costs what reading it from a component of its own
 did. What is left is to make the index again for less where few
 entities moved in the order.
+
+## 2026-10-22, the index made again where it is
+
+Where the index holds the cars it held (they only moved, and changed
+lanes), each car writes its key and place into its own row (a one-row
+window of the index, `w: mut Traffic[row, 1]`) and the rows that are
+out of order go down past those above them (insertion); only after
+spawns, despawns or moves of the cars' components is it made anew by the
+`for ... by` sort. The same lines to the bit (162,849 lane changes).
+
+| 120,000 cars | `Traffic_update` a call | a step |
+|---|---|---|
+| one core, made anew | 1.24 ms | 8.50 ms |
+| one core, made again where it is | 0.21 ms | 6.12 ms |
+| 12 threads, made anew | 1.40 ms | 3.91 ms |
+| 12 threads, made again where it is | 0.50 ms | 2.11 ms |
+
+On 12 threads the update reads what `drive` and `shift` wrote on other
+cores, and its `for` (120,000 cars, below the million from which a loop
+runs on many threads) runs on one: 0.50 where 0.21. Of the step on all
+cores the update is now half.

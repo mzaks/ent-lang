@@ -1924,7 +1924,8 @@ finds the car ahead and the cars beside each car so.
   (`who`), and, after `{ }`, a field of the entity's components under a
   name of its own (`x: Spot.x`). The entities it holds are those that
   have every component named, in it or in `{ }`; with the same key, in
-  the order the program keeps them in.
+  the order they had in it (where it is made anew: the order the
+  program keeps them in).
 - It is read as a buffer is: `Name[r].field`, `len(Name)`, and handed by
   its name to a fn or proc (`rows: Name`), which reads it. Nothing gives
   it rows, takes them, or changes them.
@@ -1937,17 +1938,27 @@ finds the car ahead and the cars beside each car so.
   the fields it copies, or which entities have its components), and
   only then. A system reads it as it was when the system started, also
   where it changes what it holds itself.
-- To make it again is to put every entity in order by its key (as a
-  `for ... by` does, then told its row), with the fields it copies: as
-  long as that, each time. (Not yet: only the entities that changed.)
+- It is made again one of two ways. Where it holds the same entities as
+  before (only keys and copied fields changed), each entity writes its
+  key and fields into its own row (a `for` that may run on all cores),
+  and the rows that are out of order then go down past those above them
+  one by one: about a pass over the rows where few moved in the order.
+  Where entities came, went, or got or lost a component of it, it is
+  made anew: every entity in order by its key (as a `for ... by` does)
+  and each told its row. With 120,000 cars of which few overtake or
+  change lanes in a step (`bench/traffic`), 0.21 ms the one way and 1.24
+  the other, on one core.
 - Each entity keeps where its row is in the first component, in a field
   of the index's (`row_in_Name`), which a spawn does not give; the C
   header shows it. The rows are not part of a saved world: they are
   made again from the entities.
 - The index declares for itself, in its module, the system that makes it
-  (`Name_update`), the one that says it is out of date (`Name_stale`),
-  the unique that says it is up to date (`Name_fresh`) and the fn that
-  halves its rows (`Name_find`); those names are taken.
+  (`Name_update`), those that say it is out of date (`Name_stale`,
+  `Name_moved`), the uniques that say it is up to date and holds the
+  same entities (`Name_fresh`, `Name_whole`), the procs that tell the
+  entities their rows and put them in order again (`Name_number`,
+  `Name_settle`) and the fn that halves its rows (`Name_find`); those
+  names are taken.
 - Its rows are as many as its first component's capacity at most.
 
 ### Entities given to a fn or proc

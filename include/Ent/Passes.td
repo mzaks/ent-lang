@@ -263,15 +263,17 @@ def EntIndexes : Pass<"ent-indexes", "ModuleOp"> {
     docs/syntax.md) holds the entities that have its components in the
     order of a key, with fields copied from them. Its rows are made by a
     system the index declares (`update`), which also sets a unique
-    (`fresh`); another (`stale`) clears it.
+    (`fresh`); others (`stale`, `moved`) clear it.
 
     In every schedule, a run of `update` on the condition that the index
     is not fresh goes before each run of a system that reads the index
-    (its rows, or the field each entity keeps its row in), and a run of
-    `stale` after each run of a system that writes what the index is made
-    of: the key, the fields it copies, or which entities have its
-    components (spawns, despawns, moves). An extern system that declares
-    no access does both. So the index is made again, once, before the first
+    (its rows, or the field each entity keeps its row in); a run of
+    `moved` after each run of a system that changes which entities have
+    its components (spawns, despawns, moves), and of `stale` after each
+    one that writes only the key or the fields it copies. After `stale`
+    the update writes each entity's values into its own row and puts the
+    rows in order again; after `moved` it makes the index anew. An extern
+    system that declares no access reads it and moves. So the index is made again, once, before the first
     read after a change, and between systems: what reads it sees it as it
     is when its system starts.
   }];

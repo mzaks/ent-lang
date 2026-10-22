@@ -19,8 +19,10 @@ namespace {
 /// What one index is made of and what reads it, as columns, and the
 /// systems that keep it.
 struct Kept {
-  StringAttr update, stale, fresh;
-  llvm::SetVector<Column> madeOf;
+  StringAttr update, stale, moved, fresh;
+  /// Which entities it holds, and the values it holds of them.
+  llvm::SetVector<Column> holds;
+  llvm::SetVector<Column> values;
   llvm::SetVector<Column> readBy;
 };
 
@@ -39,6 +41,7 @@ Kept keptOf(BufferOp buffer, DictionaryAttr info,
   Kept kept;
   kept.update = cast<StringAttr>(info.get("update"));
   kept.stale = cast<StringAttr>(info.get("stale"));
+  kept.moved = cast<StringAttr>(info.get("moved"));
   kept.fresh = cast<StringAttr>(info.get("fresh"));
   SmallVector<StringAttr> of = strings(info, "of");
   SmallVector<StringAttr> key = strings(info, "key");
@@ -55,13 +58,13 @@ Kept keptOf(BufferOp buffer, DictionaryAttr info,
         }))
       continue;
     // Which entities it holds, their keys and what it copies.
-    kept.madeOf.insert({name, empty, empty});
+    kept.holds.insert({name, empty, empty});
     for (StringAttr component : of)
       if (archetype.isOptional(FlatSymbolRefAttr::get(component)))
-        kept.madeOf.insert({name, component, empty});
-    kept.madeOf.insert({name, key[0], key[1]});
+        kept.holds.insert({name, component, empty});
+    kept.values.insert({name, key[0], key[1]});
     for (unsigned i = 0; i + 1 < copies.size(); i += 2)
-      kept.madeOf.insert({name, copies[i], copies[i + 1]});
+      kept.values.insert({name, copies[i], copies[i + 1]});
   }
   return kept;
 }
@@ -103,7 +106,8 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
       module.walk([&](RunOp run) { runs.push_back(run); });
       for (RunOp run : runs) {
         StringAttr system = run.getSystemAttr().getAttr();
-        if (system == kept.update || system == kept.stale)
+        if (system == kept.update || system == kept.stale ||
+            system == kept.moved)
           continue;
         const SystemAccess &access = accessOf(run);
         // (A system with a body that calls out is opaque to the schedule,
@@ -112,7 +116,8 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
         bool unknown = access.isOpaque() &&
                        isa<ExternOp>(symbols.lookup(run.getSystem()));
         bool reads = unknown || touches(access.reads, kept.readBy);
-        bool writes = unknown || touches(access.writes, kept.madeOf);
+        bool moves = unknown || touches(access.writes, kept.holds);
+        bool writes = moves || touches(access.writes, kept.values);
         Location loc = run.getLoc();
         if (reads) {
           builder.setInsertionPoint(run);
@@ -130,7 +135,9 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
         }
         if (writes) {
           builder.setInsertionPointAfter(run);
-          RunOp::create(builder, loc, FlatSymbolRefAttr::get(kept.stale),
+          RunOp::create(builder, loc,
+                        FlatSymbolRefAttr::get(moves ? kept.moved
+                                                     : kept.stale),
                         ValueRange{});
         }
       }
