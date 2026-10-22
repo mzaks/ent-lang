@@ -3447,9 +3447,12 @@ LogicalResult Parser::parseIndex() {
         << "fn " << n << "_image(x: " << ts << ", p: " << ts << ", size: "
         << ts << ") -> " << ts << " {\n";
     if (wrap)
+      // (One subtraction of the shift, which is what adding its
+      // opposite is, to the bit.)
       out << "  let d = x - p\n"
-          << "  if d > size * 0.5 { x - size } else if d < 0.0 - size * 0.5 "
-             "{ x + size } else { x }\n}\n";
+          << "  let shift = if d > size * 0.5 { size } else if d < 0.0 - "
+             "size * 0.5 { 0.0 - size } else { 0.0 }\n"
+          << "  x - shift\n}\n";
     else
       out << "  x\n}\n";
     // Each cell's first row: the first whose cell is not below it.
@@ -5651,22 +5654,26 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
           builder, where,
           arith::MulIOp::create(builder, where, number, sides[d]), cell[d]);
     Type i32 = builder.getI32Type();
+    // (Rows the index has, by the cells: read by row numbers, which are
+    // not asked whether they are rows of the buffer.)
+    auto cellRow = IndexOfType::get(context, cells);
     mlir::Value first32 =
         arith::TruncIOp::create(builder, where, i32, number);
     mlir::Value next32 = arith::AddIOp::create(
         builder, where, first32, integer(where, i32, 1));
-    mlir::Value first = BufferAtOp::create(builder, where, i32, cells,
-                                           builder.getStringAttr("first"),
-                                           first32);
-    mlir::Value end = BufferAtOp::create(builder, where, i32, cells,
-                                         builder.getStringAttr("first"),
-                                         next32);
+    mlir::Value first = BufferAtOp::create(
+        builder, where, i32, cells, builder.getStringAttr("first"),
+        asIndex(where, first32, cellRow));
+    mlir::Value end = BufferAtOp::create(
+        builder, where, i32, cells, builder.getStringAttr("first"),
+        asIndex(where, next32, cellRow));
     return loopWithVars(
         where, arith::IndexCastOp::create(builder, where, indexType, first),
         arith::IndexCastOp::create(builder, where, indexType, end),
         [&](mlir::Value counted) -> LogicalResult {
-          mlir::Value row =
-              arith::IndexCastOp::create(builder, where, i32, counted);
+          mlir::Value row = asIndex(
+              where, arith::IndexCastOp::create(builder, where, i32, counted),
+              IndexOfType::get(context, rows));
           mlir::Value who =
               BufferAtOp::create(builder, where, EntityType::get(context),
                                  rows, builder.getStringAttr("who"), row);
