@@ -1,0 +1,42 @@
+// The intelligent driver model of examples/traffic (idm.ent) on two ring
+// roads, Sugiyama's and one of other drivers, as
+// examples/traffic/check/idm.c drives them: every 100 steps a line for
+// each car, `step car x v` (the bits of the floats), and at the end each
+// road's (by its cars) distance driven (the bits of the double) and stops.
+import console
+import idm
+
+world {
+  Sim.dt = 0.1
+  Sim.warm = 3000
+  Plan += { ring: 230.0, cars: 22, length: 5.0, v0: 15.0, t: 1.0, s0: 2.0,
+            a: 1.0, b: 1.5, kick: 0.5 }
+  Plan += { ring: 400.0, cars: 30, length: 4.5, v0: 20.0, t: 1.2, s0: 1.5,
+            a: 0.8, b: 2.0, kick: 1.0 }
+}
+
+system trace() {
+  let step = Sim.step
+  for c: Car, at: Spot, s: Speed {
+    put("{step} {c.number} {bits_of(at.x)} {bits_of(s.v)}")
+  }
+}
+
+system report() {
+  for r: Road {
+    put("road of {r.cars} cars driven {bits_of(r.driven)} stops {r.stops}")
+  }
+}
+
+schedule traced() {
+  trace() run_if Sim.step % 100 == 0
+  step()
+}
+
+schedule finish() { report() }
+
+main {
+  setup()
+  loop { traced() } until Sim.step == 6000
+  finish()
+}

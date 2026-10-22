@@ -1,0 +1,132 @@
+// Cars on a ring road, one lane, after the intelligent driver model
+// (Treiber, Hennecke and Helbing, 2000): a car is where it is in metres
+// and goes as fast as it goes, and speeds up or brakes by how far it is
+// behind the car ahead and how much faster it is than that one:
+//
+//   s* = s0 + max(0, v T + v (v - v_ahead) / (2 sqrt(a b)))
+//   dv/dt = a (1 - (v / v0)^4 - (s* / s)^2)
+//
+// with s the gap to the car ahead, v0 the speed it would go on a free
+// road, T the time it keeps behind, s0 the gap it keeps standing, a how
+// hard it speeds up and b how hard it likes to brake. Every step of `dt`
+// seconds each car at once speeds up by that, and moves as one that
+// speeds up so evenly does (the "ballistic" update of Treiber and
+// Kesting); one that would go backwards stops where it comes to stand.
+// All in f32, in an order of operations that examples/traffic/check/idm.c
+// keeps too, so the two go the same to the bit.
+//
+// A road also counts how far its cars drove and how often one of them
+// stopped (went below 1 m/s after being above 3), after `Sim.warm`. With
+// one jam going round, every car stops once each time it meets it, and so
+// the jam's speed comes out of the two: see `wave`.
+
+unique Sim { dt: f32, step: i64, warm: i64, cars: i32 }
+
+// A road and what was measured on it after the warm-up.
+component Road { ring: f32, cars: i32, driven: f64, stops: i32 } capacity 1024
+
+// What a car is: its road, its own length and how long the road is.
+component Car { road: entity, number: i32, length: f32, ring: f32 } capacity 100000
+// How it drives; `sq` is 2 sqrt(a b).
+component Driver { v0: f32, t: f32, s0: f32, a: f32, b: f32, sq: f32 } capacity 100000
+component Spot { x: f32 } capacity 100000
+component Speed { v: f32, moving: bool } capacity 100000
+component Accel { a: f32 } capacity 100000
+
+// A car follows the car ahead of it: a road is a ring of these edges.
+relation (Car)-[Follows]->(Car) capacity 100000
+
+// The roads to lay, a row each, which the program gives before `lay()`:
+// how long the ring is, how many cars, how long a car is, how they drive,
+// and how far the first car stands ahead of where it would (the kick that
+// starts a jam).
+buffer Plan { ring: f32, cars: i32, length: f32, v0: f32, t: f32, s0: f32,
+              a: f32, b: f32, kick: f32 } capacity 1024
+
+// For every row of `Plan` a road with its cars standing evenly round it,
+// each following the next, the last the first.
+system lay() {
+  for i in 0..len(Plan) {
+    let ring = Plan[i].ring
+    let cars = Plan[i].cars
+    let road = spawn { Road { ring: ring, cars: cars, driven: 0.0, stops: 0 } }
+    let a = Plan[i].a
+    let b = Plan[i].b
+    let sq = 2.0 * sqrt(a * b)
+    var first: entity = none
+    var behind: entity = none
+    for k in 0..cars {
+      var x = k as f32 * ring / cars as f32
+      if k == 0 { x += Plan[i].kick }
+      let car = spawn { Car { road: road, number: Sim.cars, length: Plan[i].length, ring: ring },
+                        Driver { v0: Plan[i].v0, t: Plan[i].t, s0: Plan[i].s0,
+                                 a: a, b: b, sq: sq },
+                        Spot { x: x }, Speed { v: 0.0, moving: false }, Accel { a: 0.0 } }
+      Sim.cars += 1
+      if behind != none { connect (behind)-[Follows]->(car) } else { first = car }
+      behind = car
+    }
+    if behind != none { connect (behind)-[Follows]->(first) }
+  }
+}
+
+// How hard every car speeds up (or brakes) this step, from where the cars
+// are and how fast they go.
+system think() {
+  for me, c: Car, d: Driver, at: Spot, s: Speed, acc: mut Accel {
+    for (me)-[Follows]->(ahead: Spot, go: Speed) {
+      var dx = ahead.x - at.x
+      if dx <= 0.0 { dx += c.ring }
+      let gap = dx - c.length
+      let v = s.v
+      let r = v / d.v0
+      let r2 = r * r
+      let want = d.s0 + max(0.0, v * d.t + v * (v - go.v) / d.sq)
+      let q = want / gap
+      acc.a = d.a * (1.0 - r2 * r2 - q * q)
+    }
+  }
+}
+
+// Every car moves on, and its road counts how far and whether it stopped.
+system drive() {
+  let dt = Sim.dt
+  let counts = Sim.step >= Sim.warm
+  for c: Car, at: mut Spot, s: mut Speed, acc: Accel {
+    let v = s.v
+    let a = acc.a
+    let next = v + a * dt
+    var dx = 0.0
+    if next < 0.0 {
+      dx = 0.0 - 0.5 * v * v / a
+      s.v = 0.0
+    } else {
+      dx = v * dt + 0.5 * a * dt * dt
+      s.v = next
+    }
+    var x = at.x + dx
+    if x >= c.ring { x -= c.ring }
+    at.x = x
+    if s.v > 3.0 { s.moving = true }
+    if s.moving && s.v < 1.0 {
+      s.moving = false
+      if counts { Road(c.road).stops += 1 }
+    }
+    if counts { Road(c.road).driven += dx as f64 }
+  }
+  Sim.step += 1
+}
+
+// The speed of the jam in m/s (below nought: against the cars), over
+// `seconds` measured. A car meets the jam once each time it has gone round
+// once more than it, so its stops are (mean speed - wave) * seconds / ring.
+fn wave(ring: f32, cars: i32, driven: f64, stops: i32, seconds: f64) -> f64 {
+  (driven - ring as f64 * stops as f64) / (cars as f64 * seconds)
+}
+
+schedule setup() { lay() }
+
+schedule step() {
+  think()
+  drive()
+}

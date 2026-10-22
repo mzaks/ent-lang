@@ -1,0 +1,32 @@
+// Sugiyama's experiment (2008), with the intelligent driver model: 22 cars
+// on a circle of 230 m, started evenly with one a little ahead, form a jam
+// that nothing caused and that goes round against them. The experiment's
+// went back at some 15 to 20 km/h. Ten minutes to settle, then ten measured.
+//
+//   tools/ent run examples/traffic/sugiyama.ent
+import console
+import idm
+
+world {
+  Sim.dt = 0.1
+  Sim.warm = 6000
+  Plan += { ring: 230.0, cars: 22, length: 5.0, v0: 15.0, t: 1.0, s0: 2.0,
+            a: 1.0, b: 1.5, kick: 0.5 }
+}
+
+system report() {
+  let seconds = (Sim.step - Sim.warm) as f64 * Sim.dt as f64
+  for r: Road {
+    let mean = r.driven / (r.cars as f64 * seconds)
+    let jam = wave(r.ring, r.cars, r.driven, r.stops, seconds)
+    put("{r.cars} cars on {r.ring} m: mean speed {mean * 3.6} km/h, {r.stops} stops, jam {jam * 3.6} km/h")
+  }
+}
+
+schedule finish() { report() }
+
+main {
+  setup()
+  loop { step() } until Sim.step == 12000
+  finish()
+}

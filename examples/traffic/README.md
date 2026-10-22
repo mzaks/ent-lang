@@ -1,9 +1,10 @@
 # Traffic on a ring road in ent-lang
 
-Cars on a road that is a ring, one lane, after Nagel and Schreckenberg
-(1992): cells of 7.5 m, whole speeds in cells a step, and every step each
-car speeds up, keeps behind its leader, brakes at random and moves on.
-It is the first step towards roads of several lanes with lane changes,
+Cars on a road that is a ring, one lane: after Nagel and Schreckenberg
+(1992), in cells of 7.5 m with whole speeds in cells a step, each car
+speeding up, keeping behind its leader, braking at random and moving on;
+and after the intelligent driver model (Treiber, Hennecke and Helbing,
+2000), in metres and seconds. It is the first step towards roads of several lanes with lane changes,
 which need the cars in their order by lane and position every step.
 
 - `ring.ent`: the roads and their cars. A car follows the car ahead by an
@@ -22,10 +23,26 @@ which need the cars in their order by lane and position every step.
   (1 - density))) / 2 (Schreckenberg, Schadschneider, Nagel and Ito,
   1995), which the roads of 1,000 cells come within 1.4 percent of.
 
+- `idm.ent`: the intelligent driver model on ring roads, in f32, with a
+  step of `Sim.dt` seconds in which every car speeds up or brakes by
+  the model and moves as one that does so evenly. Each road counts how
+  far its cars drove and how often one stopped, and from those comes how
+  fast a jam goes round against them.
+- `sugiyama.ent`: Sugiyama's experiment (2008), 22 cars on a circle of
+  230 m. A jam forms that nothing caused and goes back at 15.3 km/h
+  (v0 15 m/s, T 1 s, s0 2 m, a 1 m/s², b 1.5 m/s², cars of 5 m); the
+  experiment's went back at some 15 to 20.
+- `check/idm.c`: the same model in plain C. Run on the same roads it
+  gives what `idm.ent` gives, to the bit: every car's place and speed,
+  and what the roads measured.
+
 ```sh
 tools/ent run --parallel examples/traffic/flow.ent > flow.csv
 examples/traffic/check/flow.py
+tools/ent run examples/traffic/sugiyama.ent
 ```
 
 `test/Integration/traffic_ring.test` runs a few roads and checks the
-flows without braking to the cell.
+flows without braking to the cell; `test/Integration/traffic_idm.test`
+runs two roads of the driver model in ent and in C and compares them to
+the bit, on one core and on all.
