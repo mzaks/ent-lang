@@ -15449,9 +15449,220 @@ static void callOrderedInsert(IRRewriter &rewriter, Location loc,
 /// putting one entity after another where it goes would take as many
 /// steps as entities for each of them.
 static const char kOrderedSort[] = "ent.ordered.sort";
+
+/// The radix sort of `callOrderedSort` on many threads, for `count` keys
+/// of `keys` (with `ids`), at the insertion point: the same passes, of the
+/// bytes in which the keys differ, and so the same order. The keys are in
+/// 64 pieces; for each byte each piece counts its keys by their byte, on a
+/// thread of its own; a running sum over the counts, byte value by byte
+/// value and piece by piece, says where each piece's keys of a value go;
+/// and each piece puts its keys there, in their order, on its own thread
+/// again. Which bytes differ is the bits in which any key differs from the
+/// first, or-ed together on many threads.
+static void emitParallelRadixSort(IRRewriter &rewriter, Location loc,
+                                  Value keys, Value ids, Value count) {
+  Type i64 = rewriter.getI64Type();
+  Type index = rewriter.getIndexType();
+  auto keysType = cast<MemRefType>(keys.getType());
+  auto idsType = cast<MemRefType>(ids.getType());
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Value radix = arith::ConstantIndexOp::create(rewriter, loc, 256);
+  Value pieces = arith::ConstantIndexOp::create(rewriter, loc, 64);
+  Value sign = arith::ConstantIntOp::create(rewriter, loc, INT64_MIN, 64);
+  Value low = arith::ConstantIntOp::create(rewriter, loc, 255, 64);
+  Value eight = arith::ConstantIntOp::create(rewriter, loc, 8, 64);
+  Value zero64 = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
+  auto load = [&](Value from, Value at) -> Value {
+    return memref::LoadOp::create(rewriter, loc, from, ValueRange{at});
+  };
+  auto store = [&](Value value, Value to, Value at) {
+    memref::StoreOp::create(rewriter, loc, value, to, ValueRange{at});
+  };
+  auto add = [&](Value a, Value b) -> Value {
+    return arith::AddIOp::create(rewriter, loc, a, b);
+  };
+  auto mul = [&](Value a, Value b) -> Value {
+    return arith::MulIOp::create(rewriter, loc, a, b);
+  };
+  auto digit = [&](Value key, Value shift) -> Value {
+    Value flipped = arith::XOrIOp::create(rewriter, loc, key, sign);
+    Value moved = arith::ShRUIOp::create(rewriter, loc, flipped, shift);
+    return arith::IndexCastUIOp::create(
+        rewriter, loc, index, arith::AndIOp::create(rewriter, loc, moved, low));
+  };
+  // The rows of piece `p`: from p * size, up to count.
+  Value size = arith::DivUIOp::create(
+      rewriter, loc, add(count, arith::SubIOp::create(rewriter, loc, pieces, one)),
+      pieces);
+  auto pieceRows = [&](Value p) -> std::pair<Value, Value> {
+    Value from = arith::MinUIOp::create(rewriter, loc, mul(p, size), count);
+    Value to = arith::MinUIOp::create(rewriter, loc, add(from, size), count);
+    return {from, to};
+  };
+  auto onPieces = [&](function_ref<void(Value)> body) {
+    auto loop = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
+                                        ValueRange{pieces}, ValueRange{one});
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    body(loop.getInductionVars().front());
+  };
+  auto forRows = [&](Value from, Value to,
+                     function_ref<void(Value)> body) {
+    auto loop = scf::ForOp::create(rewriter, loc, from, to, one);
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPointToStart(loop.getBody());
+    body(loop.getInductionVar());
+  };
+
+  // Where the keys differ from the first: each piece's bits, then all.
+  Value firstKey = load(keys, zero);
+  Value differs = memref::AllocOp::create(
+      rewriter, loc, MemRefType::get({64}, i64));
+  onPieces([&](Value p) {
+    auto [from, to] = pieceRows(p);
+    auto loop = scf::ForOp::create(rewriter, loc, from, to, one,
+                                   ValueRange{zero64});
+    {
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(loop.getBody());
+      Value bits = arith::XOrIOp::create(
+          rewriter, loc, load(keys, loop.getInductionVar()), firstKey);
+      scf::YieldOp::create(
+          rewriter, loc,
+          ValueRange{arith::OrIOp::create(rewriter, loc,
+                                          loop.getRegionIterArgs()[0], bits)});
+    }
+    store(loop.getResult(0), differs, p);
+  });
+  auto gathered = scf::ForOp::create(rewriter, loc, zero, pieces, one,
+                                     ValueRange{zero64});
+  {
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPointToStart(gathered.getBody());
+    scf::YieldOp::create(
+        rewriter, loc,
+        ValueRange{arith::OrIOp::create(
+            rewriter, loc, gathered.getRegionIterArgs()[0],
+            load(differs, gathered.getInductionVar()))});
+  }
+  Value differ = gathered.getResult(0);
+
+  Value spareKeys =
+      memref::AllocOp::create(rewriter, loc, keysType, ValueRange{count});
+  Value spareIds =
+      memref::AllocOp::create(rewriter, loc, idsType, ValueRange{count});
+  // A piece's counts of the values of a byte: piece by piece, 256 each.
+  Value counts = memref::AllocOp::create(
+      rewriter, loc, MemRefType::get({64 * 256}, index));
+  Type i1 = rewriter.getI1Type();
+  Value no = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
+  Value yes = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+  Value bytes = arith::ConstantIndexOp::create(rewriter, loc, 8);
+  auto passes = scf::ForOp::create(
+      rewriter, loc, zero, bytes, one,
+      ValueRange{keys, ids, spareKeys, spareIds, no});
+  {
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPointToStart(passes.getBody());
+    Value b = passes.getInductionVar();
+    Value fromKeys = passes.getRegionIterArgs()[0];
+    Value fromIds = passes.getRegionIterArgs()[1];
+    Value toKeys = passes.getRegionIterArgs()[2];
+    Value toIds = passes.getRegionIterArgs()[3];
+    Value spare = passes.getRegionIterArgs()[4];
+    Value shift =
+        mul(arith::IndexCastUIOp::create(rewriter, loc, i64, b), eight);
+    // All alike in this byte: as they are.
+    Value alike = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::eq,
+        arith::AndIOp::create(
+            rewriter, loc,
+            arith::ShRUIOp::create(rewriter, loc, differ, shift), low),
+        zero64);
+    auto ifPass = scf::IfOp::create(
+        rewriter, loc,
+        TypeRange{keysType, idsType, keysType, idsType, i1}, alike,
+        /*withElseRegion=*/true);
+    rewriter.setInsertionPointToStart(ifPass.thenBlock());
+    scf::YieldOp::create(rewriter, loc,
+                         ValueRange{fromKeys, fromIds, toKeys, toIds, spare});
+    rewriter.setInsertionPointToStart(ifPass.elseBlock());
+    // Each piece counts its keys by this byte.
+    onPieces([&](Value p) {
+      Value base = mul(p, radix);
+      forRows(zero, radix, [&](Value v) { store(zero, counts, add(base, v)); });
+      auto [from, to] = pieceRows(p);
+      forRows(from, to, [&](Value at) {
+        Value cell = add(base, digit(load(fromKeys, at), shift));
+        store(add(load(counts, cell), one), counts, cell);
+      });
+    });
+    // Where each piece's keys of each value start: value by value, piece
+    // by piece.
+    auto values = scf::ForOp::create(rewriter, loc, zero, radix, one,
+                                     ValueRange{zero});
+    {
+      OpBuilder::InsertionGuard deeper(rewriter);
+      rewriter.setInsertionPointToStart(values.getBody());
+      Value v = values.getInductionVar();
+      auto each = scf::ForOp::create(rewriter, loc, zero, pieces, one,
+                                     ValueRange{values.getRegionIterArgs()[0]});
+      {
+        OpBuilder::InsertionGuard deepest(rewriter);
+        rewriter.setInsertionPointToStart(each.getBody());
+        Value cell = add(mul(each.getInductionVar(), radix), v);
+        Value here = load(counts, cell);
+        Value start = each.getRegionIterArgs()[0];
+        store(start, counts, cell);
+        scf::YieldOp::create(rewriter, loc, ValueRange{add(start, here)});
+      }
+      scf::YieldOp::create(rewriter, loc, each.getResults());
+    }
+    // Each piece puts its keys there, in their order.
+    onPieces([&](Value p) {
+      Value base = mul(p, radix);
+      auto [from, to] = pieceRows(p);
+      forRows(from, to, [&](Value at) {
+        Value key = load(fromKeys, at);
+        Value cell = add(base, digit(key, shift));
+        Value place = load(counts, cell);
+        store(add(place, one), counts, cell);
+        store(key, toKeys, place);
+        store(load(fromIds, at), toIds, place);
+      });
+    });
+    scf::YieldOp::create(
+        rewriter, loc,
+        ValueRange{toKeys, toIds, fromKeys, fromIds,
+                   arith::XOrIOp::create(rewriter, loc, spare, yes)});
+    rewriter.setInsertionPointAfter(ifPass);
+    scf::YieldOp::create(rewriter, loc, ifPass.getResults());
+  }
+  // Where the last pass left them in the spare lists, back.
+  auto ifBack = scf::IfOp::create(rewriter, loc, passes.getResult(4));
+  {
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPointToStart(ifBack.thenBlock());
+    onPieces([&](Value p) {
+      auto [from, to] = pieceRows(p);
+      forRows(from, to, [&](Value at) {
+        store(load(spareKeys, at), keys, at);
+        store(load(spareIds, at), ids, at);
+      });
+    });
+  }
+  memref::DeallocOp::create(rewriter, loc, counts);
+  memref::DeallocOp::create(rewriter, loc, differs);
+  memref::DeallocOp::create(rewriter, loc, spareKeys);
+  memref::DeallocOp::create(rewriter, loc, spareIds);
+}
+
+/// With `many` (built for many threads: from how many keys on), the
+/// function sorts as many as that or more by emitParallelRadixSort.
 static void callOrderedSort(IRRewriter &rewriter, Location loc,
                             Operation *module, Value keys, Value ids,
-                            Value cells) {
+                            Value cells, int64_t many) {
   Type i64 = rewriter.getI64Type();
   Type index = rewriter.getIndexType();
   Type idType = cast<MemRefType>(ids.getType()).getElementType();
@@ -15522,6 +15733,17 @@ static void callOrderedSort(IRRewriter &rewriter, Location loc,
   auto ifUnsorted = scf::IfOp::create(rewriter, loc, unsorted);
   func::ReturnOp::create(rewriter, loc);
   rewriter.setInsertionPointToStart(ifUnsorted.thenBlock());
+  if (many > 0) {
+    auto ifMany = scf::IfOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::uge, count,
+                              arith::ConstantIndexOp::create(rewriter, loc,
+                                                             many)),
+        /*withElseRegion=*/true);
+    rewriter.setInsertionPointToStart(ifMany.thenBlock());
+    emitParallelRadixSort(rewriter, loc, keys, ids, count);
+    rewriter.setInsertionPointToStart(ifMany.elseBlock());
+  }
 
   // Sorted by the keys' bytes, the lowest first, each pass keeping the
   // order of the one before among keys with the same byte (a radix sort,
@@ -15666,7 +15888,8 @@ static void callOrderedSort(IRRewriter &rewriter, Location loc,
 /// reads and writes alike, its despawns and moves are applied when its
 /// body ends, and what it spawns is put into the list.
 static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
-                         const WorldLayout &layout, WorldAccess &world) {
+                         const WorldLayout &layout, WorldAccess &world,
+                         const LoopOptions &options) {
   Location loc = query.getLoc();
   bool turn = query.isTurn();
   StringAttr byComponent = query.getByComponent().getAttr();
@@ -15775,7 +15998,10 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
                             arith::AddIOp::create(rewriter, loc, listed, one),
                             cells, ValueRange{zero});
   }
-  callOrderedSort(rewriter, loc, module, keys, ids, cells);
+  // (On many threads from as many entities as a reactive query's events
+  // are walked on them.)
+  callOrderedSort(rewriter, loc, module, keys, ids, cells,
+                  options.parallelEntities ? options.parallelMinEvents : 0);
 
   // What is done where it stands: a row given to a buffer and, turn by
   // turn, an edge connected.
@@ -17437,7 +17663,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   if (query.getCascade())
     return lowerCascade(rewriter, query, layout, world, given);
   if (query.hasBy())
-    return lowerOrdered(rewriter, query, layout, world);
+    return lowerOrdered(rewriter, query, layout, world, options);
   checkOwnRows(rewriter, query);
   if (lowerRunning(rewriter, query, layout, world, options))
     return;

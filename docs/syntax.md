@@ -463,7 +463,11 @@ after the filters, where `top down` stands for a tree:
   a `for` by a counter takes 0.025 ms where the plain one takes 0.0014,
   0.24 ms where the storage's order is the one asked for backwards, and
   0.18 ms by numbers at random (this machine, built for it). So an order
-  at random is a number at random for each entity to go by.
+  at random is a number at random for each entity to go by. Built with
+  `--parallel`, from 16,384 entities on, the keys are sorted on many
+  threads, by the same passes and so in the same order; the body still
+  runs for one entity after another (a million by numbers at random: 10
+  ms where 12.9 on one core, of which 7 the entities visited).
 - A `var` from outside is still not assigned in it: a unique does that.
   It does not react (`on`) or go along a tree, and binds what its own
   entities have, no arrows.

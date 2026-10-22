@@ -1,0 +1,31 @@
+// 100,000 things visited by a key with many alike and some below nought,
+// five times as the keys change (test/Integration/ordered_parallel.test).
+import console
+import wyhash
+component Thing { key: i64, n: i64 } capacity 131072
+buffer Seen { n: i64 } capacity 131072
+unique Run { step: i32 }
+
+world {
+  for i in 0..100000 {
+    let r = wyrand(7, i as i64)
+    // small keys, many alike, some below nought
+    spawn { Thing { key: (r >> 50) as i64 - 4000, n: i as i64 } }
+  }
+}
+
+system sort() {
+  Seen = []
+  for t: Thing by t.key { Seen += { n: t.n } }
+  var sum: u64 = 0
+  for i in 0..len(Seen) { sum = wymix(sum + 1, Seen[i].n as u64) }
+  put("step {Run.step}: {len(Seen)} rows, order {sum}")
+}
+
+system churn() {
+  Run.step += 1
+  for t: mut Thing { t.key = t.key * 3 % 1000 - (t.n % 7) * 100000000000 }
+}
+
+schedule step() { sort() churn() }
+main { loop { step() } until Run.step == 5 }

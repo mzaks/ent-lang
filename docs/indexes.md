@@ -320,7 +320,7 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 
 | Step | Work | Shows | Status |
 |---|---|---|---|
-| 1 | The shared sort-and-scan primitive (one core, parallel loops, GPU). `lay`'s order by hand ported to it, the same to the bit | The backend | next |
+| 1 | The shared sort-and-scan primitive (one core, parallel loops, GPU). `lay`'s order by hand ported to it, the same to the bit | The backend | the radix sort of `for ... by` on many threads (see below); visits, GPU to do |
 | 2 | Uniform grid and `near ... within` (a Lennard-Jones melt as its example) | `rebuild`, scheduling of makes | |
 | 3 | Hash index and `unique` | `incremental`, change tracking | |
 | 4 | Sorted index (secondary), then clustered | Ordered iteration, ranges, top-k | secondary built (5.2); query forms, float keys, ties, clustered to do |
@@ -333,6 +333,29 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 | 11 | LSH families | | |
 | 12 | `--ent-infer-indexes` | | |
 | 13 | B+ tree, BVH, HNSW from outside (where measurements or programs need them) | | |
+
+**Step 1, as it stands** (2026-10-22). The sort that every `for ...
+by` does (`ent.ordered.sort`, a stable radix sort of the keys' bytes)
+runs on many threads where the program is built with `--parallel`, from
+16,384 entities on: the keys in 64 pieces, each piece counting its keys
+by a byte on a thread of its own, a running sum of the counts, each
+piece putting its keys where those say; the bytes in which no key
+differs from the first are left out (an or over all of them, on many
+threads). The order is the one sort on one core gives
+(`test/Integration/ordered_parallel.test`). An index made anew sorts
+so.
+
+- `lay` is not a sort: each person takes the next stubs, a running sum,
+  which `for`s already do on many threads and on the GPU. Nothing of it
+  is to port; the grid (step 2) is where counting by bucket and a running
+  sum come together, and that is what to build on this.
+- A million entities by keys at random: 10 ms a `for ... by` where it
+  was 12.9 on one core; the placing passes on 12 threads, 91% busy. What
+  is left is the visit: the body for one entity after another, each
+  found by its id (7 ms). A body that only gives rows to buffers could be
+  visited on many threads, each entity at its place in the order writing
+  the rows there.
+- The GPU: not yet (`for ... by` is not for a `gpu system`).
 
 ## 9. When it is done
 
