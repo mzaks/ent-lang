@@ -2003,10 +2003,16 @@ system forces() {
 
 An index may hold the entities by where they are: `grid (x, y)` or
 `grid (x, y, z)` in place of `by field`, fields of the first component of
-one float type, with `cell` how wide a cell is at least and, after
-`wrap`, how big a box is that wraps on every side (from 0 to it). Both
-are worked out each time the index is made, and may read uniques.
-`examples/lj/lj.ent` finds the atoms near each atom so.
+one type (f32, f64, i32 or i64), with `cell` how wide a cell is at least
+and, after `wrap`, how big a box is that wraps on every side (from 0 to
+it). Both are worked out each time the index is made, and may read
+uniques. `examples/lj/lj.ent` finds the atoms near each atom so.
+
+- A grid of whole numbers (i32 or i64 places) has whole numbers for
+  `cell`, `wrap` and `within` too, and how far things are is worked out
+  to the unit, squared in an i64 (places no more than 2^31 apart). Where
+  it wraps, its cells are all as wide: as many as the size cuts into
+  evenly (a size of 1000 with cells at least 70 wide, 10 of 100).
 
 - The rows are in the order of the cells, x the fastest, then y, then
   z, each with where its entity is (the fields, by their names) and what

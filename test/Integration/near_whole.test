@@ -1,0 +1,22 @@
+// A grid of whole numbers (`grid (x, y)` of i32 or i64 fields, `cell`,
+// `wrap` and `within` whole numbers too): the dots within r of each, and
+// the sum of their distances squared, the same as a scan's, to the unit;
+// those exactly r away within. In a box that wraps, whose size 1000 the
+// cells (at least 70 wide) cut into 10 of 100; and over where the dots
+// are, from -500, also within more than the box, by blocks of rows. The
+// same on one core and on all.
+// RUN: %ent run %S/Inputs/near_whole.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel %S/Inputs/near_whole.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --check-prefix=WRAP --input-file=%t.one
+// RUN: %ent run %S/Inputs/near_whole_open.ent 2>/dev/null > %t.open
+// RUN: %ent run --parallel %S/Inputs/near_whole_open.ent 2>/dev/null > %t.open.all
+// RUN: cmp %t.open %t.open.all
+// RUN: FileCheck %s --check-prefix=OPEN --input-file=%t.open
+
+// WRAP:      same counts and distances 400 of 400, pairs 2348, at r exactly 58
+// WRAP-NEXT: same counts and distances 400 of 400, pairs 5168, at r exactly 172
+// WRAP-NEXT: same counts and distances 400 of 400, pairs 26442, at r exactly 56
+// OPEN:      same counts and distances 400 of 400, pairs 2304
+// OPEN-NEXT: same counts and distances 400 of 400, pairs 21552
+// OPEN-NEXT: same counts and distances 400 of 400, pairs 159600

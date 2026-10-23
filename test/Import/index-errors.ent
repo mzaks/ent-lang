@@ -85,8 +85,14 @@ index Traffic of Car by key
 
 // -----
 
+component Dot { x: f64, n: u32 } capacity 8
+// expected-error @+1 {{a grid is over places, f32, f64, i32 or i64; 'n' is}}
+index Cells of Dot grid (x, n) cell 1.0
+
+// -----
+
 component Dot { x: f64, n: i32 } capacity 8
-// expected-error @+1 {{a grid is over places, f32 or f64; 'n' is an i32}}
+// expected-error @+1 {{a grid's places are of one type: 'n' is}}
 index Cells of Dot grid (x, n) cell 1.0
 
 // -----

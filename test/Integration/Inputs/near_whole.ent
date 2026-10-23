@@ -1,0 +1,68 @@
+// 400 dots at whole-number places in a box of 1000 that wraps, cells at
+// least 70 wide (so 10 of 100, the most the size cuts into evenly), and
+// the dots within 70, 100 and 230 of each, by the grid index and by a
+// scan (test/Integration/near_whole.test). Many are exactly as far as r:
+// within takes them.
+import console
+import wyhash
+component Dot { x: i32, y: i32 } capacity 1024
+component Seen { near: i64, far: i64, scan: i64, scanfar: i64 } capacity 1024
+unique Check { same: i64, pairs: i64, edge: i64 }
+unique Box { size: i32, cell: i32 }
+
+index Cells of Dot grid (x, y) cell Box.cell wrap Box.size
+
+world {
+  Box.size = 1000
+  Box.cell = 70
+  for i in 0..400 {
+    // (On a lattice of 10, so that many are at the very distances.)
+    spawn { Dot { x: wyrand_below(5, i as i64 * 2, 100) as i32 * 10,
+                  y: wyrand_below(5, i as i64 * 2 + 1, 100) as i32 * 10 },
+            Seen { near: 0, far: 0, scan: 0, scanfar: 0 } }
+  }
+}
+
+fn image(d: i32, size: i32) -> i32 {
+  if d + d > size { d - size } else if d + d < 0 - size { d + size } else { d }
+}
+
+system count(r: i32) {
+  for me, a: Dot, s: mut Seen {
+    var n = 0
+    var far: i64 = 0
+    for o, b: Dot near (a.x, a.y) within r in Cells where o != me {
+      n += 1
+      far += ((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y)) as i64
+    }
+    var m = 0
+    var mfar: i64 = 0
+    for o, b: Dot where o != me {
+      let dx = image(b.x - a.x, 1000)
+      let dy = image(b.y - a.y, 1000)
+      if dx * dx + dy * dy <= r * r {
+        m += 1
+        mfar += (dx * dx + dy * dy) as i64
+        if dx * dx + dy * dy == r * r { Check.edge += 1 }
+      }
+    }
+    s.near = n
+    s.far = far
+    s.scan = m
+    s.scanfar = mfar
+  }
+}
+
+system report() {
+  for s: Seen {
+    if s.near == s.scan && s.far == s.scanfar { Check.same += 1 }
+    Check.pairs += s.near
+  }
+  put("same counts and distances {Check.same} of 400, pairs {Check.pairs}, at r exactly {Check.edge}")
+  Check.same = 0
+  Check.pairs = 0
+  Check.edge = 0
+}
+
+schedule s() { count(70) report() count(100) report() count(230) report() }
+main { s() }

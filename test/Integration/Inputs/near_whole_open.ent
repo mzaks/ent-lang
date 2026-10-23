@@ -1,0 +1,55 @@
+// 400 dots at whole-number places (i64) from -500 to 500, a grid over
+// where they are (no wrap), and the dots within 70, 230 and 3000 (more
+// than the box) of each, by the grid index and by a scan
+// (test/Integration/near_whole.test). The statements write as they go, so
+// the rows go by blocks.
+import console
+import wyhash
+component Dot { x: i64, y: i64 } capacity 1024
+component Seen { near: i64, far: i64, scan: i64, scanfar: i64 } capacity 1024
+unique Check { same: i64, pairs: i64 }
+
+index Cells of Dot grid (x, y) cell 70
+
+world {
+  for i in 0..400 {
+    spawn { Dot { x: wyrand_below(7, i as i64 * 2, 100) as i64 * 10 - 500,
+                  y: wyrand_below(7, i as i64 * 2 + 1, 100) as i64 * 10 - 500 },
+            Seen { near: 0, far: 0, scan: 0, scanfar: 0 } }
+  }
+}
+
+system count(r: i64) {
+  for me, a: Dot, s: mut Seen {
+    s.near = 0
+    s.far = 0
+    for o, b: Dot near (a.x, a.y) within r in Cells where o != me {
+      s.near += 1
+      s.far += (b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y)
+    }
+    var m = 0
+    var mfar: i64 = 0
+    for o, b: Dot where o != me {
+      let d = (b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y)
+      if d <= r * r {
+        m += 1
+        mfar += d
+      }
+    }
+    s.scan = m
+    s.scanfar = mfar
+  }
+}
+
+system report() {
+  for s: Seen {
+    if s.near == s.scan && s.far == s.scanfar { Check.same += 1 }
+    Check.pairs += s.near
+  }
+  put("same counts and distances {Check.same} of 400, pairs {Check.pairs}")
+  Check.same = 0
+  Check.pairs = 0
+}
+
+schedule s() { count(70) report() count(230) report() count(3000) report() }
+main { s() }

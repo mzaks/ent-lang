@@ -387,7 +387,8 @@ its `where` (`test/Integration/near.test`).
   4.9 s where the C takes 4.25; on 12 threads 0.76 s.
 - The policy is still `lazy`: made before `forces` reads it, after
   `kick_drift` moved the atoms, every step (0.6 ms of a step of 48).
-- Not yet: a range (`in box`), `nearest k`, and a grid of whole numbers.
+- Not yet: a range (`in box`), `nearest k`. A grid of whole numbers
+  built (2026-10-23, `test/Integration/near_whole.test`).
 
 **Step 2b, each pair once: `after me`** (built 2026-10-22, as proposed
 below; `test/Integration/near_after.test`. The half melt on one core

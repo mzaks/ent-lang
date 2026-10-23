@@ -3156,8 +3156,10 @@ LogicalResult Parser::parseIndex() {
       if (!type)
         return error(fieldAt, "component '" + of.front() +
                                   "' has no field '" + *field + "'");
-      if (!type.isF32() && !type.isF64())
-        return error(fieldAt, "a grid is over places, f32 or f64; '" +
+      if (!type.isF32() && !type.isF64() && !type.isSignlessInteger(32) &&
+          !type.isSignlessInteger(64))
+        return error(fieldAt, "a grid is over places, f32, f64, i32 or "
+                              "i64; '" +
                                   *field + "' is " + typeWords(type));
       if (positionType && type != positionType)
         return error(fieldAt, "a grid's places are of one type: '" + *field +
@@ -3413,7 +3415,15 @@ LogicalResult Parser::parseIndex() {
   // Of a grid: how many cells it has on each side, how wide they are and
   // where they start (`N_grid`); each cell's first row (`N_cells`, a row
   // more at the end); and what finds a place's cell and the cells around.
-  std::string ts = positionType && positionType.isF32() ? "f32" : "f64";
+  std::string ts = !positionType                ? "f64"
+                   : positionType.isF32()       ? "f32"
+                   : positionType.isF64()       ? "f64"
+                   : positionType.isInteger(32) ? "i32"
+                                                : "i64";
+  // (A grid of whole numbers: its cells as wide as whole numbers, where a
+  // place is in one and how far things are worked out to the unit, in
+  // i64.)
+  bool whole = ts[0] == 'i';
   unsigned dims = positions.size();
   bool wrap = !wrapText.empty();
   auto side = [&](const char *what, unsigned d) {
@@ -3426,13 +3436,19 @@ LogicalResult Parser::parseIndex() {
           << ", " << side("lo", d) << ": " << ts << ", " << side("hi", d)
           << ": " << ts;
     out << ", size: " << ts << " }\n"
-        << "transient buffer " << n << "_cells { first: i32 } capacity 1\n"
+        << "transient buffer " << n
+        << "_cells { first: i32 } capacity 1\n"
         // The cell of a place on one side.
         << "fn " << n << "_cell(x: " << ts << ", lo: " << ts << ", w: " << ts
-        << ", n: i64) -> i64 {\n"
-        << "  let q = (x - lo) / w\n"
-        << "  var c = q as i64\n"
-        << "  if (c as " << ts << ") > q { c -= 1 }\n";
+        << ", n: i64) -> i64 {\n";
+    if (whole)
+      out << "  let q = (x as i64) - (lo as i64)\n"
+          << "  var c = q / (w as i64)\n"
+          << "  if c * (w as i64) > q { c -= 1 }\n";
+    else
+      out << "  let q = (x - lo) / w\n"
+          << "  var c = q as i64\n"
+          << "  if (c as " << ts << ") > q { c -= 1 }\n";
     if (wrap)
       out << "  c = c % n\n"
           << "  if c < 0 { c += n }\n";
@@ -3442,8 +3458,11 @@ LogicalResult Parser::parseIndex() {
     out << "  c\n}\n"
         // How many cells out from a place's own are within `r`.
         << "fn " << n << "_reach(r: " << ts << ", w: " << ts << ") -> i64 {\n"
-        << "  var m = (r / w) as i64\n"
-        << "  if (m as " << ts << ") * w < r { m += 1 }\n"
+        << (whole ? "  var m = (r as i64) / (w as i64)\n"
+                    "  if m * (w as i64) < (r as i64) { m += 1 }\n"
+                  : "  var m = (r / w) as i64\n"
+                    "  if (m as " +
+                        ts + ") * w < r { m += 1 }\n")
         << "  m\n}\n"
         // The first of the cells around cell `c`, and how many.
         << "fn " << n << "_from(c: i64, m: i64, n: i64) -> i64 {\n";
@@ -3465,18 +3484,23 @@ LogicalResult Parser::parseIndex() {
         << "  if k < 0 { k + n } else if k >= n { k - n } else { k }\n}\n"
         // The lowest and the highest cell, counted on from the first
         // (not round the box), that a place's `r` either side reaches.
-        << "fn " << n << "_low(p: " << ts << ", r: " << ts << ", lo: " << ts
-        << ", w: " << ts << ") -> i64 {\n"
-        << "  let q = (p - r - w * " << slack << " - lo) / w\n"
-        << "  var c = q as i64\n"
-        << "  if (c as " << ts << ") > q { c -= 1 }\n"
-        << "  c\n}\n"
-        << "fn " << n << "_high(p: " << ts << ", r: " << ts << ", lo: " << ts
-        << ", w: " << ts << ") -> i64 {\n"
-        << "  let q = (p + r + w * " << slack << " - lo) / w\n"
-        << "  var c = q as i64\n"
-        << "  if (c as " << ts << ") > q { c -= 1 }\n"
-        << "  c\n}\n"
+        ;
+    for (const char *end : {"low", "high"}) {
+      const char *sign = end[0] == 'l' ? "-" : "+";
+      out << "fn " << n << "_" << end << "(p: " << ts << ", r: " << ts
+          << ", lo: " << ts << ", w: " << ts << ") -> i64 {\n";
+      if (whole)
+        out << "  let q = (p as i64) " << sign << " (r as i64) - (lo as i64)\n"
+            << "  var c = q / (w as i64)\n"
+            << "  if c * (w as i64) > q { c -= 1 }\n";
+      else
+        out << "  let q = (p " << sign << " r " << sign << " w * " << slack
+            << " - lo) / w\n"
+            << "  var c = q as i64\n"
+            << "  if (c as " << ts << ") > q { c -= 1 }\n";
+      out << "  c\n}\n";
+    }
+    out
         // The cells from `l` to `h` of those `_from` and `_many` give, in
         // the order they are visited, as two runs of cells next to each
         // other (where they go round the box): `part` 0 and 1 the first
@@ -3526,8 +3550,10 @@ LogicalResult Parser::parseIndex() {
       // (Moved by the size in each branch: the same, to the bit, as
       // taking away a shift of the size or of its opposite.)
       out << "  let d = x - p\n"
-          << "  if d > size * 0.5 { x - size } else if d < 0.0 - size * 0.5 "
-             "{ x + size } else { x }\n}\n";
+          << (whole ? "  if d + d > size { x - size } else if d + d < 0 - "
+                      "size { x + size } else { x }\n}\n"
+                    : "  if d > size * 0.5 { x - size } else if d < 0.0 - "
+                      "size * 0.5 { x + size } else { x }\n}\n");
     else
       out << "  x\n}\n";
     // How far, at least, an entity in cell `c` is from `p` on one side
@@ -3538,7 +3564,8 @@ LogicalResult Parser::parseIndex() {
     out << "fn " << n << "_out(a: " << ts << ", w: " << ts << ", p: " << ts
         << ") -> " << ts << " {\n"
         << "  if p < a { a - p } else if p > a + w { p - (a + w) } else "
-           "{ 0.0 }\n}\n"
+           "{ "
+        << (whole ? "0" : "0.0") << " }\n}\n"
         << "fn " << n << "_gap(c: i64, p: " << ts << ", lo: " << ts
         << ", w: " << ts << ", size: " << ts << ") -> " << ts << " {\n"
         << "  let a = lo + (c as " << ts << ") * w\n"
@@ -3548,8 +3575,17 @@ LogicalResult Parser::parseIndex() {
           << "  if below < g { g = below }\n"
           << "  let above = " << n << "_out(a + size, w, p)\n"
           << "  if above < g { g = above }\n";
-    out << "  g -= w * " << slack << "\n"
-        << "  if g < 0.0 { 0.0 } else { g }\n}\n";
+    if (whole)
+      out << "  g\n}\n"
+          // The whole number whose square is at most `v`, the most.
+          << "fn " << n << "_root(v: i64) -> i64 {\n"
+          << "  var s = sqrt(v as f64) as i64\n"
+          << "  while s * s > v { s -= 1 }\n"
+          << "  while (s + 1) * (s + 1) <= v { s += 1 }\n"
+          << "  s\n}\n";
+    else
+      out << "  g -= w * " << slack << "\n"
+          << "  if g < 0.0 { 0.0 } else { g }\n}\n";
     // Each cell's first row: the first whose cell is not below it.
     out << "proc " << n << "_bounds(order: " << n << ", starts: mut " << n
         << "_cells, cells: i64) {\n"
@@ -3573,13 +3609,19 @@ LogicalResult Parser::parseIndex() {
       out << "  var size_: " << ts << " = " << wrapText << "\n"
           << "  " << n << "_grid.size = size_\n";
       for (unsigned d = 0; d < dims; ++d)
-        out << "  " << n << "_grid." << side("lo", d) << " = 0.0\n"
+        out << "  " << n << "_grid." << side("lo", d) << " = "
+            << (whole ? "0" : "0.0") << "\n"
             << "  " << n << "_grid." << side("hi", d) << " = size_\n"
-            << "  var " << side("n", d) << " = max(1, (size_ / cell_) as i64)\n";
+            << "  var " << side("n", d)
+            << " = max(1, (size_ / cell_) as i64)\n";
     } else {
+      // (Of whole numbers, the most and the least there are.)
+      std::string most = ts == "i32" ? "2147483647" : "9223372036854775807";
       for (unsigned d = 0; d < dims; ++d)
-        out << "  " << n << "_grid." << side("lo", d) << " = 1.0 / 0.0\n"
-            << "  " << n << "_grid." << side("hi", d) << " = 0.0 - 1.0 / 0.0\n";
+        out << "  " << n << "_grid." << side("lo", d) << " = "
+            << (whole ? most : "1.0 / 0.0") << "\n"
+            << "  " << n << "_grid." << side("hi", d) << " = "
+            << (whole ? "0 - " + most + " - 1" : "0.0 - 1.0 / 0.0") << "\n";
       out << "  for c0: " << of.front() << " {\n";
       for (unsigned d = 0; d < dims; ++d)
         out << "    " << n << "_grid." << side("lo", d) << " min= c0."
@@ -3588,9 +3630,14 @@ LogicalResult Parser::parseIndex() {
             << positions[d] << "\n";
       out << "  }\n";
       for (unsigned d = 0; d < dims; ++d)
-        out << "  var " << side("n", d) << " = max(1, ((" << n << "_grid."
-            << side("hi", d) << " - " << n << "_grid." << side("lo", d)
-            << ") / cell_) as i64 + 1)\n";
+        if (whole)
+          out << "  var " << side("n", d) << " = max(1, ((" << n << "_grid."
+              << side("hi", d) << " as i64) - (" << n << "_grid."
+              << side("lo", d) << " as i64)) / (cell_ as i64) + 1)\n";
+        else
+          out << "  var " << side("n", d) << " = max(1, ((" << n << "_grid."
+              << side("hi", d) << " - " << n << "_grid." << side("lo", d)
+              << ") / cell_) as i64 + 1)\n";
     }
     std::string product = "n0";
     for (unsigned d = 1; d < dims; ++d)
@@ -3599,12 +3646,24 @@ LogicalResult Parser::parseIndex() {
     for (unsigned d = 0; d < dims; ++d)
       out << "    " << side("n", d) << " = max(1, " << side("n", d)
           << " / 2)\n";
-    out << "  }\n  " << n << "_grid.cells = " << product << "\n";
+    out << "  }\n";
+    // (Where a grid of whole numbers wraps, its cells are all as wide:
+    // as many as the size can be cut into so.)
+    if (whole && wrap)
+      for (unsigned d = 0; d < dims; ++d)
+        out << "  while (size_ as i64) % " << side("n", d) << " != 0 { "
+            << side("n", d) << " -= 1 }\n";
+    out << "  " << n << "_grid.cells = " << product << "\n";
     for (unsigned d = 0; d < dims; ++d) {
       out << "  " << n << "_grid." << side("n", d) << " = " << side("n", d)
           << "\n  " << n << "_grid." << side("w", d) << " = ";
       if (wrap)
         out << "size_ / (" << side("n", d) << " as " << ts << ")\n";
+      else if (whole)
+        // (One more than the floor: the cells are over every entity.)
+        out << "max(cell_, ((((" << n << "_grid." << side("hi", d)
+            << " as i64) - (" << n << "_grid." << side("lo", d)
+            << " as i64)) / " << side("n", d) << " + 1) as " << ts << "))\n";
       else
         out << "max(cell_, (" << n << "_grid." << side("hi", d) << " - " << n
             << "_grid." << side("lo", d) << ") / (" << side("n", d) << " as "
@@ -5777,7 +5836,37 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
     return failure();
   if (reach->getType() != t)
     return mismatch((*radius)->loc, reach->getType(), t);
-  mlir::Value far = arith::MulFOp::create(builder, where, *reach, *reach);
+  // How far things are, squared: of the places' type, or, of a grid of
+  // whole numbers, an i64.
+  bool whole = isa<IntegerType>(t);
+  auto wide = [&](mlir::Value v) -> mlir::Value {
+    return whole && v.getType() != i64
+               ? arith::ExtSIOp::create(builder, where, i64, v).getResult()
+               : v;
+  };
+  auto minus = [&](mlir::Value a, mlir::Value b) -> mlir::Value {
+    if (whole)
+      return arith::SubIOp::create(builder, where, wide(a), wide(b));
+    return arith::SubFOp::create(builder, where, a, b);
+  };
+  auto plus = [&](mlir::Value a, mlir::Value b) -> mlir::Value {
+    if (whole)
+      return arith::AddIOp::create(builder, where, a, b);
+    return arith::AddFOp::create(builder, where, a, b);
+  };
+  auto squared = [&](mlir::Value a) -> mlir::Value {
+    if (whole)
+      return arith::MulIOp::create(builder, where, wide(a), wide(a));
+    return arith::MulFOp::create(builder, where, a, a);
+  };
+  auto atMost = [&](mlir::Value a, mlir::Value b) -> mlir::Value {
+    if (whole)
+      return arith::CmpIOp::create(builder, where, arith::CmpIPredicate::sle, a,
+                                   b);
+    return arith::CmpFOp::create(builder, where, arith::CmpFPredicate::OLE, a,
+                                 b);
+  };
+  mlir::Value far = squared(*reach);
   auto grid = FlatSymbolRefAttr::get(context, index.gridUnique);
   auto read = [&](StringRef field, Type type) -> mlir::Value {
     return ReadOp::create(builder, where, type, grid,
@@ -5816,9 +5905,14 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
   // each other; then the entities within reach in them.
   auto visitRuns = [&](mlir::Value outer) -> LogicalResult {
     mlir::Value left = *reach;
-    if (outer)
+    if (outer && whole) {
+      left = call("_root", {arith::SubIOp::create(builder, where, far, outer)});
+      if (t != i64)
+        left = arith::TruncIOp::create(builder, where, t, left);
+    } else if (outer) {
       left = math::SqrtOp::create(
           builder, where, arith::SubFOp::create(builder, where, far, outer));
+    }
     mlir::Value low = call("_low", {at_[0], left, starts[0], widths[0]});
     mlir::Value high = call("_high", {at_[0], left, starts[0], widths[0]});
     auto part = [&](int64_t which) {
@@ -5874,13 +5968,8 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
                       ->getResult(0)
                 : stored;
         near.seen.push_back({index.component, index.positions[d], seen});
-        mlir::Value apart = arith::SubFOp::create(builder, where, seen, at_[d]);
-        mlir::Value squared =
-            arith::MulFOp::create(builder, where, apart, apart);
-        distance =
-            distance ? arith::AddFOp::create(builder, where, distance, squared)
-                           .getResult()
-                     : squared;
+        mlir::Value square = squared(minus(seen, at_[d]));
+        distance = distance ? plus(distance, square) : square;
       }
       return distance;
     };
@@ -5939,9 +6028,7 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
                 where, first, end, [&](mlir::Value counted) -> LogicalResult {
                   mlir::Value row = rowOf(counted);
                   NearRows near{symbolName, row, {}};
-                  mlir::Value within = arith::CmpFOp::create(
-                      builder, where, arith::CmpFPredicate::OLE,
-                      seenAt(row, near), far);
+                  mlir::Value within = atMost(seenAt(row, near), far);
                   return ifWithVars(where, within,
                                     [&] { return visit(row, near); });
                 });
@@ -5984,12 +6071,11 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
                     builder.setInsertionPointToStart(bits.getBody());
                     mlir::Value i = bits.getInductionVar();
                     NearRows near{symbolName, {}, {}};
-                    mlir::Value within = arith::CmpFOp::create(
-                        builder, where, arith::CmpFPredicate::OLE,
-                        seenAt(rowOf(arith::AddIOp::create(builder, where, low,
-                                                           i)),
-                               near),
-                        far);
+                    mlir::Value within =
+                        atMost(seenAt(rowOf(arith::AddIOp::create(
+                                          builder, where, low, i)),
+                                      near),
+                               far);
                     mlir::Value bit = arith::ShLIOp::create(
                         builder, where,
                         arith::ExtUIOp::create(builder, where, i64, within),
@@ -6076,7 +6162,7 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
                        size ? size : widths[d]},
             UnitAttr())
             ->getResult(0);
-    return arith::MulFOp::create(builder, where, gap, gap);
+    return squared(gap);
   };
   // The cells around on every side but the first, the last side's
   // outermost, those farther than `r` left out; `outer` how far, at
@@ -6093,9 +6179,8 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
           cell[d] = index.wrap ? call("_at", {along, sides[d]}) : along;
           mlir::Value gap = gapSquared(d);
           if (outer)
-            gap = arith::AddFOp::create(builder, where, outer, gap);
-          mlir::Value near = arith::CmpFOp::create(
-              builder, where, arith::CmpFPredicate::OLE, gap, far);
+            gap = plus(outer, gap);
+          mlir::Value near = atMost(gap, far);
           return ifWithVars(where, near, [&]() -> LogicalResult {
             return d == 1 ? visitRuns(gap) : sideLoop(d - 1, gap);
           });
