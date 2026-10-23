@@ -15928,6 +15928,10 @@ static void callOrderedInsert(IRRewriter &rewriter, Location loc,
 /// steps as entities for each of them.
 static const char kOrderedSort[] = "ent.ordered.sort";
 
+static Value carryingLoop(IRRewriter &rewriter, Location loc, Value from,
+                          Value to, Value init,
+                          function_ref<Value(Value index, Value carried)> step);
+
 /// The radix sort of `callOrderedSort` on many threads, for `count` keys
 /// of `keys` (with `ids`), at the insertion point: the same passes, of the
 /// bytes in which the keys differ, and so the same order. The keys are in
@@ -15947,7 +15951,6 @@ static void emitParallelRadixSort(IRRewriter &rewriter, Location loc,
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   Value radix = arith::ConstantIndexOp::create(rewriter, loc, 256);
   Value pieces = arith::ConstantIndexOp::create(rewriter, loc, 64);
-  Value sign = arith::ConstantIntOp::create(rewriter, loc, INT64_MIN, 64);
   Value low = arith::ConstantIntOp::create(rewriter, loc, 255, 64);
   Value eight = arith::ConstantIntOp::create(rewriter, loc, 8, 64);
   Value zero64 = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
@@ -15963,9 +15966,12 @@ static void emitParallelRadixSort(IRRewriter &rewriter, Location loc,
   auto mul = [&](Value a, Value b) -> Value {
     return arith::MulIOp::create(rewriter, loc, a, b);
   };
+  // (Of each key less the least, once that is known: keys of both signs
+  // differ in every byte as they are, and the order is the same.)
+  Value least;
   auto digit = [&](Value key, Value shift) -> Value {
-    Value flipped = arith::XOrIOp::create(rewriter, loc, key, sign);
-    Value moved = arith::ShRUIOp::create(rewriter, loc, flipped, shift);
+    Value moved = arith::ShRUIOp::create(
+        rewriter, loc, arith::SubIOp::create(rewriter, loc, key, least), shift);
     return arith::IndexCastUIOp::create(
         rewriter, loc, index, arith::AndIOp::create(rewriter, loc, moved, low));
   };
@@ -15993,10 +15999,41 @@ static void emitParallelRadixSort(IRRewriter &rewriter, Location loc,
     body(loop.getInductionVar());
   };
 
-  // Where the keys differ from the first: each piece's bits, then all.
-  Value firstKey = load(keys, zero);
+  // The least key: each piece's, then of all.
   Value differs = memref::AllocOp::create(
       rewriter, loc, MemRefType::get({64}, i64));
+  onPieces([&](Value p) {
+    auto [from, to] = pieceRows(p);
+    // (Of a piece with none, as much as any.)
+    auto loop = scf::ForOp::create(
+        rewriter, loc, from, to, one,
+        ValueRange{arith::ConstantIntOp::create(rewriter, loc, INT64_MAX, 64)});
+    {
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(loop.getBody());
+      scf::YieldOp::create(rewriter, loc,
+                           ValueRange{arith::MinSIOp::create(
+                               rewriter, loc, loop.getRegionIterArgs()[0],
+                               load(keys, loop.getInductionVar()))});
+    }
+    store(loop.getResult(0), differs, p);
+  });
+  auto lowest = scf::ForOp::create(
+      rewriter, loc, zero, pieces, one,
+      ValueRange{arith::ConstantIntOp::create(rewriter, loc, INT64_MAX, 64)});
+  {
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPointToStart(lowest.getBody());
+    scf::YieldOp::create(rewriter, loc,
+                         ValueRange{arith::MinSIOp::create(
+                             rewriter, loc, lowest.getRegionIterArgs()[0],
+                             load(differs, lowest.getInductionVar()))});
+  }
+  least = lowest.getResult(0);
+  // Where the keys less it differ from the first: each piece's bits, then
+  // all.
+  Value firstKey =
+      arith::SubIOp::create(rewriter, loc, load(keys, zero), least);
   onPieces([&](Value p) {
     auto [from, to] = pieceRows(p);
     auto loop = scf::ForOp::create(rewriter, loc, from, to, one,
@@ -16005,7 +16042,10 @@ static void emitParallelRadixSort(IRRewriter &rewriter, Location loc,
       OpBuilder::InsertionGuard inner(rewriter);
       rewriter.setInsertionPointToStart(loop.getBody());
       Value bits = arith::XOrIOp::create(
-          rewriter, loc, load(keys, loop.getInductionVar()), firstKey);
+          rewriter, loc,
+          arith::SubIOp::create(rewriter, loc,
+                                load(keys, loop.getInductionVar()), least),
+          firstKey);
       scf::YieldOp::create(
           rewriter, loc,
           ValueRange{arith::OrIOp::create(rewriter, loc,
@@ -16225,22 +16265,27 @@ static void callOrderedSort(IRRewriter &rewriter, Location loc,
 
   // Sorted by the keys' bytes, the lowest first, each pass keeping the
   // order of the one before among keys with the same byte (a radix sort,
-  // with the sign's bit turned over so that the numbers below nought come
-  // first). Every byte's counts are taken in one pass; a byte that all
-  // keys have alike is no pass. Each pass goes from one pair of lists to
-  // the other.
+  // of each key less the least: keys of both signs differ in every byte
+  // as they are, and the order is the same). Every byte's counts are
+  // taken in one pass; a byte that all keys have alike is no pass. Each
+  // pass goes from one pair of lists to the other.
   Type i1 = rewriter.getI1Type();
   Value no = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
   Value yes = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
   Value bytes = arith::ConstantIndexOp::create(rewriter, loc, 8);
   Value radix = arith::ConstantIndexOp::create(rewriter, loc, 256);
   Value all = arith::ConstantIndexOp::create(rewriter, loc, 8 * 256);
-  Value sign = arith::ConstantIntOp::create(rewriter, loc, INT64_MIN, 64);
   Value low = arith::ConstantIntOp::create(rewriter, loc, 255, 64);
   Value eight = arith::ConstantIntOp::create(rewriter, loc, 8, 64);
+  Value least = carryingLoop(
+      rewriter, loc, zero, count,
+      arith::ConstantIntOp::create(rewriter, loc, INT64_MAX, 64),
+      [&](Value at, Value carried) {
+        return arith::MinSIOp::create(rewriter, loc, carried, load(keys, at));
+      });
   auto digit = [&](Value key, Value shift) -> Value {
-    Value flipped = arith::XOrIOp::create(rewriter, loc, key, sign);
-    Value moved = arith::ShRUIOp::create(rewriter, loc, flipped, shift);
+    Value moved = arith::ShRUIOp::create(
+        rewriter, loc, arith::SubIOp::create(rewriter, loc, key, least), shift);
     return arith::IndexCastUIOp::create(
         rewriter, loc, index, arith::AndIOp::create(rewriter, loc, moved, low));
   };
@@ -16410,9 +16455,6 @@ appendsOnly(QueryOp query) {
 static Value parallelTurns(IRRewriter &rewriter, Location loc, Value count,
                            bool gpu);
 static int64_t runningChunk(bool gpu);
-static Value carryingLoop(IRRewriter &rewriter, Location loc, Value from,
-                          Value to, Value init,
-                          function_ref<Value(Value index, Value carried)> step);
 static Value emitRunningScan(IRRewriter &rewriter, Location loc, Value scratch,
                              Value count, Value start, StringRef rule,
                              Type valueType, bool gpu,

@@ -3541,3 +3541,21 @@ variants are now compared by their total, as the sorted trees across
 archetypes were. (`--move` in a deep tree still ties it into a cycle and
 stops, as the entry of 2026-10-06 says: give it `--shapes
 bushy,shuffled`.)
+
+## 2026-10-23: the radix sort of `for ... by` by each key less the least
+
+The sort of a `for ... by` (`ent.ordered.sort`, one core and many
+threads) leaves out bytes that all keys have alike; but keys of both
+signs, as 64-bit numbers with the sign's bit turned over, differ in
+every byte, so a key between -10,000 and 10,000 took all eight passes.
+It now sorts each key less the least (the same order; a pass over the
+keys to find it): two passes there. A million entities by such keys,
+given a row each, 20 frames (`-march=native`, on battery, so only the
+one against the other; the frames without the `for` taken off):
+
+| a frame | before | after |
+|---|---|---|
+| one core | 13.6 ms | 9.4 ms |
+| 23 threads | 5.1 ms | 3.0 ms |
+
+The same rows (and the GPU's sort, docs/gpu.md, does so too).
