@@ -140,7 +140,10 @@ index Traffic of Car by key { x: Spot.x, v: Speed.v }
   row has its entity's place (`place`), counted when the index is made,
   and the insertion goes by key and then by place. The same as a `for
   ... by` the key gives (`test/Integration/index_ties.test`).
-- Keys are whole numbers only, as for `for ... by`.
+- Keys are whole numbers or fractions (`f32`, `f64`, 2026-10-23), as for
+  `for ... by`: a fraction's bits, those but the sign's turned over
+  below nought, nought below nought as nought (`test/Integration/
+  float_keys.test`).
 - `examples/traffic/lanes.ent` uses it: to the bit what the C version
   gives, as fast as the order it kept by hand, and its update six times
   cheaper made again in place (`bench/traffic/RESULTS.md`).

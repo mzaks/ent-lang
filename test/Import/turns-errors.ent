@@ -9,9 +9,9 @@ system s() {
 
 // -----
 
-component Thing { born: i32, speed: f32 }
+component Thing { born: i32, speed: bool }
 system s() {
-  // expected-error @+1 {{the order is by a whole number; 'speed' is}}
+  // expected-error @+1 {{the order is by a whole number or a fraction (f32, f64); 'speed' is}}
   for t: Thing by t.speed {
   }
 }

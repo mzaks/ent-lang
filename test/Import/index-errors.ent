@@ -14,8 +14,8 @@ index Traffic of Car key
 
 // -----
 
-component Car { x: f32 } capacity 8
-// expected-error @+1 {{an index is in order by a whole number; 'x' is an f32}}
+component Car { x: bool } capacity 8
+// expected-error @+1 {{an index is in order by a whole number or a fraction (f32, f64); 'x' is}}
 index Traffic of Car by x
 
 // -----

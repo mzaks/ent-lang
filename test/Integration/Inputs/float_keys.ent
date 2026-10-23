@@ -1,0 +1,87 @@
+// `for ... by` and a sorted index by fractions (test/Integration/
+// float_keys.test): f32 and f64 keys of both signs, many alike, nought
+// above and below, and infinities. The `for` in the order of the keys,
+// those `==` alike (nought and nought below it too) in the order the
+// entities are stored; the index made again in place and anew, its rows
+// as the `for` has them.
+import console
+import wyhash
+
+component Dot { a: f32, b: f64, id: i64, at: i64 } capacity 20000
+buffer Seen { a: f32, b: f64, id: i64, at: i64 } capacity 20000
+unique Check { frame: i64, next: i64, places: i64 }
+
+index ByB of Dot by b { id: Dot.id }
+
+fn value(seed: u64, i: i64) -> f64 {
+  let r = wyrand_below(seed, i, 23)
+  if r == 0 { 0.0 } else if r == 1 { 0.0 - 0.0 } else if r == 2 { 1.0 / 0.0 }
+  else if r == 3 { 0.0 - 1.0 / 0.0 } else { (wyrand_below(seed + 1, i, 41) as f64 - 20.0) * 0.25 }
+}
+
+world {
+  for i in 0..15000 {
+    spawn { Dot { a: value(1, i as i64) as f32, b: value(2, i as i64), id: i as i64, at: 0 } }
+  }
+  Check.next = 15000
+}
+
+system shift() {
+  for d: mut Dot {
+    if wyrand_below(Check.frame as u64 + 5, d.id, 7) == 0 {
+      d.a = value(Check.frame as u64 + 7, d.id) as f32
+      d.b = value(Check.frame as u64 + 9, d.id)
+    }
+  }
+}
+system churn() {
+  for e, d: Dot { if wyrand_below(Check.frame as u64 + 3, d.id, 15) == 0 { e.destroy() } }
+}
+system arrive() {
+  for i in 0..400 {
+    spawn { Dot { a: value(Check.frame as u64 + 11, i as i64) as f32,
+                  b: value(Check.frame as u64 + 13, i as i64), id: Check.next, at: 0 } }
+    Check.next += 1
+  }
+}
+
+// Where each is as they are stored: a `for` goes so.
+system number() {
+  Check.places = 0
+  for d: mut Dot {
+    let p = Check.places += 1
+    d.at = p
+  }
+}
+system clear() { Seen = [] }
+system byA() { for d: Dot by d.a { Seen += { a: d.a, b: d.b, id: d.id, at: d.at } } }
+system checkA() {
+  var ordered = 0
+  var zeros = 0
+  for i in 1..len(Seen) {
+    let x = Seen[i - 1].a
+    let y = Seen[i].a
+    if x < y || (x == y && Seen[i - 1].at < Seen[i].at) { ordered += 1 }
+    if x == 0.0 && y == 0.0 { zeros += 1 }
+  }
+  put("frame {Check.frame} f32: {ordered} of {len(Seen) - 1} in order, {zeros} noughts after noughts")
+}
+system byB() { for d: Dot by d.b { Seen += { a: d.a, b: d.b, id: d.id, at: d.at } } }
+system checkB() {
+  var ordered = 0
+  var same = 0
+  for i in 1..len(Seen) {
+    let x = Seen[i - 1].b
+    let y = Seen[i].b
+    if x < y || (x == y && Seen[i - 1].at < Seen[i].at) { ordered += 1 }
+  }
+  for r in 0..len(ByB) {
+    if r < len(Seen) && ByB[r].id == Seen[r].id { same += 1 }
+  }
+  put("frame {Check.frame} f64: {ordered} of {len(Seen) - 1} in order, index {same} of {len(ByB)} as `by`, first {Seen[0].b} last {Seen[len(Seen) - 1].b}")
+  Check.frame += 1
+}
+
+schedule keys() { shift() number() clear() byA() checkA() clear() byB() checkB() }
+schedule both() { churn() arrive() shift() number() clear() byA() checkA() clear() byB() checkB() }
+main { keys() keys() both() keys() both() }

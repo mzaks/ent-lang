@@ -276,7 +276,7 @@ for with Enemy { Count += 1 }     // nor the entity
 
   See Trees below.
 - `by name.field`, in that place, visits the entities in the order of a
-  whole number they have, and `in turn by name.field` has each of them
+  number they have, and `in turn by name.field` has each of them
   see what those before it did. See "In order, and in turn" below.
 - `where cond` runs the body only where `cond` holds.
 - `on changed C.f, changed C, added C, removed C` makes the query reactive.
@@ -419,9 +419,10 @@ last one, whose draw from a stream of numbers comes when), it is said
 after the filters, where `top down` stands for a tree:
 
 - `by name.field` visits the entities one after another by a field they
-  all have, the smallest value first: a whole number, of a component the
-  `for` binds (`t.born`) or names after `with` (`Thing.born`). Entities
-  with the same value come in the storage's order. The values are those
+  all have, the smallest value first: a whole number or a fraction (`f32`,
+  `f64`), of a component the `for` binds (`t.born`) or names after `with`
+  (`Thing.born`). Entities with the same value (`==`: nought below nought
+  as nought) come in the storage's order. A NaN has no place of its own. The values are those
   the field had when the `for` started.
 - It is one `for` still, with one end. What shows of the order is what
   shows of any order: a buffer's rows lie in it, a proc is called in it,
@@ -1928,7 +1929,7 @@ system follow() {
 ```
 
 An index is the entities that have its components in the order of a
-whole number of the first one's (its key), as the rows of a buffer that
+number of the first one's (its key: a whole number or a fraction), as the rows of a buffer that
 the program keeps and the systems only read: `examples/traffic/lanes.ent`
 finds the car ahead and the cars beside each car so.
 

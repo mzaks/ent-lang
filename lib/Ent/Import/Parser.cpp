@@ -3197,8 +3197,10 @@ LogicalResult Parser::parseIndex() {
       return error(keyAt, "component '" + of.front() + "' has no field '" +
                               *key + "'");
     auto whole = dyn_cast<IntegerType>(keyType);
-    if (!whole || whole.getWidth() == 1)
-      return error(keyAt, "an index is in order by a whole number; '" +
+    if ((!whole || whole.getWidth() == 1) && !keyType.isF32() &&
+        !keyType.isF64())
+      return error(keyAt, "an index is in order by a whole number or a "
+                          "fraction (f32, f64); '" +
                               *key + "' is " + typeWords(keyType));
   }
 
@@ -3354,8 +3356,10 @@ LogicalResult Parser::parseIndex() {
   buffers[*name] = std::move(record);
 
   // What the index declares for itself.
-  std::string spelled = (isUnsigned(keyType) ? "u" : "i") +
-                         std::to_string(keyType.getIntOrFloatBitWidth());
+  std::string spelled = (isa<FloatType>(keyType) ? "f"
+                         : isUnsigned(keyType)   ? "u"
+                                                 : "i") +
+                        std::to_string(keyType.getIntOrFloatBitWidth());
   std::string n = *name;
   std::string text;
   llvm::raw_string_ostream out(text);
@@ -8098,9 +8102,11 @@ LogicalResult Parser::parseFor() {
     if (!type)
       return error(fieldAt, "component '" + component + "' has no field '" +
                                 *field + "'");
-    if (!type.isIntOrIndex() || type.isInteger(1))
-      return error(fieldAt, "the order is by a whole number; '" + *field +
-                                "' is " + typeWords(type));
+    if ((!type.isIntOrIndex() || type.isInteger(1)) && !type.isF32() &&
+        !type.isF64())
+      return error(fieldAt, "the order is by a whole number or a fraction "
+                            "(f32, f64); '" +
+                                *field + "' is " + typeWords(type));
     by = builder.getArrayAttr(
         {symbol(component), builder.getStringAttr(*field)});
     for (const Binding &binding : bindings)

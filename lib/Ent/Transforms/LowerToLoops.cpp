@@ -12407,6 +12407,48 @@ static Value emitRunningScan(IRRewriter &rewriter, Location loc, Value scratch,
                              Type valueType, bool gpu,
                              function_ref<Value(Value at)> total);
 
+/// A field's value (`stored`, of the field's `type`) as a key of the
+/// order of `for ... by` and the sorted index: a whole number in 64 bits,
+/// each smaller as a signed number where the value is smaller. A
+/// fraction's bits, with those but the sign's turned over where it is
+/// below nought (the bits of a fraction go up with it above nought and
+/// down below it); nought below nought the key of nought, as `==` has
+/// them alike. (A NaN has no place: it goes where its bits say.)
+static Value orderKey(OpBuilder &builder, Location loc, Value stored,
+                      Type type) {
+  Type i64 = builder.getI64Type();
+  if (auto real = dyn_cast<FloatType>(stored.getType())) {
+    unsigned width = real.getWidth();
+    Type bits = builder.getIntegerType(width);
+    Value raw = arith::BitcastOp::create(builder, loc, bits, stored);
+    Value below = arith::CmpIOp::create(
+        builder, loc, arith::CmpIPredicate::slt, raw,
+        arith::ConstantIntOp::create(builder, loc, bits, 0));
+    Value turned = arith::XOrIOp::create(
+        builder, loc, raw,
+        arith::ConstantIntOp::create(
+            builder, loc, bits,
+            APInt::getSignedMaxValue(width).getSExtValue()));
+    Value key = arith::SelectOp::create(builder, loc, below, turned, raw);
+    Value nought = arith::CmpFOp::create(
+        builder, loc, arith::CmpFPredicate::OEQ, stored,
+        arith::ConstantOp::create(builder, loc,
+                                  builder.getFloatAttr(real, 0.0)));
+    key = arith::SelectOp::create(
+        builder, loc, nought,
+        arith::ConstantIntOp::create(builder, loc, bits, 0), key);
+    return width == 64
+               ? key
+               : arith::ExtSIOp::create(builder, loc, i64, key).getResult();
+  }
+  unsigned width = cast<IntegerType>(stored.getType()).getWidth();
+  if (width == 64)
+    return stored;
+  return hasNoSign(type)
+             ? arith::ExtUIOp::create(builder, loc, i64, stored).getResult()
+             : arith::ExtSIOp::create(builder, loc, i64, stored).getResult();
+}
+
 /// An array of `count` elements of `element` in the GPU's memory, kept by
 /// devices/gpu.c from run to run as its scratch array `slot` (see
 /// ent_gpu_scratch), at the insertion point.
@@ -16557,13 +16599,8 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
       OpBuilder::InsertionGuard guard(rewriter);
       Value row = parallelTurns(rewriter, loc, rows, /*gpu=*/true);
       Value stored = load(world.column(*archetype, byComponent, byField), row);
-      Type type = archetype->find(byComponent, byField)->type;
-      unsigned width = cast<IntegerType>(stored.getType()).getWidth();
-      Value key =
-          width == 64 ? stored
-          : hasNoSign(type)
-              ? arith::ExtUIOp::create(rewriter, loc, i64, stored).getResult()
-              : arith::ExtSIOp::create(rewriter, loc, i64, stored).getResult();
+      Value key = orderKey(rewriter, loc, stored,
+                           archetype->find(byComponent, byField)->type);
       Value at = add(before, row);
       store(key, keys[0], at);
       store(add(arith::ShLIOp::create(rewriter, loc, whole(number, i64),
@@ -16839,15 +16876,9 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
       memref::AllocOp::create(rewriter, loc, MemRefType::get({2}, index));
   memref::StoreOp::create(rewriter, loc, zero, cells, ValueRange{zero});
   memref::StoreOp::create(rewriter, loc, zero, cells, ValueRange{one});
-  // A field's value as a key: its number, in 64 bits.
+  // A field's value as a key: see orderKey.
   auto keyOf = [&](Value stored, Type type) -> Value {
-    unsigned width = cast<IntegerType>(stored.getType()).getWidth();
-    if (width == 64)
-      return stored;
-    return hasNoSign(type)
-               ? arith::ExtUIOp::create(rewriter, loc, i64, stored).getResult()
-               : arith::ExtSIOp::create(rewriter, loc, i64, stored)
-                     .getResult();
+    return orderKey(rewriter, loc, stored, type);
   };
 
   // (On many ranks, over distributed archetypes: this rank's stretch of

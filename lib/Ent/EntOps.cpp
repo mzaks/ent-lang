@@ -2400,10 +2400,11 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
       return emitOpError("goes by '")
              << getByField().getValue() << "', which " << getByComponent()
              << " has no field of";
-    if (!type.isIntOrIndex() || type.isInteger(1))
+    if ((!type.isIntOrIndex() || type.isInteger(1)) && !type.isF32() &&
+        !type.isF64())
       return emitOpError("goes by '")
              << getByField().getValue() << "' of type " << type
-             << "; the order is that of a whole number";
+             << "; the order is that of a whole number or a fraction";
     if (!system.canRead(getByComponent()))
       return emitOpError("goes by a field of ")
              << getByComponent() << " but system @" << system.getSymName()

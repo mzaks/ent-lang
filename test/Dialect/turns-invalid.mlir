@@ -10,10 +10,10 @@ ent.system @s() {
 
 // -----
 
-ent.component @Thing (born: i32, speed: f32)
+ent.component @Thing (born: i32, speed: i1)
 ent.archetype @Things (@Thing) capacity 4
 ent.system @s() {
-  // expected-error @+1 {{goes by 'speed' of type 'f32'; the order is that of a whole number}}
+  // expected-error @+1 {{goes by 'speed' of type 'i1'; the order is that of a whole number or a fraction}}
   ent.query (%t: !ent.ref<@Thing>) by @Thing "speed" {
   }
 }

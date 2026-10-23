@@ -1,0 +1,19 @@
+// `for ... by` and a sorted index by fractions (f32, f64): in order, of
+// both signs and the infinities, those alike (nought and nought below it
+// among them) in the order the entities are stored; the index, made
+// again in place and anew, as the `for` has them. On one core and on
+// many, the same.
+// RUN: %ent run %S/Inputs/float_keys.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel %S/Inputs/float_keys.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+// CHECK: frame 0 f32: [[A0:[0-9]+]] of [[A0]] in order
+// CHECK-NEXT: frame 0 f64: [[B0:[0-9]+]] of [[B0]] in order, index [[C0:[0-9]+]] of [[C0]] as `by`, first -inf last inf
+// CHECK: frame 1 f32: [[A1:[0-9]+]] of [[A1]] in order
+// CHECK-NEXT: frame 1 f64: [[B1:[0-9]+]] of [[B1]] in order, index [[C1:[0-9]+]] of [[C1]] as `by`, first -inf last inf
+// CHECK: frame 2 f32: [[A2:[0-9]+]] of [[A2]] in order
+// CHECK-NEXT: frame 2 f64: [[B2:[0-9]+]] of [[B2]] in order, index [[C2:[0-9]+]] of [[C2]] as `by`, first -inf last inf
+// CHECK: frame 3 f32: [[A3:[0-9]+]] of [[A3]] in order
+// CHECK-NEXT: frame 3 f64: [[B3:[0-9]+]] of [[B3]] in order, index [[C3:[0-9]+]] of [[C3]] as `by`, first -inf last inf
+// CHECK: frame 4 f32: [[A4:[0-9]+]] of [[A4]] in order
+// CHECK-NEXT: frame 4 f64: [[B4:[0-9]+]] of [[B4]] in order, index [[C4:[0-9]+]] of [[C4]] as `by`, first -inf last inf
