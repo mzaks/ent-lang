@@ -1,0 +1,69 @@
+// Rows given to buffers from `for`s of a `gpu` system (test/Integration/
+// gpu.test): in the order of the entities, after those the buffers had,
+// as on the CPU. Two archetypes, one row from every entity and one from
+// those that pass a test (under an `if`), two buffers, the second given
+// rows by two `for`s one after the other; then a `gpu` system that reads
+// what was given and how many there are, and a hash of the rows, frame by
+// frame as the entities change.
+import console
+import wyhash
+
+component Dot { key: i32, mass: i64 } capacity 200000
+component Spin { turn: i32 } capacity 1000
+
+buffer All { mass: i64, key: i32 } capacity 201000
+buffer Some { mass: i64 } capacity 402000
+unique Frame { n: i64, total: i64, seen: i64 }
+
+world {
+  for i in 0..200000 {
+    spawn { Dot { key: wyrand_below(1, i as i64, 1000) as i32, mass: i as i64 } }
+  }
+  for i in 0..1000 {
+    spawn { Dot { key: wyrand_below(2, i as i64, 1000) as i32, mass: 1000000 + i as i64 },
+            Spin { turn: i as i32 } }
+  }
+}
+
+system clear() {
+  All = []
+  Some = []
+}
+
+gpu system give() {
+  for d: Dot {
+    All += { mass: d.mass, key: d.key }
+    if d.key < 300 { Some += { mass: d.mass * 2 } }
+  }
+  for d: Dot, s: Spin {
+    Some += { mass: 0 - d.mass - s.turn as i64 }
+  }
+}
+
+gpu system read() {
+  for d: mut Dot {
+    if d.key < len(All) as i32 { d.mass += All[d.key].mass % 7 + len(Some) as i64 }
+  }
+}
+
+system shuffle() {
+  for d: mut Dot {
+    d.key = wyrand_below(Frame.n as u64 + 9, d.mass, 1000) as i32
+  }
+}
+
+system check() {
+  var h: u64 = 1
+  for i in 0..len(All) {
+    h = wyhash64(h, (All[i].mass as u64) * 4096 + (All[i].key as u64))
+  }
+  var g: u64 = 1
+  for i in 0..len(Some) {
+    g = wyhash64(g, Some[i].mass as u64)
+  }
+  put("frame {Frame.n} rows {len(All)} {len(Some)} hash {h} {g}")
+  Frame.n += 1
+}
+
+schedule frame() { clear() give() read() check() shuffle() }
+main { frame() frame() frame() }

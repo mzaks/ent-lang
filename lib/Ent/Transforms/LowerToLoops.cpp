@@ -12397,6 +12397,137 @@ static void sendAppended(IRRewriter &rewriter, Operation *op,
   lowerStateAccess(rewriter, append, layout, world);
 }
 
+static func::CallOp callGpu(IRRewriter &rewriter, Location loc, ModuleOp module,
+                            StringRef name, ValueRange args, TypeRange results);
+static Value parallelTurns(IRRewriter &rewriter, Location loc, Value count,
+                           bool gpu);
+static int64_t runningChunk(bool gpu);
+static Value emitRunningScan(IRRewriter &rewriter, Location loc, Value scratch,
+                             Value count, Value start, StringRef rule,
+                             Type valueType, bool gpu,
+                             function_ref<Value(Value at)> total);
+
+/// An array of `count` elements of `element` in the GPU's memory, kept by
+/// devices/gpu.c from run to run as its scratch array `slot` (see
+/// ent_gpu_scratch), at the insertion point.
+static Value gpuScratch(IRRewriter &rewriter, Location loc, ModuleOp program,
+                        int64_t slot, Type element, Value count) {
+  Type i64 = rewriter.getI64Type();
+  Value bytes = arith::IndexCastOp::create(
+      rewriter, loc, i64,
+      arith::MulIOp::create(
+          rewriter, loc, count,
+          arith::ConstantIndexOp::create(rewriter, loc,
+                                         element.getIntOrFloatBitWidth() / 8)));
+  Value raw =
+      callGpu(rewriter, loc, program, "ent_gpu_scratch",
+              ValueRange{arith::ConstantIntOp::create(rewriter, loc, slot, 64),
+                         bytes},
+              TypeRange{MemRefType::get({ShapedType::kDynamic},
+                                        rewriter.getI8Type())})
+          .getResult(0);
+  return memref::ViewOp::create(
+      rewriter, loc, MemRefType::get({ShapedType::kDynamic}, element), raw,
+      arith::ConstantIndexOp::create(rewriter, loc, 0), ValueRange{count});
+}
+
+/// Add the rows `append` (inside a query of a `gpu` system, not from a
+/// loop of its body) noted for the first `count` rows of `archetype`, in
+/// the order of the rows, on the GPU, at the insertion point: each row's
+/// place among them a running sum over the rows of whether each gave one
+/// (the running sums' own scan), whose whole is read back; each row it
+/// gave then put at its place, after those the buffer had. The buffer's
+/// count is the CPU's (see placeGpuCopies), which asks whether there is
+/// room, as appendAppended does.
+static void placeAppendedOnGpu(IRRewriter &rewriter, AppendOp append,
+                               const WorldLayout &layout,
+                               const WorldArchetype &archetype,
+                               WorldAccess &world, Value count) {
+  Location loc = append.getLoc();
+  OpBuilder::InsertionGuard guard(rewriter);
+  ModuleOp program = append->getParentOfType<ModuleOp>();
+  const WorldBuffer &buffer =
+      layout.getBuffer(append.getBufferAttr().getAttr());
+  WorldAccess::AppendSlots slots = world.appendSlots(append, archetype);
+  Type i32 = rewriter.getI32Type();
+  Type i64 = rewriter.getI64Type();
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  // (Scratch array 7: the running sums' are done with when the rows are
+  // put; one that goes by a field puts its own, see lowerOrderedOnGpu.)
+  const int64_t slot = 7;
+  Value room = arith::AddIOp::create(
+      rewriter, loc, count,
+      arith::AddIOp::create(
+          rewriter, loc,
+          arith::DivUIOp::create(rewriter, loc, count,
+                                 arith::ConstantIndexOp::create(
+                                     rewriter, loc, runningChunk(true) - 1)),
+          arith::ConstantIndexOp::create(rewriter, loc, 64)));
+  Value places = gpuScratch(rewriter, loc, program, slot, i32, room);
+  auto gave = [&](Value row) -> Value {
+    return arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::ne,
+        memref::LoadOp::create(rewriter, loc, slots.sent, ValueRange{row}),
+        arith::ConstantIntOp::create(rewriter, loc, 0, 8));
+  };
+  {
+    OpBuilder::InsertionGuard inner(rewriter);
+    Value row = parallelTurns(rewriter, loc, count, /*gpu=*/true);
+    memref::StoreOp::create(
+        rewriter, loc, arith::ExtUIOp::create(rewriter, loc, i32, gave(row)),
+        places, ValueRange{row});
+  }
+  Value given = emitRunningScan(
+      rewriter, loc, places, count,
+      arith::ConstantIntOp::create(rewriter, loc, 0, 32), "add", i32,
+      /*gpu=*/true, [&](Value at) -> Value {
+        Value offset = arith::IndexCastOp::create(
+            rewriter, loc, i64,
+            arith::MulIOp::create(
+                rewriter, loc, at,
+                arith::ConstantIndexOp::create(rewriter, loc, 4)));
+        return callGpu(
+                   rewriter, loc, program, "ent_gpu_scratch_get",
+                   ValueRange{
+                       arith::ConstantIntOp::create(rewriter, loc, slot, 64),
+                       offset,
+                       arith::ConstantIntOp::create(rewriter, loc, 4, 64)},
+                   TypeRange{i64})
+            .getResult(0);
+      });
+  Value counter = world.cpu().bufferCount(buffer);
+  Value base = memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero});
+  Value end = arith::AddIOp::create(rewriter, loc, base, given);
+  cf::AssertOp::create(
+      rewriter, loc,
+      arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::ule, end,
+          arith::ConstantIntOp::create(rewriter, loc, buffer.capacity, 64)),
+      rewriter.getStringAttr("no room for another row: the buffer @" +
+                             BufferOp(buffer.op).getSymName() + " holds " +
+                             Twine(buffer.capacity) +
+                             "; 'capacity' gives more"));
+  memref::StoreOp::create(rewriter, loc, end, counter, ValueRange{zero});
+  {
+    OpBuilder::InsertionGuard inner(rewriter);
+    Value row = parallelTurns(rewriter, loc, count, /*gpu=*/true);
+    auto ifGave = scf::IfOp::create(rewriter, loc, gave(row));
+    rewriter.setInsertionPoint(ifGave.thenBlock()->getTerminator());
+    Value at = arith::IndexCastOp::create(
+        rewriter, loc, rewriter.getIndexType(),
+        arith::AddIOp::create(
+            rewriter, loc, base,
+            arith::ExtUIOp::create(rewriter, loc, i64,
+                                   memref::LoadOp::create(rewriter, loc, places,
+                                                          ValueRange{row}))));
+    for (auto [column, field] : llvm::zip(slots.values, buffer.fields))
+      memref::StoreOp::create(
+          rewriter, loc,
+          memref::LoadOp::create(rewriter, loc, column, ValueRange{row}),
+          world.bufferField(buffer, field), ValueRange{at});
+  }
+}
+
 /// Add what `op` (a connect or an append inside a query) staged for the
 /// entities of `archetype`, at the insertion point: from its list where it
 /// is sent from a loop of the body, else from the first `count` rows; an
@@ -16452,14 +16583,6 @@ appendsOnly(QueryOp query) {
   return rows;
 }
 
-static Value parallelTurns(IRRewriter &rewriter, Location loc, Value count,
-                           bool gpu);
-static int64_t runningChunk(bool gpu);
-static Value emitRunningScan(IRRewriter &rewriter, Location loc, Value scratch,
-                             Value count, Value start, StringRef rule,
-                             Type valueType, bool gpu,
-                             function_ref<Value(Value at)> total);
-
 /// A query of a `gpu` system that goes by a field (a body that only gives
 /// rows to buffers, see appendsOnly; the verifier sees to that), on the
 /// GPU: the entities listed with their keys, each with its archetype's
@@ -16508,20 +16631,10 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
   };
   Value zero = constant(0);
   Value one = constant(1);
-  // In the GPU's memory, kept by devices/gpu.c from run to run (a query
-  // that goes by a field keeps no running sums, whose those are).
+  // In the GPU's memory (a query that goes by a field keeps no running
+  // sums, whose those arrays are).
   auto scratch = [&](int64_t slot, Type element, Value count) -> Value {
-    Value bytes = arith::IndexCastOp::create(
-        rewriter, loc, i64,
-        mul(count, constant(element.getIntOrFloatBitWidth() / 8)));
-    Value raw = callGpu(rewriter, loc, program, "ent_gpu_scratch",
-                        ValueRange{whole(slot, i64), bytes},
-                        TypeRange{MemRefType::get({ShapedType::kDynamic},
-                                                  rewriter.getI8Type())})
-                    .getResult(0);
-    return memref::ViewOp::create(
-        rewriter, loc, MemRefType::get({ShapedType::kDynamic}, element), raw,
-        zero, ValueRange{count});
+    return gpuScratch(rewriter, loc, program, slot, element, count);
   };
   Value room = constant(capacity);
   Value keys[2] = {scratch(0, i64, room), scratch(2, i64, room)};
@@ -19080,11 +19193,17 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
       placeAppended(rewriter, connect, layout, *archetype, world, count,
                     options.parallelEntities && !options.gpuSystems,
                     std::max<int64_t>(options.parallelMinEvents / 16, 1));
-  // And the rows appended to buffers, in the same order.
+  // And the rows appended to buffers, in the same order (on the GPU,
+  // there).
   for (AppendOp append : appends)
-    for (auto [archetype, count] : visited)
+    for (auto [archetype, count] : visited) {
+      if (options.gpu) {
+        placeAppendedOnGpu(rewriter, append, layout, *archetype, world, count);
+        continue;
+      }
       placeAppended(rewriter, append, layout, *archetype, world, count,
                     /*parallel=*/false, /*many=*/0);
+    }
 
   // (On many ranks: what each rank's rows accumulated, added up over the
   // ranks, and what they wrote out written in order.)
@@ -22567,15 +22686,13 @@ static void placeGpuCopies(IRRewriter &rewriter, func::FuncOp func,
     for (const Column &column : access.reads)
       for (unsigned piece : shared.of(column, layout, world, false))
         sides.touched[gpu].insert(piece);
-    // (The counts of buffers a `for` of a `gpu` system that goes by a field
-    // gives rows: the CPU's, which it reads and writes; the rows the GPU's,
-    // see lowerOrderedOnGpu.)
+    // (The counts of buffers a `for` of a `gpu` system gives rows: the
+    // CPU's, which it reads and writes; the rows the GPU's, see
+    // lowerOrderedOnGpu and placeAppendedOnGpu.)
     llvm::DenseSet<Attribute> countedOnCpu;
     if (gpu && ours)
       ours.walk([&](AppendOp append) {
-        if (auto query = append->getParentOfType<QueryOp>();
-            query && query.hasBy())
-          countedOnCpu.insert(append.getBufferAttr().getAttr());
+        countedOnCpu.insert(append.getBufferAttr().getAttr());
       });
     for (const Column &column : access.writes)
       for (unsigned piece : shared.of(column, layout, world, false)) {

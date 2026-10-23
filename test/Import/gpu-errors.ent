@@ -23,17 +23,6 @@ gpu system add() {
 
 // -----
 
-component Hp { hp: i32 }
-buffer Marks { hp: i32 } capacity 8
-gpu system mark() {
-  for h: Hp {
-    // expected-error @+1 {{gives a buffer rows, in the order of the entities}}
-    Marks += { hp: h.hp }
-  }
-}
-
-// -----
-
 component Spot { x: f32 }
 gpu system near() {
   for s: mut Spot {

@@ -362,9 +362,8 @@ so.
   and what is allocated). 120,000: 0.70 ms where 0.84.
 - The GPU (2026-10-23): a `for ... by` that only gives rows runs in a
   `gpu system`, its entities listed, sorted by a radix sort of the GPU's
-  and visited there (docs/gpu.md, "A `for ... by` on the GPU"). Rows
-  given to buffers by other `for`s, in the order of the entities, are
-  still not on the GPU.
+  and visited there (docs/gpu.md, "A `for ... by` on the GPU"); rows
+  given to buffers by other `for`s too, in the order of the entities.
 
 **Step 2, as it stands** (2026-10-22). `index Name of C grid (x, y, z)
 cell w [wrap size] { .. }` (`docs/syntax.md`, Grids) is a sorted index

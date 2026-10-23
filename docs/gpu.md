@@ -131,7 +131,6 @@ Errors, each naming the construct and what it waits for:
 |---|---|---|
 | sending or accumulating a fraction (`f32`, `f64`), or sending with `=` | combined at the commit point in the order of the rows, which the GPU does not keep: needs the sends sorted by target and combined in that order on the GPU (keep such a system on the CPU) | later |
 | sending to a field the query also reads or writes | what is sent lands when the query ends; on the GPU it lands as it is sent | never |
-| `Marks += { ... }` (rows given to a buffer) but in a `for ... by` (below) | rows in the order of the entities: needs an ordered compaction | G2 |
 | `extern fn` | the C runs on the CPU; the GPU's own functions round differently from the machine's library, which breaks the same-results rule (`math` is written in ent and runs on both, see below) | G2 |
 | a `for` over other entities inside the `for` | fine on a GPU (it is its best case), but needs the `old` copy and the inner loop's order kept | G2 |
 | further up a tree than the parent (`*`, `hops`, siblings, paths), a tree's edges (`for` over them), a `sorted` tree | the links and the lists in order are the CPU's | later |
@@ -839,3 +838,20 @@ each about 230 us putting keys in place (to places all over), 60 us
 counting; the visit 110 us. (First 8 ms: all eight passes, the least
 and most found by one thread, the counts cleared in the counting
 kernel.)
+
+## Rows given to buffers on the GPU (2026-10-23)
+
+`Marks += { .. }` in a `for` of a `gpu system` (at most once for an
+entity, as anywhere: not from a loop of the body) puts its rows in the
+order of the entities, as the CPU does (append by append, archetype by
+archetype, row by row), on the GPU (`placeAppendedOnGpu`): the loop
+notes each row's in its places, as on the CPU; then a kernel turns the
+marks into ones and noughts, the running sums' scan makes each row's
+place among those given, its whole read back, and a kernel puts each
+row given at its place after those the buffer had. The buffer's count
+is the CPU's, as with `for ... by` (above): copied to the CPU before the
+run, asked whether there is room, marked the CPU's after.
+`Inputs/gpu_given.ent` (`gpu.test`): 201,000 entities of two
+archetypes, every one and those under an `if`, two `for`s into one
+buffer, and a `gpu` system after that reads the rows and how many
+there are: the same as the CPU, 40 runs, and with `ENT_GPU_PROTECT`.

@@ -205,3 +205,16 @@
 // RUN: FileCheck %s --check-prefix=BY --input-file=%t.by.gpu
 // BY: frame 0 rows 602000 301000 hash 5544980611785813485 2835094989288384706 first -2500 last 2500
 // BY: frame 2 rows 602000 301000 hash 8746012038621469105 2451871882340062265 first -10000 last 10000
+
+// Rows given to buffers from `for`s of a `gpu` system (two archetypes,
+// every entity and those under an `if`, two `for`s one after the other
+// into one buffer): put in the order of the entities on the GPU, read
+// there by the next system, the same as on the CPU.
+// RUN: %ent run %S/Inputs/gpu_given.ent > %t.given.cpu
+// RUN: %ent run %S/Inputs/gpu_given.ent --gpu > %t.given.gpu
+// RUN: %ent run %S/Inputs/gpu_given.ent --gpu --parallel > %t.given.gpupar
+// RUN: diff %t.given.cpu %t.given.gpu
+// RUN: diff %t.given.cpu %t.given.gpupar
+// RUN: FileCheck %s --check-prefix=GIVEN --input-file=%t.given.gpu
+// GIVEN: frame 0 rows 201000 61506 hash 490018650532524284 10378687888565092654
+// GIVEN: frame 2 rows 201000 61612 hash 4885933534860777026 6311147305899071910
