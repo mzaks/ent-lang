@@ -87,6 +87,11 @@ or moved between archetypes (which reactive queries do not see as
 changes of the key), and where the rows would move more steps than there
 are rows, it is made anew, as `rebuild` does.
 
+A hash index (5.1) has no order to keep: as fits it is mended from the
+entities whose key or copies differ from their rows', `incremental` from
+those a reactive `for` visits; each moved from its key's list to its new
+key's, at the end.
+
 A clustered index (5.2) is brought up to date before every system where
 it is out of date, eager or not: its archetype's rows are in its order
 whenever a system starts.
@@ -111,15 +116,54 @@ surface after, as for the rest of the language.
 ### 5.1 Hash index (equality)
 
 ```
-index Player.name hash unique capacity 4096
-for p in Player where name == "ada" { ... }   // or: Player by name "ada"
+index ByName of Player by name hash unique
+let p = ByName.get("ada")                  // the entity, or none
+for p: Player where p.team == t { ... }    // through `index ByTeam of Player by team hash`
 ```
 
-- Open addressing, a power-of-two table, linear probing.
-- Hash functions: multiply-shift (Fibonacci) for whole numbers and
-  `entity`, wyhash for `text` (`devices/wyhash.ent`). Fixed and seedable.
-- `unique`: two entities with the same key at a commit point stop the
-  program, naming the key and both entities.
+Built (2026-10-23, `docs/syntax.md`, Hash indexes):
+
+- Keys: whole numbers, enums, entities and texts (by two hashes of 64
+  bits, by two seeds: two texts are taken for one where both are the
+  same, a chance of 2^-128; the index does not hold the text).
+- Slots of keys (open addressing, a power-of-two table twice the
+  entities there may be, at least, linear probing) and a row for each
+  entity (`Name_list`, in the order they are stored, with its place
+  there): those of a key are a list, from the key's slot, in the order
+  they are stored as made. A key many entities have is one slot, and
+  its list: one slot an entity would put them all in one run of slots
+  (200,000 entities of 7 keys took a second to make so).
+- The hash: rapidhash's mix (one 64 by 64 bit multiply, the halves of
+  the product xored; `ent.hash`), its seed and secrets fixed. Measured
+  against wyhash64 (two such multiplies), aHash without AES (the same
+  folded multiply twice and a rotate: its fast form needs the AES
+  instructions, which ent's code does not have) and SplitMix64's
+  finalizer, in the table as the index has it (`bench/RESULTS.md`,
+  2026-10-23): the fastest, by about a fifth, and runs as short where
+  keys are at random, shorter where they are made by a rule (numbers in
+  a row, multiples of 1,024, high bits).
+- `Name.get(key)`: the entity of a key, the first as they are stored
+  where several have it; `none` where none has it.
+- `for x: C where x.key == value` (or `value == x.key`, or one of the
+  conditions `&&` joins), where the value is the same for all its
+  entities (literals, consts, enum cases, locals not declared `var`):
+  the value is worked out before the `for`, and `--ent-indexes` marks
+  it to visit only the entities the index says have it (`via_hash`),
+  in the order they are stored; the `where` is still asked. Where the
+  index holds the same entities, is kept up to date before the system,
+  and nothing in the system before the `for` (or in it, of other
+  entities) changes the key or which entities there are. Where one in
+  64 of the entities or more have the key, the `for` looks at all of
+  them, as without the index, a loop that costs less than finding each
+  by its id; which, it says from the key's slot as it runs.
+- `unique`: where two entities have one key, when the index is made
+  (or mended), the program stops, naming the key and both entities.
+- Kept each of the ways of section 4: `rebuild` makes it anew; as fits
+  and `incremental` mend it, from the entities whose key or copies
+  differ from their rows' (as fits, all looked at) or that a reactive
+  `for` says changed (`incremental`): each taken out of its key's list
+  and put at the end of its new key's (a key none has now: its slot
+  emptied, those after it moved back, no tombstones).
 - For: an entity by name or an id from outside, a netlist's signal name
   to its entity (AIGER and SPICE import), network ids.
 
@@ -373,7 +417,7 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 |---|---|---|---|
 | 1 | The shared sort-and-scan primitive (one core, parallel loops, GPU). `lay`'s order by hand ported to it, the same to the bit | The backend | built: `for ... by` listed, sorted and (giving rows) visited on many threads and on the GPU (see below); one radix sort for one core and many (2026-10-23) |
 | 2 | Uniform grid and `near ... within` (a Lennard-Jones melt as its example) | `rebuild`, scheduling of makes | built (see below), and `after me` (2b); grids of whole numbers, `between .. and ..`, `nearest k to` (2026-10-23) |
-| 3 | Hash index and `unique` | `incremental`, change tracking | |
+| 3 | Hash index and `unique` | `incremental`, change tracking | built: `by key hash [unique]`, `get`, `where x.key == value` through it, every way of section 4 (2026-10-23) |
 | 4 | Sorted index (secondary), then clustered | Ordered iteration, ranges, top-k | built: secondary (5.2); ties, float keys, query forms (`by` with `from`, `to`, `first`, `last`) and `clustered` (2026-10-23) |
 | 5 | Morton linear quadtree and octree | Keys made of fields, ranges of prefixes | |
 | 6 | Relation indexes by source and target everywhere, indexes on edge fields | | |
@@ -533,8 +577,9 @@ and a full list by a value of the world keeps two loops.
 
 - Every query gives the same with an index as without (an index changes
   only how fast), checked by running each test both ways. (The sorted
-  index as built is read explicitly, `Name[r]` and `Name.find`: this
-  applies once queries use indexes by themselves.)
+  index as built is read explicitly, `Name[r]` and `Name.find`, and by
+  `for ... by` its key; a hash index by `where x.key == value`, checked
+  so in `test/Integration/hash_index.test`.)
 - The same on one core, on many and on the GPU.
 - Each kind has a benchmark that shows where it beats a scan and where
   it does not (the B+ tree against sorting again when many keys change).

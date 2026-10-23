@@ -1723,10 +1723,12 @@ LogicalResult FunctionOp::verifyRegions() {
       return;
     auto invoke = dyn_cast<InvokeOp>(op);
     if (isa<SameOp, NobodyOp, TableAtOp, TextConstantOp, TextOfOp, TextCutOp,
-            TextLengthOp,
-            TextAtOp, TextEqualOp, TextJoinOp, TextKeepOp, RowsStartOp,
-            RowsCountOp>(op) ||
+            TextLengthOp, TextAtOp, TextEqualOp, TextJoinOp, TextKeepOp,
+            RowsStartOp, RowsCountOp, HashOp>(op) ||
         (invoke && (!invoke.getProc() || getProc())))
+      return;
+    // (What a unique index declares stops the program, in a proc.)
+    if (isa<IndexDuplicateOp>(op) && getProc())
       return;
     // (A buffer it was given: each of these says for itself whether it
     // was, and given to be changed.)
@@ -1917,6 +1919,7 @@ ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
         if (succeeded(parser.parseOptionalKeyword(traversal)))
           result.addAttribute(kTraversalAttr, b.getStringAttr(traversal));
     }
+    SmallVector<Attribute> parts;
     if (succeeded(parser.parseOptionalKeyword("by"))) {
       FlatSymbolRefAttr component;
       StringAttr field;
@@ -1926,7 +1929,6 @@ ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
       if (succeeded(parser.parseOptionalKeyword("turn")))
         result.addAttribute(kTurnAttr, b.getUnitAttr());
       // Its slice: `from %a : t`, `to %b : t`, `first %k`, `last %k`.
-      SmallVector<Attribute> parts;
       for (StringRef part : {"from", "to", "first", "last"}) {
         if (failed(parser.parseOptionalKeyword(part)))
           continue;
@@ -1938,9 +1940,21 @@ ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
           return failure();
         parts.push_back(b.getStringAttr(part));
       }
-      if (!parts.empty())
-        result.addAttribute(kSliceAttr, b.getArrayAttr(parts));
     }
+    // The value a key is compared with: `equals %v : t` (and a text's
+    // hashes, `equals_hash %h : i64`, `equals_check %c : i64`).
+    for (StringRef part : {"equals", "equals_hash", "equals_check"}) {
+      if (failed(parser.parseOptionalKeyword(part)))
+        continue;
+      OpAsmParser::UnresolvedOperand operand;
+      Type type;
+      if (parser.parseOperand(operand) || parser.parseColonType(type) ||
+          parser.resolveOperand(operand, type, result.operands))
+        return failure();
+      parts.push_back(b.getStringAttr(part));
+    }
+    if (!parts.empty())
+      result.addAttribute(kSliceAttr, b.getArrayAttr(parts));
     if (failed(parser.parseOptionalKeyword("on")))
       return success();
     Builder &builder = parser.getBuilder();
@@ -2022,7 +2036,7 @@ void QueryOp::print(OpAsmPrinter &p) {
     for (auto [part, value] : llvm::zip(parts, getSlice())) {
       StringRef name = cast<StringAttr>(part).getValue();
       p << " " << name << " " << value;
-      if (name == "from" || name == "to")
+      if (name != "first" && name != "last")
         p << " : " << value.getType();
     }
   if (auto triggers = (*this)->getAttrOfType<ArrayAttr>(kTriggersAttr)) {
@@ -2054,6 +2068,25 @@ void QueryOp::print(OpAsmPrinter &p) {
       {kTriggersAttr, kWithAttr, kWithoutAttr, kAnyAttr, kCascadeAttr,
        kLeavesFirstAttr, kTraversalAttr, kByAttr, kTurnAttr, kSliceAttr});
   printBody(p, getBody());
+}
+
+void QueryOp::dropEquals() {
+  auto parts = (*this)->getAttrOfType<ArrayAttr>(kSliceAttr);
+  (*this)->removeAttr(kKeyEqualsAttr);
+  if (!parts)
+    return;
+  SmallVector<Attribute> kept;
+  SmallVector<Value> values;
+  for (auto [name, value] : llvm::zip(parts, getSlice()))
+    if (!cast<StringAttr>(name).getValue().starts_with("equals")) {
+      kept.push_back(name);
+      values.push_back(value);
+    }
+  getSliceMutable().assign(values);
+  if (kept.empty())
+    (*this)->removeAttr(kSliceAttr);
+  else
+    (*this)->setAttr(kSliceAttr, ArrayAttr::get(getContext(), kept));
 }
 
 Value QueryOp::getSlicePart(StringRef part) {
@@ -2125,10 +2158,16 @@ LogicalResult QueryOp::verify() {
   if (!getSlice().empty() || parts) {
     if (!parts || parts.size() != getSlice().size())
       return emitOpError("'") << kSliceAttr << "' names each slice operand";
-    if (!hasBy())
+    bool sliced = llvm::any_of(parts, [](Attribute part) {
+      return !cast<StringAttr>(part).getValue().starts_with("equals");
+    });
+    if (sliced && !hasBy())
       return emitOpError("has a slice (from, to, first, last) but does not "
                          "go by a field");
-    if (isTurn())
+    if (getSlicePart("equals") && !(*this)->getAttr(kKeyEqualsAttr))
+      return emitOpError("has a value a key equals but no '")
+             << kKeyEqualsAttr << "'";
+    if (sliced && isTurn())
       return emitOpError("takes turns and has a slice (from, to, first, "
                          "last): not yet");
     if (getSlicePart("first") && getSlicePart("last"))

@@ -8467,6 +8467,103 @@ static void moveRows(IRRewriter &rewriter, Location loc,
     }
 }
 
+/// Lower each `ent.hash` of `module`: the value's bits as stored (an
+/// entity's id, an enum's number, a row number, a whole number's bits),
+/// in 64, mixed by rapidhash's `rapid_mix` (one 64 by 64 bit multiply to
+/// 128 bits, the halves xored) with its secrets and seed.
+/// The bits of a whole number, an enum, an entity or a row of a buffer,
+/// as they are stored, widened to an i64 (without a sign).
+static Value wordOf(OpBuilder &builder, Location loc, Value value,
+                    const WorldLayout &layout) {
+  Type i64 = builder.getI64Type();
+  Type type = value.getType();
+  Type stored = type;
+  if (isa<EntityType>(type))
+    stored = builder.getIntegerType(layout.entities.idBits);
+  else if (auto named = dyn_cast<EnumType>(type))
+    stored = named.getStorageType();
+  else if (auto row = dyn_cast<IndexOfType>(type))
+    stored = row.getStorageType();
+  else if (hasNoSign(type))
+    stored = bitsOf(type);
+  if (stored != type)
+    value = UnrealizedConversionCastOp::create(builder, loc, stored, value)
+                .getResult(0);
+  if (value.getType().isIndex())
+    value = arith::IndexCastUIOp::create(builder, loc, i64, value);
+  else if (value.getType().getIntOrFloatBitWidth() < 64)
+    value = arith::ExtUIOp::create(builder, loc, i64, value);
+  return value;
+}
+
+static void lowerHashes(IRRewriter &rewriter, ModuleOp module,
+                        const WorldLayout &layout) {
+  SmallVector<HashOp> hashes;
+  module.walk([&](HashOp hash) { hashes.push_back(hash); });
+  Type i64 = rewriter.getI64Type();
+  for (HashOp hash : hashes) {
+    Location loc = hash.getLoc();
+    rewriter.setInsertionPoint(hash);
+    Value value = wordOf(rewriter, loc, hash.getValue(), layout);
+    auto constant = [&](uint64_t bits) -> Value {
+      return arith::ConstantIntOp::create(rewriter, loc, i64, int64_t(bits));
+    };
+    auto wide = arith::MulUIExtendedOp::create(
+        rewriter, loc,
+        arith::XOrIOp::create(rewriter, loc, value,
+                              constant(0x2d358dccaa6c78a5ull)),
+        constant(0xbdd89aa982704029ull ^ 0x8bb84b93962eacc9ull));
+    rewriter.replaceOp(hash, arith::XOrIOp::create(rewriter, loc, wide.getLow(),
+                                                   wide.getHigh()));
+  }
+}
+
+/// Lower each `ent.index.duplicate` of `module`: devices/memory.c says
+/// which entities (their ids) and the key (where a whole number), and the
+/// program stops, naming the index.
+static void lowerDuplicates(IRRewriter &rewriter, ModuleOp module,
+                            const WorldLayout &layout) {
+  SmallVector<IndexDuplicateOp> duplicates;
+  module.walk([&](IndexDuplicateOp op) { duplicates.push_back(op); });
+  Type i64 = rewriter.getI64Type();
+  for (IndexDuplicateOp op : duplicates) {
+    Location loc = op.getLoc();
+    rewriter.setInsertionPoint(op);
+    auto whole = [&](Value value) -> Value {
+      Type type = value.getType();
+      if (isa<EntityType>(type))
+        value = UnrealizedConversionCastOp::create(
+                    rewriter, loc,
+                    rewriter.getIntegerType(layout.entities.idBits), value)
+                    .getResult(0);
+      else if (hasNoSign(type))
+        value = UnrealizedConversionCastOp::create(rewriter, loc, bitsOf(type),
+                                                   value)
+                    .getResult(0);
+      if (value.getType().getIntOrFloatBitWidth() < 64)
+        value =
+            isa<EntityType>(type) || hasNoSign(type)
+                ? arith::ExtUIOp::create(rewriter, loc, i64, value).getResult()
+                : arith::ExtSIOp::create(rewriter, loc, i64, value).getResult();
+      return value;
+    };
+    Type keyType = op.getKey().getType();
+    bool number = keyType.isIntOrIndex() || hasNoSign(keyType);
+    Value key = number ? whole(op.getKey())
+                       : arith::ConstantIntOp::create(rewriter, loc, 0, 64);
+    callGpu(rewriter, loc, module, "ent_index_duplicate",
+            ValueRange{key,
+                       arith::ConstantIntOp::create(rewriter, loc, number, 64),
+                       whole(op.getA()), whole(op.getB())},
+            TypeRange{});
+    cf::AssertOp::create(
+        rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 1),
+        rewriter.getStringAttr("the index @" + op.getIndexAttr().getValue() +
+                               " is unique, but two entities have one key"));
+    rewriter.eraseOp(op);
+  }
+}
+
 /// Lower the `ent.cluster`s of `func`: the rows of the archetype a
 /// clustered index keeps in its order move there (see moveRows), the
 /// entity of the index's row r to row r; and so each one's place among
@@ -16997,6 +17094,106 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
   rewriter.eraseOp(query);
 }
 
+/// On a query a hash index answers, once it is lowered in the branch for a
+/// key few entities have (see lowerQuery).
+static constexpr StringLiteral kChosenAttr = "ent.hash_chosen";
+
+/// Of a query a hash index answers (QueryOp::kViaHashAttr): the slot of
+/// the key it asks for in the index (`slot`, an index), and how many
+/// entities have that key (`count`, an i32: 0 where none has it), at the
+/// insertion point.
+struct HashSlot {
+  Value slot, count;
+};
+static HashSlot findHashSlot(IRRewriter &rewriter, Location loc, QueryOp query,
+                             const WorldLayout &layout, WorldAccess &world) {
+  const WorldBuffer &slots = layout.getBuffer(query.getViaHash().getAttr());
+  auto load = [&](StringRef name, Value row) {
+    const WorldColumn &field =
+        *llvm::find_if(slots.fields, [&](const WorldColumn &field) {
+          return field.field.getValue() == name;
+        });
+    return memref::LoadOp::create(
+               rewriter, loc, world.bufferField(slots, field), ValueRange{row})
+        .getResult();
+  };
+  Type i32 = rewriter.getI32Type();
+  Type i64 = rewriter.getI64Type();
+  Type index = rewriter.getIndexType();
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  // (A text by its two hashes, which the index holds; a number by itself,
+  // from the slot its hash says.)
+  Value text = query.getSlicePart("equals_hash");
+  Value wanted =
+      wordOf(rewriter, loc, text ? text : query.getSlicePart("equals"), layout);
+  Value check =
+      text ? wordOf(rewriter, loc, query.getSlicePart("equals_check"), layout)
+           : Value();
+  Value hash =
+      text ? wanted
+           : HashOp::create(rewriter, loc, i64, query.getSlicePart("equals"))
+                 .getResult();
+  Value count = world.toIndex(
+      loc, memref::LoadOp::create(rewriter, loc, world.bufferCount(slots),
+                                  ValueRange{zero}));
+  auto some = scf::IfOp::create(rewriter, loc, TypeRange{index, i32},
+                                arith::CmpIOp::create(rewriter, loc,
+                                                      arith::CmpIPredicate::ugt,
+                                                      count, zero),
+                                /*withElseRegion=*/true);
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToStart(some.thenBlock());
+  Value mask = arith::SubIOp::create(
+      rewriter, loc, arith::IndexCastUIOp::create(rewriter, loc, i64, count),
+      arith::ConstantIntOp::create(rewriter, loc, i64, 1));
+  Value home = arith::IndexCastUIOp::create(
+      rewriter, loc, index, arith::AndIOp::create(rewriter, loc, hash, mask));
+  Value indexMask = arith::IndexCastUIOp::create(rewriter, loc, index, mask);
+  // The first slot from its home that is empty or the key's.
+  auto probe = scf::WhileOp::create(
+      rewriter, loc, TypeRange{index}, ValueRange{home},
+      [&](OpBuilder &, Location, ValueRange at) {
+        Value taken = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::sge, load("head", at[0]),
+            arith::ConstantIntOp::create(rewriter, loc, i32, 0));
+        Value other = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::ne,
+            wordOf(rewriter, loc, load("key", at[0]), layout), wanted);
+        if (check)
+          other = arith::OrIOp::create(
+              rewriter, loc, other,
+              arith::CmpIOp::create(
+                  rewriter, loc, arith::CmpIPredicate::ne,
+                  wordOf(rewriter, loc, load("check", at[0]), layout), check));
+        scf::ConditionOp::create(
+            rewriter, loc, arith::AndIOp::create(rewriter, loc, taken, other),
+            at);
+      },
+      [&](OpBuilder &, Location, ValueRange at) {
+        scf::YieldOp::create(
+            rewriter, loc,
+            ValueRange{arith::AndIOp::create(
+                rewriter, loc, arith::AddIOp::create(rewriter, loc, at[0], one),
+                indexMask)});
+      });
+  Value slot = probe.getResult(0);
+  Value taken = arith::CmpIOp::create(
+      rewriter, loc, arith::CmpIPredicate::sge, load("head", slot),
+      arith::ConstantIntOp::create(rewriter, loc, i32, 0));
+  scf::YieldOp::create(
+      rewriter, loc,
+      ValueRange{slot,
+                 arith::SelectOp::create(
+                     rewriter, loc, taken, load("count", slot),
+                     arith::ConstantIntOp::create(rewriter, loc, i32, 0))});
+  rewriter.setInsertionPointToStart(some.elseBlock());
+  scf::YieldOp::create(
+      rewriter, loc,
+      ValueRange{zero, arith::ConstantIntOp::create(rewriter, loc, i32, 0)});
+  return {some.getResult(0), some.getResult(1)};
+}
+
 /// Replace a query that goes by a field (`by @C "f"`) by a loop over its
 /// entities in that order: they are listed with the field's values, the
 /// smallest first, and each is then found by its id, since rows may move
@@ -17031,9 +17228,13 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
   Operation *module = ArchetypeOp(matched.front()->op)->getParentOp();
   rewriter.setInsertionPoint(query);
   Value tick = world.hasStamps() ? world.currentTick(loc) : Value();
-  if (options.gpu)
+  if (options.gpu) {
+    // (No hash index answers it there: it goes by where the entities are
+    // stored, which the index keeps them told of.)
+    query.dropEquals();
     return lowerOrderedOnGpu(rewriter, query, layout, world, matched, capacity,
                              tick);
+  }
   Type i64 = rewriter.getI64Type();
   Type index = rewriter.getIndexType();
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
@@ -17081,11 +17282,19 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
   const WorldBuffer *byIndex = nullptr;
   if (FlatSymbolRefAttr name = query.getByIndex(); name && !spread)
     byIndex = &layout.getBuffer(name.getAttr());
+  // Or, of a `for` whose `where` asks for a key a hash index by it holds
+  // (QueryOp::kViaHashAttr), those of the index's entities that have it,
+  // then put in the order they are stored (see `index ... hash`).
+  const WorldBuffer *viaHash = nullptr;
+  if (FlatSymbolRefAttr name = query.getViaHash(); name && !spread)
+    viaHash = &layout.getBuffer(name.getAttr());
+  else
+    query.dropEquals();
   llvm::DenseMap<const WorldArchetype *, Value> startCounts;
   for (const WorldArchetype *archetype : matched) {
     Value rows = world.count(loc, *archetype);
     startCounts[archetype] = rows;
-    if (byIndex)
+    if (byIndex || viaHash)
       continue;
     Value from = zero;
     if (spread) {
@@ -17191,6 +17400,54 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
           ids, ValueRange{r});
     }
     memref::StoreOp::create(rewriter, loc, rows, cells, ValueRange{zero});
+  } else if (viaHash) {
+    // The key's list, from its slot's head along `next` (rows of
+    // `N_list`), each entity's place a key of the order.
+    const WorldBuffer &list = layout.getBuffer(StringAttr::get(
+        rewriter.getContext(), query.getViaHash().getValue() + "_list"));
+    auto load = [&](const WorldBuffer &buffer, StringRef name, Value row) {
+      const WorldColumn &field =
+          *llvm::find_if(buffer.fields, [&](const WorldColumn &field) {
+            return field.field.getValue() == name;
+          });
+      return memref::LoadOp::create(rewriter, loc,
+                                    world.bufferField(buffer, field),
+                                    ValueRange{row})
+          .getResult();
+    };
+    HashSlot found = findHashSlot(rewriter, loc, query, layout, world);
+    query.dropEquals();
+    Type i32 = rewriter.getI32Type();
+    Value none = arith::ConstantIntOp::create(rewriter, loc, i32, -1);
+    Value head = arith::SelectOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::sgt, found.count,
+            arith::ConstantIntOp::create(rewriter, loc, i32, 0)),
+        load(*viaHash, "head", found.slot), none);
+    auto walk = scf::WhileOp::create(
+        rewriter, loc, TypeRange{i32, index}, ValueRange{head, zero},
+        [&](OpBuilder &, Location, ValueRange at) {
+          scf::ConditionOp::create(
+              rewriter, loc,
+              arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne,
+                                    at[0], none),
+              at);
+        },
+        [&](OpBuilder &, Location, ValueRange at) {
+          Value row = arith::IndexCastOp::create(rewriter, loc, index, at[0]);
+          memref::StoreOp::create(rewriter, loc, load(list, "place", row), keys,
+                                  ValueRange{at[1]});
+          memref::StoreOp::create(rewriter, loc, load(list, "who", row), ids,
+                                  ValueRange{at[1]});
+          scf::YieldOp::create(
+              rewriter, loc,
+              ValueRange{load(list, "next", row),
+                         arith::AddIOp::create(rewriter, loc, at[1], one)});
+        });
+    memref::StoreOp::create(rewriter, loc, walk.getResult(1), cells,
+                            ValueRange{zero});
+    callOrderedSort(rewriter, loc, module, keys, ids, cells, 0);
   } else {
     // (On many threads from as many entities as a reactive query's events
     // are walked on them.)
@@ -19047,6 +19304,41 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   }
   if (query.getCascade())
     return lowerCascade(rewriter, query, layout, world, given);
+  // A `for` a hash index answers: where many have the key (one in 64 of
+  // the entities the index holds, or more), the entities themselves
+  // looked at as without the index, in a loop over them all, which costs
+  // less than finding each by its id; else those of the index's list.
+  if (query.getViaHash() && !options.gpu && !query->hasAttr(kChosenAttr)) {
+    Location loc = query.getLoc();
+    rewriter.setInsertionPoint(query);
+    HashSlot found = findHashSlot(rewriter, loc, query, layout, world);
+    const WorldBuffer &list = layout.getBuffer(StringAttr::get(
+        rewriter.getContext(), query.getViaHash().getValue() + "_list"));
+    Type i32 = rewriter.getI32Type();
+    Value rows = memref::LoadOp::create(
+        rewriter, loc, world.bufferCount(list),
+        ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)});
+    rows = arith::IndexCastOp::create(rewriter, loc, i32,
+                                      world.toIndex(loc, rows));
+    Value many = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::sge,
+        arith::MulIOp::create(
+            rewriter, loc, found.count,
+            arith::ConstantIntOp::create(rewriter, loc, i32, 64)),
+        rows);
+    auto choice = scf::IfOp::create(rewriter, loc, many,
+                                    /*withElseRegion=*/true);
+    auto all = cast<QueryOp>(rewriter.clone(*query));
+    all->moveBefore(choice.thenBlock()->getTerminator());
+    for (StringRef attr :
+         {QueryOp::kViaHashAttr, QueryOp::kByAttr, QueryOp::kByIndexAttr})
+      all->removeAttr(attr);
+    all.dropEquals();
+    query->moveBefore(choice.elseBlock()->getTerminator());
+    query->setAttr(kChosenAttr, rewriter.getUnitAttr());
+    lowerQuery(rewriter, all, layout, world, given);
+    return lowerQuery(rewriter, query, layout, world, given);
+  }
   if (query.hasBy())
     return lowerOrdered(rewriter, query, layout, world, options);
   checkOwnRows(rewriter, query);
@@ -24228,6 +24520,8 @@ struct EntLowerToLoops
               FunctionOp, EnumOp, TableOp, BufferOp>(op))
         rewriter.eraseOp(&op);
 
+    lowerHashes(rewriter, module, *layout);
+    lowerDuplicates(rewriter, module, *layout);
     if (failed(convertEntityTypes(module, layout->entities.idBits)))
       return signalPassFailure();
     if (failed(checkGpuLoops(module)))

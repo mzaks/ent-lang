@@ -2018,6 +2018,64 @@ finds the car ahead and the cars beside each car so.
   many (`Name_below`, `Name_tangled`); those names are taken.
 - Its rows are as many as its first component's capacity at most.
 
+#### Hash indexes
+
+```
+component Ship { number: i64, team: i32, name: text } capacity 4096
+
+index ByNumber of Ship by number hash unique
+index ByTeam of Ship by team hash
+index ByName of Ship by name hash incremental
+
+system look(t: i32) {
+  let s = ByNumber.get(49)                  // the entity, or none
+  if let n = Ship(ByName.get("ada")).team { ... }
+  for x: Ship where x.team == t { ... }     // the ships ByTeam has of t
+}
+```
+
+`by key hash` after the components makes an index that finds the
+entities of a key, by a hash of it, in place of an order.
+
+- The key: a whole number, an enum, an entity or a text. A text is held
+  by two hashes of it (of 64 bits each, by two seeds; texts are taken
+  for one where both are the same, a chance of 2^-128).
+- `Name.get(key)` is the entity that has the key, the first as they are
+  stored where several have it, and `none` where none has it; in a
+  system.
+- A `for` whose `where` asks `x.key == value` (or `value == x.key`, or
+  that among the conditions `&&` joins), of a binding of the index's
+  component, visits only the entities the index says have the value,
+  where it can: the value the same for all of them (literals, consts,
+  cases of enums, locals not declared `var`), the index holding the
+  same entities as the `for`, and nothing in the system before the
+  `for`, nor in it of other entities, changing the key or which
+  entities there are (spawns, despawns, moves, procs called). It visits
+  them in the order they are stored, and asks the `where` still: the
+  same as without the index. Where one in 64 of the entities or more
+  have the value, it looks at all of them as without the index (which
+  costs less there), decided as it runs.
+- `unique` after `hash` (on the same line): where two entities have one
+  key when the index is made again, the program stops (exit status 3),
+  naming the key and both entities.
+- Kept as the others, `lazy` or `eager`, and `rebuild`, `incremental`
+  or as fits (neither said). It has no order: as fits, every entity
+  whose key or copied fields differ from its row's is mended (taken
+  out of its key's list and put at the end of its new key's);
+  `incremental`, those a reactive `for` says changed; `rebuild` makes
+  it anew. Anew where entities came, went or moved.
+- Its slots (`Name`, a power of two, twice the first component's
+  capacity at least) hold the keys, and its rows (`Name_list`, one for
+  each entity, in the order they are stored) the entities: `who`, the
+  key, `place`, the rows before and after of its key, and what `{ }`
+  copies. The names `Name_list`, `Name_changed`, `Name_home`,
+  `Name_slot`, `Name_append`, `Name_build`, `Name_mend` and `Name_get`
+  are taken besides those above. Not `find`, `[r]` or `for ... by`: it
+  has no order.
+- `hash_of(x)` and `hash_of(x, seed)`, built in: the hash it takes, of a
+  whole number, an enum, an entity or a text, as a `u64` (rapidhash's
+  mix: one 64 by 64 bit multiply, the halves of the product xored).
+
 #### Grids
 
 ```

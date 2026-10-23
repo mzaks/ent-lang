@@ -1,0 +1,12 @@
+// A unique hash index (test/Integration/hash_index.test): where a key
+// changes to one another entity has, the program stops and says which.
+import console
+
+component Tag { id: i64 } capacity 64
+index ById of Tag by id hash unique
+
+world { for i in 0..20 { spawn { Tag { id: i as i64 } } } }
+system look() { put("before") let t = ById.get(3) put("{t != none}") }
+system clash() { for t: mut Tag { if t.id == 15 { t.id = 14 } } }
+schedule s() { look() clash() look() }
+main { s() }

@@ -72,6 +72,25 @@ void *ent_world_memory(int64_t bytes) {
 }
 
 // The world's memory given back when `main` ends.
+// Where a unique index finds a second entity of a key (ent.index.duplicate,
+// see docs/indexes.md): the entities, and the key where it is a whole
+// number; and the program stops.
+void ent_index_duplicate(int64_t key, int64_t has_key, int64_t a, int64_t b) {
+  // (After what the program wrote out before.)
+  fflush(stdout);
+  if (has_key)
+    fprintf(stderr,
+            "ent: a unique index has two entities of one key: %lld and "
+            "%lld have %lld\n",
+            (long long)a, (long long)b, (long long)key);
+  else
+    fprintf(stderr,
+            "ent: a unique index has two entities of one key: %lld and "
+            "%lld\n",
+            (long long)a, (long long)b);
+  exit(3);
+}
+
 void ent_world_free(void *world) {
   (void)world;
   if (ent_world_base)

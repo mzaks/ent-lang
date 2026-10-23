@@ -609,6 +609,17 @@ private:
     /// By a parameter: its value.
     mlir::Value given;
   };
+  /// A hash index is read by `get` and by `where`, not by its rows (but
+  /// in what it declares for itself).
+  LogicalResult notHashRows(const BufferUse &held, StringRef name,
+                            llvm::SMLoc at) {
+    auto index = indexes.find(held.symbol);
+    if (buildingIndex || index == indexes.end() || !index->second.hashed)
+      return success();
+    return error(at, "'" + name + "' is a hash index: it is read by '" + name +
+                         ".get(key)' and by a 'for' whose 'where' "
+                         "asks 'x.key == value', not by its rows");
+  }
   std::optional<BufferUse> bufferNamed(StringRef name) {
     if (const Variable *variable = lookup(name)) {
       if (variable->kind == Variable::Value && variable->value &&
@@ -1017,10 +1028,18 @@ private:
     SmallVector<std::tuple<std::string, std::string, std::string>> copied;
     /// The components of the entities it holds, by their symbols.
     SmallVector<std::string> of;
+    /// A hash index (`hash`): the fn that finds an entity by its key
+    /// (`Name.get(key)`), whether the key is a text (whose hash the rows
+    /// keep, the entity's text compared), and the field it is of.
+    bool hashed = false;
+    bool textKey = false;
+    std::string get, keyField;
   };
   llvm::StringMap<Index> indexes;
-  /// Parsing what an index declares for itself, which fills it.
+  /// Parsing what an index declares for itself, which fills it (and of
+  /// which index: `index_duplicate` names it).
   bool buildingIndex = false;
+  std::string buildingIndexName;
   /// The files that have a name (`asset name = "file"`): as the program
   /// writes them.
   Declared<std::string> assetFiles;
@@ -3085,6 +3104,9 @@ LogicalResult Parser::parseBuffer() {
 // have, until the capacity of its first component is known
 // (finishIndexOrders).
 static constexpr int64_t kCellsPlaceholder = 918273645;
+// In what a hash index declares: how many slots its table has, until the
+// capacity of its first component is known (finishIndexOrders).
+static constexpr int64_t kSlotsPlaceholder = 918273644;
 // (kTangledPlaceholder, Ent/EntOps.h: how out of order a grid index is.)
 
 // From how many entities on an index's update writes the rows on many
@@ -3128,6 +3150,7 @@ LogicalResult Parser::parseIndex() {
   // grid they are in, its key a field of the index's own; else `by` a
   // field of the first component.
   bool grid = false;
+  bool hashed = false, unique = false;
   SmallVector<std::string> positions;
   Type positionType;
   std::string cellText, wrapText;
@@ -3197,15 +3220,36 @@ LogicalResult Parser::parseIndex() {
       return error(keyAt, "component '" + of.front() + "' has no field '" +
                               *key + "'");
     auto whole = dyn_cast<IntegerType>(keyType);
-    if ((!whole || whole.getWidth() == 1) && !keyType.isF32() &&
-        !keyType.isF64())
+    // `hash [unique]`: by equal keys (a whole number, an enum, an entity,
+    // a row number or a text), not in order.
+    const char *hashAt = token.loc.getPointer();
+    if (consumeKeyword("hash")) {
+      hashed = true;
+      // (On the same line: a `unique` on the next is a declaration.)
+      unique =
+          token.isKeyword("unique") &&
+          !StringRef(hashAt, token.loc.getPointer() - hashAt).contains('\n') &&
+          consumeKeyword("unique");
+      if (!(whole && whole.getWidth() > 1) &&
+          !isa<EnumType, EntityType, IndexOfType, TextType, StringType>(
+              keyType))
+        return error(keyAt, "a hash index is by a whole number, an enum, an "
+                            "entity, a row number or a text; '" +
+                                *key + "' is " + typeWords(keyType));
+    } else if ((!whole || whole.getWidth() == 1) && !keyType.isF32() &&
+               !keyType.isF64()) {
       return error(keyAt, "an index is in order by a whole number or a "
                           "fraction (f32, f64); '" +
                               *key + "' is " + typeWords(keyType));
+    }
   }
 
   // `clustered`: the archetype's rows themselves kept in its order.
+  llvm::SMLoc clusteredAt = token.loc;
   bool clustered = consumeKeyword("clustered");
+  if (clustered && hashed)
+    return error(clusteredAt, "a hash index has no order to keep the rows "
+                              "in: it is not 'clustered'");
   // When it is brought up to date (`lazy`, the default, or `eager`) and
   // how (`rebuild`, `incremental`, or as fits), after the key or after
   // what it copies (docs/indexes.md, section 4).
@@ -3369,11 +3413,27 @@ LogicalResult Parser::parseIndex() {
   // The rows: a buffer the program keeps, which a saved world leaves out
   // (it is made again from the entities).
   Record record;
-  record.fields.push_back({"key", keyType});
-  record.fields.push_back({"who", EntityType::get(context)});
-  record.fields.push_back({"place", builder.getI64Type()});
-  for (const Copy &copy : copies)
-    record.fields.push_back({copy.name, copy.type});
+  // (A hash index by a text keeps two hashes of the text, of 64 bits each,
+  // by two seeds: the entity has the text, which is not compared, so two
+  // texts are taken for one where both are the same, a chance of 2^-128.)
+  bool textKey = hashed && isa<TextType, StringType>(keyType);
+  Type storedKey =
+      textKey ? Type(builder.getIntegerType(64, /*isSigned=*/false)) : keyType;
+  record.fields.push_back({"key", storedKey});
+  if (textKey)
+    record.fields.push_back({"check", storedKey});
+  if (hashed) {
+    // (A hash index's slots: a key's, with the first and the last row of
+    // its list and how many it has; the entities are rows of `N_list`.)
+    record.fields.push_back({"head", builder.getI32Type()});
+    record.fields.push_back({"last", builder.getI32Type()});
+    record.fields.push_back({"count", builder.getI32Type()});
+  } else {
+    record.fields.push_back({"who", EntityType::get(context)});
+    record.fields.push_back({"place", builder.getI64Type()});
+    for (const Copy &copy : copies)
+      record.fields.push_back({copy.name, copy.type});
+  }
   SmallVector<Attribute> names, types;
   for (auto &[field, type] : record.fields) {
     names.push_back(builder.getStringAttr(field));
@@ -3386,13 +3446,45 @@ LogicalResult Parser::parseIndex() {
                                        builder.getI64IntegerAttr(1));
   declared->setAttr(WorldLayout::kTransientAttr, builder.getUnitAttr());
   buffers[*name] = std::move(record);
+  // A hash index: its entities, a row each in the order they are stored,
+  // with its key (a text's hashes), its place there, the rows before and
+  // after it of its key, and what it copies (the room the first
+  // component's capacity).
+  if (hashed) {
+    Record listed;
+    listed.fields.push_back({"who", EntityType::get(context)});
+    listed.fields.push_back({"key", storedKey});
+    if (textKey)
+      listed.fields.push_back({"check", storedKey});
+    listed.fields.push_back({"place", builder.getI64Type()});
+    listed.fields.push_back({"next", builder.getI32Type()});
+    listed.fields.push_back({"prev", builder.getI32Type()});
+    for (const Copy &copy : copies)
+      listed.fields.push_back({copy.name, copy.type});
+    SmallVector<Attribute> listNames, listTypes;
+    for (auto &[field, type] : listed.fields) {
+      listNames.push_back(builder.getStringAttr(field));
+      listTypes.push_back(TypeAttr::get(type));
+    }
+    std::string listName = *name + "_list";
+    BufferOp made = BufferOp::create(
+        builder, loc(at), declareSymbol(at, listName),
+        builder.getArrayAttr(listNames), builder.getArrayAttr(listTypes),
+        builder.getI64IntegerAttr(1));
+    made->setAttr(WorldLayout::kTransientAttr, builder.getUnitAttr());
+    buffers[listName] = std::move(listed);
+  }
   // Made again incrementally: the entities whose key or what it copies
   // changed, each with those as they are now (its room the first
   // component's capacity, put in where that is known).
-  if (how == "incremental") {
+  // (A hash index too, but made anew every time: its rows are mended
+  // where they are, as fits, from those it finds changed.)
+  if (how == "incremental" || (hashed && how != "rebuild")) {
     Record changed;
     changed.fields.push_back({"who", EntityType::get(context)});
-    changed.fields.push_back({"key", keyType});
+    changed.fields.push_back({"key", storedKey});
+    if (textKey)
+      changed.fields.push_back({"check", storedKey});
     for (const Copy &copy : copies)
       changed.fields.push_back({copy.name, copy.type});
     SmallVector<Attribute> changedNames, changedTypes;
@@ -3410,10 +3502,13 @@ LogicalResult Parser::parseIndex() {
   }
 
   // What the index declares for itself.
-  std::string spelled = (isa<FloatType>(keyType) ? "f"
-                         : isUnsigned(keyType)   ? "u"
-                                                 : "i") +
-                        std::to_string(keyType.getIntOrFloatBitWidth());
+  std::string spelled =
+      !keyType.isIntOrFloat()
+          ? std::string()
+          : (isa<FloatType>(keyType) ? "f"
+             : isUnsigned(keyType)   ? "u"
+                                     : "i") +
+                std::to_string(keyType.getIntOrFloatBitWidth());
   std::string n = *name;
   std::string text;
   llvm::raw_string_ostream out(text);
@@ -3428,488 +3523,723 @@ LogicalResult Parser::parseIndex() {
   SmallVector<std::string> fields{"key", "who", "place"};
   for (const Copy &copy : copies)
     fields.push_back(copy.name);
-  out << "transient unique " << n << "_fresh: bool\n"
-      << "transient unique " << n << "_places: i64\n"
-      << "transient unique " << n << "_skip: i64\n"
-      << "transient unique " << n << "_wait: i64\n"
-      << "transient unique " << n
-      << "_whole: bool\n"
-      // Every entity told its row.
-      << "proc " << n << "_number(order: " << n << ", held: mut " << of.front()
-      << ") {\n"
-      << "  for row in 0..len(order) { held[order[row].who]." << rowField
-      << " = row }\n}\n"
-      // How many rows are below the one before them; and whether that is
-      // more than one in 64 of them, so many that they are better put in
-      // order anew (64 where nothing else says: `tune`, ent-lower-to-
-      // loops, says another of a trace, which also sees this call).
-      << "fn " << n << "_below(order: " << n << ") -> i32 {\n"
-      << "  var below = 0\n"
-      << "  for i in 1..len(order) {\n"
-      // (Its place read only where the keys do not say: seldom.)
-      << "    if order[i].key <= order[i - 1].key {\n"
-      << "      if order[i].key < order[i - 1].key || order[i].place < "
-         "order[i - 1].place { below += 1 }\n    }\n"
-      << "  }\n  below\n}\n"
-      << "fn " << n << "_tangled(below: i32, rows: i32) -> bool {\n"
-      << "  (below as i64) * " << kTangledPlaceholder
-      << " > (rows as i64)\n}\n"
-      // The rows in order again, where few are out of it: each that is
-      // below the one before (by key, then by place) goes down past those
-      // above it (insertion), and the entities of the rows that moved are
-      // told their rows. Where that would move them more steps than
-      // there are rows, it stops and says so: they are better put in
-      // order anew (a sort is some passes over the rows; rows moved far,
-      // keys at random, would take as many steps as rows for each). What
-      // it moved by then is made anew as well.
-      << "proc " << n << "_settle(order: mut " << n << ", held: mut "
-      << of.front() << ") -> bool {\n"
-      << "  var steps = 0\n"
-      << "  var i = 1\n"
-      << "  while i < len(order) {\n"
-      << "    if order[i].key <= order[i - 1].key && (order[i].key < "
-         "order[i - 1].key || order[i].place < order[i - 1].place) {\n";
-  for (const std::string &field : fields)
-    out << "      let " << field << "_ = order[i]." << field << "\n";
-  out << "      var j = i\n"
-      << "      while j > 0 && steps <= len(order) && (order[j - 1].key > "
-         "key_ || (order[j - 1].key == key_ && order[j - 1].place > "
-         "place_)) {\n"
-      << "        steps += 1\n";
-  for (const std::string &field : fields)
-    out << "        order[j]." << field << " = order[j - 1]." << field << "\n";
-  out << "        held[order[j].who]." << rowField << " = j\n"
-      << "        j -= 1\n      }\n";
-  for (const std::string &field : fields)
-    out << "      order[j]." << field << " = " << field << "_\n";
-  out << "      held[who_]." << rowField << " = j\n"
-      << "      if steps > len(order) { i = len(order) }\n"
-      << "    }\n    i += 1\n  }\n"
-      << "  steps <= len(order)\n}\n"
-      // Made again: where the same entities are in it, each writes its
-      // key and what is copied into its own row, and the rows are put in
-      // order again; else all are put in order by their keys.
-      ;
-  // Of one made again incrementally: the entities whose key or what it
-  // copies changed (the room is the first component's capacity, put in
-  // where that is known), and what moves each one's row up or down to its
-  // place, the others in order as they are. Where that would move rows
-  // more steps than there are rows, it stops and says so.
-  if (how == "incremental") {
-    // (Each with its key and what is copied as they are now: a buffer of
-    // its own, declared as the index's rows are, below.)
-    out << "proc " << n << "_mend(order: mut " << n << ", held: mut "
-        << of.front() << ", changed: " << n << "_changed) -> bool {\n"
-        << "  var steps = 0\n"
-        << "  for k in 0..len(changed) {\n"
-        << "    if steps <= len(order) {\n"
-        << "      let i = held[changed[k].who]." << rowField << "\n"
-        << "      order[i].key = changed[k].key\n";
+  std::string mutBindings = bindings;
+  mutBindings.insert(mutBindings.find(':') + 2, "mut ");
+  if (hashed) {
+    // (A type as the source writes it: of an enum or a buffer, its name as
+    // the module that declares the index has it.)
+    auto typeSpelling = [&](Type type) -> std::string {
+      auto leaf = [](StringRef symbolName) {
+        return symbolName.rsplit('.').second.empty()
+                   ? symbolName.str()
+                   : symbolName.rsplit('.').second.str();
+      };
+      if (isa<EntityType>(type))
+        return "entity";
+      if (auto named = dyn_cast<EnumType>(type))
+        return leaf(named.getName().getValue());
+      if (auto row = dyn_cast<IndexOfType>(type))
+        return "index of " + leaf(row.getBuffer().getValue());
+      return (isUnsigned(type) ? "u" : "i") +
+             std::to_string(type.getIntOrFloatBitWidth());
+    };
+    // A table of slots (twice the entities there may be, at least, and a
+    // power of two: put in where the capacity is known), each empty
+    // (`head` -1) or a key's (a text's hashes): a key goes into the slot
+    // its hash says, or the next empty one after it (linear probing). The
+    // entities are rows of their own (`N_list`), in the order they are
+    // stored, each with its key, its place and what is copied; those of a
+    // key are a list, from the slot's `head` to its `last` along `next`
+    // (and back along `prev`), in the order they are stored as made.
+    auto hashOf = [&](const std::string &stored) {
+      return textKey ? stored : "hash_of(" + stored + ")";
+    };
+    auto slotOf = [&](const std::string &row) {
+      return n + "_slot(order, " + row + ".key" +
+             (textKey ? ", " + row + ".check" : "") + ")";
+    };
+    // (The other hash of a text: by another seed, written in hex.)
+    std::string other = "0x9e3779b97f4a7c15";
+    std::string keyType_ = typeSpelling(storedKey);
+    out << "transient unique " << n << "_fresh: bool\n"
+        << "transient unique " << n << "_whole: bool\n"
+        << "transient unique " << n << "_places: i64\n"
+        << "fn " << n << "_home(order: " << n << ", h: u64) -> i32 {\n"
+        << "  (h & ((len(order) - 1) as u64)) as i32\n}\n"
+        // The slot of a key, or the empty one it would have.
+        << "fn " << n << "_slot(order: " << n << ", key: " << keyType_
+        << (textKey ? ", check: u64" : "") << ") -> i32 {\n"
+        << "  var s = " << n << "_home(order, " << hashOf("key") << ")\n"
+        << "  while order[s].head >= 0 && !(order[s].key == key"
+        << (textKey ? " && order[s].check == check" : "") << ") {\n"
+        << "    s = (s + 1) & (len(order) - 1)\n  }\n  s\n}\n"
+        // An entity's row at the end of its key's list.
+        << "proc " << n << "_append(order: mut " << n << ", list: mut " << n
+        << "_list, r: i32) {\n"
+        << "  let s = " << slotOf("list[r]") << "\n"
+        << "  list[r].next = -1\n"
+        << "  if order[s].head >= 0 {\n"
+        << "    list[order[s].last].next = r\n"
+        << "    list[r].prev = order[s].last\n"
+        << "    order[s].count += 1\n"
+        << "  } else {\n"
+        << "    order[s].key = list[r].key\n"
+        << (textKey ? "    order[s].check = list[r].check\n" : "")
+        << "    order[s].head = r\n"
+        << "    order[s].count = 1\n"
+        << "    list[r].prev = -1\n"
+        << "  }\n"
+        << "  order[s].last = r\n}\n";
+    // Under `unique`: where a key's list has two entities, the program
+    // stops and says which.
+    auto checkUnique = [&](const std::string &indent, const std::string &row) {
+      if (!unique)
+        return;
+      out << indent << "let u = " << slotOf(row) << "\n"
+          << indent << "let first_ = order[u].head\n"
+          << indent << "if list[first_].next >= 0 {\n"
+          << indent
+          << "  index_duplicate(list[first_].key, list[first_].who, "
+             "list[list[first_].next].who)\n"
+          << indent << "}\n";
+    };
+    out << "proc " << n << "_build(order: mut " << n << ", list: mut " << n
+        << "_list, held: mut " << of.front() << ", slots: i32) {\n"
+        << "  if len(list) == 0 {\n    order = []\n  } else {\n"
+        << "    order = [{ key: list[0].key, head: -1, last: -1, count: 0"
+        << (textKey ? ", check: 0" : "") << " }; slots]\n"
+        << "    for k in 0..len(list) {\n"
+        << "      " << n << "_append(order, list, k)\n"
+        << "      held[list[k].who]." << rowField << " = k\n"
+        << "    }\n";
+    if (unique) {
+      out << "    for k in 0..len(list) {\n";
+      checkUnique("      ", "list[k]");
+      out << "    }\n";
+    }
+    out << "  }\n}\n";
+    // Mended: each changed entity's copies written into its row; where
+    // its key changed, its row taken out of its key's list (and where no
+    // other has that key, the slot emptied, those after it along the
+    // slots that their home no longer reaches moved back into the hole),
+    // then put at the end of its new key's, with its place as it was.
+    if (how != "rebuild") {
+      out << "proc " << n << "_mend(order: mut " << n << ", list: mut " << n
+          << "_list, held: mut " << of.front() << ", changed: " << n
+          << "_changed) {\n"
+          << "  let mask = len(order) - 1\n"
+          << "  for k in 0..len(changed) {\n"
+          << "    let r = held[changed[k].who]." << rowField << "\n";
+      for (const Copy &copy : copies)
+        out << "    list[r]." << copy.name << " = changed[k]." << copy.name
+            << "\n";
+      out << "    if list[r].key != changed[k].key"
+          << (textKey ? " || list[r].check != changed[k].check" : "") << " {\n"
+          << "      let s = " << slotOf("list[r]") << "\n"
+          << "      let p = list[r].prev\n"
+          << "      let q = list[r].next\n"
+          << "      if p < 0 { order[s].head = q } else { list[p].next = q }\n"
+          << "      if q < 0 { order[s].last = p } else { list[q].prev = p }\n"
+          << "      order[s].count -= 1\n"
+          << "      if order[s].head < 0 {\n"
+          << "        var hole = s\n"
+          << "        var j = (s + 1) & mask\n"
+          << "        while order[j].head >= 0 {\n"
+          << "          let h = " << n << "_home(order, "
+          << hashOf("order[j].key") << ")\n"
+          << "          let stays = (hole <= j && hole < h && h <= j) || "
+             "(hole > j && (hole < h || h <= j))\n"
+          << "          if !stays {\n"
+          << "            order[hole].key = order[j].key\n"
+          << (textKey ? "            order[hole].check = order[j].check\n" : "")
+          << "            order[hole].head = order[j].head\n"
+          << "            order[hole].last = order[j].last\n"
+          << "            order[hole].count = order[j].count\n"
+          << "            hole = j\n"
+          << "          }\n"
+          << "          j = (j + 1) & mask\n"
+          << "        }\n"
+          << "        order[hole].head = -1\n"
+          << "      }\n"
+          << "      list[r].key = changed[k].key\n"
+          << (textKey ? "      list[r].check = changed[k].check\n" : "")
+          << "      " << n << "_append(order, list, r)\n"
+          << "    }\n  }\n";
+      // (After all of them: two may have swapped their keys.)
+      if (unique) {
+        out << "  for k in 0..len(changed) {\n"
+            << "    let r = held[changed[k].who]." << rowField << "\n";
+        checkUnique("    ", "list[r]");
+        out << "  }\n";
+      }
+      out << "}\n";
+    }
+    // The entity of a key (of a text: whose hashes are the text's), the
+    // first of them as they are stored; none where none is.
+    out << "fn " << n << "_get(order: " << n << ", list: " << n
+        << "_list, key: "
+        << (textKey ? std::string("text") : typeSpelling(keyType))
+        << ") -> entity {\n"
+        << "  var best: entity = none\n"
+        << "  if len(order) > 0 {\n"
+        << (textKey ? "    var r = order[" + n +
+                          "_slot(order, hash_of(key), "
+                          "hash_of(key, " +
+                          other + "))].head\n"
+                    : "    var r = order[" + n + "_slot(order, key)].head\n")
+        << "    var first: i64 = 9223372036854775807\n"
+        << "    while r >= 0 {\n"
+        << "      if list[r].place < first {\n"
+        << "        best = list[r].who\n"
+        << "        first = list[r].place\n      }\n"
+        << "      r = list[r].next\n    }\n  }\n"
+        << "  best\n}\n"
+        << "system " << n << "_update() {\n";
+    // (Its key as the index holds it, and the rest of a row.)
+    std::string held = textKey
+                           ? "hash_of(c0." + *key + "), check: hash_of(c0." +
+                                 *key + ", " + other + ")"
+                           : "c0." + *key;
+    std::string rest;
     for (const Copy &copy : copies)
-      out << "      order[i]." << copy.name << " = changed[k]." << copy.name
-          << "\n";
+      rest += ", " + copy.name + ": " + through(copy);
+    // Where the same entities are in it, mended: those a reactive `for`
+    // visits (`incremental`), or whose key or copies differ from their
+    // row's (as fits).
+    if (how != "rebuild") {
+      out << "  if " << n << "_whole {\n"
+          << "    " << n << "_changed = []\n"
+          << "    for e" << bindings;
+      if (how == "incremental") {
+        out << " on changed c0." << *key;
+        for (const Copy &copy : copies)
+          out << ", changed " << through(copy);
+      } else {
+        std::string row = n + "_list[c0." + rowField + "]";
+        out << " where " << row << ".key != "
+            << (textKey ? "hash_of(c0." + *key + ")" : "c0." + *key);
+        if (textKey)
+          out << " || " << row << ".check != hash_of(c0." << *key << ", "
+              << other << ")";
+        for (const Copy &copy : copies)
+          out << " || " << row << "." << copy.name << " != " << through(copy);
+      }
+      out << " {\n      " << n << "_changed += { who: e, key: " << held << rest
+          << " }\n    }\n"
+          << "    " << n << "_mend(" << n << ", " << n << "_list, "
+          << of.front() << ", " << n << "_changed)\n"
+          << "  } else {\n";
+    }
+    out << "  " << n << "_places = 0\n"
+        << "  " << n << "_list = []\n"
+        << "  for e" << mutBindings << " {\n"
+        << "    let place_ = " << n
+        << "_places += 1\n"
+        // (Where it is stored: what a `for` it answers goes by.)
+        << "    c0." << placeField << " = place_\n"
+        << "    " << n << "_list += { who: e, key: " << held
+        << ", place: place_, next: -1, prev: -1" << rest << " }\n  }\n"
+        << "  " << n << "_build(" << n << ", " << n << "_list, " << of.front()
+        << ", " << kSlotsPlaceholder << ")\n"
+        << "  " << n << "_whole = true\n";
+    if (how != "rebuild")
+      out << "  }\n";
+    out << "  " << n << "_fresh = true\n}\n"
+        << "system " << n << "_stale() { " << n << "_fresh = false }\n"
+        << "system " << n << "_moved() {\n  " << n << "_fresh = false\n  " << n
+        << "_whole = false\n}\n";
+  } else {
+    out << "transient unique " << n << "_fresh: bool\n"
+        << "transient unique " << n << "_places: i64\n"
+        << "transient unique " << n << "_skip: i64\n"
+        << "transient unique " << n << "_wait: i64\n"
+        << "transient unique " << n
+        << "_whole: bool\n"
+        // Every entity told its row.
+        << "proc " << n << "_number(order: " << n << ", held: mut "
+        << of.front() << ") {\n"
+        << "  for row in 0..len(order) { held[order[row].who]." << rowField
+        << " = row }\n}\n"
+        // How many rows are below the one before them; and whether that is
+        // more than one in 64 of them, so many that they are better put in
+        // order anew (64 where nothing else says: `tune`, ent-lower-to-
+        // loops, says another of a trace, which also sees this call).
+        << "fn " << n << "_below(order: " << n << ") -> i32 {\n"
+        << "  var below = 0\n"
+        << "  for i in 1..len(order) {\n"
+        // (Its place read only where the keys do not say: seldom.)
+        << "    if order[i].key <= order[i - 1].key {\n"
+        << "      if order[i].key < order[i - 1].key || order[i].place < "
+           "order[i - 1].place { below += 1 }\n    }\n"
+        << "  }\n  below\n}\n"
+        << "fn " << n << "_tangled(below: i32, rows: i32) -> bool {\n"
+        << "  (below as i64) * " << kTangledPlaceholder
+        << " > (rows as i64)\n}\n"
+        // The rows in order again, where few are out of it: each that is
+        // below the one before (by key, then by place) goes down past those
+        // above it (insertion), and the entities of the rows that moved are
+        // told their rows. Where that would move them more steps than
+        // there are rows, it stops and says so: they are better put in
+        // order anew (a sort is some passes over the rows; rows moved far,
+        // keys at random, would take as many steps as rows for each). What
+        // it moved by then is made anew as well.
+        << "proc " << n << "_settle(order: mut " << n << ", held: mut "
+        << of.front() << ") -> bool {\n"
+        << "  var steps = 0\n"
+        << "  var i = 1\n"
+        << "  while i < len(order) {\n"
+        << "    if order[i].key <= order[i - 1].key && (order[i].key < "
+           "order[i - 1].key || order[i].place < order[i - 1].place) {\n";
     for (const std::string &field : fields)
       out << "      let " << field << "_ = order[i]." << field << "\n";
-    out << "      var j = i\n";
-    for (int down = 0; down < 2; ++down) {
-      if (!down)
-        out << "      while j > 0 && steps <= len(order) && (order[j - 1].key "
-               "> key_ || (order[j - 1].key == key_ && order[j - 1].place > "
-               "place_)) {\n";
-      else
-        out << "      while j + 1 < len(order) && steps <= len(order) && "
-               "(order[j + 1].key < key_ || (order[j + 1].key == key_ && "
-               "order[j + 1].place < place_)) {\n";
-      std::string next = down ? "j + 1" : "j - 1";
-      out << "        steps += 1\n";
-      for (const std::string &field : fields)
-        out << "        order[j]." << field << " = order[" << next << "]."
-            << field << "\n";
-      out << "        held[order[j].who]." << rowField << " = j\n"
-          << "        j " << (down ? "+=" : "-=") << " 1\n      }\n";
-    }
+    out << "      var j = i\n"
+        << "      while j > 0 && steps <= len(order) && (order[j - 1].key > "
+           "key_ || (order[j - 1].key == key_ && order[j - 1].place > "
+           "place_)) {\n"
+        << "        steps += 1\n";
+    for (const std::string &field : fields)
+      out << "        order[j]." << field << " = order[j - 1]." << field
+          << "\n";
+    out << "        held[order[j].who]." << rowField << " = j\n"
+        << "        j -= 1\n      }\n";
     for (const std::string &field : fields)
       out << "      order[j]." << field << " = " << field << "_\n";
     out << "      held[who_]." << rowField << " = j\n"
-        << "    }\n  }\n"
-        << "  steps <= len(order)\n}\n";
-  }
-  // Of a grid: how many cells it has on each side, how wide they are and
-  // where they start (`N_grid`); each cell's first row (`N_cells`, a row
-  // more at the end); and what finds a place's cell and the cells around.
-  std::string ts = !positionType                ? "f64"
-                   : positionType.isF32()       ? "f32"
-                   : positionType.isF64()       ? "f64"
-                   : positionType.isInteger(32) ? "i32"
-                                                : "i64";
-  // (A grid of whole numbers: its cells as wide as whole numbers, where a
-  // place is in one and how far things are worked out to the unit, in
-  // i64.)
-  bool whole = ts[0] == 'i';
-  unsigned dims = positions.size();
-  bool wrap = !wrapText.empty();
-  auto side = [&](const char *what, unsigned d) {
-    return std::string(what) + std::to_string(d);
-  };
-  if (grid) {
-    out << "transient unique " << n << "_grid { cells: i64";
-    for (unsigned d = 0; d < dims; ++d)
-      out << ", " << side("n", d) << ": i64, " << side("w", d) << ": " << ts
-          << ", " << side("lo", d) << ": " << ts << ", " << side("hi", d)
-          << ": " << ts;
-    out << ", size: " << ts << " }\n"
-        << "transient buffer " << n
-        << "_cells { first: i32 } capacity 1\n"
-        // The cell of a place on one side.
-        << "fn " << n << "_cell(x: " << ts << ", lo: " << ts << ", w: " << ts
-        << ", n: i64) -> i64 {\n";
-    if (whole)
-      out << "  let q = (x as i64) - (lo as i64)\n"
-          << "  var c = q / (w as i64)\n"
-          << "  if c * (w as i64) > q { c -= 1 }\n";
-    else
-      out << "  let q = (x - lo) / w\n"
-          << "  var c = q as i64\n"
-          << "  if (c as " << ts << ") > q { c -= 1 }\n";
-    if (wrap)
-      out << "  c = c % n\n"
-          << "  if c < 0 { c += n }\n";
-    else
-      out << "  if c < 0 { c = 0 }\n"
-          << "  if c >= n { c = n - 1 }\n";
-    out << "  c\n}\n"
-        // How many cells out from a place's own are within `r`.
-        << "fn " << n << "_reach(r: " << ts << ", w: " << ts << ") -> i64 {\n"
-        << (whole ? "  var m = (r as i64) / (w as i64)\n"
-                    "  if m * (w as i64) < (r as i64) { m += 1 }\n"
-                  : "  var m = (r / w) as i64\n"
-                    "  if (m as " +
-                        ts + ") * w < r { m += 1 }\n")
-        << "  m\n}\n"
-        // The first of the cells around cell `c`, and how many.
-        << "fn " << n << "_from(c: i64, m: i64, n: i64) -> i64 {\n";
-    if (wrap)
-      out << "  if 2 * m + 1 >= n { 0 } else { c - m }\n}\n";
-    else
-      out << "  max(0, c - m)\n}\n";
-    out << "fn " << n << "_many(c: i64, m: i64, n: i64) -> i64 {\n";
-    if (wrap)
-      out << "  min(2 * m + 1, n)\n}\n";
-    else
-      out << "  min(n - 1, c + m) - max(0, c - m) + 1\n}\n";
-    // A little of a cell's width, for where a place found its cell by
-    // rounding.
-    std::string slack = ts == "f32" ? "0.01" : "0.000000001";
-    // A cell counted from the first, round the box (from `_from`, never
-    // a box or more below the first cell or past the last).
-    out << "fn " << n << "_at(k: i64, n: i64) -> i64 {\n"
-        << "  if k < 0 { k + n } else if k >= n { k - n } else { k }\n}\n"
-        // The lowest and the highest cell, counted on from the first
-        // (not round the box), that a place's `r` either side reaches.
+        << "      if steps > len(order) { i = len(order) }\n"
+        << "    }\n    i += 1\n  }\n"
+        << "  steps <= len(order)\n}\n"
+        // Made again: where the same entities are in it, each writes its
+        // key and what is copied into its own row, and the rows are put in
+        // order again; else all are put in order by their keys.
         ;
-    for (const char *end : {"low", "high"}) {
-      const char *sign = end[0] == 'l' ? "-" : "+";
-      out << "fn " << n << "_" << end << "(p: " << ts << ", r: " << ts
-          << ", lo: " << ts << ", w: " << ts << ") -> i64 {\n";
+    // Of one made again incrementally: the entities whose key or what it
+    // copies changed (the room is the first component's capacity, put in
+    // where that is known), and what moves each one's row up or down to its
+    // place, the others in order as they are. Where that would move rows
+    // more steps than there are rows, it stops and says so.
+    if (how == "incremental") {
+      // (Each with its key and what is copied as they are now: a buffer of
+      // its own, declared as the index's rows are, below.)
+      out << "proc " << n << "_mend(order: mut " << n << ", held: mut "
+          << of.front() << ", changed: " << n << "_changed) -> bool {\n"
+          << "  var steps = 0\n"
+          << "  for k in 0..len(changed) {\n"
+          << "    if steps <= len(order) {\n"
+          << "      let i = held[changed[k].who]." << rowField << "\n"
+          << "      order[i].key = changed[k].key\n";
+      for (const Copy &copy : copies)
+        out << "      order[i]." << copy.name << " = changed[k]." << copy.name
+            << "\n";
+      for (const std::string &field : fields)
+        out << "      let " << field << "_ = order[i]." << field << "\n";
+      out << "      var j = i\n";
+      for (int down = 0; down < 2; ++down) {
+        if (!down)
+          out << "      while j > 0 && steps <= len(order) && (order[j - "
+                 "1].key "
+                 "> key_ || (order[j - 1].key == key_ && order[j - 1].place > "
+                 "place_)) {\n";
+        else
+          out << "      while j + 1 < len(order) && steps <= len(order) && "
+                 "(order[j + 1].key < key_ || (order[j + 1].key == key_ && "
+                 "order[j + 1].place < place_)) {\n";
+        std::string next = down ? "j + 1" : "j - 1";
+        out << "        steps += 1\n";
+        for (const std::string &field : fields)
+          out << "        order[j]." << field << " = order[" << next << "]."
+              << field << "\n";
+        out << "        held[order[j].who]." << rowField << " = j\n"
+            << "        j " << (down ? "+=" : "-=") << " 1\n      }\n";
+      }
+      for (const std::string &field : fields)
+        out << "      order[j]." << field << " = " << field << "_\n";
+      out << "      held[who_]." << rowField << " = j\n"
+          << "    }\n  }\n"
+          << "  steps <= len(order)\n}\n";
+    }
+    // Of a grid: how many cells it has on each side, how wide they are and
+    // where they start (`N_grid`); each cell's first row (`N_cells`, a row
+    // more at the end); and what finds a place's cell and the cells around.
+    std::string ts = !positionType                ? "f64"
+                     : positionType.isF32()       ? "f32"
+                     : positionType.isF64()       ? "f64"
+                     : positionType.isInteger(32) ? "i32"
+                                                  : "i64";
+    // (A grid of whole numbers: its cells as wide as whole numbers, where a
+    // place is in one and how far things are worked out to the unit, in
+    // i64.)
+    bool whole = ts[0] == 'i';
+    unsigned dims = positions.size();
+    bool wrap = !wrapText.empty();
+    auto side = [&](const char *what, unsigned d) {
+      return std::string(what) + std::to_string(d);
+    };
+    if (grid) {
+      out << "transient unique " << n << "_grid { cells: i64";
+      for (unsigned d = 0; d < dims; ++d)
+        out << ", " << side("n", d) << ": i64, " << side("w", d) << ": " << ts
+            << ", " << side("lo", d) << ": " << ts << ", " << side("hi", d)
+            << ": " << ts;
+      out << ", size: " << ts << " }\n"
+          << "transient buffer " << n
+          << "_cells { first: i32 } capacity 1\n"
+          // The cell of a place on one side.
+          << "fn " << n << "_cell(x: " << ts << ", lo: " << ts << ", w: " << ts
+          << ", n: i64) -> i64 {\n";
       if (whole)
-        out << "  let q = (p as i64) " << sign << " (r as i64) - (lo as i64)\n"
+        out << "  let q = (x as i64) - (lo as i64)\n"
             << "  var c = q / (w as i64)\n"
             << "  if c * (w as i64) > q { c -= 1 }\n";
       else
-        out << "  let q = (p " << sign << " r " << sign << " w * " << slack
-            << " - lo) / w\n"
+        out << "  let q = (x - lo) / w\n"
             << "  var c = q as i64\n"
             << "  if (c as " << ts << ") > q { c -= 1 }\n";
-      out << "  c\n}\n";
-    }
-    out
-        // The cells from `l` to `h` of those `_from` and `_many` give, in
-        // the order they are visited, as two runs of cells next to each
-        // other (where they go round the box): `part` 0 and 1 the first
-        // and last of the first run, 2 and 3 of the second; a run with no
-        // cells is from 1 to 0.
-        << "fn " << n << "_run(part: i64, l: i64, h: i64, from: i64, "
-        << "many: i64, n: i64) -> i64 {\n"
-        << "  var a1: i64 = 1\n  var b1: i64 = 0\n"
-        << "  var a2: i64 = 1\n  var b2: i64 = 0\n";
-    if (wrap)
-      // (All the cells, from the first: where they are no more than a
-      // box, those of `l` to `h` round it.)
-      out << "  if many == n {\n"
-          << "    if h - l + 1 >= n {\n"
-          << "      a1 = 0\n      b1 = n - 1\n"
-          << "    } else {\n"
-          << "      let lw = " << n << "_at(l - n * (l / n), n)\n"
-          << "      let hw = " << n << "_at(h - n * (h / n), n)\n"
-          << "      if lw <= hw {\n        a1 = lw\n        b1 = hw\n"
-          << "      } else {\n        a1 = 0\n        b1 = hw\n"
-          << "        a2 = lw\n        b2 = n - 1\n      }\n"
-          << "    }\n"
-          << "  } else {\n"
-          << "    let s = max(l, from)\n"
-          << "    let e = min(h, from + many - 1)\n"
-          << "    if s <= e {\n"
-          << "      if e < 0 {\n        a1 = s + n\n        b1 = e + n\n"
-          << "      } else if s < 0 {\n        a1 = s + n\n        b1 = n - 1\n"
-          << "        a2 = 0\n        b2 = e\n"
-          << "      } else if s >= n {\n"
-          << "        a1 = s - n\n        b1 = e - n\n"
-          << "      } else if e >= n {\n        a1 = s\n        b1 = n - 1\n"
-          << "        a2 = 0\n        b2 = e - n\n"
-          << "      } else {\n        a1 = s\n        b1 = e\n      }\n"
-          << "    }\n"
-          << "  }\n";
-    else
-      out << "  let s = max(l, from)\n"
-          << "  let e = min(h, from + many - 1)\n"
-          << "  if s <= e {\n    a1 = s\n    b1 = e\n  }\n";
-    out << "  if part == 0 { a1 } else if part == 1 { b1 } else if part == 2 "
-           "{ a2 } else { b2 }\n}\n"
-        // Where `x` is seen from `p`: the image nearest it.
-        << "fn " << n << "_image(x: " << ts << ", p: " << ts << ", size: " << ts
-        << ") -> " << ts << " {\n";
-    if (wrap)
-      // (Moved by the size in each branch: the same, to the bit, as
-      // taking away a shift of the size or of its opposite.)
-      out << "  let d = x - p\n"
-          << (whole ? "  if d + d > size { x - size } else if d + d < 0 - "
-                      "size { x + size } else { x }\n}\n"
-                    : "  if d > size * 0.5 { x - size } else if d < 0.0 - "
-                      "size * 0.5 { x + size } else { x }\n}\n");
-    else
-      out << "  x\n}\n";
-    // How far, at least, an entity in cell `c` is from `p` on one side
-    // (as `_image` sees it, where the box wraps): from `p` to the cell,
-    // less a little for where a place found its cell by rounding. No
-    // nearer than that, so a cell farther than a distance has no entity
-    // within it.
-    out << "fn " << n << "_out(a: " << ts << ", w: " << ts << ", p: " << ts
-        << ") -> " << ts << " {\n"
-        << "  if p < a { a - p } else if p > a + w { p - (a + w) } else "
-           "{ "
-        << (whole ? "0" : "0.0") << " }\n}\n"
-        << "fn " << n << "_gap(c: i64, p: " << ts << ", lo: " << ts
-        << ", w: " << ts << ", size: " << ts << ") -> " << ts << " {\n"
-        << "  let a = lo + (c as " << ts << ") * w\n"
-        << "  var g = " << n << "_out(a, w, p)\n";
-    if (wrap)
-      out << "  let below = " << n << "_out(a - size, w, p)\n"
-          << "  if below < g { g = below }\n"
-          << "  let above = " << n << "_out(a + size, w, p)\n"
-          << "  if above < g { g = above }\n";
-    if (whole)
-      out << "  g\n}\n"
-          // The whole number whose square is at most `v`, the most.
-          << "fn " << n << "_root(v: i64) -> i64 {\n"
-          << "  var s = sqrt(v as f64) as i64\n"
-          << "  while s * s > v { s -= 1 }\n"
-          << "  while (s + 1) * (s + 1) <= v { s += 1 }\n"
-          << "  s\n}\n";
-    else
-      out << "  g -= w * " << slack << "\n"
-          << "  if g < 0.0 { 0.0 } else { g }\n}\n";
-    // Each cell's first row: the first whose cell is not below it.
-    out << "proc " << n << "_bounds(order: " << n << ", starts: mut " << n
-        << "_cells, cells: i64) {\n"
-        << "  starts = [{ first: 0 }; (cells + 1) as i32]\n"
-        << "  var r = 0\n"
-        << "  for c in 0..cells + 1 {\n"
-        << "    while r < len(order) && order[r].key < c { r += 1 }\n"
-        << "    starts[c as i32].first = r\n"
-        << "  }\n}\n";
-  }
-  out << "system " << n << "_update() {\n";
-  if (grid) {
-    // The grid as the entities are now: its cells at least `cell` wide,
-    // round the box where it wraps (`size` on every side), else over
-    // where the entities are; no more cells than entities can be (the
-    // number is the first component's capacity, put in where the index's
-    // capacity is known).
-    // (Of the places' type: a number written out takes it.)
-    out << "  var cell_: " << ts << " = " << cellText << "\n";
-    if (wrap) {
-      out << "  var size_: " << ts << " = " << wrapText << "\n"
-          << "  " << n << "_grid.size = size_\n";
-      for (unsigned d = 0; d < dims; ++d)
-        out << "  " << n << "_grid." << side("lo", d) << " = "
-            << (whole ? "0" : "0.0") << "\n"
-            << "  " << n << "_grid." << side("hi", d) << " = size_\n"
-            << "  var " << side("n", d)
-            << " = max(1, (size_ / cell_) as i64)\n";
-    } else {
-      // (Of whole numbers, the most and the least there are.)
-      std::string most = ts == "i32" ? "2147483647" : "9223372036854775807";
-      for (unsigned d = 0; d < dims; ++d)
-        out << "  " << n << "_grid." << side("lo", d) << " = "
-            << (whole ? most : "1.0 / 0.0") << "\n"
-            << "  " << n << "_grid." << side("hi", d) << " = "
-            << (whole ? "0 - " + most + " - 1" : "0.0 - 1.0 / 0.0") << "\n";
-      out << "  for c0: " << of.front() << " {\n";
-      for (unsigned d = 0; d < dims; ++d)
-        out << "    " << n << "_grid." << side("lo", d) << " min= c0."
-            << positions[d] << "\n"
-            << "    " << n << "_grid." << side("hi", d) << " max= c0."
-            << positions[d] << "\n";
-      out << "  }\n";
-      for (unsigned d = 0; d < dims; ++d)
-        if (whole)
-          out << "  var " << side("n", d) << " = max(1, ((" << n << "_grid."
-              << side("hi", d) << " as i64) - (" << n << "_grid."
-              << side("lo", d) << " as i64)) / (cell_ as i64) + 1)\n";
-        else
-          out << "  var " << side("n", d) << " = max(1, ((" << n << "_grid."
-              << side("hi", d) << " - " << n << "_grid." << side("lo", d)
-              << ") / cell_) as i64 + 1)\n";
-    }
-    std::string product = "n0";
-    for (unsigned d = 1; d < dims; ++d)
-      product += " * " + side("n", d);
-    out << "  while " << product << " > " << kCellsPlaceholder << " {\n";
-    for (unsigned d = 0; d < dims; ++d)
-      out << "    " << side("n", d) << " = max(1, " << side("n", d)
-          << " / 2)\n";
-    out << "  }\n";
-    // (Where a grid of whole numbers wraps, its cells are all as wide:
-    // as many as the size can be cut into so.)
-    if (whole && wrap)
-      for (unsigned d = 0; d < dims; ++d)
-        out << "  while (size_ as i64) % " << side("n", d) << " != 0 { "
-            << side("n", d) << " -= 1 }\n";
-    out << "  " << n << "_grid.cells = " << product << "\n";
-    for (unsigned d = 0; d < dims; ++d) {
-      out << "  " << n << "_grid." << side("n", d) << " = " << side("n", d)
-          << "\n  " << n << "_grid." << side("w", d) << " = ";
       if (wrap)
-        out << "size_ / (" << side("n", d) << " as " << ts << ")\n";
-      else if (whole)
-        // (One more than the floor: the cells are over every entity.)
-        out << "max(cell_, ((((" << n << "_grid." << side("hi", d)
-            << " as i64) - (" << n << "_grid." << side("lo", d)
-            << " as i64)) / " << side("n", d) << " + 1) as " << ts << "))\n";
+        out << "  c = c % n\n"
+            << "  if c < 0 { c += n }\n";
       else
-        out << "max(cell_, (" << n << "_grid." << side("hi", d) << " - " << n
-            << "_grid." << side("lo", d) << ") / (" << side("n", d) << " as "
-            << ts << "))\n";
-      out << "  let " << side("w_", d) << " = " << n << "_grid."
-          << side("w", d) << "\n  let " << side("lo_", d) << " = " << n
-          << "_grid." << side("lo", d) << "\n";
+        out << "  if c < 0 { c = 0 }\n"
+            << "  if c >= n { c = n - 1 }\n";
+      out << "  c\n}\n"
+          // How many cells out from a place's own are within `r`.
+          << "fn " << n << "_reach(r: " << ts << ", w: " << ts << ") -> i64 {\n"
+          << (whole ? "  var m = (r as i64) / (w as i64)\n"
+                      "  if m * (w as i64) < (r as i64) { m += 1 }\n"
+                    : "  var m = (r / w) as i64\n"
+                      "  if (m as " +
+                          ts + ") * w < r { m += 1 }\n")
+          << "  m\n}\n"
+          // The first of the cells around cell `c`, and how many.
+          << "fn " << n << "_from(c: i64, m: i64, n: i64) -> i64 {\n";
+      if (wrap)
+        out << "  if 2 * m + 1 >= n { 0 } else { c - m }\n}\n";
+      else
+        out << "  max(0, c - m)\n}\n";
+      out << "fn " << n << "_many(c: i64, m: i64, n: i64) -> i64 {\n";
+      if (wrap)
+        out << "  min(2 * m + 1, n)\n}\n";
+      else
+        out << "  min(n - 1, c + m) - max(0, c - m) + 1\n}\n";
+      // A little of a cell's width, for where a place found its cell by
+      // rounding.
+      std::string slack = ts == "f32" ? "0.01" : "0.000000001";
+      // A cell counted from the first, round the box (from `_from`, never
+      // a box or more below the first cell or past the last).
+      out << "fn " << n << "_at(k: i64, n: i64) -> i64 {\n"
+          << "  if k < 0 { k + n } else if k >= n { k - n } else { k }\n}\n"
+          // The lowest and the highest cell, counted on from the first
+          // (not round the box), that a place's `r` either side reaches.
+          ;
+      for (const char *end : {"low", "high"}) {
+        const char *sign = end[0] == 'l' ? "-" : "+";
+        out << "fn " << n << "_" << end << "(p: " << ts << ", r: " << ts
+            << ", lo: " << ts << ", w: " << ts << ") -> i64 {\n";
+        if (whole)
+          out << "  let q = (p as i64) " << sign
+              << " (r as i64) - (lo as i64)\n"
+              << "  var c = q / (w as i64)\n"
+              << "  if c * (w as i64) > q { c -= 1 }\n";
+        else
+          out << "  let q = (p " << sign << " r " << sign << " w * " << slack
+              << " - lo) / w\n"
+              << "  var c = q as i64\n"
+              << "  if (c as " << ts << ") > q { c -= 1 }\n";
+        out << "  c\n}\n";
+      }
+      out
+          // The cells from `l` to `h` of those `_from` and `_many` give, in
+          // the order they are visited, as two runs of cells next to each
+          // other (where they go round the box): `part` 0 and 1 the first
+          // and last of the first run, 2 and 3 of the second; a run with no
+          // cells is from 1 to 0.
+          << "fn " << n << "_run(part: i64, l: i64, h: i64, from: i64, "
+          << "many: i64, n: i64) -> i64 {\n"
+          << "  var a1: i64 = 1\n  var b1: i64 = 0\n"
+          << "  var a2: i64 = 1\n  var b2: i64 = 0\n";
+      if (wrap)
+        // (All the cells, from the first: where they are no more than a
+        // box, those of `l` to `h` round it.)
+        out << "  if many == n {\n"
+            << "    if h - l + 1 >= n {\n"
+            << "      a1 = 0\n      b1 = n - 1\n"
+            << "    } else {\n"
+            << "      let lw = " << n << "_at(l - n * (l / n), n)\n"
+            << "      let hw = " << n << "_at(h - n * (h / n), n)\n"
+            << "      if lw <= hw {\n        a1 = lw\n        b1 = hw\n"
+            << "      } else {\n        a1 = 0\n        b1 = hw\n"
+            << "        a2 = lw\n        b2 = n - 1\n      }\n"
+            << "    }\n"
+            << "  } else {\n"
+            << "    let s = max(l, from)\n"
+            << "    let e = min(h, from + many - 1)\n"
+            << "    if s <= e {\n"
+            << "      if e < 0 {\n        a1 = s + n\n        b1 = e + n\n"
+            << "      } else if s < 0 {\n        a1 = s + n\n        b1 = n - "
+               "1\n"
+            << "        a2 = 0\n        b2 = e\n"
+            << "      } else if s >= n {\n"
+            << "        a1 = s - n\n        b1 = e - n\n"
+            << "      } else if e >= n {\n        a1 = s\n        b1 = n - 1\n"
+            << "        a2 = 0\n        b2 = e - n\n"
+            << "      } else {\n        a1 = s\n        b1 = e\n      }\n"
+            << "    }\n"
+            << "  }\n";
+      else
+        out << "  let s = max(l, from)\n"
+            << "  let e = min(h, from + many - 1)\n"
+            << "  if s <= e {\n    a1 = s\n    b1 = e\n  }\n";
+      out << "  if part == 0 { a1 } else if part == 1 { b1 } else if part == 2 "
+             "{ a2 } else { b2 }\n}\n"
+          // Where `x` is seen from `p`: the image nearest it.
+          << "fn " << n << "_image(x: " << ts << ", p: " << ts
+          << ", size: " << ts << ") -> " << ts << " {\n";
+      if (wrap)
+        // (Moved by the size in each branch: the same, to the bit, as
+        // taking away a shift of the size or of its opposite.)
+        out << "  let d = x - p\n"
+            << (whole ? "  if d + d > size { x - size } else if d + d < 0 - "
+                        "size { x + size } else { x }\n}\n"
+                      : "  if d > size * 0.5 { x - size } else if d < 0.0 - "
+                        "size * 0.5 { x + size } else { x }\n}\n");
+      else
+        out << "  x\n}\n";
+      // How far, at least, an entity in cell `c` is from `p` on one side
+      // (as `_image` sees it, where the box wraps): from `p` to the cell,
+      // less a little for where a place found its cell by rounding. No
+      // nearer than that, so a cell farther than a distance has no entity
+      // within it.
+      out << "fn " << n << "_out(a: " << ts << ", w: " << ts << ", p: " << ts
+          << ") -> " << ts << " {\n"
+          << "  if p < a { a - p } else if p > a + w { p - (a + w) } else "
+             "{ "
+          << (whole ? "0" : "0.0") << " }\n}\n"
+          << "fn " << n << "_gap(c: i64, p: " << ts << ", lo: " << ts
+          << ", w: " << ts << ", size: " << ts << ") -> " << ts << " {\n"
+          << "  let a = lo + (c as " << ts << ") * w\n"
+          << "  var g = " << n << "_out(a, w, p)\n";
+      if (wrap)
+        out << "  let below = " << n << "_out(a - size, w, p)\n"
+            << "  if below < g { g = below }\n"
+            << "  let above = " << n << "_out(a + size, w, p)\n"
+            << "  if above < g { g = above }\n";
+      if (whole)
+        out << "  g\n}\n"
+            // The whole number whose square is at most `v`, the most.
+            << "fn " << n << "_root(v: i64) -> i64 {\n"
+            << "  var s = sqrt(v as f64) as i64\n"
+            << "  while s * s > v { s -= 1 }\n"
+            << "  while (s + 1) * (s + 1) <= v { s += 1 }\n"
+            << "  s\n}\n";
+      else
+        out << "  g -= w * " << slack << "\n"
+            << "  if g < 0.0 { 0.0 } else { g }\n}\n";
+      // Each cell's first row: the first whose cell is not below it.
+      out << "proc " << n << "_bounds(order: " << n << ", starts: mut " << n
+          << "_cells, cells: i64) {\n"
+          << "  starts = [{ first: 0 }; (cells + 1) as i32]\n"
+          << "  var r = 0\n"
+          << "  for c in 0..cells + 1 {\n"
+          << "    while r < len(order) && order[r].key < c { r += 1 }\n"
+          << "    starts[c as i32].first = r\n"
+          << "  }\n}\n";
     }
-    // Each entity's cell: x fastest, then y, then z.
-    std::string number;
-    for (unsigned d = dims; d-- > 0;) {
-      std::string cell = n + "_cell(c0." + positions[d] + ", " +
-                         side("lo_", d) + ", " + side("w_", d) + ", " +
-                         side("n", d) + ")";
-      number = number.empty()
-                   ? cell
-                   : "(" + number + ") * " + side("n", d) + " + " + cell;
-    }
-    out << "  for c0: mut " << of.front() << " {\n    c0." << *key << " = "
-        << number << "\n  }\n";
-  }
-  // Made anew by `by`: every entity in order by its key, those of a key
-  // in the order they are stored (the order insertion by their places
-  // gives).
-  // Where each entity is as they are stored, counted first where it may
-  // have moved there (entities came, went or moved: no other change moves
-  // one, so made again in place the places are as they were, in the rows
-  // too, which keep theirs as they move).
-  auto anew = [&](const std::string &indent, bool counted) {
-    if (counted)
-      out << indent << n << "_places = 0\n"
-          << indent << "for c0: mut " << of.front() << " {\n"
-          << indent << "  let place_ = " << n << "_places += 1\n"
-          << indent << "  c0." << placeField << " = place_\n"
-          << indent << "}\n";
-    out << indent << n << " = []\n"
-        << indent << "for e" << bindings << " by c0." << *key << " {\n"
-        << indent << "  " << n << " += { key: c0." << *key << ", who: e, "
-        << "place: c0." << placeField;
-    for (const Copy &copy : copies)
-      out << ", " << copy.name << ": " << through(copy);
-    out << " }\n" << indent << "}\n"
-        << indent << n << "_number(" << n << ", " << of.front() << ")\n";
-  };
-  if (how == "rebuild") {
-    // (Every time anew.)
-    anew("  ", /*counted=*/true);
-    out << "  " << n << "_whole = true\n";
-  } else if (how == "incremental") {
-    // (Where the same entities are in it, only those whose key or what it
-    // copies changed, which a reactive `for` visits; their rows moved
-    // to their places.)
-    out << "  if " << n << "_whole {\n"
-        << "    " << n << "_changed = []\n"
-        << "    for e" << bindings << " on changed c0." << *key;
-    for (const Copy &copy : copies)
-      out << ", changed " << through(copy);
-    out << " {\n      " << n << "_changed += { who: e, key: c0." << *key;
-    for (const Copy &copy : copies)
-      out << ", " << copy.name << ": " << through(copy);
-    out << " }\n    }\n"
-        << "    if !" << n << "_mend(" << n << ", " << of.front() << ", " << n
-        << "_changed) {\n";
-    anew("      ", /*counted=*/false);
-    out << "    }\n  } else {\n";
-    anew("    ", /*counted=*/true);
-    out << "    " << n << "_whole = true\n  }\n";
-  } else {
-    out << "  if " << n << "_whole {\n";
-    // (As fits, not a grid: where trying in place came to too many steps,
-    // anew the next so many times without trying, twice as many after
-    // each try that does, up to 64; where it did not, it tries every time.
-    // Keys that change much each time are then sorted anew without first
-    // writing every row and moving them each time.)
-    if (!grid) {
-      out << "  if " << n << "_skip > 0 {\n    " << n << "_skip -= 1\n";
-      anew("    ", /*counted=*/false);
-      out << "  } else {\n";
-    }
-    out << "    for e" << bindings << ", w: mut " << n << "[c0." << rowField
-        << ", 1] {\n      w[0].key = c0." << *key << "\n";
-    for (const Copy &copy : copies)
-      out << "      w[0]." << copy.name << " = " << through(copy) << "\n";
-    out << "    }\n";
-    // (Where many rows are out of order, sorted on many threads; else each
-    // goes down past those above it. A grid counts them first, which a
-    // trace sees (and --tune chooses from): `Name_tangled`.)
+    out << "system " << n << "_update() {\n";
     if (grid) {
-      out << "    if " << n << "_tangled(" << n << "_below(" << n << "), len("
-          << n << ")) {\n";
-      anew("      ", /*counted=*/false);
-      out << "    } else if !" << n << "_settle(" << n << ", " << of.front()
-          << ") {\n";
-      anew("      ", /*counted=*/false);
-      out << "    }\n";
-    } else {
-      out << "    if !" << n << "_settle(" << n << ", " << of.front()
-          << ") {\n";
-      anew("      ", /*counted=*/false);
-      out << "      " << n << "_wait = min(max(" << n << "_wait * 2, 1), 64)\n"
-          << "      " << n << "_skip = " << n << "_wait\n"
-          << "    } else {\n      " << n << "_wait = 0\n    }\n  }\n";
+      // The grid as the entities are now: its cells at least `cell` wide,
+      // round the box where it wraps (`size` on every side), else over
+      // where the entities are; no more cells than entities can be (the
+      // number is the first component's capacity, put in where the index's
+      // capacity is known).
+      // (Of the places' type: a number written out takes it.)
+      out << "  var cell_: " << ts << " = " << cellText << "\n";
+      if (wrap) {
+        out << "  var size_: " << ts << " = " << wrapText << "\n"
+            << "  " << n << "_grid.size = size_\n";
+        for (unsigned d = 0; d < dims; ++d)
+          out << "  " << n << "_grid." << side("lo", d) << " = "
+              << (whole ? "0" : "0.0") << "\n"
+              << "  " << n << "_grid." << side("hi", d) << " = size_\n"
+              << "  var " << side("n", d)
+              << " = max(1, (size_ / cell_) as i64)\n";
+      } else {
+        // (Of whole numbers, the most and the least there are.)
+        std::string most = ts == "i32" ? "2147483647" : "9223372036854775807";
+        for (unsigned d = 0; d < dims; ++d)
+          out << "  " << n << "_grid." << side("lo", d) << " = "
+              << (whole ? most : "1.0 / 0.0") << "\n"
+              << "  " << n << "_grid." << side("hi", d) << " = "
+              << (whole ? "0 - " + most + " - 1" : "0.0 - 1.0 / 0.0") << "\n";
+        out << "  for c0: " << of.front() << " {\n";
+        for (unsigned d = 0; d < dims; ++d)
+          out << "    " << n << "_grid." << side("lo", d) << " min= c0."
+              << positions[d] << "\n"
+              << "    " << n << "_grid." << side("hi", d) << " max= c0."
+              << positions[d] << "\n";
+        out << "  }\n";
+        for (unsigned d = 0; d < dims; ++d)
+          if (whole)
+            out << "  var " << side("n", d) << " = max(1, ((" << n << "_grid."
+                << side("hi", d) << " as i64) - (" << n << "_grid."
+                << side("lo", d) << " as i64)) / (cell_ as i64) + 1)\n";
+          else
+            out << "  var " << side("n", d) << " = max(1, ((" << n << "_grid."
+                << side("hi", d) << " - " << n << "_grid." << side("lo", d)
+                << ") / cell_) as i64 + 1)\n";
+      }
+      std::string product = "n0";
+      for (unsigned d = 1; d < dims; ++d)
+        product += " * " + side("n", d);
+      out << "  while " << product << " > " << kCellsPlaceholder << " {\n";
+      for (unsigned d = 0; d < dims; ++d)
+        out << "    " << side("n", d) << " = max(1, " << side("n", d)
+            << " / 2)\n";
+      out << "  }\n";
+      // (Where a grid of whole numbers wraps, its cells are all as wide:
+      // as many as the size can be cut into so.)
+      if (whole && wrap)
+        for (unsigned d = 0; d < dims; ++d)
+          out << "  while (size_ as i64) % " << side("n", d) << " != 0 { "
+              << side("n", d) << " -= 1 }\n";
+      out << "  " << n << "_grid.cells = " << product << "\n";
+      for (unsigned d = 0; d < dims; ++d) {
+        out << "  " << n << "_grid." << side("n", d) << " = " << side("n", d)
+            << "\n  " << n << "_grid." << side("w", d) << " = ";
+        if (wrap)
+          out << "size_ / (" << side("n", d) << " as " << ts << ")\n";
+        else if (whole)
+          // (One more than the floor: the cells are over every entity.)
+          out << "max(cell_, ((((" << n << "_grid." << side("hi", d)
+              << " as i64) - (" << n << "_grid." << side("lo", d)
+              << " as i64)) / " << side("n", d) << " + 1) as " << ts << "))\n";
+        else
+          out << "max(cell_, (" << n << "_grid." << side("hi", d) << " - " << n
+              << "_grid." << side("lo", d) << ") / (" << side("n", d) << " as "
+              << ts << "))\n";
+        out << "  let " << side("w_", d) << " = " << n << "_grid."
+            << side("w", d) << "\n  let " << side("lo_", d) << " = " << n
+            << "_grid." << side("lo", d) << "\n";
+      }
+      // Each entity's cell: x fastest, then y, then z.
+      std::string number;
+      for (unsigned d = dims; d-- > 0;) {
+        std::string cell = n + "_cell(c0." + positions[d] + ", " +
+                           side("lo_", d) + ", " + side("w_", d) + ", " +
+                           side("n", d) + ")";
+        number = number.empty()
+                     ? cell
+                     : "(" + number + ") * " + side("n", d) + " + " + cell;
+      }
+      out << "  for c0: mut " << of.front() << " {\n    c0." << *key << " = "
+          << number << "\n  }\n";
     }
-    out << "  } else {\n";
-    anew("    ", /*counted=*/true);
-    out << "    " << n << "_whole = true\n  }\n";
+    // Made anew by `by`: every entity in order by its key, those of a key
+    // in the order they are stored (the order insertion by their places
+    // gives).
+    // Where each entity is as they are stored, counted first where it may
+    // have moved there (entities came, went or moved: no other change moves
+    // one, so made again in place the places are as they were, in the rows
+    // too, which keep theirs as they move).
+    auto anew = [&](const std::string &indent, bool counted) {
+      if (counted)
+        out << indent << n << "_places = 0\n"
+            << indent << "for c0: mut " << of.front() << " {\n"
+            << indent << "  let place_ = " << n << "_places += 1\n"
+            << indent << "  c0." << placeField << " = place_\n"
+            << indent << "}\n";
+      out << indent << n << " = []\n"
+          << indent << "for e" << bindings << " by c0." << *key << " {\n"
+          << indent << "  " << n << " += { key: c0." << *key << ", who: e, "
+          << "place: c0." << placeField;
+      for (const Copy &copy : copies)
+        out << ", " << copy.name << ": " << through(copy);
+      out << " }\n"
+          << indent << "}\n"
+          << indent << n << "_number(" << n << ", " << of.front() << ")\n";
+    };
+    if (how == "rebuild") {
+      // (Every time anew.)
+      anew("  ", /*counted=*/true);
+      out << "  " << n << "_whole = true\n";
+    } else if (how == "incremental") {
+      // (Where the same entities are in it, only those whose key or what it
+      // copies changed, which a reactive `for` visits; their rows moved
+      // to their places.)
+      out << "  if " << n << "_whole {\n"
+          << "    " << n << "_changed = []\n"
+          << "    for e" << bindings << " on changed c0." << *key;
+      for (const Copy &copy : copies)
+        out << ", changed " << through(copy);
+      out << " {\n      " << n << "_changed += { who: e, key: c0." << *key;
+      for (const Copy &copy : copies)
+        out << ", " << copy.name << ": " << through(copy);
+      out << " }\n    }\n"
+          << "    if !" << n << "_mend(" << n << ", " << of.front() << ", " << n
+          << "_changed) {\n";
+      anew("      ", /*counted=*/false);
+      out << "    }\n  } else {\n";
+      anew("    ", /*counted=*/true);
+      out << "    " << n << "_whole = true\n  }\n";
+    } else {
+      out << "  if " << n << "_whole {\n";
+      // (As fits, not a grid: where trying in place came to too many steps,
+      // anew the next so many times without trying, twice as many after
+      // each try that does, up to 64; where it did not, it tries every time.
+      // Keys that change much each time are then sorted anew without first
+      // writing every row and moving them each time.)
+      if (!grid) {
+        out << "  if " << n << "_skip > 0 {\n    " << n << "_skip -= 1\n";
+        anew("    ", /*counted=*/false);
+        out << "  } else {\n";
+      }
+      out << "    for e" << bindings << ", w: mut " << n << "[c0." << rowField
+          << ", 1] {\n      w[0].key = c0." << *key << "\n";
+      for (const Copy &copy : copies)
+        out << "      w[0]." << copy.name << " = " << through(copy) << "\n";
+      out << "    }\n";
+      // (Where many rows are out of order, sorted on many threads; else each
+      // goes down past those above it. A grid counts them first, which a
+      // trace sees (and --tune chooses from): `Name_tangled`.)
+      if (grid) {
+        out << "    if " << n << "_tangled(" << n << "_below(" << n << "), len("
+            << n << ")) {\n";
+        anew("      ", /*counted=*/false);
+        out << "    } else if !" << n << "_settle(" << n << ", " << of.front()
+            << ") {\n";
+        anew("      ", /*counted=*/false);
+        out << "    }\n";
+      } else {
+        out << "    if !" << n << "_settle(" << n << ", " << of.front()
+            << ") {\n";
+        anew("      ", /*counted=*/false);
+        out << "      " << n << "_wait = min(max(" << n
+            << "_wait * 2, 1), 64)\n"
+            << "      " << n << "_skip = " << n << "_wait\n"
+            << "    } else {\n      " << n << "_wait = 0\n    }\n  }\n";
+      }
+      out << "  } else {\n";
+      anew("    ", /*counted=*/true);
+      out << "    " << n << "_whole = true\n  }\n";
+    }
+    if (grid)
+      out << "  " << n << "_bounds(" << n << ", " << n << "_cells, " << n
+          << "_grid.cells)\n";
+    out << "  " << n
+        << "_fresh = true\n}\n"
+        // Out of date: its keys or what it copies changed, or (`moved`)
+        // which entities it holds.
+        << "system " << n << "_stale() { " << n << "_fresh = false }\n"
+        << "system " << n << "_moved() {\n  " << n << "_fresh = false\n  " << n
+        << "_whole = false\n}\n"
+        << "fn " << n << "_find(order: " << n << ", key: " << spelled
+        << ") -> i32 {\n"
+        << "  var low = 0\n  var high = len(order)\n"
+        << "  let rounds = (bits_of(len(order) as f32) >> 23) as i32 - 126\n"
+        << "  for round in 0..rounds {\n    if low < high {\n"
+        << "      let mid = (low + high) >> 1\n"
+        << "      if order[mid].key < key { low = mid + 1 } else { high = mid "
+           "}\n"
+        << "    }\n  }\n  low\n}\n";
   }
-  if (grid)
-    out << "  " << n << "_bounds(" << n << ", " << n << "_cells, " << n
-        << "_grid.cells)\n";
-  out << "  " << n << "_fresh = true\n}\n"
-      // Out of date: its keys or what it copies changed, or (`moved`)
-      // which entities it holds.
-      << "system " << n << "_stale() { " << n << "_fresh = false }\n"
-      << "system " << n << "_moved() {\n  " << n << "_fresh = false\n  "
-      << n << "_whole = false\n}\n"
-      << "fn " << n << "_find(order: " << n << ", key: " << spelled
-      << ") -> i32 {\n"
-      << "  var low = 0\n  var high = len(order)\n"
-      << "  let rounds = (bits_of(len(order) as f32) >> 23) as i32 - 126\n"
-      << "  for round in 0..rounds {\n    if low < high {\n"
-      << "      let mid = (low + high) >> 1\n"
-      << "      if order[mid].key < key { low = mid + 1 } else { high = mid }\n"
-      << "    }\n  }\n  low\n}\n";
   auto source = llvm::MemoryBuffer::getMemBufferCopy(text, "index " + n);
   StringRef bytes = source->getBuffer();
   sourceMgr.AddNewSourceBuffer(std::move(source), at);
@@ -3918,6 +4248,7 @@ LogicalResult Parser::parseIndex() {
   const char *savedEnd = previousEnd;
   lexer = Lexer(bytes);
   buildingIndex = true;
+  buildingIndexName = resolve(n);
   advance();
   LogicalResult made = parseDeclarations();
   buildingIndex = false;
@@ -3957,10 +4288,12 @@ LogicalResult Parser::parseIndex() {
                                builder.getStringAttr(resolve(n + "_fresh"))),
           builder.getNamedAttr(
               "own",
-              strings(grid ? SmallVector<std::string>{resolve(n),
-                                                      resolve(n + "_cells"),
-                                                      resolve(n + "_grid")}
-                           : SmallVector<std::string>{resolve(n)})),
+              strings(grid     ? SmallVector<std::string>{resolve(n),
+                                                          resolve(n + "_cells"),
+                                                          resolve(n + "_grid")}
+                      : hashed ? SmallVector<std::string>{resolve(n),
+                                                          resolve(n + "_list")}
+                               : SmallVector<std::string>{resolve(n)})),
           builder.getNamedAttr(
               "hidden",
               strings(grid
@@ -3975,10 +4308,18 @@ LogicalResult Parser::parseIndex() {
       info.set("eager", builder.getUnitAttr());
     if (!how.empty())
       info.set("how", builder.getStringAttr(how));
+    if (hashed)
+      info.set("hash", builder.getUnitAttr());
+    if (unique)
+      info.set("unique", builder.getUnitAttr());
     declared->setAttr("ent.index", info.getDictionary(context));
   }
   Index &kept = indexes[bufferName.getValue()];
   kept = {resolve(of.front()), rowField, keyType, resolve(n + "_find")};
+  kept.hashed = hashed;
+  kept.textKey = textKey;
+  kept.get = resolve(n + "_get");
+  kept.keyField = *key;
   for (const Copy &copy : copies)
     kept.copied.push_back({resolve(copy.component), copy.field, copy.name});
   for (const std::string &component : of)
@@ -4033,6 +4374,27 @@ LogicalResult Parser::finishIndexOrders() {
              << "': give that component a capacity (or the program a "
                 "default_capacity)";
     buffer.setCapacityAttr(builder.getI64IntegerAttr(capacity.getInt()));
+    // A hash index: its slots twice as many as there may be entities, at
+    // least, a power of two; its list as many as there may be entities.
+    if (found->second.hashed) {
+      int64_t slots = 1;
+      while (slots < 2 * capacity.getInt())
+        slots *= 2;
+      buffer.setCapacityAttr(builder.getI64IntegerAttr(slots));
+      cast<BufferOp>(
+          SymbolTable::lookupSymbolIn(
+              module, builder.getStringAttr(buffer.getSymName() + "_list")))
+          .setCapacityAttr(builder.getI64IntegerAttr(capacity.getInt()));
+      std::string update = buffer.getSymName().str() + "_update";
+      module.walk([&](arith::ConstantOp constant) {
+        auto value = dyn_cast<IntegerAttr>(constant.getValue());
+        if (!value || value.getInt() != kSlotsPlaceholder)
+          return;
+        auto system = constant->getParentOfType<SystemOp>();
+        if (system && system.getSymName() == update)
+          constant.setValueAttr(IntegerAttr::get(value.getType(), slots));
+      });
+    }
     // Made again incrementally: as many changed as there may be entities.
     if (auto changed = dyn_cast_or_null<BufferOp>(SymbolTable::lookupSymbolIn(
             module, builder.getStringAttr(buffer.getSymName() + "_changed"))))
@@ -4090,6 +4452,43 @@ FailureOr<mlir::Value> Parser::emitIndexCall(const Expr &expr,
     mlir::Value row = arith::SelectOp::create(builder, at, lookup.getFound(),
                                               lookup.getValue(), none);
     return asIndex(at, row, rowType);
+  }
+  if ((expr.field == "get") != index.hashed)
+    return error(expr.loc,
+                 index.hashed ? "'" + expr.name +
+                                    "' is a hash index: an "
+                                    "entity by its key is '" +
+                                    expr.name + ".get(key)'"
+                              : "'" + expr.name +
+                                    ".get' is of a hash index "
+                                    "('by key hash'); this one is in order: '" +
+                                    expr.name + ".find(key)'");
+  if (index.hashed) {
+    // The entity of a key, of a hash index (none where none has it).
+    Function &get = functions.ofSymbol(index.get);
+    Type wanted = index.textKey ? Type(StringType::get(context)) : index.key;
+    FailureOr<mlir::Value> key = emit(*expr.operands[0], wanted);
+    if (failed(key))
+      return failure();
+    if (!index.textKey && key->getType() != index.key)
+      return mismatch(expr.operands[0]->loc, key->getType(), index.key);
+    // (Its slots and its rows: of the world's.)
+    if (given)
+      return error(expr.loc, "'" + expr.name +
+                                 ".get' is asked of the "
+                                 "world's index, in a system");
+    auto bufferOf = [&](unsigned param, StringRef name) -> mlir::Value {
+      return BufferOfOp::create(builder, at, get.params[param],
+                                FlatSymbolRefAttr::get(context, name))
+          .getResult();
+    };
+    SmallVector<mlir::Value> args{bufferOf(0, symbolName),
+                                  bufferOf(1, (symbolName + "_list").str()),
+                                  *key};
+    return InvokeOp::create(builder, at, EntityType::get(context),
+                            FlatSymbolRefAttr::get(context, index.get), args,
+                            UnitAttr())
+        ->getResult(0);
   }
   FailureOr<mlir::Value> key = emit(*expr.operands[0], index.key);
   if (failed(key))
@@ -4887,6 +5286,8 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
       statement = through ? through->proc && !through->result
                           : functions.count(token.spelling) &&
                                 functions[token.spelling].results.empty();
+      // (What a unique index declares: the call that stops the program.)
+      statement |= buildingIndex && token.isKeyword("index_duplicate");
     }
     if (!statement)
       break;
@@ -5451,6 +5852,15 @@ LogicalResult Parser::parseStatement() {
                          "a value, so calling it for nothing does nothing");
       return emitCallThrough(**call, *through);
     }
+  // (What a unique index declares: two entities of a key stop the
+  // program.)
+  if (buildingIndex && token.isKeyword("index_duplicate") &&
+      peek().is(Token::LParen)) {
+    FailureOr<ExprPtr> call = parsePrimary();
+    if (failed(call) || failed(emit(**call, Type())))
+      return failure();
+    return success();
+  }
   // name(args): a call for what it does.
   if (token.is(Token::Identifier) && peek().is(Token::LParen) &&
       functions.count(token.spelling)) {
@@ -8443,6 +8853,110 @@ LogicalResult Parser::parseFor() {
     } while (consumeIf(Token::Comma));
   }
 
+  // where b.key == value (or one of the conditions `&&` joins): the value
+  // worked out once, before the `for`, where it is the same for every
+  // entity (literals, consts and locals not declared `var`), so that a
+  // hash index by that field can say which entities have it (see
+  // QueryOp::kKeyEqualsAttr); the `where` stays in the body.
+  SmallVector<Attribute> keyEquals;
+  if (where && !by && !cascade && triggers.empty()) {
+    std::function<bool(const Expr &)> outside = [&](const Expr &expr) {
+      switch (expr.kind) {
+      case Expr::Int:
+      case Expr::Float:
+      case Expr::Bool:
+      case Expr::String:
+      case Expr::Const:
+        return true;
+      case Expr::Name: {
+        if (expr.name == entity || ownNames.contains(expr.name))
+          return false;
+        const Variable *variable = lookup(expr.name);
+        return variable && variable->kind == Variable::Value &&
+               !variable->isVar;
+      }
+      case Expr::Field: // (a case of an enum)
+        return !lookup(expr.name) && enums.count(expr.name);
+      case Expr::Unary:
+      case Expr::Binary:
+      case Expr::Cast:
+        return llvm::all_of(expr.operands, [&](const ExprPtr &operand) {
+          return outside(*operand);
+        });
+      default:
+        return false;
+      }
+    };
+    SmallVector<const Expr *> conditions{where.get()};
+    for (size_t i = 0; i < conditions.size(); ++i) {
+      const Expr &condition = *conditions[i];
+      if (condition.kind != Expr::Binary)
+        continue;
+      if (condition.op == Token::AndAnd) {
+        for (const ExprPtr &operand : condition.operands)
+          conditions.push_back(operand.get());
+        continue;
+      }
+      if (condition.op != Token::Equal || !keyEquals.empty())
+        continue;
+      for (int side : {0, 1}) {
+        const Expr &field = *condition.operands[side];
+        const Expr &value = *condition.operands[1 - side];
+        if (field.kind != Expr::Field || !outside(value))
+          continue;
+        const Binding *bound = nullptr;
+        for (const Binding &binding : bindings)
+          if (binding.name == field.name)
+            bound = &binding;
+        if (!bound || bound->via || bound->optional)
+          continue;
+        Type type = components[bound->component].fieldType(field.field);
+        if (!type)
+          continue;
+        bool text = isa<TextType, StringType>(type);
+        FailureOr<mlir::Value> equals = emit(value, type);
+        if (failed(equals))
+          return failure();
+        if (!text && equals->getType() != type)
+          return mismatch(value.loc, equals->getType(), type);
+        sliceValues.push_back(*equals);
+        sliceOrder.push_back(builder.getStringAttr("equals"));
+        if (text) {
+          // A text key is held by two hashes of it (see `index ... hash`).
+          for (bool check : {false, true}) {
+            auto node = [&](Expr::Kind kind) {
+              auto expr = std::make_unique<Expr>();
+              expr->kind = kind;
+              expr->loc = value.loc;
+              return expr;
+            };
+            ExprPtr hash = node(Expr::Call);
+            hash->name = "hash_of";
+            ExprPtr given = node(Expr::Given);
+            given->given = *equals;
+            hash->operands.push_back(std::move(given));
+            if (check) {
+              ExprPtr seed = node(Expr::Int);
+              seed->intValue = int64_t(0x9e3779b97f4a7c15ull);
+              seed->isHex = true;
+              hash->operands.push_back(std::move(seed));
+            }
+            FailureOr<mlir::Value> hashed =
+                emit(*hash, builder.getIntegerType(64, /*isSigned=*/false));
+            if (failed(hashed))
+              return failure();
+            sliceValues.push_back(*hashed);
+            sliceOrder.push_back(
+                builder.getStringAttr(check ? "equals_check" : "equals_hash"));
+          }
+        }
+        keyEquals = {symbol(bound->component),
+                     builder.getStringAttr(field.field)};
+        break;
+      }
+    }
+  }
+
   OperationState state(loc(at), QueryOp::getOperationName());
   if (!triggers.empty())
     state.addAttribute(QueryOp::kTriggersAttr, builder.getArrayAttr(triggers));
@@ -8463,6 +8977,9 @@ LogicalResult Parser::parseFor() {
     state.addAttribute(QueryOp::kByAttr, by);
   if (turn)
     state.addAttribute(QueryOp::kTurnAttr, builder.getUnitAttr());
+  if (!keyEquals.empty())
+    state.addAttribute(QueryOp::kKeyEqualsAttr,
+                       builder.getArrayAttr(keyEquals));
   if (!sliceValues.empty()) {
     state.addOperands(sliceValues);
     state.addAttribute(QueryOp::kSliceAttr, builder.getArrayAttr(sliceOrder));
@@ -10149,6 +10666,11 @@ Type Parser::typeOf(const Expr &expr) {
   case Expr::Call:
     if (Callable *through = callableThrough(expr))
       return through->result;
+    // (Index.get(key) of a hash index: an entity.)
+    if (expr.field == "get")
+      if (std::optional<BufferUse> held = bufferNamed(expr.name);
+          held && indexes.count(held->symbol))
+        return EntityType::get(context);
     // (Index.row(e), Index.find(key): a row of the index.)
     if (expr.field == "row" || expr.field == "find")
       if (std::optional<BufferUse> held = bufferNamed(expr.name);
@@ -10161,6 +10683,9 @@ Type Parser::typeOf(const Expr &expr) {
       return builder.getI32Type();
     if (functions.count(expr.name))
       return functions[expr.name].result;
+    // (A hash: 64 bits without a sign.)
+    if (expr.name == "hash_of")
+      return builder.getIntegerType(64, /*isSigned=*/false);
     // (The bits of a float, and the float of bits: of as many bits.)
     if ((expr.name == "bits_of" || expr.name == "float_of") &&
         expr.operands.size() == 1)
@@ -10299,6 +10824,8 @@ FailureOr<SmallVector<mlir::Value>> Parser::emitCall(const Expr &expr) {
         return error(operand->loc,
                      "'" + expr.name + "' is handed the buffer '" +
                          handed.getName().getValue() + "' here, by its name");
+      if (failed(notHashRows(*held, operand->name, operand->loc)))
+        return failure();
       if (handed.getMut() && !held->mut && indexes.count(held->symbol))
         return error(operand->loc,
                      "'" + operand->name + "' is an index, whose rows are "
@@ -10592,6 +11119,8 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
           .getValue();
     }
     if (std::optional<BufferUse> held = bufferNamed(expr.name)) {
+      if (failed(notHashRows(*held, expr.name, expr.loc)))
+        return failure();
       Type type = buffers.ofSymbol(held->symbol).fieldType(expr.field);
       if (!type)
         return error(expr.loc,
@@ -11012,7 +11541,7 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
   case Expr::Binary:
     return emitBinary(expr, expected);
   case Expr::Call: {
-    if (expr.field == "row" || expr.field == "find")
+    if (expr.field == "row" || expr.field == "find" || expr.field == "get")
       if (std::optional<BufferUse> held = bufferNamed(expr.name);
           held && indexes.count(held->symbol))
         return emitIndexCall(expr, held->symbol, held->given);
@@ -11058,6 +11587,8 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
         expr.operands[0]->kind == Expr::Name &&
         bufferNamed(expr.operands[0]->name)) {
       BufferUse held = *bufferNamed(expr.operands[0]->name);
+      if (failed(notHashRows(held, expr.operands[0]->name, expr.loc)))
+        return failure();
       if (inFunction && !held.given)
         return error(expr.loc, "'" + expr.operands[0]->name + "' is a "
                                "buffer, which a system reads: a fn or proc "
@@ -11106,6 +11637,147 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       return error(expr.loc, "'mul_wide' gives 2 values, the high and the "
                              "low bits; take them with 'let (hi, lo) = "
                              "mul_wide(a, b)'");
+    // (In what a unique index declares: a second entity of a key stops
+    // the program, naming them.)
+    if (expr.name == "index_duplicate" && buildingIndex &&
+        expr.operands.size() == 3) {
+      SmallVector<mlir::Value, 3> values;
+      for (const ExprPtr &operand : expr.operands) {
+        FailureOr<mlir::Value> value = emit(*operand, typeOf(*operand));
+        if (failed(value))
+          return failure();
+        values.push_back(*value);
+      }
+      IndexDuplicateOp::create(
+          builder, at, FlatSymbolRefAttr::get(context, buildingIndexName),
+          values[0], values[1], values[2]);
+      return mlir::Value();
+    }
+    // `hash_of(x)`: 64 bits mixed of a whole number, an enum, an entity
+    // or a row number (ent.hash), or of a text's bytes: 16 at a time, as
+    // two words of 8 (the bytes from the lowest), mixed as rapidhash's
+    // blocks are (`rapid_mix(a ^ secret, b ^ hash)`), then the length.
+    // The same on every machine and every run; for an index's slots.
+    if (expr.name == "hash_of") {
+      if (expr.operands.size() != 1 && expr.operands.size() != 2)
+        return error(expr.loc, "'hash_of' takes a value, and a seed (u64)");
+      Type i64 = builder.getI64Type();
+      auto constant = [&](uint64_t value) -> mlir::Value {
+        return arith::ConstantIntOp::create(builder, at, i64, int64_t(value));
+      };
+      // rapidhash's secrets and its seed.
+      mlir::Value secret0 = constant(0x2d358dccaa6c78a5ull);
+      mlir::Value secret1 = constant(0x8bb84b93962eacc9ull);
+      mlir::Value secret2 = constant(0x4b33a62ed433d4a3ull);
+      auto mix = [&](mlir::Value a, mlir::Value b) -> mlir::Value {
+        auto wide = arith::MulUIExtendedOp::create(builder, at, a, b);
+        return arith::XOrIOp::create(builder, at, wide.getLow(),
+                                     wide.getHigh());
+      };
+      const Expr &operand = *expr.operands[0];
+      // (`hash_of(x, seed)`: another hash of the same, by a seed.)
+      mlir::Value seeded;
+      if (expr.operands.size() == 2) {
+        FailureOr<mlir::Value> given = emit(
+            *expr.operands[1], builder.getIntegerType(64, /*isSigned=*/false));
+        if (failed(given))
+          return failure();
+        if (!isUnsigned(given->getType()) ||
+            given->getType().getIntOrFloatBitWidth() != 64)
+          return error(expr.operands[1]->loc, "a seed is a u64");
+        seeded = UnrealizedConversionCastOp::create(builder, at, i64, *given)
+                     .getResult(0);
+      }
+      if (!isAnyText(operand) && !textTypeOf(operand)) {
+        Type type = typeOf(operand);
+        if (!type)
+          type = defaultType(operand);
+        FailureOr<mlir::Value> value = emit(operand, type);
+        if (failed(value))
+          return failure();
+        Type given = value->getType();
+        if (isa<FloatType>(given) || given.isInteger(1))
+          return error(operand.loc, "'hash_of' takes a whole number, an "
+                                    "enum, an entity, a row number or a "
+                                    "text");
+        mlir::Value hashed = HashOp::create(builder, at, i64, *value);
+        if (seeded)
+          hashed = mix(arith::XOrIOp::create(builder, at, hashed, secret2),
+                       arith::XOrIOp::create(builder, at, seeded, secret1));
+        return fromBits(at, hashed,
+                        builder.getIntegerType(64, /*isSigned=*/false));
+      }
+      FailureOr<mlir::Value> text = emit(operand, StringType::get(context));
+      if (failed(text))
+        return failure();
+      mlir::Value length =
+          TextLengthOp::create(builder, at, builder.getI32Type(), *text);
+      Type indexType = builder.getIndexType();
+      auto toIndex = [&](mlir::Value v) -> mlir::Value {
+        return arith::IndexCastOp::create(builder, at, indexType, v);
+      };
+      // A word of the 8 bytes from `from` (0 past the end).
+      auto word = [&](mlir::Value from) -> mlir::Value {
+        mlir::Value bits = constant(0);
+        for (int k = 0; k < 8; ++k) {
+          mlir::Value place =
+              arith::AddIOp::create(builder, at, from,
+                                    arith::ConstantIntOp::create(
+                                        builder, at, builder.getI32Type(), k));
+          mlir::Value byte = arith::ExtUIOp::create(
+              builder, at, i64,
+              TextAtOp::create(builder, at, builder.getIntegerType(8), *text,
+                               place));
+          bits = arith::OrIOp::create(
+              builder, at, bits,
+              arith::ShLIOp::create(builder, at, byte, constant(8 * k)));
+        }
+        return bits;
+      };
+      mlir::Value blocks = arith::DivUIOp::create(
+          builder, at,
+          arith::AddIOp::create(builder, at, length,
+                                arith::ConstantIntOp::create(
+                                    builder, at, builder.getI32Type(), 15)),
+          arith::ConstantIntOp::create(builder, at, builder.getI32Type(), 16));
+      mlir::Value seed =
+          seeded ? mlir::Value(arith::XOrIOp::create(
+                       builder, at, seeded, constant(0xbdd89aa982704029ull)))
+                 : constant(0xbdd89aa982704029ull);
+      auto loop = scf::ForOp::create(
+          builder, at,
+          toIndex(arith::ConstantIntOp::create(builder, at,
+                                               builder.getI32Type(), 0)),
+          toIndex(blocks), arith::ConstantIndexOp::create(builder, at, 1),
+          ValueRange{seed});
+      {
+        OpBuilder::InsertionGuard guard(builder);
+        builder.setInsertionPointToStart(loop.getBody());
+        mlir::Value from = arith::MulIOp::create(
+            builder, at,
+            arith::IndexCastOp::create(builder, at, builder.getI32Type(),
+                                       loop.getInductionVar()),
+            arith::ConstantIntOp::create(builder, at, builder.getI32Type(),
+                                         16));
+        mlir::Value a = word(from);
+        mlir::Value b = word(
+            arith::AddIOp::create(builder, at, from,
+                                  arith::ConstantIntOp::create(
+                                      builder, at, builder.getI32Type(), 8)));
+        mlir::Value hash = loop.getRegionIterArg(0);
+        scf::YieldOp::create(
+            builder, at,
+            mlir::Value(mix(arith::XOrIOp::create(builder, at, a, secret1),
+                            arith::XOrIOp::create(builder, at, b, hash))));
+      }
+      mlir::Value hashed =
+          mix(arith::XOrIOp::create(builder, at, loop.getResult(0), secret0),
+              arith::XOrIOp::create(
+                  builder, at, arith::ExtUIOp::create(builder, at, i64, length),
+                  secret2));
+      return fromBits(at, hashed,
+                      builder.getIntegerType(64, /*isSigned=*/false));
+    }
     // `fma(a, b, c)` of floats: a * b + c rounded once, as IEEE 754 says
     // (an instruction where the machine has one, else C's fma).
     if (expr.name == "fma") {
@@ -11177,8 +11849,8 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
                                  "'; declare it before with 'fn', or one "
                                  "implemented in C with 'extern fn' or "
                                  "'extern proc' (min, max, len, mul_wide, "
-                                 "sqrt, fma, bits_of and float_of are "
-                                 "built in)");
+                                 "sqrt, fma, bits_of, float_of and hash_of "
+                                 "are built in)");
     if (expr.operands.size() != 2)
       return error(expr.loc, "'" + expr.name + "' takes two arguments");
     Type type = typeOf(expr);

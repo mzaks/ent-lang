@@ -3,6 +3,7 @@
 #include "Ent/Structure.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
 #include "llvm/ADT/DenseMap.h"
@@ -90,16 +91,25 @@ Kept keptOf(BufferOp buffer, DictionaryAttr info,
   return kept;
 }
 
-/// Whether `system`, but for `query`, may change what `query`'s order is
-/// by or which entities there are before it runs: then the index, made
-/// when the system starts, is not what the `for` would sort. (Writes to
-/// the key in the query itself are fine: a `for ... by` goes by the values
-/// the key had when it started.)
-bool changesOrderOutside(SystemOp system, QueryOp query) {
-  FlatSymbolRefAttr component = query.getByComponent();
-  StringAttr field = query.getByField();
-  WalkResult result = system.walk([&](Operation *op) {
+/// Whether `system`, but for `query`, may change the field `query`'s
+/// order is by, or its key equals (`component`, `field`), or which
+/// entities there are before it runs: then the index, made when the
+/// system starts, is not what the `for` would sort. (Writes to the key in
+/// the query itself are fine: a `for ... by` goes by the values the key
+/// had when it started.)
+bool changesOrderOutside(SystemOp system, QueryOp query,
+                         FlatSymbolRefAttr component, StringAttr field) {
+  // (What comes after the query does not change what it sees, where no
+  // loop of the system's runs the two again.)
+  bool once = true;
+  for (Operation *around = query->getParentOp(); around != system;
+       around = around->getParentOp())
+    once &= !isa<scf::ForOp, scf::WhileOp>(around);
+  WalkResult result = system.walk<WalkOrder::PreOrder>([&](Operation *op) {
     if (op == query.getOperation())
+      return WalkResult::skip();
+    if (Operation *top = query->getBlock()->findAncestorOpInBlock(*op);
+        once && top && query->isBeforeInBlock(top))
       return WalkResult::skip();
     if (isa<SpawnOp, DespawnOp, AddOp, RemoveOp>(op))
       return WalkResult::interrupt();
@@ -161,7 +171,15 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
     // keys change much (made anew, and its rows written and told), and
     // where few change it is made again on one thread where the sort runs
     // on many (bench/RESULTS.md, 2026-10-23).
+    // (Not in what makes an index: one is made of the entities as they
+    // are, not of another index, which may be out of date then.)
+    llvm::DenseSet<Attribute> making;
+    for (auto [buffer, info] : indexes)
+      making.insert(info.get("update"));
     for (auto [buffer, info] : indexes) {
+      // (A hash index has no order.)
+      if (info.get("hash"))
+        continue;
       Kept kept = keptOf(buffer, info, archetypes, symbols);
       bool read = false;
       for (SystemOp system : module.getOps<SystemOp>()) {
@@ -181,12 +199,11 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
                      !archetype.isOptional(FlatSymbolRefAttr::get(component));
             }))
           held.insert(archetype.getSymNameAttr());
-      StringAttr update = cast<StringAttr>(info.get("update"));
       module.walk([&](QueryOp query) {
         auto system = query->getParentOfType<SystemOp>();
-        // (Not the index's own making, which sorts the entities into it.)
-        if (!system || system.getSymNameAttr() == update || !query.hasBy() ||
-            query.getByIndex() || query.getByComponent().getAttr() != key[0] ||
+        if (!system || making.contains(system.getSymNameAttr()) ||
+            !query.hasBy() || query.getByIndex() ||
+            query.getByComponent().getAttr() != key[0] ||
             query.getByField() != key[1])
           return;
         SmallVector<ArchetypeOp> matched = getMatchedArchetypes(query);
@@ -195,12 +212,96 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
               return held.contains(archetype.getSymNameAttr());
             }))
           return;
-        if (changesOrderOutside(system, query))
+        if (changesOrderOutside(system, query, query.getByComponent(),
+                                query.getByField()))
+          return;
+        // (Nor where its body spawns: the index does not have those.)
+        if (query.getBody()
+                .walk([](SpawnOp) { return WalkResult::interrupt(); })
+                .wasInterrupted())
           return;
         query->setAttr(QueryOp::kByIndexAttr,
                        FlatSymbolRefAttr::get(buffer.getSymNameAttr()));
       });
     }
+
+    // A `for` whose `where` compares a field with a value the same for
+    // all its entities (QueryOp::kKeyEqualsAttr), over the entities a
+    // hash index by that field holds, visits only those it says have the
+    // value (QueryOp::kViaHashAttr): in their order, as kept in the index
+    // (its place), the `where` still asked. Not where the system changes
+    // the key or which entities there are, but in the `for` itself and
+    // there only of the entity visited (written or sent); nor where the
+    // body spawns, adds or removes.
+    for (auto [buffer, info] : indexes) {
+      if (!info.get("hash"))
+        continue;
+      SmallVector<StringAttr> key = strings(info, "key");
+      SmallVector<StringAttr> of = strings(info, "of");
+      StringAttr place;
+      for (StringAttr hidden : strings(info, "hidden"))
+        if (hidden.getValue().starts_with("place_in_"))
+          place = hidden;
+      if (!place)
+        continue;
+      llvm::SmallDenseSet<Attribute> held;
+      for (ArchetypeOp archetype : archetypes)
+        if (llvm::all_of(of, [&](StringAttr component) {
+              return archetype.contains(FlatSymbolRefAttr::get(component)) &&
+                     !archetype.isOptional(FlatSymbolRefAttr::get(component));
+            }))
+          held.insert(archetype.getSymNameAttr());
+      module.walk([&](QueryOp query) {
+        auto equals = query->getAttrOfType<ArrayAttr>(QueryOp::kKeyEqualsAttr);
+        auto system = query->getParentOfType<SystemOp>();
+        if (!equals || query.getViaHash() || !system || system.getGpu() ||
+            making.contains(system.getSymNameAttr()))
+          return;
+        auto component = cast<FlatSymbolRefAttr>(equals[0]);
+        auto field = cast<StringAttr>(equals[1]);
+        if (component.getAttr() != key[0] || field != key[1])
+          return;
+        SmallVector<ArchetypeOp> matched = getMatchedArchetypes(query);
+        if (matched.size() != held.size() ||
+            !llvm::all_of(matched, [&](ArchetypeOp archetype) {
+              return held.contains(archetype.getSymNameAttr());
+            }))
+          return;
+        if (changesOrderOutside(system, query, component, field))
+          return;
+        Block &body = query.getBody().front();
+        WalkResult inside = query.getBody().walk([&](Operation *op) {
+          if (isa<SpawnOp, AddOp, RemoveOp>(op))
+            return WalkResult::interrupt();
+          // (The key written, or sent: of the entity visited only.)
+          auto other = [&](Value ref, StringAttr written) {
+            return cast<RefType>(ref.getType()).getComponent() == component &&
+                   written == field && ref.getParentBlock() != &body;
+          };
+          if (auto set = dyn_cast<SetOp>(op);
+              set && other(set.getRef(), set.getFieldAttr()))
+            return WalkResult::interrupt();
+          if (auto combine = dyn_cast<CombineOp>(op);
+              combine && other(combine.getRef(), combine.getFieldAttr()))
+            return WalkResult::interrupt();
+          if (auto apply = dyn_cast<ApplyOp>(op);
+              apply && apply.getComponentAttr() == component &&
+              apply.getFieldAttr() == field)
+            return WalkResult::interrupt();
+          return WalkResult::advance();
+        });
+        if (inside.wasInterrupted())
+          return;
+        query->setAttr(QueryOp::kViaHashAttr,
+                       FlatSymbolRefAttr::get(buffer.getSymNameAttr()));
+        query->setAttr(QueryOp::kByAttr,
+                       ArrayAttr::get(module.getContext(), {component, place}));
+      });
+    }
+    module.walk([&](QueryOp query) {
+      if (!query.getViaHash())
+        query.dropEquals();
+    });
 
     // The systems that keep the indexes that are not clustered: each
     // writes only fields of its own (where an entity's row is, its

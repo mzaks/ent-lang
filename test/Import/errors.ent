@@ -236,7 +236,7 @@ main {
 // -----
 
 system s() {
-  // expected-error @+1 {{unknown function 'nearest'; declare it before with 'fn', or one implemented in C with 'extern fn' or 'extern proc' (min, max, len, mul_wide, sqrt, fma, bits_of and float_of are built in)}}
+  // expected-error @+1 {{unknown function 'nearest'; declare it before with 'fn', or one implemented in C with 'extern fn' or 'extern proc' (min, max, len, mul_wide, sqrt, fma, bits_of, float_of and hash_of are built in)}}
   let x = nearest(1)
 }
 
@@ -641,7 +641,7 @@ fn ratio(a: i32, b: i32) -> f32 {
 // -----
 
 fn first(x: i32) -> i32 {
-  // expected-error @+1 {{unknown function 'second'; declare it before with 'fn', or one implemented in C with 'extern fn' or 'extern proc' (min, max, len, mul_wide, sqrt, fma, bits_of and float_of are built in)}}
+  // expected-error @+1 {{unknown function 'second'; declare it before with 'fn', or one implemented in C with 'extern fn' or 'extern proc' (min, max, len, mul_wide, sqrt, fma, bits_of, float_of and hash_of are built in)}}
   second(x)
 }
 fn second(x: i32) -> i32 { x }

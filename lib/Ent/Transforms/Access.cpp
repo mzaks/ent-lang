@@ -533,6 +533,13 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
           access.reads.insert({archetype.getSymNameAttr(),
                                query.getByComponent().getAttr(),
                                query.getByField()});
+      // (A hash index's slots, and its rows: `N_list`.)
+      if (FlatSymbolRefAttr index = query.getViaHash())
+        for (StringRef suffix : {"", "_list"})
+          access.reads.insert(
+              {StringAttr(),
+               StringAttr::get(context, index.getValue() + suffix),
+               StringAttr::get(context, "rows")});
       if (FlatSymbolRefAttr index = query.getByIndex())
         access.reads.insert(
             {StringAttr(), index.getAttr(), StringAttr::get(context, "rows")});

@@ -202,3 +202,51 @@ system look() {
     for o, b: Dot nearest 3 (a.x, a.y) in Cells { }
   }
 }
+
+// -----
+
+component Ship { speed: f64 } capacity 8
+// expected-error @+1 {{a hash index is by a whole number, an enum, an entity, a row number or a text; 'speed' is}}
+index BySpeed of Ship by speed hash
+
+// -----
+
+component Ship { team: i32 } capacity 8
+// expected-error @+1 {{a hash index has no order to keep the rows in: it is not 'clustered'}}
+index ByTeam of Ship by team hash clustered
+
+// -----
+
+component Ship { team: i32 } capacity 8
+index ByTeam of Ship by team hash
+system look() {
+  // expected-error @+1 {{'ByTeam' is a hash index: an entity by its key is 'ByTeam.get(key)'}}
+  let r = ByTeam.find(3)
+}
+
+// -----
+
+component Ship { team: i32 } capacity 8
+index ByTeam of Ship by team
+system look() {
+  // expected-error @+1 {{'ByTeam.get' is of a hash index ('by key hash'); this one is in order: 'ByTeam.find(key)'}}
+  let e = ByTeam.get(3)
+}
+
+// -----
+
+component Ship { team: i32 } capacity 8
+index ByTeam of Ship by team hash
+system look() {
+  // expected-error @+1 {{'ByTeam' is a hash index: it is read by 'ByTeam.get(key)' and by a 'for' whose 'where' asks 'x.key == value', not by its rows}}
+  let k = ByTeam[0].key
+}
+
+// -----
+
+component Ship { team: i32 } capacity 8
+index ByTeam of Ship by team hash
+system look() {
+  // expected-error @+1 {{'ByTeam' is a hash index: it is read by 'ByTeam.get(key)' and by a 'for' whose 'where' asks 'x.key == value', not by its rows}}
+  let n = len(ByTeam)
+}

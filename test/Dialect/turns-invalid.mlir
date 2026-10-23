@@ -72,3 +72,13 @@ ent.system @s() {
     %n = ent.buffer.len @Seen
   }
 }
+
+// -----
+
+ent.component @Thing (born: i32) capacity 8
+ent.archetype @Things (@Thing) capacity 8
+ent.system @equals(%n: i32) {
+  // expected-error @+1 {{has a value a key equals but no 'key_equals'}}
+  ent.query (%t: !ent.ref<@Thing>) equals %n : i32 {
+  }
+}

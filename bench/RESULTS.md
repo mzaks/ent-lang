@@ -3687,3 +3687,68 @@ change, which the access analysis takes for writing all of it, so with
 two indexes over one component each one's update made the other be made
 anew. `--ent-indexes` now leaves out the systems that keep other indexes
 (but a clustered one's update, which moves rows).
+
+## 2026-10-23: hash indexes, and which hash
+
+`index ByTeam of Ship by team hash` (docs/indexes.md, 5.1) finds the
+entities of a key: `ByTeam.get(t)`, and a `for x: Ship where x.team ==
+t` visits only those (`bench/hash/run.py`). 200,000 ships, one in so
+many changing team a frame, 500 frames, ms a frame, `-march=native`, on
+mains (one core, CPU 2 / 23 threads); without reads the frame is 0.11
+(0.12 where one in 50 changes):
+
+| 1,000 teams | scan | as fits | `incremental` | `rebuild` |
+|---|---|---|---|---|
+| one in 1,000 changes, 10 reads | 0.28 / 0.29 | 0.31 / 0.24 | 0.24 / 0.30 | 1.37 / 1.25 |
+| one in 1,000 changes, 100 reads | 1.74 / 1.76 | 0.56 / 0.51 | 0.49 / 0.57 | 1.61 / 1.50 |
+| one in 50 changes, 10 reads | 0.29 / 0.31 | 0.44 / 0.46 | 0.33 / 0.59 | 1.39 / 1.26 |
+| one in 50 changes, 100 reads | 1.82 / 1.87 | 0.68 / 0.75 | 0.58 / 0.89 | 1.64 / 1.53 |
+
+A read of a team (200 ships) is 2.8 µs through the index where a scan of
+the 200,000 is 16.6; keeping the index, 0.10 to 0.24 ms a frame mended
+(`incremental` or as fits), 1.1 made anew (`rebuild`). So it pays from
+about ten reads a frame. `incremental` on many threads costs more than on
+one (its reactive `for`): open.
+
+Seven teams (a key of one ship in seven), one in 50 changes, 10 reads:
+scan 0.29, as fits 0.53, `incremental` 0.44, `rebuild` 1.56. Two things
+were found here. First the index had a slot for each entity, so those of
+a key were one run of slots, which every one put in went along: made
+anew it took over a second. Now a key is one slot, with a list of its
+entities. Then a mended list is no longer in the order the entities are
+stored, and going along it is a load that waits for the one before: a
+read of 28,000 took 0.32 ms where a list in order took 0.06, as fits
+3.5 ms a frame. A `for` now looks at all the entities, as without the
+index, where one in 64 of them or more have the key (the count is in its
+slot, read as the `for` starts): a scan of a dense column costs a
+fraction of a nanosecond an entity, the index's way 10 to 15 (going along
+the list, the sort by place, each found by its id).
+
+The hash: rapidhash's mix, one 64 by 64 bit multiply, the halves of the
+product xored, its seed and secrets fixed (`ent.hash`, `hash_of`).
+Against others in the index's table, 200,000 keys put in and found, as
+many looked for that are not there (`bench/hash/mixers.c`, one core,
+ms, and slots looked at a search):
+
+| keys | rapidhash mix | wyhash64 (two multiplies) | aHash without AES | SplitMix64 finalizer |
+|---|---|---|---|---|
+| 0, 1, 2, .. | 0.62 + 3.15, 1.48 | 0.79 + 3.80, 1.61 | 0.79 + 3.99, 1.61 | 0.80 + 3.96, 1.61 |
+| at random | 0.69 + 3.46, 1.61 | 0.81 + 3.84, 1.62 | 0.80 + 4.01, 1.61 | 0.80 + 3.95, 1.61 |
+| multiples of 1,024 | 0.27 + 1.91, 0.97 | 0.80 + 3.81, 1.62 | 0.80 + 3.99, 1.61 | 0.80 + 3.97, 1.61 |
+| in the high bits | 0.19 + 0.72, 0.84 | 0.81 + 3.84, 1.62 | 0.82 + 4.04, 1.61 | 0.82 + 4.01, 1.62 |
+
+The least work and runs as short where keys are at random, shorter where
+they follow a rule. aHash's own form takes the AES instructions, which
+ent's code does not have; without them it is the same folded multiply,
+twice, and a rotate. A text is held by two hashes, of 64 bits each, by
+two seeds (wyhash's loop for its bytes would be the one to compare there:
+not done).
+
+Found on the way: `--ent-indexes` asked whether anything in the system
+but the `for` changed the key by walking it after the `for`'s body, so
+its own body counted (a `put`, a despawn): no `for ... by` in such a
+system took its order from an index, and with that mended the update of
+another index took its order from one not up to date
+(`index_ways.test`). It walks in order now, leaves out what comes after
+the `for` where no loop runs them again, and no index's update takes
+another's order.

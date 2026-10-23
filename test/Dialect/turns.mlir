@@ -37,3 +37,15 @@ ent.system @turns() {
     ent.buffer.set @Seen "born"[%zero : i32] = %new : i32
   }
 }
+
+// CHECK-LABEL: ent.system @equals(
+ent.system @equals(%n: i32, %h: i64, %c: i64) {
+  // A `where` that compares a field with a value the same for all: the
+  // value (of a text, its hashes too), which a hash index may answer.
+  // CHECK: ent.query (%{{.*}}: !ent.ref<@Thing>) equals %{{.*}} : i32 attributes {key_equals = [@Thing, "born"]} {
+  ent.query (%t: !ent.ref<@Thing>) equals %n : i32 attributes {key_equals = [@Thing, "born"]} {
+  }
+  // CHECK: ent.query (%{{.*}}: !ent.ref<@Thing>) equals %{{.*}} : i32 equals_hash %{{.*}} : i64 equals_check %{{.*}} : i64 attributes {key_equals = [@Thing, "hp"]} {
+  ent.query (%t: !ent.ref<@Thing>) equals %n : i32 equals_hash %h : i64 equals_check %c : i64 attributes {key_equals = [@Thing, "hp"]} {
+  }
+}

@@ -1,0 +1,123 @@
+// Hash indexes (test/Integration/hash_index.test): by a whole number, an
+// enum, an entity and a text, kept each of the ways; read by `get` and by
+// `for ... where x.key == value`, which they answer (a team few ships
+// have through its list, a name or side many have by looking at all the
+// ships). Keys, what is copied
+// and which entities there are change between reads. Without the lines
+// that end in `//I`, and with those that start `//P` in their place, the
+// same program finds the same without indexes, one entity after another.
+import console
+import text
+
+enum Side { left, right, middle }
+component Ship { number: i64, team: i32, side: Side, name: text } capacity 512
+component Crew { boss: entity } capacity 512
+unique Step: i64
+unique Count: i64
+unique Sum: i64
+unique Most: i64
+unique Found { who: entity, any: bool }
+buffer Listed { who: entity, team: i32 } capacity 1024
+
+index ByTeam of Ship by team hash { number: Ship.number } //I
+index BySide of Ship by side hash rebuild //I
+index ByName of Ship by name hash incremental //I
+index ByBoss of Crew by boss hash eager //I
+index ByNumber of Ship by number hash unique eager incremental //I
+
+world {
+  for i in 0..200 {
+    let ship = spawn {
+      Ship { number: i as i64, team: (i % 64) as i32,
+             side: if i % 3 == 0 { Side.left } else if i % 3 == 1 { Side.right } else { Side.middle },
+             name: if i % 5 == 0 { "five" } else { "rest" } }
+    }
+    if i % 4 == 0 { spawn { Crew { boss: ship } } }
+  }
+}
+
+system shuffle() {
+  Step += 1
+  let s = Step
+  for x: mut Ship {
+    if (x.number * 13 + s) % 9 == 0 { x.team = ((x.number + s) % 64) as i32 }
+    if (x.number + s) % 11 == 0 { x.number += 1000 }
+    if (x.number + s) % 17 == 0 { x.name = if x.name == "five" { "rest" } else { "five" } }
+    if (x.number + s) % 19 == 0 { x.side = Side.middle }
+  }
+}
+// The ship numbered three times the step and more (none where there is
+// none), and the first ship of a team as they are stored: by the
+// indexes, or by looking at each.
+system numbered(more: i64) {
+  let n = Step * 3 + more
+  Found.who = ByNumber.get(n) //I
+  //P Found.who = none
+  //P for e, x: Ship where x.number + 0 == n { Found.who = e }
+}
+system first(t: i32) {
+  Found.who = ByTeam.get(t) //I
+  //P Listed = []
+  //P for e, x: Ship { Listed += { who: e, team: x.team } }
+  //P Found.who = none
+  //P for k in 0..len(Listed) {
+  //P   let j = len(Listed) - 1 - k
+  //P   if Listed[j].team == t { Found.who = Listed[j].who }
+  //P }
+}
+system named() {
+  Found.any = ByName.get("five") != none //I
+  //P Found.any = false
+  //P for x: Ship where x.name + "" == "five" { Found.any = true }
+}
+system rehire() {
+  let s = Step
+  let boss = Found.who
+  for c: mut Crew {
+    if let n = Ship(c.boss).number {
+      if (n + s) % 5 == 0 { c.boss = boss }
+    }
+  }
+}
+system team(t: i32) {
+  Count = 0
+  Sum = 0
+  for x: Ship where x.team == t { Count += 1 Sum += x.number }
+  put("team {t}: {Count} {Sum}")
+}
+system sided() {
+  Count = 0
+  Most = 0
+  for x: Ship where x.side == Side.middle { Count += 1 Most max= x.number }
+  put("middle: {Count} {Most}")
+}
+system fives() {
+  Count = 0
+  Sum = 0
+  for x: Ship where x.name == "five" && x.number > 50 { Count += 1 Sum += x.number * Step }
+  put("fives: {Count} {Sum}")
+}
+system crews() {
+  let boss = Found.who
+  Count = 0
+  for c: Crew where c.boss == boss { Count += 1 }
+  var number: i64 = -1
+  if let n = Ship(boss).number { number = n }
+  put("crew of {number}: {Count}")
+}
+system said() { put("a five: {Found.any}") }
+system thin() { for e, x: Ship where x.team == 3 { if x.number % 2 == 0 { e.destroy() } } }
+system more() {
+  let s = Step
+  if s % 4 == 0 {
+    spawn { Ship { number: 5000 + s, team: 3, side: Side.left, name: "five" } }
+  }
+}
+
+schedule round() {
+  shuffle() team(1) sided() fives()
+  numbered(0) crews() first(2) crews() rehire() crews() named() said()
+  thin() team(3) more() shuffle() team(3) fives() sided()
+  numbered(1000) crews() first(3) rehire() crews()
+}
+main { loop { round() } until Step >= 60 }

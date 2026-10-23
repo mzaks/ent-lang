@@ -1,0 +1,28 @@
+// A hash index read by `for x: Ship where x.team == t` (bench/RESULTS.md,
+// 2026-10-23); run.py fills in INDEX (the index, or none), TEAMS, RATE
+// (one in so many ships changes team a frame) and ASKS (the reads a
+// frame).
+import console
+import wyhash
+
+component Ship { id: i64, team: i32 } capacity 200000
+unique Step: i64
+unique Total: i64
+INDEX
+
+world { for i in 0..200000 { spawn { Ship { id: i as i64, team: wyrand_below(1, i as i64, TEAMS) as i32 } } } }
+system churn() {
+  Step += 1
+  let s = Step as u64
+  for x: mut Ship {
+    if wyrand_below(s + 5, x.id, RATE) == 0 { x.team = wyrand_below(s + 7, x.id, TEAMS) as i32 }
+  }
+}
+system ask(k: i64) {
+  let t = ((Step * 7919 + k * 104729) % TEAMS) as i32
+  for x: Ship where x.team == t { Total += x.id }
+}
+system done() { put("{Total}") }
+schedule frame() { churn() ASKS }
+schedule finish() { done() }
+main { loop { frame() } until Step >= 500 finish() }

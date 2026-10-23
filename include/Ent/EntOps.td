@@ -784,6 +784,14 @@ def Ent_QueryOp : Ent_Op<"query", [
         to %b : i64 first %k { ... }
     ```
     The values are worked out before it starts. Not with `turn`.
+
+    A query whose `where` compares a field with a value that is the same
+    for all its entities has that value as `equals` (`key_equals` names
+    the field), which a hash index by the field may answer (`via_hash`):
+    ```mlir
+    ent.query (%p: !ent.ref<@Player>) equals %n : i64
+        {key_equals = [@Player, "team"]} { ... }
+    ```
   }];
   let arguments = (ins Variadic<AnyType>:$slice);
   let regions = (region SizedRegion<1>:$body);
@@ -795,6 +803,21 @@ def Ent_QueryOp : Ent_Op<"query", [
     static constexpr ::llvm::StringLiteral kSliceAttr = "slice_of";
     /// The slice operand named `part`, or nothing.
     ::mlir::Value getSlicePart(::llvm::StringRef part);
+    /// Of a query whose `where` compares a field of its entity's with a
+    /// value that is the same for all of them: [component, field]; the
+    /// value is the slice operand `equals` (a text's two hashes, as an
+    /// `index ... hash` holds it, `equals_hash` and `equals_check`).
+    static constexpr ::llvm::StringLiteral kKeyEqualsAttr = "key_equals";
+    /// Set by --ent-indexes: the hash index by that field, over the same
+    /// entities, that says which have that value; the query visits only
+    /// those (still asking its `where`), in their order.
+    static constexpr ::llvm::StringLiteral kViaHashAttr = "via_hash";
+    ::mlir::FlatSymbolRefAttr getViaHash() {
+      return (*this)->getAttrOfType<::mlir::FlatSymbolRefAttr>(kViaHashAttr);
+    }
+    /// Forgets the value a key is compared with (`key_equals`, and its
+    /// slice operands), where no index says which entities have it.
+    void dropEquals();
     /// Set by --ent-indexes: the sorted index by the same field, over the
     /// same entities, that the query takes its order from instead of
     /// sorting them (the same order).
@@ -1055,6 +1078,38 @@ def Ent_SameOp : Ent_Op<"same", [Pure]> {
   let arguments = (ins Ent_EntityType:$lhs, Ent_EntityType:$rhs);
   let results = (outs I1:$result);
   let assemblyFormat = "$lhs `,` $rhs attr-dict";
+}
+
+def Ent_HashOp : Ent_Op<"hash", [Pure]> {
+  let summary = "A hash of a value: its bits mixed into 64";
+  let description = [{
+    ```mlir
+    %h = ent.hash %v : !ent.entity
+    ```
+    Of a whole number, an enum, an entity or a row number: its bits as
+    stored, mixed by one 64 by 64 bit multiply to 128 bits, the halves
+    xored (rapidhash's `rapid_mix`, with its secrets). The same on every
+    machine and every run. (`hash_of(text)` is a loop of its own.)
+  }];
+  let arguments = (ins AnyType:$value);
+  let results = (outs I64:$result);
+  let assemblyFormat = "$value attr-dict `:` type($value)";
+}
+
+def Ent_IndexDuplicateOp : Ent_Op<"index.duplicate"> {
+  let summary = "Stop the program: two entities of a unique index's key";
+  let description = [{
+    ```mlir
+    ent.index.duplicate @ById(%key, %a, %b) : i64
+    ```
+    In what a `unique` hash index declares, where it finds a second entity
+    of a key: the program says so, the key (of a whole number) and both
+    entities, and stops.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$index, AnyType:$key, AnyType:$a,
+      AnyType:$b);
+  let assemblyFormat = "$index `(` $key `,` $a `,` $b `)` attr-dict `:` "
+                       "type($key) `,` type($a) `,` type($b)";
 }
 
 def Ent_TextConstantOp : Ent_Op<"text.constant", [Pure]> {

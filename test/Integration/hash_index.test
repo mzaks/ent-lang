@@ -1,0 +1,43 @@
+// Hash indexes (docs/indexes.md, section 5.1): what `get` gives and what
+// a `for ... where x.key == value` visits, in their order, are as without
+// the indexes, one entity after another; on one core and on many. The
+// `for`s an index answers are told so (via_hash); one whose value is not
+// the same for all its entities is not.
+// RUN: sed -e '/\/\/I$/d' -e 's|^\( *\)//P |\1|' %S/Inputs/hash_index.ent > %t.plain.ent
+// RUN: %ent run %t.plain.ent > %t.plain
+// RUN: %ent run %S/Inputs/hash_index.ent 2>&1 > %t.one | count 0
+// RUN: cmp %t.one %t.plain
+// RUN: %ent run --parallel %S/Inputs/hash_index.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// And with each index kept another way.
+// RUN: sed -e 's/hash { number/hash incremental { number/' -e 's/side hash rebuild/side hash/' \
+// RUN:   -e 's/name hash incremental/name hash rebuild/' -e 's/boss hash eager/boss hash incremental/' \
+// RUN:   -e 's/unique eager incremental/unique eager/' %S/Inputs/hash_index.ent > %t.other.ent
+// RUN: %ent run %t.other.ent > %t.other
+// RUN: cmp %t.one %t.other
+// RUN: FileCheck %s --input-file=%t.one
+// RUN: ent-translate --import-ent %S/Inputs/hash_index.ent -I %S/../../devices \
+// RUN:   | ent-opt --ent-indexes | FileCheck %s --check-prefix=VIA
+// A unique one stops the program where two entities have one key.
+// RUN: not %ent run %S/Inputs/hash_unique.ent 2>&1 | FileCheck %s --check-prefix=TWICE
+
+// CHECK: team 1: 4 451
+// CHECK: crew of 1065: 10
+// CHECK: a five: true
+
+// VIA-LABEL: ent.system @numbered(
+// VIA-NOT: via_hash
+// VIA-LABEL: ent.system @team(
+// VIA: via_hash = @ByTeam
+// VIA-LABEL: ent.system @sided(
+// VIA: via_hash = @BySide
+// VIA-LABEL: ent.system @fives(
+// VIA: via_hash = @ByName
+// VIA-LABEL: ent.system @crews(
+// VIA: via_hash = @ByBoss
+// VIA-LABEL: ent.system @thin(
+// VIA: via_hash = @ByTeam
+
+// TWICE: before
+// TWICE-NEXT: true
+// TWICE-NEXT: ent: a unique index has two entities of one key: {{[0-9]+}} and {{[0-9]+}} have 14
