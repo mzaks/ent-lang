@@ -3430,6 +3430,8 @@ LogicalResult Parser::parseIndex() {
     fields.push_back(copy.name);
   out << "transient unique " << n << "_fresh: bool\n"
       << "transient unique " << n << "_places: i64\n"
+      << "transient unique " << n << "_skip: i64\n"
+      << "transient unique " << n << "_wait: i64\n"
       << "transient unique " << n
       << "_whole: bool\n"
       // Every entity told its row.
@@ -3852,8 +3854,18 @@ LogicalResult Parser::parseIndex() {
     anew("    ", /*counted=*/true);
     out << "    " << n << "_whole = true\n  }\n";
   } else {
-    out << "  if " << n << "_whole {\n"
-        << "    for e" << bindings << ", w: mut " << n << "[c0." << rowField
+    out << "  if " << n << "_whole {\n";
+    // (As fits, not a grid: where trying in place came to too many steps,
+    // anew the next so many times without trying, twice as many after
+    // each try that does, up to 64; where it did not, it tries every time.
+    // Keys that change much each time are then sorted anew without first
+    // writing every row and moving them each time.)
+    if (!grid) {
+      out << "  if " << n << "_skip > 0 {\n    " << n << "_skip -= 1\n";
+      anew("    ", /*counted=*/false);
+      out << "  } else {\n";
+    }
+    out << "    for e" << bindings << ", w: mut " << n << "[c0." << rowField
         << ", 1] {\n      w[0].key = c0." << *key << "\n";
     for (const Copy &copy : copies)
       out << "      w[0]." << copy.name << " = " << through(copy) << "\n";
@@ -3873,7 +3885,9 @@ LogicalResult Parser::parseIndex() {
       out << "    if !" << n << "_settle(" << n << ", " << of.front()
           << ") {\n";
       anew("      ", /*counted=*/false);
-      out << "    }\n";
+      out << "      " << n << "_wait = min(max(" << n << "_wait * 2, 1), 64)\n"
+          << "      " << n << "_skip = " << n << "_wait\n"
+          << "    } else {\n      " << n << "_wait = 0\n    }\n  }\n";
     }
     out << "  } else {\n";
     anew("    ", /*counted=*/true);

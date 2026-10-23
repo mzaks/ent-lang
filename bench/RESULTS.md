@@ -3674,8 +3674,12 @@ entities, an index read every frame, ms a frame for keeping it,
 their rows; `rebuild` sorts all of them every time. As fits writes every
 row and moves those out of order down, and is made anew where that would
 take more steps than there are rows: where keys change at random it does
-both, a millisecond more than `rebuild` (which way to try first is left
-open). `eager` costs what `lazy` does where the index is read after every
+both, a millisecond more than `rebuild`. So now, where trying in place
+came to too many steps, it is made anew the next 1, 2, 4, .. 64 times
+without trying (twice as many after each failed try; a try that works
+starts it over): one in 50 at random 1.88 / 0.90 ms (20 frames, of which
+4 try in place; over long runs one in 64), where keys move little as
+before (0.61 / 0.61), and the traffic highway as before (6.27 / 1.23 s). `eager` costs what `lazy` does where the index is read after every
 change; it moves the work next to the change.
 
 Found on the way: an index's update hands a proc the first component to

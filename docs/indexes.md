@@ -74,7 +74,7 @@ How an index is kept is two choices that do not depend on each other:
 |---|---|---|
 | `rebuild` | Every entity listed and sorted anew | Many keys change each time (positions) |
 | `incremental` | Only the rows of the entities whose key, or a field it copies, changed: each written and moved up or down to its place | Few keys change (names, ids, cars that overtake) |
-| (neither said) | As fits: anew where entities came or went; else every entity writes its row and those out of order are moved down, anew where that would take more steps than there are rows | Not known |
+| (neither said) | As fits: anew where entities came or went; else every entity writes its row and those out of order are moved down, anew where that would take more steps than there are rows (and then anew without trying the next 1, 2, 4, .. 64 times) | Not known |
 
 ```
 index Traffic of Car by key { x: Spot.x } eager incremental
