@@ -161,6 +161,17 @@ index Traffic of Car by key { x: Spot.x, v: Speed.v }
   them once that has taken more steps than there are rows, and is made
   anew (keys changed at random: 200,000 entities, one in 50 changed,
   163 ms to 2.6 ms on one core).
+- **Clustered** (built 2026-10-23, `test/Integration/clustered.test`):
+  `index Name of C by key clustered` keeps the rows of the one archetype
+  that holds its entities in its order whenever a system starts:
+  `--ent-indexes` makes it before every run where it is out of date, and
+  its update ends in `ent.cluster`, which moves the rows into the index's
+  order (every column and the ids, the entity table following, as a
+  sorted tree moves them) and makes each row's place its row. An
+  archetype a sorted tree keeps, entities of several archetypes, or two
+  clustered indexes of one archetype: errors. Another index over the
+  archetype is made again as the rows move (clustered ones are placed
+  first).
 - `examples/traffic/lanes.ent` uses it: to the bit what the C version
   gives, as fast as the order it kept by hand, and its update six times
   cheaper made again in place (`bench/traffic/RESULTS.md`).
@@ -346,7 +357,7 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 | 1 | The shared sort-and-scan primitive (one core, parallel loops, GPU). `lay`'s order by hand ported to it, the same to the bit | The backend | built: `for ... by` listed, sorted and (giving rows) visited on many threads and on the GPU (see below); one radix sort for one core and many (2026-10-23) |
 | 2 | Uniform grid and `near ... within` (a Lennard-Jones melt as its example) | `rebuild`, scheduling of makes | built (see below), and `after me` (2b); grids of whole numbers, `between .. and ..`, `nearest k to` (2026-10-23) |
 | 3 | Hash index and `unique` | `incremental`, change tracking | |
-| 4 | Sorted index (secondary), then clustered | Ordered iteration, ranges, top-k | secondary built (5.2); ties, float keys, query forms (`by` with `from`, `to`, `first`, `last`) built 2026-10-23; clustered to do |
+| 4 | Sorted index (secondary), then clustered | Ordered iteration, ranges, top-k | built: secondary (5.2); ties, float keys, query forms (`by` with `from`, `to`, `first`, `last`) and `clustered` (2026-10-23) |
 | 5 | Morton linear quadtree and octree | Keys made of fields, ranges of prefixes | |
 | 6 | Relation indexes by source and target everywhere, indexes on edge fields | | |
 | 7 | Partitions by value | | |

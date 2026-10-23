@@ -3631,3 +3631,29 @@ core) / 1.3 (23 threads). Where few rows move little (one in 1,000) it is
 as before (0.64 / 0.65 ms), and so is the traffic highway, whose index
 is made again in place every step (6.25 / 1.23 s, 6.19 / 1.21 before the
 rows had their places: the rows are 8 bytes wider).
+
+## 2026-10-23: a clustered index
+
+`index Order of Dot by key clustered` keeps the archetype's rows in the
+index's order whenever a system starts (made before every run where it
+is out of date, then the rows moved: `ent.cluster`). 200,000 entities,
+ms a frame, `-march=native`, on mains (one core, CPU 2 / 23 threads):
+
+| | one in 1,000 keys moves a little | one in 50 changes at random |
+|---|---|---|
+| keeping it clustered | 1.12 / 0.86 | 3.7 / 1.9 |
+| a `for ... by` the key, besides (listed in order: no sort) | 0.40 / 0.22 | 0.47 / 0.06 |
+| the same `for` sorting, without an index | 1.25 / 0.51 | |
+
+Moving the rows copies only those that move, every column of a row in
+one turn of a parallel loop (first 1.26 / 1.31 ms with a loop over every
+row for each column, on one thread). Here, with one `for` going by the
+key, keeping the rows in order costs more than the sort it saves: it
+pays where more of the program goes in that order, or reads neighbours
+in it.
+
+On the way: `placeGpuCopies` marked what a run under a condition wrote
+only where the condition held after the run; an index's update makes the
+index up to date, so what it wrote was never marked and a `gpu` system
+read the columns as they were (a clustered archetype read on the GPU,
+`gpu.test`). The condition is now as it was before the run.

@@ -347,8 +347,41 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       if (llvm::is_contained(*sorted, ArchetypeOp(archetype.op)))
         archetype.sortedBy = relation.getSymNameAttr();
   }
+  // And one a clustered index keeps in its order: the one archetype that
+  // holds the index's entities, not one a sorted tree keeps.
+  for (BufferOp buffer : module.getOps<BufferOp>()) {
+    auto info = buffer->getAttrOfType<DictionaryAttr>("ent.index");
+    if (!info || !info.get("clustered"))
+      continue;
+    auto of = cast<ArrayAttr>(info.get("of"));
+    SmallVector<WorldArchetype *> holders;
+    for (WorldArchetype &archetype : layout.archetypes)
+      if (llvm::all_of(of, [&](Attribute component) {
+            auto name = FlatSymbolRefAttr::get(cast<StringAttr>(component));
+            return ArchetypeOp(archetype.op).contains(name) &&
+                   !ArchetypeOp(archetype.op).isOptional(name);
+          }))
+        holders.push_back(&archetype);
+    if (holders.size() != 1)
+      return buffer.emitError("the clustered index '")
+             << buffer.getSymName()
+             << "' keeps its entities' rows in its order, so they are of "
+                "one archetype; they are of "
+             << holders.size();
+    if (holders[0]->isSorted())
+      return buffer.emitError("the clustered index '")
+             << buffer.getSymName() << "' would keep the rows of @"
+             << ArchetypeOp(holders[0]->op).getSymName()
+             << " in its order, which @" << holders[0]->sortedBy.getValue()
+             << " (a sorted tree) keeps in its own";
+    if (holders[0]->isClustered())
+      return buffer.emitError("@") << ArchetypeOp(holders[0]->op).getSymName()
+                                   << " has one clustered index already: @"
+                                   << holders[0]->clusteredBy.getValue();
+    holders[0]->clusteredBy = buffer.getSymNameAttr();
+  }
   bool moves = llvm::any_of(layout.archetypes, [](const WorldArchetype &a) {
-    return !a.moves.empty() || a.isSorted();
+    return !a.moves.empty() || a.isSorted() || a.isClustered();
   });
   auto attr = [&](StringRef name, int64_t otherwise) {
     if (auto value = module->getAttrOfType<IntegerAttr>(name))
@@ -668,6 +701,14 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
       archetype.levelStartOffset = offset;
       end = offset + 4 * archetype.levelCapacity;
+      archetype.newRowOffset = place(4);
+      for (const WorldColumn &column : archetype.columns)
+        archetype.columnScratchOffsets.push_back(
+            place(storageBytes(column.type)));
+      archetype.idScratchOffset = place(scheme.idBits / 8);
+    }
+    // (Of a clustered one, the same places for its rows to move through.)
+    if (archetype.isClustered()) {
       archetype.newRowOffset = place(4);
       for (const WorldColumn &column : archetype.columns)
         archetype.columnScratchOffsets.push_back(

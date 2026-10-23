@@ -467,6 +467,23 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
         }
       return;
     }
+    // Rows moved into a clustered index's order: every column of the
+    // archetype that holds its entities, by its rows.
+    if (auto cluster = dyn_cast<ClusterOp>(op)) {
+      auto index = SymbolTable::lookupNearestSymbolFrom<BufferOp>(
+          system, cluster.getIndexAttr());
+      access.reads.insert({StringAttr(), cluster.getIndexAttr().getAttr(),
+                           StringAttr::get(context, "rows")});
+      auto of = cast<ArrayAttr>(
+          index->getAttrOfType<DictionaryAttr>("ent.index").get("of"));
+      for (ArchetypeOp archetype : archetypes)
+        if (llvm::all_of(of, [&](Attribute component) {
+              auto name = FlatSymbolRefAttr::get(cast<StringAttr>(component));
+              return archetype.contains(name) && !archetype.isOptional(name);
+            }))
+          writeStructure(archetype);
+      return;
+    }
     if (isa<DespawnOp>(op)) {
       for (ArchetypeOp archetype :
            matchedArchetypes(op->getParentOfType<QueryOp>())) {

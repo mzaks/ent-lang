@@ -519,6 +519,19 @@ static BufferOp verifyBufferUse(SymbolTableCollection &symbolTable,
   return buffer;
 }
 
+LogicalResult ClusterOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto index =
+      symbolTable.lookupNearestSymbolFrom<BufferOp>(*this, getIndexAttr());
+  auto info = index ? index->getAttrOfType<DictionaryAttr>("ent.index")
+                    : DictionaryAttr();
+  if (!info || !info.get("clustered"))
+    return emitOpError("names ")
+           << getIndexAttr() << ", which is no clustered index";
+  if ((*this)->getParentOfType<QueryOp>())
+    return emitOpError("is in a 'for': rows move between systems");
+  return success();
+}
+
 LogicalResult ClearOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return verifyBufferUse(symbolTable, *this, getBufferAttr(), /*writes=*/true,
                          /*outside=*/true)

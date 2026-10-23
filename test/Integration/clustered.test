@@ -1,0 +1,19 @@
+// `index Order of Dot by key clustered`: the archetype's rows kept in the
+// index's order (made before every system where it is out of date, the
+// rows moved into it). A plain `for` in that order, the entity table
+// following, another index made again as they move; as keys change and
+// entities come and go, on one core and on many.
+// RUN: %ent run %S/Inputs/clustered.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel %S/Inputs/clustered.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+// RUN: not %ent build %S/Inputs/clustered_two.ent -o %t.two 2>&1 | FileCheck %s --check-prefix=TWO
+
+// CHECK:      frame 0: 12000 stored, in order true, 12000 as the index has them, 12000 found where the index says, 12000 of 12000 in the other index
+// CHECK-NEXT: frame 1: 12000 stored, in order true, 12000 as the index has them, 12000 found where the index says, 12000 of 12000 in the other index
+// CHECK-NEXT: frame 2: [[A:[0-9]+]] stored, in order true, [[A]] as the index has them, [[A]] found where the index says, [[A]] of [[A]] in the other index
+// CHECK-NEXT: frame 3: [[B:[0-9]+]] stored, in order true, [[B]] as the index has them, [[B]] found where the index says, [[B]] of [[B]] in the other index
+// CHECK-NEXT: frame 4: [[C:[0-9]+]] stored, in order true, [[C]] as the index has them, [[C]] found where the index says, [[C]] of [[C]] in the other index
+// CHECK-NEXT: frame 5: [[D:[0-9]+]] stored, in order true, [[D]] as the index has them, [[D]] found where the index says, [[D]] of [[D]] in the other index
+
+// TWO: the clustered index 'Order' keeps its entities' rows in its order, so they are of one archetype; they are of 2

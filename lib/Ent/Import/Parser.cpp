@@ -3204,6 +3204,9 @@ LogicalResult Parser::parseIndex() {
                               *key + "' is " + typeWords(keyType));
   }
 
+  // `clustered`: the archetype's rows themselves kept in its order.
+  bool clustered = consumeKeyword("clustered");
+
   // { name: Component.field, .. }: what each row has besides.
   struct Copy {
     std::string name, component, field;
@@ -3829,6 +3832,11 @@ LogicalResult Parser::parseIndex() {
                           ? SmallVector<std::string>{rowField, placeField, *key}
                           : SmallVector<std::string>{rowField, placeField})),
       }));
+  if (clustered) {
+    NamedAttrList info(declared->getAttrOfType<DictionaryAttr>("ent.index"));
+    info.set("clustered", builder.getUnitAttr());
+    declared->setAttr("ent.index", info.getDictionary(context));
+  }
   Index &kept = indexes[bufferName.getValue()];
   kept = {resolve(of.front()), rowField, keyType, resolve(n + "_find")};
   for (const Copy &copy : copies)
@@ -3853,6 +3861,13 @@ LogicalResult Parser::parseIndex() {
       query->setAttr("ent.parallel_min_entities",
                      builder.getI64IntegerAttr(kIndexParallelMin));
   });
+  // Clustered: made, the rows move into its order.
+  if (clustered) {
+    OpBuilder::InsertionGuard guard(builder);
+    builder.setInsertionPoint(update.getBody().front().getTerminator());
+    ClusterOp::create(builder, loc(at),
+                      FlatSymbolRefAttr::get(context, bufferName));
+  }
   return success();
 }
 

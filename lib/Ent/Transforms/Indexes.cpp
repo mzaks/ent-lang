@@ -135,6 +135,11 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
         indexes.push_back({buffer, info});
     if (indexes.empty())
       return;
+    // (Clustered ones first: the runs that move their rows then change
+    // what the others hold, and those see them.)
+    llvm::stable_sort(indexes, [](auto &a, auto &b) {
+      return a.second.get("clustered") && !b.second.get("clustered");
+    });
     if (failed(inferArchetypes(module)))
       return signalPassFailure();
     SmallVector<ArchetypeOp> archetypes(module.getOps<ArchetypeOp>());
@@ -213,7 +218,11 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
         // that declares nothing may do anything to it.)
         bool unknown = access.isOpaque() &&
                        isa<ExternOp>(symbols.lookup(run.getSystem()));
-        bool reads = unknown || touches(access.reads, kept.readBy);
+        // (A clustered index is made before every run where it is out of
+        // date: its archetype's rows are in its order when any system
+        // starts.)
+        bool reads = unknown || touches(access.reads, kept.readBy) ||
+                     info.get("clustered");
         bool moves = unknown || touches(access.writes, kept.holds);
         bool writes = moves || touches(access.writes, kept.values);
         Location loc = run.getLoc();

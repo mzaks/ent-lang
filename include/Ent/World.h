@@ -137,6 +137,13 @@ struct WorldArchetype {
 
   bool isSorted() const { return static_cast<bool>(sortedBy); }
 
+  /// The sorted index (`index Name of C by key clustered`, a buffer) whose
+  /// order the archetype's rows are kept in, or null: its rows move into
+  /// that order where the index is made (see ent.cluster), through
+  /// `newRowOffset` and the scratch columns, as a sorted tree's do.
+  StringAttr clusteredBy;
+  bool isClustered() const { return static_cast<bool>(clusteredBy); }
+
   /// The move for adding or removing `component`, or null.
   const WorldMove *findMove(StringAttr component, bool add) const;
 

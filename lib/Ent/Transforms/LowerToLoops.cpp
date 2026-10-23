@@ -8396,6 +8396,147 @@ static void callSort(IRRewriter &rewriter, Location loc,
                        ValueRange{arena});
 }
 
+/// Move the rows of `archetype` (one a sorted tree or a clustered index
+/// keeps in order) to those `newRows` (i32 per row) says, at the insertion
+/// point: every column and the ids, through the archetype's scratch
+/// columns, the entity table following; and a tree that keeps a slot for
+/// its entities has their locations to read again. Only the rows that
+/// move are copied (where few keys changed, few move), each by a turn of
+/// a parallel loop (on many threads where the program is built for them).
+static void moveRows(IRRewriter &rewriter, Location loc,
+                     const WorldLayout &layout, WorldAccess &world,
+                     const WorldArchetype &archetype, Value newRows) {
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  // (Each row, where it moves.)
+  auto forEach = [&](Value from, Value to, function_ref<void(Value)> body) {
+    auto loop = scf::ParallelOp::create(rewriter, loc, ValueRange{from},
+                                        ValueRange{to}, ValueRange{one});
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    Value row = loop.getInductionVars().front();
+    Value to_ = world.toIndex(
+        loc, memref::LoadOp::create(rewriter, loc, newRows, ValueRange{row}));
+    auto ifMoves = scf::IfOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne, to_,
+                              row));
+    rewriter.setInsertionPoint(ifMoves.thenBlock()->getTerminator());
+    body(row);
+  };
+  Value rows = world.count(loc, archetype);
+  Value ids = world.ids(archetype);
+  SmallVector<std::pair<Value, Value>> columns;
+  for (auto [column, offset] :
+       llvm::zip(archetype.columns, archetype.columnScratchOffsets))
+    columns.push_back({world.moveValues(archetype, column),
+                       world.array(offset, archetype.capacity,
+                                   world.storageType(column.type))});
+  columns.push_back({ids, world.array(archetype.idScratchOffset,
+                                      archetype.capacity, world.idType())});
+  // Each row that moves: first all its columns to the scratch, then from
+  // there to where it goes, and its entity told where it is.
+  forEach(zero, rows, [&](Value row) {
+    for (auto [column, copy] : columns)
+      memref::StoreOp::create(
+          rewriter, loc,
+          memref::LoadOp::create(rewriter, loc, column, ValueRange{row}), copy,
+          ValueRange{row});
+  });
+  forEach(zero, rows, [&](Value row) {
+    Value to = world.toIndex(
+        loc, memref::LoadOp::create(rewriter, loc, newRows, ValueRange{row}));
+    for (auto [column, copy] : columns)
+      memref::StoreOp::create(
+          rewriter, loc,
+          memref::LoadOp::create(rewriter, loc, copy, ValueRange{row}), column,
+          ValueRange{to});
+    Value id =
+        memref::LoadOp::create(rewriter, loc,
+                               world.array(archetype.idScratchOffset,
+                                           archetype.capacity, world.idType()),
+                               ValueRange{row});
+    world.setLocation(loc, world.idSlot(loc, id), archetype, to);
+  });
+  for (const WorldRelation &other : layout.relations)
+    if (other.hasLocations() && canHoldEnd(archetype, other)) {
+      memref::StoreOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 64),
+          world.treeStale(other), ValueRange{zero});
+      callSort(rewriter, loc, other, world.getArena());
+    }
+}
+
+/// Lower the `ent.cluster`s of `func`: the rows of the archetype a
+/// clustered index keeps in its order move there (see moveRows), the
+/// entity of the index's row r to row r; and so each one's place among
+/// the entities as stored (`place_in_Name`, and its index row's `place`)
+/// is that row.
+static void lowerClusters(IRRewriter &rewriter, func::FuncOp func,
+                          const WorldLayout &layout, WorldAccess &world) {
+  SmallVector<ClusterOp> clusters;
+  func.walk([&](ClusterOp cluster) { clusters.push_back(cluster); });
+  for (ClusterOp cluster : clusters) {
+    Location loc = cluster.getLoc();
+    rewriter.setInsertionPoint(cluster);
+    StringAttr name = cluster.getIndexAttr().getAttr();
+    const WorldBuffer &index = layout.getBuffer(name);
+    auto info =
+        cast<BufferOp>(index.op)->getAttrOfType<DictionaryAttr>("ent.index");
+    StringAttr first = cast<StringAttr>(cast<ArrayAttr>(info.get("of"))[0]);
+    StringAttr place;
+    for (Attribute hidden : cast<ArrayAttr>(info.get("hidden")))
+      if (cast<StringAttr>(hidden).getValue().starts_with("place_in_"))
+        place = cast<StringAttr>(hidden);
+    auto fieldOf = [&](StringRef field) -> const WorldColumn & {
+      return *llvm::find_if(index.fields, [&](const WorldColumn &column) {
+        return column.field.getValue() == field;
+      });
+    };
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    Type i32 = rewriter.getI32Type();
+    Type i64 = rewriter.getI64Type();
+    for (const WorldArchetype &archetype : layout.archetypes) {
+      if (archetype.clusteredBy != name)
+        continue;
+      Value newRows =
+          world.array(archetype.newRowOffset, archetype.capacity, i32);
+      Value rows = world.toIndex(
+          loc, memref::LoadOp::create(rewriter, loc, world.bufferCount(index),
+                                      ValueRange{zero}));
+      Value who = world.bufferField(index, fieldOf("who"));
+      {
+        auto each = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
+                                            ValueRange{rows}, ValueRange{one});
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPoint(each.getBody()->getTerminator());
+        Value r = each.getInductionVars().front();
+        Value id = memref::LoadOp::create(rewriter, loc, who, ValueRange{r});
+        Value row = world.getLocation(loc, world.idSlot(loc, id)).second;
+        if (!row.getType().isIndex())
+          row = world.toIndex(loc, row);
+        memref::StoreOp::create(
+            rewriter, loc, arith::IndexCastOp::create(rewriter, loc, i32, r),
+            newRows, ValueRange{row});
+      }
+      moveRows(rewriter, loc, layout, world, archetype, newRows);
+      // (Each where it is now: the row, of the index and of the archetype.)
+      Value places = world.bufferField(index, fieldOf("place"));
+      Value placeColumn = world.column(archetype, first, place);
+      auto each = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
+                                          ValueRange{rows}, ValueRange{one});
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPoint(each.getBody()->getTerminator());
+      Value r = each.getInductionVars().front();
+      Value at = arith::IndexCastOp::create(rewriter, loc, i64, r);
+      memref::StoreOp::create(rewriter, loc, at, places, ValueRange{r});
+      memref::StoreOp::create(rewriter, loc, at, placeColumn, ValueRange{r});
+    }
+    rewriter.eraseOp(cluster);
+  }
+}
+
 namespace {
 /// What the functions of a linked tree are written with: loads and stores
 /// in its per-key columns, and links, which are a key and one.
@@ -10466,52 +10607,11 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
                                   world.levelStarts(*archetype),
                                   ValueRange{zero});
       }
-      for (const WorldArchetype *archetype : holders) {
-        Value rows = world.count(loc, *archetype);
-        Value ids = world.ids(*archetype);
-        Value newRows = newRowsOf(*archetype);
-        SmallVector<std::pair<Value, Value>> columns;
-        for (auto [column, offset] :
-             llvm::zip(archetype->columns, archetype->columnScratchOffsets))
-          columns.push_back({world.moveValues(*archetype, column),
-                             world.array(offset, archetype->capacity,
-                                         world.storageType(column.type))});
-        columns.push_back(
-            {ids, world.array(archetype->idScratchOffset, archetype->capacity,
-                              world.idType())});
-        for (auto [column, copy] : columns) {
-          forEach(zero, rows, [&, column = column, copy = copy](Value row) {
-            memref::StoreOp::create(
-                rewriter, loc,
-                memref::LoadOp::create(rewriter, loc, column, ValueRange{row}),
-                copy, ValueRange{row});
-          });
-          forEach(zero, rows, [&, column = column, copy = copy](Value row) {
-            Value to = world.toIndex(
-                loc, memref::LoadOp::create(rewriter, loc, newRows,
-                                            ValueRange{row}));
-            memref::StoreOp::create(
-                rewriter, loc,
-                memref::LoadOp::create(rewriter, loc, copy, ValueRange{row}),
-                column, ValueRange{to});
-          });
-        }
-        forEach(zero, rows, [&](Value row) {
-          Value id =
-              memref::LoadOp::create(rewriter, loc, ids, ValueRange{row});
-          world.setLocation(loc, world.idSlot(loc, id), *archetype, row);
-        });
-        // Its rows have moved: another tree that keeps a slot for its
-        // entities has their locations to read again.
-        for (const WorldRelation &other : layout.relations)
-          if (other.hasLocations() && canHoldEnd(*archetype, other)) {
-            memref::StoreOp::create(
-                rewriter, loc,
-                arith::ConstantIntOp::create(rewriter, loc, 1, 64),
-                world.treeStale(other), ValueRange{zero});
-            callSort(rewriter, loc, other, world.getArena());
-          }
-      }
+      // (Its rows have moved: another tree that keeps a slot for its
+      // entities has their locations to read again.)
+      for (const WorldArchetype *archetype : holders)
+        moveRows(rewriter, loc, layout, world, *archetype,
+                 newRowsOf(*archetype));
       if (alone) {
         Value parentRows = world.parentRows(*holders[0]);
         forEach(zero, roots[0], [&](Value row) {
@@ -16419,9 +16519,6 @@ static void callOrderedSort(IRRewriter &rewriter, Location loc,
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   auto load = [&](Value from, Value at) -> Value {
     return memref::LoadOp::create(rewriter, loc, from, ValueRange{at});
-  };
-  auto store = [&](Value value, Value to, Value at) {
-    memref::StoreOp::create(rewriter, loc, value, to, ValueRange{at});
   };
   auto less = [&](arith::CmpIPredicate predicate, Value a, Value b) {
     return arith::CmpIOp::create(rewriter, loc, predicate, a, b).getResult();
@@ -22846,19 +22943,24 @@ static void placeGpuCopies(IRRewriter &rewriter, func::FuncOp func,
   bool anyGpu = false;
   SmallVector<Operation *> group;
   Sides sides;
-  // Inside `if (cond)` where the group is a run under a condition.
+  // Inside `if (cond)` where the group is a run under a condition: the
+  // condition as it was before the run (`asked`, worked out there), which
+  // the run may change (an index's update makes it up to date).
+  Value asked;
   auto guarded = [&](Location loc, function_ref<void()> emit) {
     if (!sides.conditional) {
       emit();
       return;
     }
-    IRMapping mapping;
-    Block &condition = sides.conditional.getCondition().front();
-    for (Operation &op : condition.without_terminator())
-      rewriter.clone(op, mapping);
-    Value holds = mapping.lookupOrDefault(
-        cast<YieldOp>(condition.getTerminator()).getResults()[0]);
-    auto branch = scf::IfOp::create(rewriter, loc, holds);
+    if (!asked) {
+      IRMapping mapping;
+      Block &condition = sides.conditional.getCondition().front();
+      for (Operation &op : condition.without_terminator())
+        rewriter.clone(op, mapping);
+      asked = mapping.lookupOrDefault(
+          cast<YieldOp>(condition.getTerminator()).getResults()[0]);
+    }
+    auto branch = scf::IfOp::create(rewriter, loc, asked);
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPoint(branch.thenBlock()->getTerminator());
     emit();
@@ -22903,6 +23005,7 @@ static void placeGpuCopies(IRRewriter &rewriter, func::FuncOp func,
     anyGpu |= sides.any[1];
     group.clear();
     sides = Sides();
+    asked = Value();
   };
   for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
     SmallVector<RunOp> runs;
@@ -23908,6 +24011,7 @@ struct EntLowerToLoops
              op && op != after; op = op->getNextNode())
           op->setAttr(kScopeAttr, rewriter.getI64IntegerAttr(scope));
       }
+      lowerClusters(rewriter, func, *layout, world);
       lowerSpawns(rewriter, func, *layout, world);
       lowerConnects(rewriter, func, *layout, world);
       lowerBuffers(rewriter, func, *layout, world, symbols, defined,

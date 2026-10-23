@@ -117,6 +117,25 @@ def Ent_ClearOp : Ent_Op<"clear", [
   let assemblyFormat = "$buffer attr-dict";
 }
 
+def Ent_ClusterOp
+    : Ent_Op<"cluster", [DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary =
+      "Move an archetype's rows into the order of its clustered index";
+  let description = [{
+    ```mlir
+    ent.cluster @Order
+    ```
+    `@Order` is a sorted index declared `clustered` (its `ent.index` has
+    `clustered`), just made: the rows of the one archetype that holds its
+    entities move so that the entity of the index's row r is at row r,
+    every column and the ids, the entity table following; each row's place
+    (`place_in_Name`, and the index row's `place`) is its row then. In a
+    system, outside its queries: the index's own update.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$index);
+  let assemblyFormat = "$index attr-dict";
+}
+
 def Ent_BufferLenOp : Ent_Op<"buffer.len", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "How many rows a buffer has";

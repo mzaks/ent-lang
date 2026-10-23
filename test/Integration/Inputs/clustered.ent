@@ -1,0 +1,68 @@
+// A clustered index (test/Integration/clustered.test): the rows of the
+// archetype kept in the index's order. A plain `for` over them visits
+// them in that order, the index's rows as it goes; every entity found by
+// its id where it is now; another index over them made again as its rows
+// move. Keys change, entities come and go.
+import console
+import wyhash
+
+component Dot { key: i32, id: i64 } capacity 20000
+buffer Seen { id: i64, key: i32 } capacity 20000
+unique Check { frame: i64, next: i64 }
+
+index Order of Dot by key clustered { id: Dot.id }
+index ById of Dot by id
+
+world {
+  for i in 0..12000 { spawn { Dot { key: wyrand_below(1, i as i64, 300) as i32, id: i as i64 } } }
+  Check.next = 12000
+}
+
+system shift() {
+  for d: mut Dot {
+    if wyrand_below(Check.frame as u64 + 5, d.id, 8) == 0 {
+      d.key = wyrand_below(Check.frame as u64 + 7, d.id, 300) as i32
+    }
+  }
+}
+system churn() {
+  for e, d: Dot { if wyrand_below(Check.frame as u64 + 3, d.id, 20) == 0 { e.destroy() } }
+}
+system arrive() {
+  for i in 0..400 {
+    spawn { Dot { key: wyrand_below(Check.frame as u64 + 11, i as i64, 300) as i32, id: Check.next } }
+    Check.next += 1
+  }
+}
+
+system clear() { Seen = [] }
+// As they are stored: a plain `for`.
+system walk() {
+  for d: Dot { Seen += { id: d.id, key: d.key } }
+}
+system check() {
+  var ordered = 0
+  var same = 0
+  var found = 0
+  for i in 0..len(Seen) {
+    if i > 0 && Seen[i - 1].key <= Seen[i].key { ordered += 1 }
+    if i < len(Order) && Order[i].id == Seen[i].id { same += 1 }
+  }
+  for r in 0..len(Order) {
+    if let id = Dot(Order[r].who).id { if id == Order[r].id { found += 1 } }
+  }
+  var byId = 0
+  for r in 0..len(ById) {
+    if let id = Dot(ById[r].who).id {
+      if id == ById[r].key && (r == 0 || ById[r - 1].key < id) { byId += 1 }
+    }
+  }
+  let sorted = ordered == max(len(Seen) - 1, 0)
+  put("frame {Check.frame}: {len(Seen)} stored, in order {sorted}, {same} as the index has them, {found} found where the index says, {byId} of {len(ById)} in the other index")
+  Check.frame += 1
+}
+
+schedule look() { clear() walk() check() }
+schedule keys() { shift() look() }
+schedule both() { churn() arrive() shift() look() }
+main { look() keys() both() keys() both() both() }

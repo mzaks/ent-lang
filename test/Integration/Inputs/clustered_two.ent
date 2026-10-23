@@ -1,0 +1,12 @@
+// A clustered index whose entities are of two archetypes: refused
+// (test/Integration/clustered.test).
+component Dot { key: i32 } capacity 8
+component Mark { m: i32 } capacity 8
+index Order of Dot by key clustered
+world {
+  spawn { Dot { key: 1 } }
+  spawn { Dot { key: 2 }, Mark { m: 0 } }
+}
+system s() { for d: Dot { } }
+schedule t() { s() }
+main { t() }

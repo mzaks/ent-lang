@@ -233,3 +233,12 @@
 // RUN: FileCheck %s --check-prefix=GIVEN --input-file=%t.given.gpu
 // GIVEN: frame 0 rows 201000 61506 hash 490018650532524284 10378687888565092654
 // GIVEN: frame 2 rows 201000 61612 hash 4885933534860777026 6311147305899071910
+
+// A clustered index's archetype, its rows moved into the index's order on
+// the CPU, read by a `gpu` system: the columns it moved go to the GPU
+// (where its update ran, as its condition was before it: the update
+// makes the index up to date).
+// RUN: sed -e 's/^system walk() {/gpu system walk() {/' %S/Inputs/clustered.ent > %t.cl.ent
+// RUN: %ent run %S/Inputs/clustered.ent > %t.cl.cpu
+// RUN: %ent run %t.cl.ent --gpu > %t.cl.gpu
+// RUN: diff %t.cl.cpu %t.cl.gpu

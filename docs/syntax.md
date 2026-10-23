@@ -1984,6 +1984,15 @@ finds the car ahead and the cars beside each car so.
   and each told its row. With 120,000 cars of which few overtake or
   change lanes in a step (`bench/traffic`), 0.21 ms the one way and 1.24
   the other, on one core.
+- `clustered` after the key (`index Order of Car by key clustered`, or
+  after a grid's `cell` and `wrap`) keeps the archetype's rows themselves
+  in the index's order: the entity of the index's row r is at row r,
+  whenever a system starts (the index is made before every system where
+  it is out of date, and the rows move into its order then: every column,
+  the entity table following). A plain `for` over them goes in that
+  order, and a `for ... by` the key finds them in it (no sort). The
+  entities it holds are of one archetype, which no sorted tree keeps, and
+  an archetype has one clustered index at most.
 - Each entity keeps where its row is in the first component, in a field
   of the index's (`row_in_Name`), and its place among the entities as
   they are stored (`place_in_Name`), which a spawn does not give; the C
