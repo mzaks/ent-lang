@@ -3559,3 +3559,45 @@ one against the other; the frames without the `for` taken off):
 | 23 threads | 5.1 ms | 3.0 ms |
 
 The same rows (and the GPU's sort, docs/gpu.md, does so too).
+
+## 2026-10-23: the radix sort of `for ... by`, after mm_radix_sort
+
+What of [mm_radix_sort](https://github.com/Mojo-Mania/mm_radix_sort)
+(LSD with 11-bit digits for 32- and 64-bit keys, every pass counted in
+one read, `UInt32` counters, private histograms) the sort of `for ... by`
+(`emitRadixSort`, now one function for one core and for many) takes: on
+one core every pass's counts in one read of the keys, counters of 32 bits
+(they were `index`es), and the least key and the most found first (the
+passes the bytes up to the highest in which they differ; the pass over
+which bytes differ is gone). On many threads the pieces hold other keys
+after each pass, so each pass is counted again, as before.
+
+A million, 250,000 and 32,000 entities with keys of 20 and 32 bits at
+random, given a row each; ms a frame, the frames without the `for` taken
+off, `-march=native`, on mains, the best of five, two rounds (one core,
+CPU 2 / 23 threads):
+
+| keys | before | after |
+|---|---|---|
+| 32,000, 20 bits | 0.193 / 0.450 | 0.168 / 0.224 |
+| 32,000, 32 bits | 0.209 / 0.576 | 0.179 / 0.305 |
+| 250,000, 20 bits | 1.94 / 0.791 | 1.71 / 0.569 |
+| 250,000, 32 bits | 2.03 / 0.983 | 1.80 / 0.716 |
+| 1,000,000, 20 bits | 10.16 / 3.56 | 9.38 / 3.38 |
+| 1,000,000, 32 bits | 10.45 / 3.89 | 9.65 / 3.58 |
+
+The same rows, on one core and on many. Tried and not kept, one core:
+
+- Digits of up to 11 bits (two passes of 10 for 20 bits, three of 11 for
+  32): slower at every size here, where mm_radix_sort sorts keys alone
+  and an 11-bit digit wins there below the last cache. At a million, 20
+  bits 12.1 ms against 9.9 (bytes), 32 bits 16.1 against 10.5; at 32,000,
+  0.053 against 0.039 s for 200 frames. A key here goes with its id, 16
+  bytes a row and as many spare: a pass scatters twice as much, to 1024 or
+  2048 places.
+- On many threads it is worse still: the running sum over the counts goes
+  value by value over 64 pieces, 2048 x 64 counts 8 KB apart (a million
+  keys of 32 bits, 7.3 ms against 3.9).
+- Digits of as many bits each (three of 7 for 20 bits, where bytes are 8,
+  8 and 4): 1-9% slower than bytes; a last pass of few values scatters to
+  few places.

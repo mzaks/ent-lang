@@ -1,0 +1,57 @@
+// 40,000 entities by keys of many widths (test/Integration/
+// ordered_widths.test): one value only, 1, 15, 20 and 33 bits, of both
+// signs, and every bit of an i64, the least and the most there are among
+// them. Each gives a row of its key and its number (its place among the
+// entities as they are stored): the rows in the order of the keys, those
+// alike in the order of their numbers.
+import console
+import wyhash
+
+component Dot { key: i64, n: i64 } capacity 40000
+buffer Seen { key: i64, n: i64 } capacity 40000
+unique Check { sorted: i64, stable: i64 }
+
+world {
+  for i in 0..40000 { spawn { Dot { key: 0, n: i as i64 } } }
+}
+
+system fill(bits: i64, below: i64) {
+  for d: mut Dot {
+    let h = wyrand(5 + bits as u64, d.n)
+    if bits >= 64 {
+      d.key = h as i64
+      if d.n == 7 { d.key = 0 - 9223372036854775807 - 1 }
+      if d.n == 8 { d.key = 9223372036854775807 }
+    } else if bits == 0 {
+      d.key = 0 - below
+    } else {
+      d.key = ((h >> (64 - bits as u64)) as i64) - below
+    }
+  }
+}
+
+system clear() { Seen = [] }
+
+system lay() {
+  for d: Dot by d.key { Seen += { key: d.key, n: d.n } }
+}
+
+system check(bits: i64) {
+  for i in 1..len(Seen) {
+    if Seen[i - 1].key <= Seen[i].key { Check.sorted += 1 }
+    if Seen[i - 1].key < Seen[i].key || Seen[i - 1].n < Seen[i].n { Check.stable += 1 }
+  }
+  put("{bits} bits: {len(Seen)} rows, in order {Check.sorted}, alike in order {Check.stable}, first {Seen[0].key} last {Seen[len(Seen) - 1].key}")
+  Check.sorted = 0
+  Check.stable = 0
+}
+
+schedule one(bits: i64, below: i64) { fill(bits, below) clear() lay() check(bits) }
+main {
+  one(0, 5)
+  one(1, 0)
+  one(15, 16384)
+  one(20, 0)
+  one(33, 4294967296)
+  one(64, 0)
+}

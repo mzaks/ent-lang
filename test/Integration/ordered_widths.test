@@ -1,0 +1,16 @@
+// A `for ... by` over keys of many widths: the radix sort goes over the
+// bytes of each key less the least up to the highest in which they
+// differ. In order, those alike in the order they are stored, with
+// nought bits, one, and every bit of an i64; on one core and on many
+// (from 16,384 keys on), the same.
+// RUN: %ent run %S/Inputs/ordered_widths.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel %S/Inputs/ordered_widths.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+
+// CHECK:      0 bits: 40000 rows, in order 39999, alike in order 39999, first -5 last -5
+// CHECK-NEXT: 1 bits: 40000 rows, in order 39999, alike in order 39999, first 0 last 1
+// CHECK-NEXT: 15 bits: 40000 rows, in order 39999, alike in order 39999,
+// CHECK-NEXT: 20 bits: 40000 rows, in order 39999, alike in order 39999,
+// CHECK-NEXT: 33 bits: 40000 rows, in order 39999, alike in order 39999,
+// CHECK-NEXT: 64 bits: 40000 rows, in order 39999, alike in order 39999, first -9223372036854775808 last 9223372036854775807
