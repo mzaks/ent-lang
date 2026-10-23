@@ -1,0 +1,92 @@
+// Six indexes by one key (test/Integration/index_ways.test), one of each
+// way of keeping them: lazy or eager, made again as fits, anew every time
+// (`rebuild`) or only for what changed (`incremental`). Each, every
+// frame, as a `for ... by` the key has the entities, with what it copies
+// of each as it is; as keys change, what they copy changes, and entities
+// come and go.
+import console
+import wyhash
+
+component Dot { key: i32, id: i64, tag: i64 } capacity 20000
+buffer Seen { id: i64 } capacity 20000
+unique Check { frame: i64, next: i64 }
+
+index A of Dot by key { id: Dot.id, tag: Dot.tag }
+index B of Dot by key { id: Dot.id, tag: Dot.tag } eager
+index C of Dot by key { id: Dot.id, tag: Dot.tag } rebuild
+index D of Dot by key { id: Dot.id, tag: Dot.tag } eager rebuild
+index E of Dot by key { id: Dot.id, tag: Dot.tag } incremental
+index F of Dot by key { id: Dot.id, tag: Dot.tag } eager incremental
+
+world {
+  for i in 0..10000 { spawn { Dot { key: wyrand_below(1, i as i64, 200) as i32, id: i as i64, tag: 0 } } }
+  Check.next = 10000
+}
+
+system keys() {
+  for d: mut Dot {
+    if wyrand_below(Check.frame as u64 + 5, d.id, 30) == 0 {
+      d.key = wyrand_below(Check.frame as u64 + 7, d.id, 200) as i32
+    }
+  }
+}
+system tags() {
+  for d: mut Dot { if wyrand_below(Check.frame as u64 + 9, d.id, 40) == 0 { d.tag += 1 } }
+}
+system churn() {
+  for e, d: Dot { if wyrand_below(Check.frame as u64 + 3, d.id, 25) == 0 { e.destroy() } }
+}
+system arrive() {
+  for i in 0..200 {
+    spawn { Dot { key: wyrand_below(Check.frame as u64 + 11, i as i64, 200) as i32, id: Check.next, tag: 0 } }
+    Check.next += 1
+  }
+}
+system clear() { Seen = [] }
+system walk() { for d: Dot by d.key { Seen += { id: d.id } } }
+system check() {
+  var a = 0
+  for r in 0..len(A) {
+    if r < len(Seen) && A[r].id == Seen[r].id {
+      if let tag = Dot(A[r].who).tag { if tag == A[r].tag { a += 1 } }
+    }
+  }
+  var b = 0
+  for r in 0..len(B) {
+    if r < len(Seen) && B[r].id == Seen[r].id {
+      if let tag = Dot(B[r].who).tag { if tag == B[r].tag { b += 1 } }
+    }
+  }
+  var c = 0
+  for r in 0..len(C) {
+    if r < len(Seen) && C[r].id == Seen[r].id {
+      if let tag = Dot(C[r].who).tag { if tag == C[r].tag { c += 1 } }
+    }
+  }
+  var d = 0
+  for r in 0..len(D) {
+    if r < len(Seen) && D[r].id == Seen[r].id {
+      if let tag = Dot(D[r].who).tag { if tag == D[r].tag { d += 1 } }
+    }
+  }
+  var e = 0
+  for r in 0..len(E) {
+    if r < len(Seen) && E[r].id == Seen[r].id {
+      if let tag = Dot(E[r].who).tag { if tag == E[r].tag { e += 1 } }
+    }
+  }
+  var f = 0
+  for r in 0..len(F) {
+    if r < len(Seen) && F[r].id == Seen[r].id {
+      if let tag = Dot(F[r].who).tag { if tag == F[r].tag { f += 1 } }
+    }
+  }
+  put("frame {Check.frame}: {len(Seen)} rows; as `by` has them: A {a}, B {b}, C {c}, D {d}, E {e}, F {f}")
+  Check.frame += 1
+}
+
+schedule look() { clear() walk() check() }
+schedule k() { keys() look() }
+schedule t() { tags() look() }
+schedule c() { churn() arrive() keys() look() }
+main { look() k() t() c() k() t() c() c() k() }

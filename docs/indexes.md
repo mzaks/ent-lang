@@ -62,28 +62,45 @@ transient buffer, made again from the entities after a world is loaded.
 
 ## 4. Keeping an index up to date
 
-An index has one of three policies. The compiler infers it (section 7)
-unless the program says which.
+How an index is kept is two choices that do not depend on each other:
+**when** it is brought up to date, and **how**. Every pair makes sense.
 
-| Policy | When the index is brought up to date | Best where |
+| When | The index is brought up to date | Best where |
 |---|---|---|
-| `rebuild` | At the commit point after the last writer of a key field in the frame | Many keys change each frame (positions) |
-| `incremental` | At the commit point, only the rows whose key changed, or that were spawned or despawned | Keys change rarely (names, ids) |
-| `lazy` | Before the first query that reads it after a write | Readers are rare or conditional |
+| `lazy` (the default) | Before the first system that reads it after one that changed it | Readers are rare or conditional: several changes make one update, none where nothing reads |
+| `eager` | Right after each system that changes it | It is read soon and often: its cost lands where the change is (staged with what does not read it), readers never wait |
 
-`incremental` needs to know which rows changed: the change tracking that
-reactive queries have already (`test/Transforms/lower-reactive*.mlir`),
-not a second mechanism.
+| How | What is done | Best where |
+|---|---|---|
+| `rebuild` | Every entity listed and sorted anew | Many keys change each time (positions) |
+| `incremental` | Only the rows of the entities whose key, or a field it copies, changed: each written and moved up or down to its place | Few keys change (names, ids, cars that overtake) |
+| (neither said) | As fits: anew where entities came or went; else every entity writes its row and those out of order are moved down, anew where that would take more steps than there are rows | Not known |
 
-**Built:** `lazy` only, and it is all an index has. The pass
-`--ent-indexes` runs the index's update before every system that reads
-it, on the condition that something changed since it was last made; it
-knows what changed from the access analysis: after a system that changes
-which entities it holds (spawns, despawns, moves) it is made anew by a
-sort; after one that changes only keys or copied fields, every entity
-writes its own row again (in parallel, from 16,384 entities on) and the
-rows out of order are put back by insertion. This is not the
-`incremental` above: every row is written, not only those that changed.
+```
+index Traffic of Car by key { x: Spot.x } eager incremental
+```
+
+`incremental` knows which rows changed by the change tracking reactive
+queries have already (`on changed C.f`), not a second mechanism: its
+update's `for` over the entities is reactive. Where entities came, went
+or moved between archetypes (which reactive queries do not see as
+changes of the key), and where the rows would move more steps than there
+are rows, it is made anew, as `rebuild` does.
+
+A clustered index (5.2) is brought up to date before every system where
+it is out of date, eager or not: its archetype's rows are in its order
+whenever a system starts.
+
+**Built** (2026-10-23): both choices, after the key (`index Name of C by
+key [lazy | eager] [rebuild | incremental]`), checked against a `for ...
+by` the key in `test/Integration/index_ways.test`. `--ent-indexes` runs
+the update before every system that reads the index, on the condition
+that something changed since it was last made, and, of an `eager` one,
+right after every system that changed it (the one before a reader then
+finds it up to date). What changed it, it knows from the access
+analysis: a system that changes which entities it holds (spawns,
+despawns, moves) marks it to be made anew; one that changes only keys or
+copied fields, to be made again.
 
 ## 5. Kinds of index
 

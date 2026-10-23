@@ -22233,6 +22233,10 @@ static void warnAboutReactiveQueries(ModuleOp module) {
       // do, which is not the module's to know: `module.name` is one.)
       auto system = query->getParentOfType<SystemOp>();
       bool ofModule = system && system.getSymName().contains('.');
+      // (Nor what an index made again incrementally reacts to: everything
+      // it copies, written or not.)
+      if (query->hasAttr("ent.index_changes"))
+        continue;
       if (trigger.kind != Trigger::Added && !ofModule &&
           llvm::none_of(causers,
                         [&](Operation *op) { return causes(op, trigger); })) {

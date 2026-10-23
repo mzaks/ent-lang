@@ -3206,6 +3206,33 @@ LogicalResult Parser::parseIndex() {
 
   // `clustered`: the archetype's rows themselves kept in its order.
   bool clustered = consumeKeyword("clustered");
+  // When it is brought up to date (`lazy`, the default, or `eager`) and
+  // how (`rebuild`, `incremental`, or as fits), after the key or after
+  // what it copies (docs/indexes.md, section 4).
+  bool eager = false;
+  std::string how;
+  auto ways = [&]() -> LogicalResult {
+    while (token.isKeyword("lazy") || token.isKeyword("eager") ||
+           token.isKeyword("rebuild") || token.isKeyword("incremental")) {
+      llvm::SMLoc wayAt = token.loc;
+      std::string way = token.spelling.str();
+      advance();
+      if (way == "lazy" || way == "eager") {
+        eager = way == "eager";
+        continue;
+      }
+      if (!how.empty() && how != way)
+        return error(wayAt, "an index is made again one way: '" + how +
+                                "' or '" + way + "'");
+      if (grid && way == "incremental")
+        return error(wayAt, "a grid's cells are worked out for every "
+                            "entity each time: it is not 'incremental'");
+      how = way;
+    }
+    return success();
+  };
+  if (failed(ways()))
+    return failure();
 
   // { name: Component.field, .. }: what each row has besides.
   struct Copy {
@@ -3252,6 +3279,8 @@ LogicalResult Parser::parseIndex() {
     if (failed(expect(Token::RBrace, "'}'")))
       return failure();
   }
+  if (failed(ways()))
+    return failure();
   consumeIf(Token::Semicolon);
   // A grid's rows have where the entity is, under the fields' names.
   for (auto [number, field] : llvm::enumerate(positions)) {
@@ -3357,6 +3386,28 @@ LogicalResult Parser::parseIndex() {
                                        builder.getI64IntegerAttr(1));
   declared->setAttr(WorldLayout::kTransientAttr, builder.getUnitAttr());
   buffers[*name] = std::move(record);
+  // Made again incrementally: the entities whose key or what it copies
+  // changed, each with those as they are now (its room the first
+  // component's capacity, put in where that is known).
+  if (how == "incremental") {
+    Record changed;
+    changed.fields.push_back({"who", EntityType::get(context)});
+    changed.fields.push_back({"key", keyType});
+    for (const Copy &copy : copies)
+      changed.fields.push_back({copy.name, copy.type});
+    SmallVector<Attribute> changedNames, changedTypes;
+    for (auto &[field, type] : changed.fields) {
+      changedNames.push_back(builder.getStringAttr(field));
+      changedTypes.push_back(TypeAttr::get(type));
+    }
+    std::string changedName = *name + "_changed";
+    BufferOp made = BufferOp::create(
+        builder, loc(at), declareSymbol(at, changedName),
+        builder.getArrayAttr(changedNames), builder.getArrayAttr(changedTypes),
+        builder.getI64IntegerAttr(1));
+    made->setAttr(WorldLayout::kTransientAttr, builder.getUnitAttr());
+    buffers[changedName] = std::move(changed);
+  }
 
   // What the index declares for itself.
   std::string spelled = (isa<FloatType>(keyType) ? "f"
@@ -3437,6 +3488,50 @@ LogicalResult Parser::parseIndex() {
       // key and what is copied into its own row, and the rows are put in
       // order again; else all are put in order by their keys.
       ;
+  // Of one made again incrementally: the entities whose key or what it
+  // copies changed (the room is the first component's capacity, put in
+  // where that is known), and what moves each one's row up or down to its
+  // place, the others in order as they are. Where that would move rows
+  // more steps than there are rows, it stops and says so.
+  if (how == "incremental") {
+    // (Each with its key and what is copied as they are now: a buffer of
+    // its own, declared as the index's rows are, below.)
+    out << "proc " << n << "_mend(order: mut " << n << ", held: mut "
+        << of.front() << ", changed: " << n << "_changed) -> bool {\n"
+        << "  var steps = 0\n"
+        << "  for k in 0..len(changed) {\n"
+        << "    if steps <= len(order) {\n"
+        << "      let i = held[changed[k].who]." << rowField << "\n"
+        << "      order[i].key = changed[k].key\n";
+    for (const Copy &copy : copies)
+      out << "      order[i]." << copy.name << " = changed[k]." << copy.name
+          << "\n";
+    for (const std::string &field : fields)
+      out << "      let " << field << "_ = order[i]." << field << "\n";
+    out << "      var j = i\n";
+    for (int down = 0; down < 2; ++down) {
+      if (!down)
+        out << "      while j > 0 && steps <= len(order) && (order[j - 1].key "
+               "> key_ || (order[j - 1].key == key_ && order[j - 1].place > "
+               "place_)) {\n";
+      else
+        out << "      while j + 1 < len(order) && steps <= len(order) && "
+               "(order[j + 1].key < key_ || (order[j + 1].key == key_ && "
+               "order[j + 1].place < place_)) {\n";
+      std::string next = down ? "j + 1" : "j - 1";
+      out << "        steps += 1\n";
+      for (const std::string &field : fields)
+        out << "        order[j]." << field << " = order[" << next << "]."
+            << field << "\n";
+      out << "        held[order[j].who]." << rowField << " = j\n"
+          << "        j " << (down ? "+=" : "-=") << " 1\n      }\n";
+    }
+    for (const std::string &field : fields)
+      out << "      order[j]." << field << " = " << field << "_\n";
+    out << "      held[who_]." << rowField << " = j\n"
+        << "    }\n  }\n"
+        << "  steps <= len(order)\n}\n";
+  }
   // Of a grid: how many cells it has on each side, how wide they are and
   // where they start (`N_grid`); each cell's first row (`N_cells`, a row
   // more at the end); and what finds a place's cell and the cells around.
@@ -3733,31 +3828,57 @@ LogicalResult Parser::parseIndex() {
     out << " }\n" << indent << "}\n"
         << indent << n << "_number(" << n << ", " << of.front() << ")\n";
   };
-  out << "  if " << n << "_whole {\n"
-      << "    for e" << bindings << ", w: mut " << n << "[c0." << rowField
-      << ", 1] {\n      w[0].key = c0." << *key << "\n";
-  for (const Copy &copy : copies)
-    out << "      w[0]." << copy.name << " = " << through(copy) << "\n";
-  out << "    }\n";
-  // (Where many rows are out of order, sorted on many threads; else each
-  // goes down past those above it. A grid counts them first, which a
-  // trace sees (and --tune chooses from): `Name_tangled`.)
-  if (grid) {
-    out << "    if " << n << "_tangled(" << n << "_below(" << n << "), len("
-        << n << ")) {\n";
+  if (how == "rebuild") {
+    // (Every time anew.)
+    anew("  ", /*counted=*/true);
+    out << "  " << n << "_whole = true\n";
+  } else if (how == "incremental") {
+    // (Where the same entities are in it, only those whose key or what it
+    // copies changed, which a reactive `for` visits; their rows moved
+    // to their places.)
+    out << "  if " << n << "_whole {\n"
+        << "    " << n << "_changed = []\n"
+        << "    for e" << bindings << " on changed c0." << *key;
+    for (const Copy &copy : copies)
+      out << ", changed " << through(copy);
+    out << " {\n      " << n << "_changed += { who: e, key: c0." << *key;
+    for (const Copy &copy : copies)
+      out << ", " << copy.name << ": " << through(copy);
+    out << " }\n    }\n"
+        << "    if !" << n << "_mend(" << n << ", " << of.front() << ", " << n
+        << "_changed) {\n";
     anew("      ", /*counted=*/false);
-    out << "    } else if !" << n << "_settle(" << n << ", " << of.front()
-        << ") {\n";
-    anew("      ", /*counted=*/false);
-    out << "    }\n";
+    out << "    }\n  } else {\n";
+    anew("    ", /*counted=*/true);
+    out << "    " << n << "_whole = true\n  }\n";
   } else {
-    out << "    if !" << n << "_settle(" << n << ", " << of.front() << ") {\n";
-    anew("      ", /*counted=*/false);
+    out << "  if " << n << "_whole {\n"
+        << "    for e" << bindings << ", w: mut " << n << "[c0." << rowField
+        << ", 1] {\n      w[0].key = c0." << *key << "\n";
+    for (const Copy &copy : copies)
+      out << "      w[0]." << copy.name << " = " << through(copy) << "\n";
     out << "    }\n";
+    // (Where many rows are out of order, sorted on many threads; else each
+    // goes down past those above it. A grid counts them first, which a
+    // trace sees (and --tune chooses from): `Name_tangled`.)
+    if (grid) {
+      out << "    if " << n << "_tangled(" << n << "_below(" << n << "), len("
+          << n << ")) {\n";
+      anew("      ", /*counted=*/false);
+      out << "    } else if !" << n << "_settle(" << n << ", " << of.front()
+          << ") {\n";
+      anew("      ", /*counted=*/false);
+      out << "    }\n";
+    } else {
+      out << "    if !" << n << "_settle(" << n << ", " << of.front()
+          << ") {\n";
+      anew("      ", /*counted=*/false);
+      out << "    }\n";
+    }
+    out << "  } else {\n";
+    anew("    ", /*counted=*/true);
+    out << "    " << n << "_whole = true\n  }\n";
   }
-  out << "  } else {\n";
-  anew("    ", /*counted=*/true);
-  out << "    " << n << "_whole = true\n  }\n";
   if (grid)
     out << "  " << n << "_bounds(" << n << ", " << n << "_cells, " << n
         << "_grid.cells)\n";
@@ -3832,9 +3953,14 @@ LogicalResult Parser::parseIndex() {
                           ? SmallVector<std::string>{rowField, placeField, *key}
                           : SmallVector<std::string>{rowField, placeField})),
       }));
-  if (clustered) {
+  {
     NamedAttrList info(declared->getAttrOfType<DictionaryAttr>("ent.index"));
-    info.set("clustered", builder.getUnitAttr());
+    if (clustered)
+      info.set("clustered", builder.getUnitAttr());
+    if (eager)
+      info.set("eager", builder.getUnitAttr());
+    if (!how.empty())
+      info.set("how", builder.getStringAttr(how));
     declared->setAttr("ent.index", info.getDictionary(context));
   }
   Index &kept = indexes[bufferName.getValue()];
@@ -3860,6 +3986,8 @@ LogicalResult Parser::parseIndex() {
     if (!query->hasAttr("by"))
       query->setAttr("ent.parallel_min_entities",
                      builder.getI64IntegerAttr(kIndexParallelMin));
+    if (query->hasAttr(QueryOp::kTriggersAttr))
+      query->setAttr("ent.index_changes", builder.getUnitAttr());
   });
   // Clustered: made, the rows move into its order.
   if (clustered) {
@@ -3891,6 +4019,10 @@ LogicalResult Parser::finishIndexOrders() {
              << "': give that component a capacity (or the program a "
                 "default_capacity)";
     buffer.setCapacityAttr(builder.getI64IntegerAttr(capacity.getInt()));
+    // Made again incrementally: as many changed as there may be entities.
+    if (auto changed = dyn_cast_or_null<BufferOp>(SymbolTable::lookupSymbolIn(
+            module, builder.getStringAttr(buffer.getSymName() + "_changed"))))
+      changed.setCapacityAttr(builder.getI64IntegerAttr(capacity.getInt()));
     // A grid: as many cells at most as there may be entities.
     if (found->second.cells.empty())
       continue;

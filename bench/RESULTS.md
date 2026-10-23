@@ -3657,3 +3657,29 @@ only where the condition held after the run; an index's update makes the
 index up to date, so what it wrote was never marked and a `gpu` system
 read the columns as they were (a clustered archetype read on the GPU,
 `gpu.test`). The condition is now as it was before the run.
+
+## 2026-10-23: when an index is kept, and how
+
+An index is `lazy` (the default) or `eager`, and made again as fits,
+`rebuild` or `incremental` (docs/indexes.md, section 4). 200,000
+entities, an index read every frame, ms a frame for keeping it,
+`-march=native`, on mains (one core, CPU 2 / 23 threads):
+
+| | as fits | `incremental` | `rebuild` |
+|---|---|---|---|
+| one in 1,000 keys moves by up to 10 | 0.65 / 0.63 | 0.37 / 0.50 | 1.60 / 0.87 |
+| one in 50 keys changes at random | 2.55 / 1.32 | 2.75 / 1.38 | 1.69 / 0.88 |
+
+`incremental` visits the changed entities by a reactive `for` and moves
+their rows; `rebuild` sorts all of them every time. As fits writes every
+row and moves those out of order down, and is made anew where that would
+take more steps than there are rows: where keys change at random it does
+both, a millisecond more than `rebuild` (which way to try first is left
+open). `eager` costs what `lazy` does where the index is read after every
+change; it moves the work next to the change.
+
+Found on the way: an index's update hands a proc the first component to
+change, which the access analysis takes for writing all of it, so with
+two indexes over one component each one's update made the other be made
+anew. `--ent-indexes` now leaves out the systems that keep other indexes
+(but a clustered one's update, which moves rows).

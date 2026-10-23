@@ -1,0 +1,36 @@
+// The ways of keeping an index (docs/indexes.md, section 4): lazy or
+// eager, made again as fits, anew (`rebuild`) or only for what changed
+// (`incremental`), six indexes by one key. Each as a `for ... by` the
+// key has the entities, with what it copies as it is, every frame, as
+// keys change, what they copy changes, and entities come and go; on one
+// core and on many. An eager one is made right after what changed it, a
+// lazy one before what reads it.
+// RUN: %ent run %S/Inputs/index_ways.ent 2>&1 > %t.one | count 0
+// RUN: %ent run --parallel %S/Inputs/index_ways.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one --implicit-check-not=frame
+// RUN: ent-translate --import-ent %S/Inputs/index_ways.ent -I %S/../../devices \
+// RUN:   | ent-opt --ent-indexes | FileCheck %s --check-prefix=RUNS
+
+// CHECK: frame 0: 10000 rows; as `by` has them: A 10000, B 10000, C 10000, D 10000, E 10000, F 10000
+// CHECK: frame 1: 10000 rows; as `by` has them: A 10000, B 10000, C 10000, D 10000, E 10000, F 10000
+// CHECK: frame 2: 10000 rows; as `by` has them: A 10000, B 10000, C 10000, D 10000, E 10000, F 10000
+// CHECK: frame 3: [[N3:[0-9]+]] rows; as `by` has them: A [[N3]], B [[N3]], C [[N3]], D [[N3]], E [[N3]], F [[N3]]
+// CHECK: frame 4: [[N4:[0-9]+]] rows; as `by` has them: A [[N4]], B [[N4]], C [[N4]], D [[N4]], E [[N4]], F [[N4]]
+// CHECK: frame 5: [[N5:[0-9]+]] rows; as `by` has them: A [[N5]], B [[N5]], C [[N5]], D [[N5]], E [[N5]], F [[N5]]
+// CHECK: frame 6: [[N6:[0-9]+]] rows; as `by` has them: A [[N6]], B [[N6]], C [[N6]], D [[N6]], E [[N6]], F [[N6]]
+// CHECK: frame 7: [[N7:[0-9]+]] rows; as `by` has them: A [[N7]], B [[N7]], C [[N7]], D [[N7]], E [[N7]], F [[N7]]
+// CHECK: frame 8: [[N8:[0-9]+]] rows; as `by` has them: A [[N8]], B [[N8]], C [[N8]], D [[N8]], E [[N8]], F [[N8]]
+
+// RUNS-LABEL: ent.schedule @k()
+// RUNS: ent.run @keys()
+// RUNS: ent.run @F_stale()
+// RUNS: ent.run @F_update() if
+// RUNS: ent.run @E_stale()
+// RUNS: ent.run @D_stale()
+// RUNS: ent.run @D_update() if
+// RUNS: ent.run @C_stale()
+// RUNS: ent.run @B_stale()
+// RUNS: ent.run @B_update() if
+// RUNS: ent.run @A_stale()
+// RUNS: ent.run @clear()

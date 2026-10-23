@@ -1984,6 +1984,16 @@ finds the car ahead and the cars beside each car so.
   and each told its row. With 120,000 cars of which few overtake or
   change lanes in a step (`bench/traffic`), 0.21 ms the one way and 1.24
   the other, on one core.
+- After the key, or after `{ }`: when it is brought up to date, `lazy`
+  (the default: before the first system that reads it after one that
+  changed it) or `eager` (right after each system that changed it); and
+  how, `rebuild` (every entity sorted anew each time) or `incremental`
+  (only the entities whose key, or a field it copies, changed, found by a
+  reactive `for` and each row moved up or down to its place; anew where
+  entities came or went, or where rows would move more steps than there
+  are rows), or neither said (as fits, below). `index Traffic of Car by
+  key { x: Spot.x } eager incremental`. A grid is not `incremental` (its
+  cells are worked out for every entity each time).
 - `clustered` after the key (`index Order of Car by key clustered`, or
   after a grid's `cell` and `wrap`) keeps the archetype's rows themselves
   in the index's order: the entity of the index's row r is at row r,

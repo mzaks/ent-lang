@@ -202,6 +202,18 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
       });
     }
 
+    // The systems that keep the indexes that are not clustered: each
+    // writes only fields of its own (where an entity's row is, its
+    // place) and its flags, which no other index holds; but it hands a
+    // proc the first component to change, which the analysis takes for
+    // writing all of it (and so for moving its entities). A clustered
+    // one's update moves rows: that one changes the others.
+    llvm::DenseSet<Attribute> keepers;
+    for (auto [buffer, info] : indexes)
+      if (!info.get("clustered"))
+        for (StringRef which : {"update", "stale", "moved"})
+          keepers.insert(info.get(which));
+
     OpBuilder builder(module.getContext());
     for (auto [buffer, info] : indexes) {
       Kept kept = keptOf(buffer, info, archetypes, symbols);
@@ -210,7 +222,7 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
       for (RunOp run : runs) {
         StringAttr system = run.getSystemAttr().getAttr();
         if (system == kept.update || system == kept.stale ||
-            system == kept.moved)
+            system == kept.moved || keepers.contains(system))
           continue;
         const SystemAccess &access = accessOf(run);
         // (A system with a body that calls out is opaque to the schedule,
@@ -252,10 +264,27 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
         }
         if (writes) {
           builder.setInsertionPointAfter(run);
-          RunOp::create(builder, loc,
-                        FlatSymbolRefAttr::get(moves ? kept.moved
-                                                     : kept.stale),
-                        ValueRange{});
+          auto marked = RunOp::create(
+              builder, loc,
+              FlatSymbolRefAttr::get(moves ? kept.moved : kept.stale),
+              ValueRange{});
+          // Eager: made again right after what changed it, where it is
+          // out of date (not where that run did not run).
+          if (info.get("eager")) {
+            builder.setInsertionPointAfter(marked);
+            auto update =
+                RunOp::create(builder, loc, FlatSymbolRefAttr::get(kept.update),
+                              ValueRange{});
+            Block *condition = builder.createBlock(&update.getCondition());
+            builder.setInsertionPointToStart(condition);
+            Value fresh = ReadOp::create(builder, loc, builder.getI1Type(),
+                                         FlatSymbolRefAttr::get(kept.fresh),
+                                         builder.getStringAttr("value"));
+            Value yes = arith::ConstantIntOp::create(builder, loc, 1, 1);
+            YieldOp::create(
+                builder, loc,
+                ValueRange{arith::XOrIOp::create(builder, loc, fresh, yes)});
+          }
         }
       }
     }
