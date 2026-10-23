@@ -1723,8 +1723,8 @@ LogicalResult FunctionOp::verifyRegions() {
       return;
     auto invoke = dyn_cast<InvokeOp>(op);
     if (isa<SameOp, NobodyOp, TableAtOp, TextConstantOp, TextOfOp, TextCutOp,
-            TextLengthOp, TextAtOp, TextEqualOp, TextJoinOp, TextKeepOp,
-            RowsStartOp, RowsCountOp, HashOp>(op) ||
+            TextLengthOp, TextAtOp, TextHashOp, TextEqualOp, TextJoinOp,
+            TextKeepOp, RowsStartOp, RowsCountOp, HashOp>(op) ||
         (invoke && (!invoke.getProc() || getProc())))
       return;
     // (What a unique index declares stops the program, in a proc.)

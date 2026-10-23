@@ -1181,6 +1181,21 @@ def Ent_TextAtOp : Ent_Op<"text.at", [NoMemoryEffect]> {
   let assemblyFormat = "$value `,` $index attr-dict `:` type($index)";
 }
 
+def Ent_TextHashOp : Ent_Op<"text.hash", [NoMemoryEffect]> {
+  let summary = "A hash of a text of any length (see `hash_of`)";
+  let description = [{
+    ```mlir
+    %h = ent.text.hash %t, %seed
+    ```
+    The text's bytes 16 at a time, two words of 8 (little-endian, 0 past
+    its end), each block mixed into the hash (from `%seed`) as rapidhash
+    mixes, then with its length (devices/text.c, `ent_text_hash`).
+  }];
+  let arguments = (ins Ent_StringType:$value, I64:$seed);
+  let results = (outs I64:$result);
+  let assemblyFormat = "$value `,` $seed attr-dict";
+}
+
 def Ent_TextEqualOp : Ent_Op<"text.equal", [NoMemoryEffect]> {
   let summary = "Whether two texts of any length have the same bytes";
   let description = [{

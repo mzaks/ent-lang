@@ -3752,3 +3752,47 @@ another index took its order from one not up to date
 (`index_ways.test`). It walks in order now, leaves out what comes after
 the `for` where no loop runs them again, and no index's update takes
 another's order.
+
+## 2026-10-23: hash indexes, what was left
+
+The three things left open by the hash index (`bench/hash/run.py`, the
+same 200,000 ships, ms a frame, one core / 23 threads; before → now):
+
+| 1,000 teams | as fits | `incremental` | `rebuild` |
+|---|---|---|---|
+| one in 1,000 changes, 10 reads | 0.31 / 0.24 → 0.27 / 0.24 | 0.24 / 0.30 → 0.20 / 0.22 | 1.37 / 1.25 → 1.24 / 1.19 |
+| one in 50 changes, 10 reads | 0.44 / 0.46 → 0.40 / 0.46 | 0.33 / 0.59 → 0.29 / 0.30 | 1.39 / 1.26 → 1.28 / 1.21 |
+| one in 50 changes, 100 reads | 0.68 / 0.75 → 0.65 / 0.75 | 0.58 / 0.89 → 0.53 / 0.56 | 1.64 / 1.53 → 1.47 / 1.42 |
+
+- `incremental` on many threads. Its reactive `for` gave rows to a
+  buffer (the list of what changed), which a reactive `for` does in the
+  order of the rows: so it looked at all 200,000 entities, on 23
+  threads (an index's loops run on many from 16,384 entities), where
+  one in 1,000 changed. The order does not show in what the mending
+  does (each row put in its place among rows in order), so that list
+  is now in any order (`ent.any_order`): its rows are given where they
+  are sent, on one thread, and the `for` goes through the log of what
+  changed. The same for a sorted index kept `incremental` (the ways'
+  benchmark of 2026-10-23): one in 50 at random 2.83 → 2.52 ms, 1.63
+  → 1.38 on 23 threads; few that move little 0.55 → 0.48, 0.69 → 0.57
+  (whole runs of 20 frames).
+- `rebuild`. The slots were twice the capacity, 524,288, filled every
+  time; now twice the keys (from the last time, four times as many
+  where they come to more than half), 2,048 for 1,000 teams. That alone
+  made it slower (1.0 → 1.8 ms its own time): the keys' homes were the
+  hash's low bits, and runs of whole numbers land on few of them in a
+  small table, 550 homes for 1,000 teams in 2,048 slots where keys at
+  random land on about 790 (`bench/hash/homes.c`). A key's home is now
+  the high bits, `((h >> 32) * slots) >> 32`, a multiply and a shift,
+  as Fibonacci hashing: every run of whole numbers on a home of its own,
+  keys by strides of 1,024 as at random. Then a loop of `while` with a
+  test of the room in every turn (1.8 → 0.94 ms as a `for`). What is
+  left is a pass over the entities, 4.5 ns each: its key's slot, the
+  link to the one before of its key, and the entity told its row.
+- A text's hash. Each 16 bytes were read a byte at a time, a call to
+  `ent_text_at` each; reading the bytes was all of it (128 bytes: 120
+  ns, where summing them takes 115). Now one call hashes the text
+  (`ent.text.hash`, `devices/text.c`), the same bits: 8 bytes 17.5 →
+  9.0 ns, 32 bytes 29.4 → 16.0, 128 bytes 120 → 56 (a `for` over
+  100,000 texts, each the time of a text). wyhash's loop would have
+  read the same bytes, so its mixing was not the question.

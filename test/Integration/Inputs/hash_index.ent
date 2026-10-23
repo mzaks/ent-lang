@@ -10,7 +10,7 @@ import console
 import text
 
 enum Side { left, right, middle }
-component Ship { number: i64, team: i32, side: Side, name: text } capacity 512
+component Ship { number: i64, team: i32, side: Side, name: text, mark: i64 } capacity 512
 component Crew { boss: entity } capacity 512
 unique Step: i64
 unique Count: i64
@@ -24,13 +24,15 @@ index BySide of Ship by side hash rebuild //I
 index ByName of Ship by name hash incremental //I
 index ByBoss of Crew by boss hash eager //I
 index ByNumber of Ship by number hash unique eager incremental //I
+// (All of one mark at first, then of more and more: its slots grow.)
+index ByMark of Ship by mark hash incremental //I
 
 world {
   for i in 0..200 {
     let ship = spawn {
       Ship { number: i as i64, team: (i % 64) as i32,
              side: if i % 3 == 0 { Side.left } else if i % 3 == 1 { Side.right } else { Side.middle },
-             name: if i % 5 == 0 { "five" } else { "rest" } }
+             name: if i % 5 == 0 { "five" } else { "rest" }, mark: 0 }
     }
     if i % 4 == 0 { spawn { Crew { boss: ship } } }
   }
@@ -44,6 +46,7 @@ system shuffle() {
     if (x.number + s) % 11 == 0 { x.number += 1000 }
     if (x.number + s) % 17 == 0 { x.name = if x.name == "five" { "rest" } else { "five" } }
     if (x.number + s) % 19 == 0 { x.side = Side.middle }
+    if (x.number + s) % 3 == 0 { x.mark = s * 1000 + x.number % 7 }
   }
 }
 // The ship numbered three times the step and more (none where there is
@@ -106,11 +109,19 @@ system crews() {
   put("crew of {number}: {Count}")
 }
 system said() { put("a five: {Found.any}") }
+system marked() {
+  Count = 0
+  Sum = 0
+  let m = Step * 1000 + 2
+  for x: Ship where x.mark == m { Count += 1 Sum += x.number }
+  for x: Ship where x.mark == 0 { Count += 1000 }
+  put("marked: {Count} {Sum}")
+}
 system thin() { for e, x: Ship where x.team == 3 { if x.number % 2 == 0 { e.destroy() } } }
 system more() {
   let s = Step
   if s % 4 == 0 {
-    spawn { Ship { number: 5000 + s, team: 3, side: Side.left, name: "five" } }
+    spawn { Ship { number: 5000 + s, team: 3, side: Side.left, name: "five", mark: 0 } }
   }
 }
 
@@ -118,6 +129,6 @@ schedule round() {
   shuffle() team(1) sided() fives()
   numbered(0) crews() first(2) crews() rehire() crews() named() said()
   thin() team(3) more() shuffle() team(3) fives() sided()
-  numbered(1000) crews() first(3) rehire() crews()
+  numbered(1000) crews() first(3) rehire() crews() marked()
 }
 main { loop { round() } until Step >= 60 }

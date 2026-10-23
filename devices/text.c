@@ -219,6 +219,28 @@ int8_t ent_text_at(uint64_t view, int64_t index) {
              : 0;
 }
 
+// A hash of a text (`hash_of`, ent.text.hash): its bytes 16 at a time,
+// two little-endian words of 8 (0 past its end), each block mixed into
+// the hash from `seed` as rapidhash mixes (one 64 by 64 bit multiply, the
+// halves of the product xored), then with its length.
+static inline uint64_t ent_text_mix(uint64_t a, uint64_t b) {
+  __uint128_t product = (__uint128_t)a * b;
+  return (uint64_t)product ^ (uint64_t)(product >> 64);
+}
+int64_t ent_text_hash(uint64_t view, int64_t seed) {
+  const ent_text *text = ent_text_of(view);
+  const uint64_t secret0 = 0x2d358dccaa6c78a5ull,
+                 secret1 = 0x8bb84b93962eacc9ull,
+                 secret2 = 0x4b33a62ed433d4a3ull;
+  uint64_t length = text->length, hash = (uint64_t)seed;
+  for (uint64_t from = 0; from < length; from += 16) {
+    uint64_t words[2] = {0, 0};
+    memcpy(words, text->bytes + from, length - from < 16 ? length - from : 16);
+    hash = ent_text_mix(words[0] ^ secret1, words[1] ^ hash);
+  }
+  return (int64_t)ent_text_mix(hash ^ secret0, length ^ secret2);
+}
+
 int8_t ent_text_equal(uint64_t a, uint64_t b) {
   const ent_text *left = ent_text_of(a), *right = ent_text_of(b);
   return left->length == right->length &&

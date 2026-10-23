@@ -2062,13 +2062,15 @@ entities of a key, by a hash of it, in place of an order.
   or as fits (neither said). It has no order: as fits, every entity
   whose key or copied fields differ from its row's is mended (taken
   out of its key's list and put at the end of its new key's);
-  `incremental`, those a reactive `for` says changed; `rebuild` makes
-  it anew. Anew where entities came, went or moved.
-- Its slots (`Name`, a power of two, twice the first component's
-  capacity at least) hold the keys, and its rows (`Name_list`, one for
+  `incremental`, those a reactive `for` says changed, which goes through
+  the log of what changed (on one thread); `rebuild` makes it anew.
+  Anew where entities came, went or moved, and where keys come to more
+  than half its slots.
+- Its slots (`Name`, a power of two, twice the keys at least and as
+  many as twice the first component's capacity) hold the keys, and its rows (`Name_list`, one for
   each entity, in the order they are stored) the entities: `who`, the
   key, `place`, the rows before and after of its key, and what `{ }`
-  copies. The names `Name_list`, `Name_changed`, `Name_home`,
+  copies. The names `Name_list`, `Name_changed`, `Name_keys`, `Name_home`,
   `Name_slot`, `Name_append`, `Name_build`, `Name_mend` and `Name_get`
   are taken besides those above. Not `find`, `[r]` or `for ... by`: it
   has no order.

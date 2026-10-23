@@ -1231,6 +1231,9 @@ static bool isEntityLocal(QueryOp query) {
     // (What is combined where it is sent, whatever the order: one thread.)
     if (op->hasAttr("ent.order_free"))
       return WalkResult::interrupt();
+    // (Nor rows given a buffer where they are sent: see ent.any_order.)
+    if (isa<AppendOp>(op) && op->hasAttr("ent.at_once"))
+      return WalkResult::interrupt();
     // What a `for` inside the body became (see lowerEach): it reads the
     // columns of other entities, which the query does not write (what it
     // sets of its own is not read there, or read from a copy); but what
@@ -17147,8 +17150,17 @@ static HashSlot findHashSlot(IRRewriter &rewriter, Location loc, QueryOp query,
   Value mask = arith::SubIOp::create(
       rewriter, loc, arith::IndexCastUIOp::create(rewriter, loc, i64, count),
       arith::ConstantIntOp::create(rewriter, loc, i64, 1));
+  // (Its home by the hash's high bits, as Name_home has it.)
+  Value thirtyTwo = arith::ConstantIntOp::create(rewriter, loc, i64, 32);
   Value home = arith::IndexCastUIOp::create(
-      rewriter, loc, index, arith::AndIOp::create(rewriter, loc, hash, mask));
+      rewriter, loc, index,
+      arith::ShRUIOp::create(
+          rewriter, loc,
+          arith::MulIOp::create(
+              rewriter, loc,
+              arith::ShRUIOp::create(rewriter, loc, hash, thirtyTwo),
+              arith::IndexCastUIOp::create(rewriter, loc, i64, count)),
+          thirtyTwo));
   Value indexMask = arith::IndexCastUIOp::create(rewriter, loc, index, mask);
   // The first slot from its home that is empty or the key's.
   auto probe = scf::WhileOp::create(
@@ -21546,6 +21558,7 @@ static void declareTextRuntime(IRRewriter &rewriter, ModuleOp module,
   declare("ent_text_own", {i64}, {i64});
   declare("ent_text_drop", {i64}, {});
   declare("ent_text_length", {i64}, {i32});
+  declare("ent_text_hash", {i64, i64}, {i64});
   declare("ent_text_at", {i64, i64}, {i8});
   declare("ent_text_equal", {i64, i64}, {i8});
   declare("ent_text_cut", {i64, i64, i32}, {});
@@ -21580,7 +21593,8 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
   bool makes = false;
   module.walk([&](Operation *op) {
     if (isa<TextConstantOp, TextOfOp, TextCutOp, TextLengthOp, TextAtOp,
-            TextEqualOp, TextOwnOp, TextDropOp, TextJoinOp, TextKeepOp>(op))
+            TextHashOp, TextEqualOp, TextOwnOp, TextDropOp, TextJoinOp,
+            TextKeepOp>(op))
       ops.push_back(op);
     makes |= isa<TextJoinOp, TextKeepOp>(op);
   });
@@ -21741,6 +21755,11 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
       rewriter.replaceOp(op, call(loc, "ent_text_at", {rewriter.getI8Type()},
                                   {address(loc, at.getValue()), index})
                                  .getResults());
+    } else if (auto hash = dyn_cast<TextHashOp>(op)) {
+      rewriter.replaceOp(op,
+                         call(loc, "ent_text_hash", {i64},
+                              {address(loc, hash.getValue()), hash.getSeed()})
+                             .getResults());
     } else if (auto equal = dyn_cast<TextEqualOp>(op)) {
       Value is = call(loc, "ent_text_equal", {rewriter.getI8Type()},
                       {address(loc, equal.getLhs()),
@@ -23982,6 +24001,18 @@ struct EntLowerToLoops
                             fields))
           groupedSends.insert(index.getInt());
       });
+    // Rows a reactive query gives a buffer in whatever order (an index's
+    // list of what changed, `ent.any_order`): given where they are sent,
+    // on one thread, so that the query goes through the logs.
+    module.walk([&](AppendOp append) {
+      auto query = append->getParentOfType<QueryOp>();
+      if (!append->hasAttr("ent.any_order") || !query || query.isTurn() ||
+          query.getCascade() || query.hasBy() || getTriggers(query).empty() ||
+          append->getParentOfType<EachOp>())
+        return;
+      append->setAttr(kOrderFreeAttr, rewriter.getUnitAttr());
+      append->setAttr(kAtOnceAttr, rewriter.getUnitAttr());
+    });
     // Whole numbers a reactive query sends or adds up, where the order
     // does not show (see kOrderFreeAttr): nothing else in the query reads
     // or sets the field, or sends to it by another rule. (Looking whether

@@ -133,8 +133,16 @@ Built (2026-10-23, `docs/syntax.md`, Hash indexes):
   they are stored as made. A key many entities have is one slot, and
   its list: one slot an entity would put them all in one run of slots
   (200,000 entities of 7 keys took a second to make so).
+- The slots: twice the keys at least (a power of two, 64 at least),
+  from twice those of the last time it was made, four times as many
+  where the keys come to more than half; made anew where a key more
+  would come to that as it is mended. A key's home is the hash's high
+  bits (multiply-shift): with the low bits, runs of whole numbers
+  landed on half as many homes in a small table (`bench/hash/homes.c`).
 - The hash: rapidhash's mix (one 64 by 64 bit multiply, the halves of
-  the product xored; `ent.hash`), its seed and secrets fixed. Measured
+  the product xored; `ent.hash`), its seed and secrets fixed. A text
+  is hashed 16 bytes at a time in one call (`ent.text.hash`,
+  `devices/text.c`). Measured
   against wyhash64 (two such multiplies), aHash without AES (the same
   folded multiply twice and a rotate: its fast form needs the AES
   instructions, which ent's code does not have) and SplitMix64's
@@ -161,7 +169,8 @@ Built (2026-10-23, `docs/syntax.md`, Hash indexes):
 - Kept each of the ways of section 4: `rebuild` makes it anew; as fits
   and `incremental` mend it, from the entities whose key or copies
   differ from their rows' (as fits, all looked at) or that a reactive
-  `for` says changed (`incremental`): each taken out of its key's list
+  `for` says changed (`incremental`, through its log: the list of what
+  changed is in any order, `ent.any_order`): each taken out of its key's list
   and put at the end of its new key's (a key none has now: its slot
   emptied, those after it moved back, no tombstones).
 - For: an entity by name or an id from outside, a netlist's signal name

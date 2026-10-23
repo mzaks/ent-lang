@@ -3563,9 +3563,16 @@ LogicalResult Parser::parseIndex() {
     std::string keyType_ = typeSpelling(storedKey);
     out << "transient unique " << n << "_fresh: bool\n"
         << "transient unique " << n << "_whole: bool\n"
-        << "transient unique " << n << "_places: i64\n"
+        << "transient unique " << n
+        << "_places: i64\n"
+        // (How many keys it has: what its slots are made for.)
+        << "transient unique " << n
+        << "_keys: i64\n"
+        // (A key's home: by the hash's high bits, which runs of whole
+        // numbers spread over the slots evenly, as a multiply and a shift
+        // do; its low bits do not.)
         << "fn " << n << "_home(order: " << n << ", h: u64) -> i32 {\n"
-        << "  (h & ((len(order) - 1) as u64)) as i32\n}\n"
+        << "  (((h >> 32) * (len(order) as u64)) >> 32) as i32\n}\n"
         // The slot of a key, or the empty one it would have.
         << "fn " << n << "_slot(order: " << n << ", key: " << keyType_
         << (textKey ? ", check: u64" : "") << ") -> i32 {\n"
@@ -3573,12 +3580,14 @@ LogicalResult Parser::parseIndex() {
         << "  while order[s].head >= 0 && !(order[s].key == key"
         << (textKey ? " && order[s].check == check" : "") << ") {\n"
         << "    s = (s + 1) & (len(order) - 1)\n  }\n  s\n}\n"
-        // An entity's row at the end of its key's list.
+        // An entity's row at the end of its key's list; whether no other
+        // has that key.
         << "proc " << n << "_append(order: mut " << n << ", list: mut " << n
-        << "_list, r: i32) {\n"
+        << "_list, r: i32) -> bool {\n"
         << "  let s = " << slotOf("list[r]") << "\n"
+        << "  let fresh = order[s].head < 0\n"
         << "  list[r].next = -1\n"
-        << "  if order[s].head >= 0 {\n"
+        << "  if !fresh {\n"
         << "    list[order[s].last].next = r\n"
         << "    list[r].prev = order[s].last\n"
         << "    order[s].count += 1\n"
@@ -3589,7 +3598,7 @@ LogicalResult Parser::parseIndex() {
         << "    order[s].count = 1\n"
         << "    list[r].prev = -1\n"
         << "  }\n"
-        << "  order[s].last = r\n}\n";
+        << "  order[s].last = r\n  fresh\n}\n";
     // Under `unique`: where a key's list has two entities, the program
     // stops and says which.
     auto checkUnique = [&](const std::string &indent, const std::string &row) {
@@ -3603,32 +3612,55 @@ LogicalResult Parser::parseIndex() {
              "list[list[first_].next].who)\n"
           << indent << "}\n";
     };
+    // Made: the slots as many as twice the keys at least (a power of two,
+    // 64 at least, at most `slots`), from as many as twice those it had
+    // last (`hint`), four times as many where the keys come to more than
+    // half; how many keys there are.
     out << "proc " << n << "_build(order: mut " << n << ", list: mut " << n
-        << "_list, held: mut " << of.front() << ", slots: i32) {\n"
+        << "_list, held: mut " << of.front()
+        << ", slots: i32, hint: i64) -> i64 {\n"
+        << "  var keys: i64 = 0\n"
         << "  if len(list) == 0 {\n    order = []\n  } else {\n"
-        << "    order = [{ key: list[0].key, head: -1, last: -1, count: 0"
-        << (textKey ? ", check: 0" : "") << " }; slots]\n"
-        << "    for k in 0..len(list) {\n"
-        << "      " << n << "_append(order, list, k)\n"
-        << "      held[list[k].who]." << rowField << " = k\n"
+        << "    var size = 64\n"
+        << "    while (size as i64) < hint * 2 && size < slots { size *= 2 }\n"
+        << "    var again = true\n"
+        << "    while again {\n"
+        << "      order = [{ key: list[0].key, head: -1, last: -1, count: 0"
+        << (textKey ? ", check: 0" : "") << " }; size]\n"
+        << "      keys = 0\n"
+        << "      for k in 0..len(list) {\n"
+        << "        if keys * 2 <= size as i64 {\n"
+        << "          if " << n << "_append(order, list, k) { keys += 1 }\n"
+        << "          held[list[k].who]." << rowField << " = k\n"
+        << "        }\n"
+        << "      }\n"
+        << "      again = keys * 2 > size as i64\n"
+        << "      if again { size = min(size * 4, slots) }\n"
         << "    }\n";
     if (unique) {
       out << "    for k in 0..len(list) {\n";
       checkUnique("      ", "list[k]");
       out << "    }\n";
     }
-    out << "  }\n}\n";
+    out << "  }\n  keys\n}\n";
     // Mended: each changed entity's copies written into its row; where
     // its key changed, its row taken out of its key's list (and where no
     // other has that key, the slot emptied, those after it along the
     // slots that their home no longer reaches moved back into the hole),
     // then put at the end of its new key's, with its place as it was.
     if (how != "rebuild") {
+      // (How many keys there are, given and said; -1 where a key more
+      // could make them more than half the slots: then made anew.)
       out << "proc " << n << "_mend(order: mut " << n << ", list: mut " << n
           << "_list, held: mut " << of.front() << ", changed: " << n
-          << "_changed) {\n"
+          << "_changed, given: i64) -> i64 {\n"
+          << "  var keys = given\n"
           << "  let mask = len(order) - 1\n"
           << "  for k in 0..len(changed) {\n"
+          << "   if keys >= 0 && (keys + 1) * 2 > len(order) as i64 {\n"
+          << "    keys = -1\n"
+          << "   }\n"
+          << "   if keys >= 0 {\n"
           << "    let r = held[changed[k].who]." << rowField << "\n";
       for (const Copy &copy : copies)
         out << "    list[r]." << copy.name << " = changed[k]." << copy.name
@@ -3660,19 +3692,20 @@ LogicalResult Parser::parseIndex() {
           << "          j = (j + 1) & mask\n"
           << "        }\n"
           << "        order[hole].head = -1\n"
+          << "        keys -= 1\n"
           << "      }\n"
           << "      list[r].key = changed[k].key\n"
           << (textKey ? "      list[r].check = changed[k].check\n" : "")
-          << "      " << n << "_append(order, list, r)\n"
-          << "    }\n  }\n";
+          << "      if " << n << "_append(order, list, r) { keys += 1 }\n"
+          << "    }\n   }\n  }\n";
       // (After all of them: two may have swapped their keys.)
       if (unique) {
-        out << "  for k in 0..len(changed) {\n"
+        out << "  if keys >= 0 {\n   for k in 0..len(changed) {\n"
             << "    let r = held[changed[k].who]." << rowField << "\n";
         checkUnique("    ", "list[r]");
-        out << "  }\n";
+        out << "   }\n  }\n";
       }
-      out << "}\n";
+      out << "  keys\n}\n";
     }
     // The entity of a key (of a text: whose hashes are the text's), the
     // first of them as they are stored; none where none is.
@@ -3726,9 +3759,12 @@ LogicalResult Parser::parseIndex() {
       }
       out << " {\n      " << n << "_changed += { who: e, key: " << held << rest
           << " }\n    }\n"
-          << "    " << n << "_mend(" << n << ", " << n << "_list, "
-          << of.front() << ", " << n << "_changed)\n"
-          << "  } else {\n";
+          << "    " << n << "_keys = " << n << "_mend(" << n << ", " << n
+          << "_list, " << of.front() << ", " << n << "_changed, " << n
+          << "_keys)\n"
+          << "    if " << n << "_keys < 0 { " << n << "_whole = false }\n"
+          << "  }\n"
+          << "  if !" << n << "_whole {\n";
     }
     out << "  " << n << "_places = 0\n"
         << "  " << n << "_list = []\n"
@@ -3739,8 +3775,9 @@ LogicalResult Parser::parseIndex() {
         << "    c0." << placeField << " = place_\n"
         << "    " << n << "_list += { who: e, key: " << held
         << ", place: place_, next: -1, prev: -1" << rest << " }\n  }\n"
-        << "  " << n << "_build(" << n << ", " << n << "_list, " << of.front()
-        << ", " << kSlotsPlaceholder << ")\n"
+        << "  " << n << "_keys = " << n << "_build(" << n << ", " << n
+        << "_list, " << of.front() << ", " << kSlotsPlaceholder << ", " << n
+        << "_keys)\n"
         << "  " << n << "_whole = true\n";
     if (how != "rebuild")
       out << "  }\n";
@@ -4257,6 +4294,16 @@ LogicalResult Parser::parseIndex() {
   previousEnd = savedEnd;
   if (failed(made))
     return failure();
+  // (Made again incrementally: the entities that changed are listed in any
+  // order, which the mending does not show, so the reactive `for` that
+  // lists them goes through the log of what changed, not every entity.)
+  if (how == "incremental" && !grid)
+    if (auto update = dyn_cast_or_null<SystemOp>(SymbolTable::lookupSymbolIn(
+            module, builder.getStringAttr(resolve(n + "_update")))))
+      update.walk([&](AppendOp append) {
+        if (append.getBufferAttr().getValue() == resolve(n + "_changed"))
+          append->setAttr("ent.any_order", builder.getUnitAttr());
+      });
 
   auto strings = [&](ArrayRef<std::string> list) {
     SmallVector<Attribute> attrs;
@@ -11710,71 +11757,13 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       FailureOr<mlir::Value> text = emit(operand, StringType::get(context));
       if (failed(text))
         return failure();
-      mlir::Value length =
-          TextLengthOp::create(builder, at, builder.getI32Type(), *text);
-      Type indexType = builder.getIndexType();
-      auto toIndex = [&](mlir::Value v) -> mlir::Value {
-        return arith::IndexCastOp::create(builder, at, indexType, v);
-      };
-      // A word of the 8 bytes from `from` (0 past the end).
-      auto word = [&](mlir::Value from) -> mlir::Value {
-        mlir::Value bits = constant(0);
-        for (int k = 0; k < 8; ++k) {
-          mlir::Value place =
-              arith::AddIOp::create(builder, at, from,
-                                    arith::ConstantIntOp::create(
-                                        builder, at, builder.getI32Type(), k));
-          mlir::Value byte = arith::ExtUIOp::create(
-              builder, at, i64,
-              TextAtOp::create(builder, at, builder.getIntegerType(8), *text,
-                               place));
-          bits = arith::OrIOp::create(
-              builder, at, bits,
-              arith::ShLIOp::create(builder, at, byte, constant(8 * k)));
-        }
-        return bits;
-      };
-      mlir::Value blocks = arith::DivUIOp::create(
-          builder, at,
-          arith::AddIOp::create(builder, at, length,
-                                arith::ConstantIntOp::create(
-                                    builder, at, builder.getI32Type(), 15)),
-          arith::ConstantIntOp::create(builder, at, builder.getI32Type(), 16));
+      // (Its bytes 16 at a time, two words of 8 mixed in, then its
+      // length: devices/text.c, in one call.)
       mlir::Value seed =
           seeded ? mlir::Value(arith::XOrIOp::create(
                        builder, at, seeded, constant(0xbdd89aa982704029ull)))
                  : constant(0xbdd89aa982704029ull);
-      auto loop = scf::ForOp::create(
-          builder, at,
-          toIndex(arith::ConstantIntOp::create(builder, at,
-                                               builder.getI32Type(), 0)),
-          toIndex(blocks), arith::ConstantIndexOp::create(builder, at, 1),
-          ValueRange{seed});
-      {
-        OpBuilder::InsertionGuard guard(builder);
-        builder.setInsertionPointToStart(loop.getBody());
-        mlir::Value from = arith::MulIOp::create(
-            builder, at,
-            arith::IndexCastOp::create(builder, at, builder.getI32Type(),
-                                       loop.getInductionVar()),
-            arith::ConstantIntOp::create(builder, at, builder.getI32Type(),
-                                         16));
-        mlir::Value a = word(from);
-        mlir::Value b = word(
-            arith::AddIOp::create(builder, at, from,
-                                  arith::ConstantIntOp::create(
-                                      builder, at, builder.getI32Type(), 8)));
-        mlir::Value hash = loop.getRegionIterArg(0);
-        scf::YieldOp::create(
-            builder, at,
-            mlir::Value(mix(arith::XOrIOp::create(builder, at, a, secret1),
-                            arith::XOrIOp::create(builder, at, b, hash))));
-      }
-      mlir::Value hashed =
-          mix(arith::XOrIOp::create(builder, at, loop.getResult(0), secret0),
-              arith::XOrIOp::create(
-                  builder, at, arith::ExtUIOp::create(builder, at, i64, length),
-                  secret2));
+      mlir::Value hashed = TextHashOp::create(builder, at, i64, *text, seed);
       return fromBits(at, hashed,
                       builder.getIntegerType(64, /*isSigned=*/false));
     }
