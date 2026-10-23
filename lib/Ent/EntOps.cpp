@@ -567,6 +567,30 @@ BufferAtOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return success();
 }
 
+LogicalResult IndexGetOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto buffer =
+      symbolTable.lookupNearestSymbolFrom<BufferOp>(*this, getBufferAttr());
+  auto info = buffer ? buffer->getAttrOfType<DictionaryAttr>("ent.index")
+                     : DictionaryAttr();
+  if (!info || !info.get("hash"))
+    return emitOpError("asks ") << getBufferAttr() << ", not a hash index";
+  for (StringRef part : {"_list", "_tags"})
+    if (!symbolTable.lookupNearestSymbolFrom<BufferOp>(
+            *this,
+            StringAttr::get(getContext(), getBufferAttr().getValue() + part)))
+      return emitOpError("asks ")
+             << getBufferAttr() << ", which has no '" << part << "'";
+  return success();
+}
+
+LogicalResult IndexGetOp::verify() {
+  if (auto system = (*this)->getParentOfType<SystemOp>();
+      system && system.getGpu())
+    return emitOpError("is in a 'gpu' system: a hash index is asked on the "
+                       "CPU");
+  return success();
+}
+
 /// `value` through what only changes its type: a row number made of an
 /// integer and back, an integer made wider, an index.
 static Value throughCasts(Value value) {

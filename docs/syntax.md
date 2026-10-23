@@ -2070,9 +2070,11 @@ entities of a key, by a hash of it, in place of an order.
   many as twice the first component's capacity) hold the keys, and its rows (`Name_list`, one for
   each entity, in the order they are stored) the entities: `who`, the
   key, `place`, the rows before and after of its key, and what `{ }`
-  copies. The names `Name_list`, `Name_changed`, `Name_keys`, `Name_home`,
-  `Name_slot`, `Name_append`, `Name_build`, `Name_mend` and `Name_get`
-  are taken besides those above. Not `find`, `[r]` or `for ... by`: it
+  copies; its tags (`Name_tags`, a byte for each slot) let a key be
+  looked for 16 slots at a time. The names `Name_list`, `Name_tags`,
+  `Name_changed`, `Name_keys`, `Name_home`, `Name_tag`, `Name_mark`,
+  `Name_slot`, `Name_append`, `Name_build` and `Name_mend` are taken
+  besides those above. Not `find`, `[r]` or `for ... by`: it
   has no order.
 - `hash_of(x)` and `hash_of(x, seed)`, built in: the hash it takes, of a
   whole number, an enum, an entity or a text, as a `u64` (rapidhash's

@@ -1,0 +1,28 @@
+// `Name.get(key)` (test/Integration/hash_get.test): 200,000 keys at
+// random, about half as many as there are slots, so that the runs of
+// slots taken go past 16 (and round the end of the slots): each entity
+// gets itself, and a key next to its own none; again after keys changed
+// and the index was mended (or made anew).
+import console
+import wyhash
+component Ship { id: i64 } capacity 200000
+index ById of Ship by id hash unique WAY
+unique Bad: i64
+unique Good: i64
+unique Step: i64
+world { for i in 0..200000 { spawn { Ship { id: wyrand(9, i as i64) as i64 } } } }
+system check() {
+  for e, s: Ship {
+    if ById.get(s.id) == e { Good += 1 } else { Bad += 1 }
+    if ById.get(s.id ^ 1) != none { Bad += 1 }
+  }
+}
+system change() {
+  Step += 1
+  let t = Step as u64
+  for s: mut Ship { if wyrand_below(t, s.id, 20) == 0 { s.id = wyrand(t + 100, s.id) as i64 } }
+}
+system say() { put("good {Good} bad {Bad}") }
+schedule a() { check() change() }
+schedule b() { check() say() }
+main { a() a() a() a() a() b() }

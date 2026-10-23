@@ -5,24 +5,25 @@
 #include "Ent/Structure.h"
 #include "Ent/World.h"
 
-#include "mlir/IR/Dominance.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/GPU/Transforms/ParallelLoopMapper.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/Dialect/SCF/Transforms/Transforms.h"
+#include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/IRMapping.h"
-#include "mlir/Transforms/DialectConversion.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Transforms/DialectConversion.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/SaveAndRestore.h"
-#include "llvm/ADT/MapVector.h"
-#include "llvm/ADT/DenseSet.h"
-#include "llvm/ADT/DenseMap.h"
 
 namespace mlir::ent {
 #define GEN_PASS_DEF_ENTLOWERTOLOOPS
@@ -1265,7 +1266,7 @@ static bool isEntityLocal(QueryOp query) {
     // runs (the rows it gives one are there when it ends), so its rows
     // and its length are read by every entity alike, also through a fn
     // that is given it to read (a fn does nothing else to the world).
-    if (isa<BufferLenOp, BufferAtOp>(op))
+    if (isa<BufferLenOp, BufferAtOp, IndexGetOp>(op))
       return WalkResult::advance();
     // What is combined into a parent atomically, in any order, from any
     // thread (see flattenGpuCascades).
@@ -16716,8 +16717,8 @@ appendsOnly(QueryOp query) {
     if (auto handed = dyn_cast<BufferOfOp>(op))
       return handed.getResult().getType().getMut() ? WalkResult::interrupt()
                                                    : WalkResult::advance();
-    if (isa<GetOp, ReadOp, BufferAtOp, BufferLenOp, LookupOp, EntityOp,
-            HasOp, BoundOp, scf::IfOp, scf::ForOp, scf::WhileOp,
+    if (isa<GetOp, ReadOp, BufferAtOp, BufferLenOp, IndexGetOp, LookupOp,
+            EntityOp, HasOp, BoundOp, scf::IfOp, scf::ForOp, scf::WhileOp,
             scf::YieldOp, scf::ConditionOp, YieldOp>(op))
       return WalkResult::advance();
     if (op->getNumRegions() == 0 && isMemoryEffectFree(op))
@@ -17101,30 +17102,206 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
 /// key few entities have (see lowerQuery).
 static constexpr StringLiteral kChosenAttr = "ent.hash_chosen";
 
-/// Of a query a hash index answers (QueryOp::kViaHashAttr): the slot of
-/// the key it asks for in the index (`slot`, an index), and how many
-/// entities have that key (`count`, an i32: 0 where none has it), at the
-/// insertion point.
+/// Of a key asked of a hash index: its slot (an index), whether it has
+/// the key (an i1), and how many entities have it (an i32: 0 where none
+/// has it; read only where asked, see probeHash).
 struct HashSlot {
-  Value slot, count;
+  Value slot, found, count;
 };
-static HashSlot findHashSlot(IRRewriter &rewriter, Location loc, QueryOp query,
-                             const WorldLayout &layout, WorldAccess &world) {
-  const WorldBuffer &slots = layout.getBuffer(query.getViaHash().getAttr());
-  auto load = [&](StringRef name, Value row) {
-    const WorldColumn &field =
-        *llvm::find_if(slots.fields, [&](const WorldColumn &field) {
+/// The slot of the hash index whose slots are `index` that has the key
+/// whose stored bits are `wanted` (and, of a text, whose other hash is
+/// `check`), by its hash `hash`; and how many entities have it (0 where
+/// none, the slot then the empty one it would have). As SwissTable looks:
+/// the tags of 16 slots from the key's home on (`N_tags`, the first 16
+/// again after the last) compared at once with the key's and with empty,
+/// the keys looked at only where the tag is the key's and before the
+/// first empty slot, which is as far as linear probing puts it; the next
+/// 16 only where there was no empty one.
+static HashSlot probeHash(IRRewriter &rewriter, Location loc,
+                          const WorldLayout &layout, WorldAccess &world,
+                          StringAttr index, Value wanted, Value check,
+                          Value hash, bool counted = true) {
+  MLIRContext *context = rewriter.getContext();
+  const WorldBuffer &slots = layout.getBuffer(index);
+  const WorldBuffer &tags =
+      layout.getBuffer(StringAttr::get(context, index.getValue() + "_tags"));
+  auto column = [&](const WorldBuffer &buffer, StringRef name) {
+    return world.bufferField(
+        buffer, *llvm::find_if(buffer.fields, [&](const WorldColumn &field) {
           return field.field.getValue() == name;
-        });
-    return memref::LoadOp::create(
-               rewriter, loc, world.bufferField(slots, field), ValueRange{row})
+        }));
+  };
+  auto load = [&](StringRef name, Value row) {
+    return memref::LoadOp::create(rewriter, loc, column(slots, name),
+                                  ValueRange{row})
         .getResult();
   };
+  Type i8 = rewriter.getI8Type();
+  Type i16 = rewriter.getI16Type();
   Type i32 = rewriter.getI32Type();
   Type i64 = rewriter.getI64Type();
-  Type index = rewriter.getIndexType();
+  Type index_ = rewriter.getIndexType();
+  auto constant = [&](Type type, int64_t value) -> Value {
+    return arith::ConstantIntOp::create(rewriter, loc, type, value);
+  };
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  Value count = world.toIndex(
+      loc, memref::LoadOp::create(rewriter, loc, world.bufferCount(slots),
+                                  ValueRange{zero}));
+  auto some = scf::IfOp::create(
+      rewriter, loc, TypeRange{index_, rewriter.getI1Type()},
+      arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ugt, count,
+                            zero),
+      /*withElseRegion=*/true);
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPointToStart(some.thenBlock());
+  Value thirtyTwo = constant(i64, 32);
+  Value high = arith::ShRUIOp::create(rewriter, loc, hash, thirtyTwo);
+  // (Its home by the hash's high bits, as Name_home has it; its tag, 7
+  // bits more of them, as Name_tag.)
+  Value home = arith::IndexCastUIOp::create(
+      rewriter, loc, index_,
+      arith::ShRUIOp::create(
+          rewriter, loc,
+          arith::MulIOp::create(
+              rewriter, loc, high,
+              arith::IndexCastUIOp::create(rewriter, loc, i64, count)),
+          thirtyTwo));
+  Value mask = arith::SubIOp::create(
+      rewriter, loc, count, arith::ConstantIndexOp::create(rewriter, loc, 1));
+  Value tag = arith::TruncIOp::create(
+      rewriter, loc, i8,
+      arith::AndIOp::create(rewriter, loc, high, constant(i64, 127)));
+  VectorType group = VectorType::get({16}, i8);
+  Value tagged = vector::BroadcastOp::create(rewriter, loc, group, tag);
+  Value empty =
+      vector::BroadcastOp::create(rewriter, loc, group, constant(i8, -128));
+  Value tagColumn = column(tags, "tag");
+  // (The 16 lanes of a comparison as the bits of an i32.)
+  auto bits = [&](Value lanes) -> Value {
+    Value word = vector::BitCastOp::create(rewriter, loc,
+                                           VectorType::get({1}, i16), lanes);
+    return arith::ExtUIOp::create(
+        rewriter, loc, i32,
+        vector::ExtractOp::create(rewriter, loc, word, ArrayRef<int64_t>{0}));
+  };
+  auto lowest = [&](Value word) -> Value {
+    return LLVM::CountTrailingZerosOp::create(rewriter, loc, i32, word,
+                                              /*is_zero_poison=*/false);
+  };
+  auto keyIs = [&](Value slot) -> Value {
+    Value same = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::eq,
+        wordOf(rewriter, loc, load("key", slot), layout), wanted);
+    if (check)
+      same = arith::AndIOp::create(
+          rewriter, loc, same,
+          arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::eq,
+              wordOf(rewriter, loc, load("check", slot), layout), check));
+    return same;
+  };
+  Value no = constant(rewriter.getI1Type(), 0);
+  auto groups = scf::WhileOp::create(
+      rewriter, loc, TypeRange{index_, index_, rewriter.getI1Type()},
+      ValueRange{home},
+      [&](OpBuilder &, Location, ValueRange at) {
+        Value pos = at[0];
+        Value lanes =
+            vector::LoadOp::create(rewriter, loc, group, tagColumn, pos);
+        Value matches = bits(arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::eq, lanes, tagged));
+        Value empties = bits(arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::eq, lanes, empty));
+        // As far as the first empty slot (16 where there is none).
+        Value first = lowest(arith::OrIOp::create(rewriter, loc, empties,
+                                                  constant(i32, 1 << 16)));
+        Value before = arith::SubIOp::create(
+            rewriter, loc,
+            arith::ShLIOp::create(rewriter, loc, constant(i32, 1), first),
+            constant(i32, 1));
+        Value candidates =
+            arith::AndIOp::create(rewriter, loc, matches, before);
+        // Each slot whose tag is the key's: its key.
+        auto look = scf::WhileOp::create(
+            rewriter, loc, TypeRange{i32, index_, rewriter.getI1Type()},
+            ValueRange{candidates, zero, no},
+            [&](OpBuilder &, Location, ValueRange in) {
+              Value more = arith::AndIOp::create(
+                  rewriter, loc,
+                  arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne,
+                                        in[0], constant(i32, 0)),
+                  arith::XOrIOp::create(rewriter, loc, in[2],
+                                        constant(rewriter.getI1Type(), 1)));
+              scf::ConditionOp::create(rewriter, loc, more, in);
+            },
+            [&](OpBuilder &, Location, ValueRange in) {
+              Value slot = arith::AndIOp::create(
+                  rewriter, loc,
+                  arith::AddIOp::create(
+                      rewriter, loc, pos,
+                      arith::IndexCastUIOp::create(rewriter, loc, index_,
+                                                   lowest(in[0]))),
+                  mask);
+              Value same = keyIs(slot);
+              scf::YieldOp::create(
+                  rewriter, loc,
+                  ValueRange{
+                      arith::AndIOp::create(
+                          rewriter, loc, in[0],
+                          arith::SubIOp::create(rewriter, loc, in[0],
+                                                constant(i32, 1))),
+                      arith::SelectOp::create(rewriter, loc, same, slot, in[1]),
+                      same});
+            });
+        Value found = look.getResult(2);
+        Value ended = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::ult, first, constant(i32, 16));
+        Value emptySlot = arith::AndIOp::create(
+            rewriter, loc,
+            arith::AddIOp::create(
+                rewriter, loc, pos,
+                arith::IndexCastUIOp::create(rewriter, loc, index_, first)),
+            mask);
+        Value slot = arith::SelectOp::create(rewriter, loc, found,
+                                             look.getResult(1), emptySlot);
+        Value next = arith::AndIOp::create(
+            rewriter, loc,
+            arith::AddIOp::create(
+                rewriter, loc, pos,
+                arith::ConstantIndexOp::create(rewriter, loc, 16)),
+            mask);
+        Value onward = arith::AndIOp::create(
+            rewriter, loc,
+            arith::XOrIOp::create(rewriter, loc, found,
+                                  constant(rewriter.getI1Type(), 1)),
+            arith::XOrIOp::create(rewriter, loc, ended,
+                                  constant(rewriter.getI1Type(), 1)));
+        scf::ConditionOp::create(rewriter, loc, onward,
+                                 ValueRange{next, slot, found});
+      },
+      [&](OpBuilder &, Location, ValueRange at) {
+        scf::YieldOp::create(rewriter, loc, ValueRange{at[0]});
+      });
+  scf::YieldOp::create(rewriter, loc,
+                       ValueRange{groups.getResult(1), groups.getResult(2)});
+  rewriter.setInsertionPointToStart(some.elseBlock());
+  scf::YieldOp::create(rewriter, loc,
+                       ValueRange{zero, constant(rewriter.getI1Type(), 0)});
+  rewriter.setInsertionPointAfter(some);
+  HashSlot found{some.getResult(0), some.getResult(1), Value()};
+  if (counted)
+    found.count =
+        arith::SelectOp::create(rewriter, loc, found.found,
+                                load("count", found.slot), constant(i32, 0));
+  return found;
+}
+
+/// Of a query a hash index answers: the slot of the key it asks for, and
+/// how many have it (see probeHash).
+static HashSlot findHashSlot(IRRewriter &rewriter, Location loc, QueryOp query,
+                             const WorldLayout &layout, WorldAccess &world) {
+  Type i64 = rewriter.getI64Type();
   // (A text by its two hashes, which the index holds; a number by itself,
   // from the slot its hash says.)
   Value text = query.getSlicePart("equals_hash");
@@ -17137,73 +17314,8 @@ static HashSlot findHashSlot(IRRewriter &rewriter, Location loc, QueryOp query,
       text ? wanted
            : HashOp::create(rewriter, loc, i64, query.getSlicePart("equals"))
                  .getResult();
-  Value count = world.toIndex(
-      loc, memref::LoadOp::create(rewriter, loc, world.bufferCount(slots),
-                                  ValueRange{zero}));
-  auto some = scf::IfOp::create(rewriter, loc, TypeRange{index, i32},
-                                arith::CmpIOp::create(rewriter, loc,
-                                                      arith::CmpIPredicate::ugt,
-                                                      count, zero),
-                                /*withElseRegion=*/true);
-  OpBuilder::InsertionGuard guard(rewriter);
-  rewriter.setInsertionPointToStart(some.thenBlock());
-  Value mask = arith::SubIOp::create(
-      rewriter, loc, arith::IndexCastUIOp::create(rewriter, loc, i64, count),
-      arith::ConstantIntOp::create(rewriter, loc, i64, 1));
-  // (Its home by the hash's high bits, as Name_home has it.)
-  Value thirtyTwo = arith::ConstantIntOp::create(rewriter, loc, i64, 32);
-  Value home = arith::IndexCastUIOp::create(
-      rewriter, loc, index,
-      arith::ShRUIOp::create(
-          rewriter, loc,
-          arith::MulIOp::create(
-              rewriter, loc,
-              arith::ShRUIOp::create(rewriter, loc, hash, thirtyTwo),
-              arith::IndexCastUIOp::create(rewriter, loc, i64, count)),
-          thirtyTwo));
-  Value indexMask = arith::IndexCastUIOp::create(rewriter, loc, index, mask);
-  // The first slot from its home that is empty or the key's.
-  auto probe = scf::WhileOp::create(
-      rewriter, loc, TypeRange{index}, ValueRange{home},
-      [&](OpBuilder &, Location, ValueRange at) {
-        Value taken = arith::CmpIOp::create(
-            rewriter, loc, arith::CmpIPredicate::sge, load("head", at[0]),
-            arith::ConstantIntOp::create(rewriter, loc, i32, 0));
-        Value other = arith::CmpIOp::create(
-            rewriter, loc, arith::CmpIPredicate::ne,
-            wordOf(rewriter, loc, load("key", at[0]), layout), wanted);
-        if (check)
-          other = arith::OrIOp::create(
-              rewriter, loc, other,
-              arith::CmpIOp::create(
-                  rewriter, loc, arith::CmpIPredicate::ne,
-                  wordOf(rewriter, loc, load("check", at[0]), layout), check));
-        scf::ConditionOp::create(
-            rewriter, loc, arith::AndIOp::create(rewriter, loc, taken, other),
-            at);
-      },
-      [&](OpBuilder &, Location, ValueRange at) {
-        scf::YieldOp::create(
-            rewriter, loc,
-            ValueRange{arith::AndIOp::create(
-                rewriter, loc, arith::AddIOp::create(rewriter, loc, at[0], one),
-                indexMask)});
-      });
-  Value slot = probe.getResult(0);
-  Value taken = arith::CmpIOp::create(
-      rewriter, loc, arith::CmpIPredicate::sge, load("head", slot),
-      arith::ConstantIntOp::create(rewriter, loc, i32, 0));
-  scf::YieldOp::create(
-      rewriter, loc,
-      ValueRange{slot,
-                 arith::SelectOp::create(
-                     rewriter, loc, taken, load("count", slot),
-                     arith::ConstantIntOp::create(rewriter, loc, i32, 0))});
-  rewriter.setInsertionPointToStart(some.elseBlock());
-  scf::YieldOp::create(
-      rewriter, loc,
-      ValueRange{zero, arith::ConstantIntOp::create(rewriter, loc, i32, 0)});
-  return {some.getResult(0), some.getResult(1)};
+  return probeHash(rewriter, loc, layout, world, query.getViaHash().getAttr(),
+                   wanted, check, hash);
 }
 
 /// Replace a query that goes by a field (`by @C "f"`) by a loop over its
@@ -20488,7 +20600,7 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
                 // (A running sum has passes of its own.)
                 return isa<SpawnOp, DespawnOp, EachOp, EdgesOp, ConnectOp,
                            AppendOp, ClearOp, BufferLenOp, BufferAtOp,
-                           BufferOfOp, BufferSetOp, BufferFillOp,
+                           IndexGetOp, BufferOfOp, BufferSetOp, BufferFillOp,
                            BufferKeepOp, RunningOp, BufferClaimOp>(op)
                            ? WalkResult::interrupt()
                            : WalkResult::advance();
@@ -21077,7 +21189,8 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
   SmallVector<Operation *> uses;
   func.walk([&](Operation *op) {
     if (isa<AppendOp, ClearOp, BufferLenOp, BufferAtOp, BufferSetOp,
-            BufferFillOp, BufferKeepOp, RowsCheckOp, BufferClaimOp>(op))
+            BufferFillOp, BufferKeepOp, RowsCheckOp, BufferClaimOp, IndexGetOp>(
+            op))
       uses.push_back(op);
     else if (auto invoke = dyn_cast<InvokeOp>(op);
              invoke && takesBuffer(invoke))
@@ -21112,6 +21225,94 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
       }
       lowerInvoke(rewriter, invoke, function, /*defined=*/false, &layout,
                   &world);
+      continue;
+    }
+    // The entity of a key, of a hash index: the head of the key's list
+    // where it is the one, else the first of the list as they are stored.
+    if (auto get = dyn_cast<IndexGetOp>(op)) {
+      Type i32 = rewriter.getI32Type();
+      Type i64 = rewriter.getI64Type();
+      Value wanted = wordOf(rewriter, loc, get.getKey(), layout);
+      Value check = get.getCheck()
+                        ? wordOf(rewriter, loc, get.getCheck(), layout)
+                        : Value();
+      Value hash =
+          check ? wanted
+                : HashOp::create(rewriter, loc, i64, get.getKey()).getResult();
+      StringAttr index = get.getBufferAttr().getAttr();
+      HashSlot found = probeHash(rewriter, loc, layout, world, index, wanted,
+                                 check, hash, /*counted=*/false);
+      const WorldBuffer &slots = layout.getBuffer(index);
+      const WorldBuffer &list = layout.getBuffer(
+          StringAttr::get(rewriter.getContext(), index.getValue() + "_list"));
+      auto load = [&](const WorldBuffer &buffer, StringRef name, Value row) {
+        const WorldColumn &field =
+            *llvm::find_if(buffer.fields, [&](const WorldColumn &field) {
+              return field.field.getValue() == name;
+            });
+        return memref::LoadOp::create(rewriter, loc,
+                                      world.bufferField(buffer, field),
+                                      ValueRange{row})
+            .getResult();
+      };
+      auto toIndex = [&](Value row) -> Value {
+        return arith::IndexCastOp::create(rewriter, loc,
+                                          rewriter.getIndexType(), row);
+      };
+      Value none = world.noEntity(loc);
+      // Where the key is there: the slot's entity, where its key has one
+      // (none there where several have it, then the list's first); none
+      // where it is not, without reading the slot further.
+      auto walked = scf::IfOp::create(rewriter, loc, TypeRange{none.getType()},
+                                      found.found, /*withElseRegion=*/true);
+      {
+        OpBuilder::InsertionGuard inner(rewriter);
+        rewriter.setInsertionPointToStart(walked.elseBlock());
+        scf::YieldOp::create(rewriter, loc, none);
+        rewriter.setInsertionPointToStart(walked.thenBlock());
+        Value one = load(slots, "one", found.slot);
+        auto many = scf::IfOp::create(
+            rewriter, loc, TypeRange{none.getType()},
+            arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq, one,
+                                  none),
+            /*withElseRegion=*/true);
+        scf::YieldOp::create(rewriter, loc, many.getResult(0));
+        rewriter.setInsertionPointToStart(many.elseBlock());
+        scf::YieldOp::create(rewriter, loc, one);
+        rewriter.setInsertionPointToStart(many.thenBlock());
+        Value head = load(slots, "head", found.slot);
+        auto walk = scf::WhileOp::create(
+            rewriter, loc, TypeRange{i32, none.getType(), i64},
+            ValueRange{
+                head, none,
+                arith::ConstantIntOp::create(
+                    rewriter, loc, i64, std::numeric_limits<int64_t>::max())},
+            [&](OpBuilder &, Location, ValueRange at) {
+              scf::ConditionOp::create(
+                  rewriter, loc,
+                  arith::CmpIOp::create(
+                      rewriter, loc, arith::CmpIPredicate::sge, at[0],
+                      arith::ConstantIntOp::create(rewriter, loc, i32, 0)),
+                  at);
+            },
+            [&](OpBuilder &, Location, ValueRange at) {
+              Value row = toIndex(at[0]);
+              Value place = load(list, "place", row);
+              Value earlier = arith::CmpIOp::create(
+                  rewriter, loc, arith::CmpIPredicate::slt, place, at[2]);
+              scf::YieldOp::create(
+                  rewriter, loc,
+                  ValueRange{load(list, "next", row),
+                             arith::SelectOp::create(rewriter, loc, earlier,
+                                                     load(list, "who", row),
+                                                     at[1]),
+                             arith::SelectOp::create(rewriter, loc, earlier,
+                                                     place, at[2])});
+            });
+        scf::YieldOp::create(rewriter, loc, walk.getResult(1));
+      }
+      rewriter.replaceOp(op, world.fromStorage(loc, walked.getResult(0),
+                                               get.getResult().getType()));
       continue;
     }
     const WorldBuffer &buffer = layout.getBuffer(

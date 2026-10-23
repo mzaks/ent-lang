@@ -170,6 +170,31 @@ def Ent_BufferAtOp : Ent_Op<"buffer.at", [
   }];
 }
 
+def Ent_IndexGetOp
+    : Ent_Op<"index.get", [DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "The entity of a key, of a hash index";
+  let description = [{
+    ```mlir
+    %e = ent.index.get @ById [%k : i64] : !ent.entity
+    %f = ent.index.get @ByName [%h, %c : i64] : !ent.entity
+    ```
+    Of the hash index whose slots are the buffer `@ById` (its rows
+    `@ById_list`, its tags `@ById_tags`): the entity with the key, the
+    first as they are stored where several have it, none where none has
+    it. A text key is given by its two hashes (`hash_of(t)` and
+    `hash_of(t, 0x9e3779b97f4a7c15)`). Reads the index's buffers; not in
+    a `gpu` system.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$buffer, AnyType:$key,
+      Optional<I64>:$check);
+  let results = (outs Ent_EntityType:$result);
+  let assemblyFormat = [{
+    $buffer `[` $key (`,` $check^)? `:` type($key) `]` attr-dict `:`
+    type($result)
+  }];
+  let hasVerifier = 1;
+}
+
 def Ent_BufferSetOp : Ent_Op<"buffer.set", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Give a row of a buffer another value";

@@ -1,0 +1,11 @@
+// `Name.get(key)` of a hash index (docs/indexes.md, 5.1): found and not,
+// as keys change, each way it is kept; on one core and on many.
+// RUN: sed -e 's/WAY//' %S/Inputs/hash_get.ent > %t.fits.ent
+// RUN: sed -e 's/WAY/incremental/' %S/Inputs/hash_get.ent > %t.incremental.ent
+// RUN: sed -e 's/WAY/rebuild/' %S/Inputs/hash_get.ent > %t.rebuild.ent
+// RUN: %ent run %t.fits.ent | FileCheck %s
+// RUN: %ent run %t.incremental.ent | FileCheck %s
+// RUN: %ent run %t.rebuild.ent | FileCheck %s
+// RUN: %ent run --parallel %t.fits.ent | FileCheck %s
+
+// CHECK: good 1200000 bad 0

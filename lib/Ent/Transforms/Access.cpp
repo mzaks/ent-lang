@@ -533,9 +533,9 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
           access.reads.insert({archetype.getSymNameAttr(),
                                query.getByComponent().getAttr(),
                                query.getByField()});
-      // (A hash index's slots, and its rows: `N_list`.)
+      // (A hash index's slots, its rows (`N_list`) and tags.)
       if (FlatSymbolRefAttr index = query.getViaHash())
-        for (StringRef suffix : {"", "_list"})
+        for (StringRef suffix : {"", "_list", "_tags"})
           access.reads.insert(
               {StringAttr(),
                StringAttr::get(context, index.getValue() + suffix),
@@ -624,6 +624,15 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
         if (changes)
           writeStructure(archetype);
       }
+      return;
+    }
+    // (A hash index asked for a key: its slots, rows and tags.)
+    if (auto get = dyn_cast<IndexGetOp>(op)) {
+      for (StringRef part : {"", "_list", "_tags"})
+        access.reads.insert(
+            {StringAttr(),
+             StringAttr::get(context, get.getBufferAttr().getValue() + part),
+             StringAttr::get(context, "rows")});
       return;
     }
     if (isa<AppendOp, ClearOp, BufferLenOp, BufferAtOp, BufferOfOp,

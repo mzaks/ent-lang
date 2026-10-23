@@ -250,3 +250,12 @@ system look() {
   // expected-error @+1 {{'ByTeam' is a hash index: it is read by 'ByTeam.get(key)' and by a 'for' whose 'where' asks 'x.key == value', not by its rows}}
   let n = len(ByTeam)
 }
+
+// -----
+
+component Ship { team: i32 } capacity 8
+index ByTeam of Ship by team hash
+fn first(t: i32) -> entity {
+  // expected-error @+1 {{'ByTeam.get' is asked of the world's index, in a system}}
+  ByTeam.get(t)
+}

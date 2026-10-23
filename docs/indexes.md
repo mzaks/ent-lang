@@ -150,8 +150,21 @@ Built (2026-10-23, `docs/syntax.md`, Hash indexes):
   2026-10-23): the fastest, by about a fifth, and runs as short where
   keys are at random, shorter where they are made by a rule (numbers in
   a row, multiples of 1,024, high bits).
+- A byte for each slot (`Name_tags`): 128 where it is empty, else 7
+  bits of its key's hash, the first 16 again after the last. A key is
+  looked for as SwissTable looks: the tags of 16 slots from its home
+  compared at once with its own and with empty (one load, two compares
+  into masks), its key read only where the tag is its own and before
+  the first empty slot, the next 16 only where there was none
+  (`ent.index.get`, and the `for`s it answers).
 - `Name.get(key)`: the entity of a key, the first as they are stored
-  where several have it; `none` where none has it.
+  where several have it; `none` where none has it. Lowered where it is
+  (`ent.index.get`): a key one entity has gives the slot's own entity
+  (`one`), read beside its key; others go along the key's list. Against
+  absl::flat_hash_map by the same loop (`bench/hash/get.py` and
+  `swiss.cpp`): keys not there faster from 200,000 keys on (3.4 ns
+  where 5.8, at 4 million 4.0 where 9.5), keys found 1 to 1.5 ns
+  slower in the cache and as fast beyond it (35 ns where 33).
 - `for x: C where x.key == value` (or `value == x.key`, or one of the
   conditions `&&` joins), where the value is the same for all its
   entities (literals, consts, enum cases, locals not declared `var`):

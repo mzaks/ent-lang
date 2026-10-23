@@ -1033,7 +1033,7 @@ private:
     /// keep, the entity's text compared), and the field it is of.
     bool hashed = false;
     bool textKey = false;
-    std::string get, keyField;
+    std::string keyField;
   };
   llvm::StringMap<Index> indexes;
   /// Parsing what an index declares for itself, which fills it (and of
@@ -3428,6 +3428,9 @@ LogicalResult Parser::parseIndex() {
     record.fields.push_back({"head", builder.getI32Type()});
     record.fields.push_back({"last", builder.getI32Type()});
     record.fields.push_back({"count", builder.getI32Type()});
+    // (The entity, where the key has one: what `get` gives without its
+    // list.)
+    record.fields.push_back({"one", EntityType::get(context)});
   } else {
     record.fields.push_back({"who", EntityType::get(context)});
     record.fields.push_back({"place", builder.getI64Type()});
@@ -3473,6 +3476,19 @@ LogicalResult Parser::parseIndex() {
         builder.getI64IntegerAttr(1));
     made->setAttr(WorldLayout::kTransientAttr, builder.getUnitAttr());
     buffers[listName] = std::move(listed);
+    // And a byte for each slot (`N_tags`): 128 where it is empty, else 7
+    // bits of its key's hash; the first 16 again after the last, so that
+    // 16 from any slot on are read at once (see findHashSlot).
+    Record tagged;
+    tagged.fields.push_back({"tag", builder.getIntegerType(8, false)});
+    std::string tagsName = *name + "_tags";
+    BufferOp tags = BufferOp::create(
+        builder, loc(at), declareSymbol(at, tagsName),
+        builder.getArrayAttr({builder.getStringAttr("tag")}),
+        builder.getArrayAttr({TypeAttr::get(builder.getIntegerType(8, false))}),
+        builder.getI64IntegerAttr(1));
+    tags->setAttr(WorldLayout::kTransientAttr, builder.getUnitAttr());
+    buffers[tagsName] = std::move(tagged);
   }
   // Made again incrementally: the entities whose key or what it copies
   // changed, each with those as they are now (its room the first
@@ -3573,6 +3589,14 @@ LogicalResult Parser::parseIndex() {
         // do; its low bits do not.)
         << "fn " << n << "_home(order: " << n << ", h: u64) -> i32 {\n"
         << "  (((h >> 32) * (len(order) as u64)) >> 32) as i32\n}\n"
+        // (A slot's tag: 7 bits of its key's hash, others than its home's;
+        // 128 where it is empty. The first 16 slots' again after the last.)
+        << "fn " << n << "_tag(h: u64) -> u8 {\n"
+        << "  ((h >> 32) & 127) as u8\n}\n"
+        << "proc " << n << "_mark(tags: mut " << n
+        << "_tags, s: i32, t: u8, slots: i32) {\n"
+        << "  tags[s].tag = t\n"
+        << "  if s < 16 { tags[s + slots].tag = t }\n}\n"
         // The slot of a key, or the empty one it would have.
         << "fn " << n << "_slot(order: " << n << ", key: " << keyType_
         << (textKey ? ", check: u64" : "") << ") -> i32 {\n"
@@ -3582,8 +3606,8 @@ LogicalResult Parser::parseIndex() {
         << "    s = (s + 1) & (len(order) - 1)\n  }\n  s\n}\n"
         // An entity's row at the end of its key's list; whether no other
         // has that key.
-        << "proc " << n << "_append(order: mut " << n << ", list: mut " << n
-        << "_list, r: i32) -> bool {\n"
+        << "proc " << n << "_append(order: mut " << n << ", tags: mut " << n
+        << "_tags, list: mut " << n << "_list, r: i32) -> bool {\n"
         << "  let s = " << slotOf("list[r]") << "\n"
         << "  let fresh = order[s].head < 0\n"
         << "  list[r].next = -1\n"
@@ -3591,11 +3615,15 @@ LogicalResult Parser::parseIndex() {
         << "    list[order[s].last].next = r\n"
         << "    list[r].prev = order[s].last\n"
         << "    order[s].count += 1\n"
+        << "    order[s].one = none\n"
         << "  } else {\n"
         << "    order[s].key = list[r].key\n"
         << (textKey ? "    order[s].check = list[r].check\n" : "")
         << "    order[s].head = r\n"
         << "    order[s].count = 1\n"
+        << "    order[s].one = list[r].who\n"
+        << "    " << n << "_mark(tags, s, " << n << "_tag("
+        << hashOf("list[r].key") << "), len(order))\n"
         << "    list[r].prev = -1\n"
         << "  }\n"
         << "  order[s].last = r\n  fresh\n}\n";
@@ -3616,21 +3644,24 @@ LogicalResult Parser::parseIndex() {
     // 64 at least, at most `slots`), from as many as twice those it had
     // last (`hint`), four times as many where the keys come to more than
     // half; how many keys there are.
-    out << "proc " << n << "_build(order: mut " << n << ", list: mut " << n
-        << "_list, held: mut " << of.front()
+    out << "proc " << n << "_build(order: mut " << n << ", tags: mut " << n
+        << "_tags, list: mut " << n << "_list, held: mut " << of.front()
         << ", slots: i32, hint: i64) -> i64 {\n"
         << "  var keys: i64 = 0\n"
-        << "  if len(list) == 0 {\n    order = []\n  } else {\n"
+        << "  if len(list) == 0 {\n    order = []\n    tags = []\n  } else {\n"
         << "    var size = 64\n"
         << "    while (size as i64) < hint * 2 && size < slots { size *= 2 }\n"
         << "    var again = true\n"
         << "    while again {\n"
-        << "      order = [{ key: list[0].key, head: -1, last: -1, count: 0"
+        << "      order = [{ key: list[0].key, head: -1, last: -1, count: 0, "
+           "one: none"
         << (textKey ? ", check: 0" : "") << " }; size]\n"
+        << "      tags = [{ tag: 128 as u8 }; size + 16]\n"
         << "      keys = 0\n"
         << "      for k in 0..len(list) {\n"
         << "        if keys * 2 <= size as i64 {\n"
-        << "          if " << n << "_append(order, list, k) { keys += 1 }\n"
+        << "          if " << n
+        << "_append(order, tags, list, k) { keys += 1 }\n"
         << "          held[list[k].who]." << rowField << " = k\n"
         << "        }\n"
         << "      }\n"
@@ -3651,9 +3682,9 @@ LogicalResult Parser::parseIndex() {
     if (how != "rebuild") {
       // (How many keys there are, given and said; -1 where a key more
       // could make them more than half the slots: then made anew.)
-      out << "proc " << n << "_mend(order: mut " << n << ", list: mut " << n
-          << "_list, held: mut " << of.front() << ", changed: " << n
-          << "_changed, given: i64) -> i64 {\n"
+      out << "proc " << n << "_mend(order: mut " << n << ", tags: mut " << n
+          << "_tags, list: mut " << n << "_list, held: mut " << of.front()
+          << ", changed: " << n << "_changed, given: i64) -> i64 {\n"
           << "  var keys = given\n"
           << "  let mask = len(order) - 1\n"
           << "  for k in 0..len(changed) {\n"
@@ -3673,6 +3704,8 @@ LogicalResult Parser::parseIndex() {
           << "      if p < 0 { order[s].head = q } else { list[p].next = q }\n"
           << "      if q < 0 { order[s].last = p } else { list[q].prev = p }\n"
           << "      order[s].count -= 1\n"
+          << "      if order[s].count == 1 { order[s].one = "
+             "list[order[s].head].who }\n"
           << "      if order[s].head < 0 {\n"
           << "        var hole = s\n"
           << "        var j = (s + 1) & mask\n"
@@ -3687,16 +3720,20 @@ LogicalResult Parser::parseIndex() {
           << "            order[hole].head = order[j].head\n"
           << "            order[hole].last = order[j].last\n"
           << "            order[hole].count = order[j].count\n"
+          << "            order[hole].one = order[j].one\n"
+          << "            " << n
+          << "_mark(tags, hole, tags[j].tag, len(order))\n"
           << "            hole = j\n"
           << "          }\n"
           << "          j = (j + 1) & mask\n"
           << "        }\n"
           << "        order[hole].head = -1\n"
+          << "        " << n << "_mark(tags, hole, 128 as u8, len(order))\n"
           << "        keys -= 1\n"
           << "      }\n"
           << "      list[r].key = changed[k].key\n"
           << (textKey ? "      list[r].check = changed[k].check\n" : "")
-          << "      if " << n << "_append(order, list, r) { keys += 1 }\n"
+          << "      if " << n << "_append(order, tags, list, r) { keys += 1 }\n"
           << "    }\n   }\n  }\n";
       // (After all of them: two may have swapped their keys.)
       if (unique) {
@@ -3707,27 +3744,9 @@ LogicalResult Parser::parseIndex() {
       }
       out << "  keys\n}\n";
     }
-    // The entity of a key (of a text: whose hashes are the text's), the
-    // first of them as they are stored; none where none is.
-    out << "fn " << n << "_get(order: " << n << ", list: " << n
-        << "_list, key: "
-        << (textKey ? std::string("text") : typeSpelling(keyType))
-        << ") -> entity {\n"
-        << "  var best: entity = none\n"
-        << "  if len(order) > 0 {\n"
-        << (textKey ? "    var r = order[" + n +
-                          "_slot(order, hash_of(key), "
-                          "hash_of(key, " +
-                          other + "))].head\n"
-                    : "    var r = order[" + n + "_slot(order, key)].head\n")
-        << "    var first: i64 = 9223372036854775807\n"
-        << "    while r >= 0 {\n"
-        << "      if list[r].place < first {\n"
-        << "        best = list[r].who\n"
-        << "        first = list[r].place\n      }\n"
-        << "      r = list[r].next\n    }\n  }\n"
-        << "  best\n}\n"
-        << "system " << n << "_update() {\n";
+    // (`Name.get(key)` is `ent.index.get`, lowered where the slots are
+    // read: see findHashSlot.)
+    out << "system " << n << "_update() {\n";
     // (Its key as the index holds it, and the rest of a row.)
     std::string held = textKey
                            ? "hash_of(c0." + *key + "), check: hash_of(c0." +
@@ -3760,8 +3779,8 @@ LogicalResult Parser::parseIndex() {
       out << " {\n      " << n << "_changed += { who: e, key: " << held << rest
           << " }\n    }\n"
           << "    " << n << "_keys = " << n << "_mend(" << n << ", " << n
-          << "_list, " << of.front() << ", " << n << "_changed, " << n
-          << "_keys)\n"
+          << "_tags, " << n << "_list, " << of.front() << ", " << n
+          << "_changed, " << n << "_keys)\n"
           << "    if " << n << "_keys < 0 { " << n << "_whole = false }\n"
           << "  }\n"
           << "  if !" << n << "_whole {\n";
@@ -3776,8 +3795,8 @@ LogicalResult Parser::parseIndex() {
         << "    " << n << "_list += { who: e, key: " << held
         << ", place: place_, next: -1, prev: -1" << rest << " }\n  }\n"
         << "  " << n << "_keys = " << n << "_build(" << n << ", " << n
-        << "_list, " << of.front() << ", " << kSlotsPlaceholder << ", " << n
-        << "_keys)\n"
+        << "_tags, " << n << "_list, " << of.front() << ", "
+        << kSlotsPlaceholder << ", " << n << "_keys)\n"
         << "  " << n << "_whole = true\n";
     if (how != "rebuild")
       out << "  }\n";
@@ -4339,7 +4358,8 @@ LogicalResult Parser::parseIndex() {
                                                           resolve(n + "_cells"),
                                                           resolve(n + "_grid")}
                       : hashed ? SmallVector<std::string>{resolve(n),
-                                                          resolve(n + "_list")}
+                                                          resolve(n + "_list"),
+                                                          resolve(n + "_tags")}
                                : SmallVector<std::string>{resolve(n)})),
           builder.getNamedAttr(
               "hidden",
@@ -4365,7 +4385,6 @@ LogicalResult Parser::parseIndex() {
   kept = {resolve(of.front()), rowField, keyType, resolve(n + "_find")};
   kept.hashed = hashed;
   kept.textKey = textKey;
-  kept.get = resolve(n + "_get");
   kept.keyField = *key;
   for (const Copy &copy : copies)
     kept.copied.push_back({resolve(copy.component), copy.field, copy.name});
@@ -4421,8 +4440,9 @@ LogicalResult Parser::finishIndexOrders() {
              << "': give that component a capacity (or the program a "
                 "default_capacity)";
     buffer.setCapacityAttr(builder.getI64IntegerAttr(capacity.getInt()));
-    // A hash index: its slots twice as many as there may be entities, at
-    // least, a power of two; its list as many as there may be entities.
+    // A hash index: room for its slots twice as many as there may be
+    // entities, at least, a power of two; its list as many as there may
+    // be entities.
     if (found->second.hashed) {
       int64_t slots = 1;
       while (slots < 2 * capacity.getInt())
@@ -4432,6 +4452,11 @@ LogicalResult Parser::finishIndexOrders() {
           SymbolTable::lookupSymbolIn(
               module, builder.getStringAttr(buffer.getSymName() + "_list")))
           .setCapacityAttr(builder.getI64IntegerAttr(capacity.getInt()));
+      // (Its tags: one for each slot, and the first 16 again.)
+      cast<BufferOp>(
+          SymbolTable::lookupSymbolIn(
+              module, builder.getStringAttr(buffer.getSymName() + "_tags")))
+          .setCapacityAttr(builder.getI64IntegerAttr(slots + 16));
       std::string update = buffer.getSymName().str() + "_update";
       module.walk([&](arith::ConstantOp constant) {
         auto value = dyn_cast<IntegerAttr>(constant.getValue());
@@ -4511,31 +4536,36 @@ FailureOr<mlir::Value> Parser::emitIndexCall(const Expr &expr,
                                     "('by key hash'); this one is in order: '" +
                                     expr.name + ".find(key)'");
   if (index.hashed) {
-    // The entity of a key, of a hash index (none where none has it).
-    Function &get = functions.ofSymbol(index.get);
+    // The entity of a key, of a hash index (none where none has it): of a
+    // text, by its two hashes, as the index holds it.
+    if (given || inFunction)
+      return error(expr.loc, "'" + expr.name +
+                                 ".get' is asked of the "
+                                 "world's index, in a system");
     Type wanted = index.textKey ? Type(StringType::get(context)) : index.key;
     FailureOr<mlir::Value> key = emit(*expr.operands[0], wanted);
     if (failed(key))
       return failure();
     if (!index.textKey && key->getType() != index.key)
       return mismatch(expr.operands[0]->loc, key->getType(), index.key);
-    // (Its slots and its rows: of the world's.)
-    if (given)
-      return error(expr.loc, "'" + expr.name +
-                                 ".get' is asked of the "
-                                 "world's index, in a system");
-    auto bufferOf = [&](unsigned param, StringRef name) -> mlir::Value {
-      return BufferOfOp::create(builder, at, get.params[param],
-                                FlatSymbolRefAttr::get(context, name))
-          .getResult();
-    };
-    SmallVector<mlir::Value> args{bufferOf(0, symbolName),
-                                  bufferOf(1, (symbolName + "_list").str()),
-                                  *key};
-    return InvokeOp::create(builder, at, EntityType::get(context),
-                            FlatSymbolRefAttr::get(context, index.get), args,
-                            UnitAttr())
-        ->getResult(0);
+    mlir::Value check;
+    if (index.textKey) {
+      Type i64 = builder.getI64Type();
+      auto seed = [&](uint64_t value) -> mlir::Value {
+        return arith::ConstantIntOp::create(builder, at, i64, int64_t(value));
+      };
+      mlir::Value text = *key;
+      key = TextHashOp::create(builder, at, i64, text,
+                               seed(0xbdd89aa982704029ull))
+                .getResult();
+      check = TextHashOp::create(
+          builder, at, i64, text,
+          seed(0xbdd89aa982704029ull ^ 0x9e3779b97f4a7c15ull));
+    }
+    return IndexGetOp::create(builder, at, EntityType::get(context),
+                              FlatSymbolRefAttr::get(context, symbolName), *key,
+                              check)
+        .getResult();
   }
   FailureOr<mlir::Value> key = emit(*expr.operands[0], index.key);
   if (failed(key))

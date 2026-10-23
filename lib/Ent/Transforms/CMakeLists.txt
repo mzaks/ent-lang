@@ -28,6 +28,7 @@ add_mlir_library(MLIREntTransforms
   MLIRSCFDialect
   MLIRSCFTransforms
   MLIRTransforms
+  MLIRVectorDialect
   MLIRPass
   MLIRSideEffectInterfaces
 )

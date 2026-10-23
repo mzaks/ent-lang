@@ -1,0 +1,26 @@
+// `Name.get(key)` of a hash index (bench/RESULTS.md, 2026-10-23, against
+// absl::flat_hash_map in bench/hash/swiss.cpp): KEYS ships, their keys
+// KEY of their number (in a row, or at random), looked up in an order at
+// random 4,000,000 times a run, found (MISS 0) or not (MISS 1). With ASK
+// `false`, the same loop without the lookups. Filled in by get.py.
+import console
+import wyhash
+component Ship { id: i64 } capacity KEYS
+index ById of Ship by id hash unique
+unique Total: i64
+unique Step: i64
+fn key(i: i64) -> i64 { KEY }
+world { for i in 0..KEYS { spawn { Ship { id: key(i as i64) } } } }
+system ask() {
+  Step += 1
+  var n: i64 = 0
+  for i in 0..4000000 {
+    let k = key((wyrand(Step as u64, i) % KEYS) as i64) + MISS * (KEYS + 1)
+    if ASK { if ById.get(k) != none { n += 1 } } else { if k != 7 { n += 1 } }
+  }
+  Total += n
+}
+system done() { put("{Total}") }
+schedule a() { ask() }
+schedule f() { done() }
+main { a() a() a() a() a() a() a() a() f() }

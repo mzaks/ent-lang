@@ -3796,3 +3796,54 @@ same 200,000 ships, ms a frame, one core / 23 threads; before → now):
   9.0 ns, 32 bytes 29.4 → 16.0, 128 bytes 120 → 56 (a `for` over
   100,000 texts, each the time of a text). wyhash's loop would have
   read the same bytes, so its mixing was not the question.
+
+## 2026-10-23: `get` against a SwissTable
+
+`Name.get(key)` of a hash index against absl::flat_hash_map, by the same
+loop: keys computed by `wyrand` from a number at random, 4,000,000
+lookups a run, eight runs, the loop without the lookups taken off
+(`bench/hash/get.py`, `bench/hash/swiss.cpp`), ns a lookup, one core
+(CPU 2), `-march=native`, on mains. absl with the index's hash and with
+its own:
+
+| keys | found: ent | found: absl | not there: ent | not there: absl |
+|---|---|---|---|---|
+| 1,000 in a row | 2.5 | 1.0 / 1.2 | 2.3 | 4.7 / 0.9 |
+| 1,000 at random | 2.7 | 1.9 / 2.0 | 3.3 | 2.2 / 1.8 |
+| 200,000 in a row | 4.2 | 2.4 / 2.4 | 2.5 | 4.0 / 4.3 |
+| 200,000 at random | 4.7 | 3.4 / 3.5 | 3.4 | 5.8 / 5.8 |
+| 4,000,000 in a row | 30 | 26 / 27 | 2.7 | 8.1 / 8.6 |
+| 4,000,000 at random | 35 | 33 / 33 | 4.0 | 9.5 / 9.5 |
+
+Before, `get` was a fn the index declared, which went from the key's
+home slot by slot, read the slot's count and went along its list: at
+200,000 keys at random 8.4 found, 11 not there (a C++ copy of that
+table: 4.4 and 7.6). Now:
+
+- `get` is an op (`ent.index.get`), lowered where it is: no bounds to
+  check on every read of a row, no call.
+- Tags, as a SwissTable has them: a byte for each slot (`Name_tags`,
+  128 where empty, else 7 bits of the key's hash, the first 16 again
+  after the last). The 16 tags from the key's home are compared at once
+  with its own and with empty (`vector.load`, two compares into masks,
+  `tzcnt`), a key read only where its tag matches and before the first
+  empty slot, which is where linear probing stops anyway; so the slots'
+  order and their mending are as they were. A key not there is mostly
+  answered by its tags alone: from 200,000 keys on faster than absl,
+  whose groups start where its hash says and whose empty slots are fewer
+  (it fills to 7/8, the index to 1/2).
+- A key one entity has keeps it in its slot (`one`): read beside the key,
+  only where the key was found. First it took the count, then the head of
+  the list and the list's entity, three loads each waiting for the one
+  before: 9.6 ns found at 200,000 at random, 100 at 4 million. Reading
+  `one` for every lookup, found or not, cost a miss more for keys not
+  there (4 million: 4 → 34 ns): it is read after the key matched.
+
+What is left of a found key in the cache, a nanosecond or so, is the
+chain from the hash to the key's slot: the home is one multiply more
+than absl's (by the high bits, see the slots made by the keys), and the
+key and the entity are columns of their own, where absl has them side
+by side. The `for`s a hash index answers go by the same tags; keeping
+the index costs as before (`bench/hash/run.py`: as fits 0.27 / 0.28,
+`incremental` 0.20 / 0.22, `rebuild` 1.26 / 1.21 ms a frame, 1,000 teams,
+one in 1,000 changing).
