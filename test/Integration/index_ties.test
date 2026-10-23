@@ -1,0 +1,17 @@
+// A sorted index whose entities share keys: made again in place and
+// anew, its rows always in the order a `for ... by` gives (those of a
+// key in the order they are stored), on one core and on many. (Before
+// 2026-10-23, made in place, those of a key stayed in the order they had
+// in it: 600 of 30,000 rows where the `for` has them.)
+// RUN: %ent run %S/Inputs/index_ties.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel %S/Inputs/index_ties.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+
+// CHECK:      frame 0: 30000 of 30000 rows as `by` has them, 30000 visited
+// CHECK-NEXT: frame 1: [[N1:[0-9]+]] of [[N1]] rows as `by` has them, [[N1]] visited
+// CHECK-NEXT: frame 2: [[N2:[0-9]+]] of [[N2]] rows as `by` has them, [[N2]] visited
+// CHECK-NEXT: frame 3: [[N3:[0-9]+]] of [[N3]] rows as `by` has them, [[N3]] visited
+// CHECK-NEXT: frame 4: [[N4:[0-9]+]] of [[N4]] rows as `by` has them, [[N4]] visited
+// CHECK-NEXT: frame 5: [[N5:[0-9]+]] of [[N5]] rows as `by` has them, [[N5]] visited
+// CHECK-NEXT: frame 6: [[N6:[0-9]+]] of [[N6]] rows as `by` has them, [[N6]] visited

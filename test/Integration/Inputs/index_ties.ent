@@ -1,0 +1,57 @@
+// A sorted index with many entities of the same key, made again in place
+// (keys change) and anew (entities come and go), and on many threads
+// (test/Integration/index_ties.test): each time its rows in the order a
+// `for ... by` the same key visits them, which sorts the entities anew
+// (those of a key in the order they are stored).
+import console
+import wyhash
+
+component Dot { key: i32, id: i64 } capacity 40000
+unique Check { same: i64, rows: i64, h: u64, g: u64, frame: i64, next: i64 }
+buffer Seen { who: i64 } capacity 40000
+
+index Order of Dot by key { id: Dot.id }
+
+world {
+  for i in 0..30000 { spawn { Dot { key: wyrand_below(1, i as i64, 50) as i32, id: i as i64 } } }
+  Check.next = 30000
+}
+
+// Only keys change: the index is made again in place.
+system shift() {
+  for d: mut Dot {
+    if wyrand_below(Check.frame as u64 + 11, d.id, 10) == 0 {
+      d.key = wyrand_below(Check.frame as u64 + 13, d.id, 50) as i32
+    }
+  }
+}
+
+// Some go, some come: made anew.
+system churn() {
+  for e, d: Dot {
+    if wyrand_below(Check.frame as u64 + 17, d.id, 20) == 0 { e.destroy() }
+  }
+}
+system arrive() {
+  for i in 0..500 {
+    spawn { Dot { key: wyrand_below(Check.frame as u64 + 19, i as i64, 50) as i32, id: Check.next } }
+    Check.next += 1
+  }
+}
+
+system clear() { Seen = [] }
+system visit() {
+  for e, d: Dot by d.key { Seen += { who: d.id } }
+}
+system compare() {
+  var same = 0
+  for r in 0..len(Order) {
+    if r < len(Seen) && Order[r].id == Seen[r].who { same += 1 }
+  }
+  put("frame {Check.frame}: {same} of {len(Order)} rows as `by` has them, {len(Seen)} visited")
+  Check.frame += 1
+}
+
+schedule keys() { shift() clear() visit() compare() }
+schedule both() { churn() arrive() shift() clear() visit() compare() }
+main { keys() keys() both() keys() both() both() keys() }

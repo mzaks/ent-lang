@@ -2,9 +2,10 @@
 // same velocities, the same steps, and the same lists of neighbours,
 // made every 20 steps of the atoms within the cut and the skin as the
 // grid index `Cells` finds them, in the same order (the cells around an
-// atom's, z, then y, then x, each cell's atoms in the index's order: put
-// in order by cell once by insertion from the order they were made in,
-// and again by insertion from the last order each time), the atoms put
+// atom's, z, then y, then x, each cell's atoms in the order they were
+// made in, which is the order they are stored in: put in order by cell
+// and then by that, by insertion from the last order each time), the
+// atoms put
 // back in the box first (only then: between, they leave it), and those
 // seen across the side of the box in a list of their own, of which the
 // force takes the nearest image, after the others. Of half lists,
@@ -115,7 +116,8 @@ static void make_index(void) {
   for (int i = 1; i < atoms; i++) {
     int a = order[i];
     int j = i;
-    while (j > 0 && key[order[j - 1]] > key[a]) {
+    while (j > 0 && (key[order[j - 1]] > key[a] ||
+                     (key[order[j - 1]] == key[a] && order[j - 1] > a))) {
       order[j] = order[j - 1];
       j--;
     }

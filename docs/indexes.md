@@ -135,8 +135,11 @@ index Traffic of Car by key { x: Spot.x, v: Speed.v }
 - Read as a buffer that only systems read (`Name[r].x`, `len(Name)`,
   handed to a fn), with `Name.find(key)`, the first row not below a key.
   No query form uses it yet (`for e in Event ordered by time where ...`).
-- Ties: in row order where it is made anew; where it is made again in
-  place, as they were in it. To be made the same (principle 2).
+- Ties: in the order the entities are stored, however it was made
+  (2026-10-23; before, made again in place, as they were in it): each
+  row has its entity's place (`place`), counted when the index is made,
+  and the insertion goes by key and then by place. The same as a `for
+  ... by` the key gives (`test/Integration/index_ties.test`).
 - Keys are whole numbers only, as for `for ... by`.
 - `examples/traffic/lanes.ent` uses it: to the bit what the C version
   gives, as fast as the order it kept by hand, and its update six times
@@ -320,14 +323,14 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 
 | Step | Work | Shows | Status |
 |---|---|---|---|
-| 1 | The shared sort-and-scan primitive (one core, parallel loops, GPU). `lay`'s order by hand ported to it, the same to the bit | The backend | `for ... by` listed, sorted and (giving rows) visited on many threads (see below); GPU to do |
-| 2 | Uniform grid and `near ... within` (a Lennard-Jones melt as its example) | `rebuild`, scheduling of makes | built (see below), and `after me` (2b) |
+| 1 | The shared sort-and-scan primitive (one core, parallel loops, GPU). `lay`'s order by hand ported to it, the same to the bit | The backend | built: `for ... by` listed, sorted and (giving rows) visited on many threads and on the GPU (see below); one radix sort for one core and many (2026-10-23) |
+| 2 | Uniform grid and `near ... within` (a Lennard-Jones melt as its example) | `rebuild`, scheduling of makes | built (see below), and `after me` (2b); grids of whole numbers, `between .. and ..`, `nearest k to` (2026-10-23) |
 | 3 | Hash index and `unique` | `incremental`, change tracking | |
 | 4 | Sorted index (secondary), then clustered | Ordered iteration, ranges, top-k | secondary built (5.2); query forms, float keys, ties, clustered to do |
 | 5 | Morton linear quadtree and octree | Keys made of fields, ranges of prefixes | |
 | 6 | Relation indexes by source and target everywhere, indexes on edge fields | | |
 | 7 | Partitions by value | | |
-| 8 | k-d tree and `nearest k` | | |
+| 8 | k-d tree and `nearest k` | | `nearest k` built on grids (2026-10-23); k-d tree to do |
 | 9 | Embeddings by brute force (int8 and binary, ranked again) | The recall to measure against | needs a vector type |
 | 10 | IVF with k-means in ent-lang | | |
 | 11 | LSH families | | |

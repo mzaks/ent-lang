@@ -3214,7 +3214,7 @@ LogicalResult Parser::parseIndex() {
       FailureOr<std::string> field = identifier("a field name");
       if (failed(field) || failed(expect(Token::Colon, "':'")))
         return failure();
-      if (*field == "key" || *field == "who")
+      if (*field == "key" || *field == "who" || *field == "place")
         return error(nameAt, "every row has '" + *field + "' already");
       for (const Copy &copy : copies)
         if (copy.name == *field)
@@ -3260,18 +3260,16 @@ LogicalResult Parser::parseIndex() {
 
   // Where each entity's row is: a field of the first component, which
   // the spawns and adds of it that were read already are given (0), as
-  // those after will be; and, of a grid, the cell it is in, and that and
-  // its row before together (`rank_in_Name`: its place among the rows put
-  // in order again, as insertion from the order before puts them).
+  // those after will be; where it is among the entities as they are
+  // stored (`place_in_Name`: entities of the same key are in that order,
+  // however the index was made); and, of a grid, the cell it is in.
   std::string rowField = "row_in_" + *name;
-  std::string rankField = "rank_in_" + *name;
+  std::string placeField = "place_in_" + *name;
   Record &holder = components[of.front()];
   SmallVector<std::pair<std::string, Type>> hidden{
-      {rowField, builder.getI32Type()}};
-  if (grid) {
+      {rowField, builder.getI32Type()}, {placeField, builder.getI64Type()}};
+  if (grid)
     hidden.push_back({*key, keyType});
-    hidden.push_back({rankField, builder.getI64Type()});
-  }
   for (auto &[field, type] : hidden)
     if (holder.fieldType(field))
       return error(at, "'" + of.front() + "' has a field '" + field +
@@ -3339,6 +3337,7 @@ LogicalResult Parser::parseIndex() {
   Record record;
   record.fields.push_back({"key", keyType});
   record.fields.push_back({"who", EntityType::get(context)});
+  record.fields.push_back({"place", builder.getI64Type()});
   for (const Copy &copy : copies)
     record.fields.push_back({copy.name, copy.type});
   SmallVector<Attribute> names, types;
@@ -3368,14 +3367,16 @@ LogicalResult Parser::parseIndex() {
   std::string bindings;
   for (auto [number, component] : llvm::enumerate(of))
     bindings += ", c" + std::to_string(number) + ": " + component;
-  SmallVector<std::string> fields{"key", "who"};
+  SmallVector<std::string> fields{"key", "who", "place"};
   for (const Copy &copy : copies)
     fields.push_back(copy.name);
   out << "transient unique " << n << "_fresh: bool\n"
-      << "transient unique " << n << "_whole: bool\n"
+      << "transient unique " << n << "_places: i64\n"
+      << "transient unique " << n
+      << "_whole: bool\n"
       // Every entity told its row.
-      << "proc " << n << "_number(order: " << n << ", held: mut "
-      << of.front() << ") {\n"
+      << "proc " << n << "_number(order: " << n << ", held: mut " << of.front()
+      << ") {\n"
       << "  for row in 0..len(order) { held[order[row].who]." << rowField
       << " = row }\n}\n"
       // How many rows are below the one before them; and whether that is
@@ -3385,22 +3386,28 @@ LogicalResult Parser::parseIndex() {
       << "fn " << n << "_below(order: " << n << ") -> i32 {\n"
       << "  var below = 0\n"
       << "  for i in 1..len(order) {\n"
-      << "    if order[i].key < order[i - 1].key { below += 1 }\n"
+      // (Its place read only where the keys do not say: seldom.)
+      << "    if order[i].key <= order[i - 1].key {\n"
+      << "      if order[i].key < order[i - 1].key || order[i].place < "
+         "order[i - 1].place { below += 1 }\n    }\n"
       << "  }\n  below\n}\n"
       << "fn " << n << "_tangled(below: i32, rows: i32) -> bool {\n"
       << "  (below as i64) * " << kTangledPlaceholder
       << " > (rows as i64)\n}\n"
       // The rows in order again, where few are out of it: each that is
-      // below the one before goes down past those above it (insertion),
-      // and the entities of the rows that moved are told their rows.
+      // below the one before (by key, then by place) goes down past those
+      // above it (insertion), and the entities of the rows that moved are
+      // told their rows.
       << "proc " << n << "_settle(order: mut " << n << ", held: mut "
       << of.front() << ") {\n"
       << "  for i in 1..len(order) {\n"
-      << "    if order[i].key < order[i - 1].key {\n";
+      << "    if order[i].key <= order[i - 1].key && (order[i].key < "
+         "order[i - 1].key || order[i].place < order[i - 1].place) {\n";
   for (const std::string &field : fields)
     out << "      let " << field << "_ = order[i]." << field << "\n";
   out << "      var j = i\n"
-      << "      while j > 0 && order[j - 1].key > key_ {\n";
+      << "      while j > 0 && (order[j - 1].key > key_ || (order[j - 1].key "
+         "== key_ && order[j - 1].place > place_)) {\n";
   for (const std::string &field : fields)
     out << "        order[j]." << field << " = order[j - 1]." << field << "\n";
   out << "        held[order[j].who]." << rowField << " = j\n"
@@ -3683,16 +3690,27 @@ LogicalResult Parser::parseIndex() {
                    ? cell
                    : "(" + number + ") * " + side("n", d) + " + " + cell;
     }
-    out << "  for c0: mut " << of.front() << " {\n    let cell_ = " << number
-        << "\n    c0." << *key << " = cell_\n    c0." << rankField
-        << " = cell_ * 4294967296 + c0." << rowField << " as i64\n  }\n";
+    out << "  for c0: mut " << of.front() << " {\n    c0." << *key << " = "
+        << number << "\n  }\n";
   }
-  // Made anew by `by`: every entity in order by its key, or of a grid,
-  // by its key and then its row before (the order the insertion gives).
-  auto anew = [&](const std::string &by, const std::string &indent) {
+  // Made anew by `by`: every entity in order by its key, those of a key
+  // in the order they are stored (the order insertion by their places
+  // gives).
+  // Where each entity is as they are stored, counted first where it may
+  // have moved there (entities came, went or moved: no other change moves
+  // one, so made again in place the places are as they were, in the rows
+  // too, which keep theirs as they move).
+  auto anew = [&](const std::string &indent, bool counted) {
+    if (counted)
+      out << indent << n << "_places = 0\n"
+          << indent << "for c0: mut " << of.front() << " {\n"
+          << indent << "  let place_ = " << n << "_places += 1\n"
+          << indent << "  c0." << placeField << " = place_\n"
+          << indent << "}\n";
     out << indent << n << " = []\n"
-        << indent << "for e" << bindings << " by c0." << by << " {\n"
-        << indent << "  " << n << " += { key: c0." << *key << ", who: e";
+        << indent << "for e" << bindings << " by c0." << *key << " {\n"
+        << indent << "  " << n << " += { key: c0." << *key << ", who: e, "
+        << "place: c0." << placeField;
     for (const Copy &copy : copies)
       out << ", " << copy.name << ": " << through(copy);
     out << " }\n" << indent << "}\n"
@@ -3709,14 +3727,14 @@ LogicalResult Parser::parseIndex() {
     // each goes down past those above it.)
     out << "    if " << n << "_tangled(" << n << "_below(" << n << "), len("
         << n << ")) {\n";
-    anew(rankField, "      ");
+    anew("      ", /*counted=*/false);
     out << "    } else {\n      " << n << "_settle(" << n << ", "
         << of.front() << ")\n    }\n";
   } else {
     out << "    " << n << "_settle(" << n << ", " << of.front() << ")\n";
   }
   out << "  } else {\n";
-  anew(*key, "    ");
+  anew("    ", /*counted=*/true);
   out << "    " << n << "_whole = true\n  }\n";
   if (grid)
     out << "  " << n << "_bounds(" << n << ", " << n << "_cells, " << n
@@ -3771,12 +3789,15 @@ LogicalResult Parser::parseIndex() {
           builder.getNamedAttr("of", strings(ofSymbols)),
           builder.getNamedAttr("key", strings({resolve(of.front()), *key})),
           builder.getNamedAttr("copies", strings(copied)),
-          builder.getNamedAttr("row",
-                               strings({resolve(of.front()), rowField})),
-          builder.getNamedAttr("update", builder.getStringAttr(resolve(n + "_update"))),
-          builder.getNamedAttr("stale", builder.getStringAttr(resolve(n + "_stale"))),
-          builder.getNamedAttr("moved", builder.getStringAttr(resolve(n + "_moved"))),
-          builder.getNamedAttr("fresh", builder.getStringAttr(resolve(n + "_fresh"))),
+          builder.getNamedAttr("row", strings({resolve(of.front()), rowField})),
+          builder.getNamedAttr("update",
+                               builder.getStringAttr(resolve(n + "_update"))),
+          builder.getNamedAttr("stale",
+                               builder.getStringAttr(resolve(n + "_stale"))),
+          builder.getNamedAttr("moved",
+                               builder.getStringAttr(resolve(n + "_moved"))),
+          builder.getNamedAttr("fresh",
+                               builder.getStringAttr(resolve(n + "_fresh"))),
           builder.getNamedAttr(
               "own",
               strings(grid ? SmallVector<std::string>{resolve(n),
@@ -3784,8 +3805,10 @@ LogicalResult Parser::parseIndex() {
                                                       resolve(n + "_grid")}
                            : SmallVector<std::string>{resolve(n)})),
           builder.getNamedAttr(
-              "hidden", strings(grid ? SmallVector<std::string>{rowField, *key}
-                                     : SmallVector<std::string>{rowField})),
+              "hidden",
+              strings(grid
+                          ? SmallVector<std::string>{rowField, placeField, *key}
+                          : SmallVector<std::string>{rowField, placeField})),
       }));
   Index &kept = indexes[bufferName.getValue()];
   kept = {resolve(of.front()), rowField, keyType, resolve(n + "_find")};

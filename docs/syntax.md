@@ -1937,8 +1937,8 @@ finds the car ahead and the cars beside each car so.
   (`who`), and, after `{ }`, a field of the entity's components under a
   name of its own (`x: Spot.x`). The entities it holds are those that
   have every component named, in it or in `{ }`; with the same key, in
-  the order they had in it (where it is made anew: the order the
-  program keeps them in).
+  the order the program keeps them in, however it was made (as a `for
+  ... by` visits them). Each row also has that place (`place`).
 - It is read as a buffer is: `Name[r].field`, `len(Name)`, and handed by
   its name to a fn or proc (`rows: Name`), which reads it. Nothing gives
   it rows, takes them, or changes them.
@@ -1956,11 +1956,10 @@ finds the car ahead and the cars beside each car so.
   key and fields into its own row (a `for` that runs on all cores from
   16,384 entities on, built with `--parallel`),
   and the rows that are out of order then go down past those above them
-  one by one: about a pass over the rows where few moved in the order.
-  Of a grid, where more than one row in 64 is below the one before, the
-  entities are put in order instead by their cell and then their row
-  before (`rank_in_Name`), as a `for ... by` does, on many threads: the
-  same order. (`ent build --tune` with a trace may choose another than
+  one by one (by key, then by place): about a pass over the rows where
+  few moved in the order. Of a grid, where more than one row in 64 is
+  below the one before, the entities are put in order instead by their
+  cell, as a `for ... by` does, on many threads: the same order. (`ent build --tune` with a trace may choose another than
   64; see tools/ent.)
   Where entities came, went, or got or lost a component of it, it is
   made anew: every entity in order by its key (as a `for ... by` does)
@@ -1968,8 +1967,9 @@ finds the car ahead and the cars beside each car so.
   change lanes in a step (`bench/traffic`), 0.21 ms the one way and 1.24
   the other, on one core.
 - Each entity keeps where its row is in the first component, in a field
-  of the index's (`row_in_Name`), which a spawn does not give; the C
-  header shows it. The rows are not part of a saved world: they are
+  of the index's (`row_in_Name`), and its place among the entities as
+  they are stored (`place_in_Name`), which a spawn does not give; the C
+  header shows them. The rows are not part of a saved world: they are
   made again from the entities.
 - The index declares for itself, in its module, the system that makes it
   (`Name_update`), those that say it is out of date (`Name_stale`,

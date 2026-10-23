@@ -33,11 +33,12 @@ schedule frame() {
   count()
 }
 
-// CHECK: ent.component @Car (key: i64, row_in_Traffic: i32) capacity 64
+// CHECK: ent.component @Car (key: i64, row_in_Traffic: i32, place_in_Traffic: i64) capacity 64
 // CHECK-LABEL: ent.system @early()
 // CHECK: %[[ROW:.*]] = arith.constant 0 : i32
-// CHECK: ent.spawn (@Car, @Spot)(%{{.*}}, %[[ROW]], %{{.*}}) : i64, i32, f32
-// CHECK: ent.buffer @Traffic (key: i64, who: !ent.entity, x: f32) capacity 64 {ent.index = {copies = ["Spot", "x"], fresh = "Traffic_fresh", hidden = ["row_in_Traffic"], key = ["Car", "key"], moved = "Traffic_moved", of = ["Car", "Spot"], own = ["Traffic"], row = ["Car", "row_in_Traffic"], stale = "Traffic_stale", update = "Traffic_update"}{{.*}}ent.transient}
+// CHECK: %[[PLACE:.*]] = arith.constant 0 : i64
+// CHECK: ent.spawn (@Car, @Spot)(%{{.*}}, %[[ROW]], %[[PLACE]], %{{.*}}) : i64, i32, i64, f32
+// CHECK: ent.buffer @Traffic (key: i64, who: !ent.entity, place: i64, x: f32) capacity 64 {ent.index = {copies = ["Spot", "x"], fresh = "Traffic_fresh", hidden = ["row_in_Traffic", "place_in_Traffic"], key = ["Car", "key"], moved = "Traffic_moved", of = ["Car", "Spot"], own = ["Traffic"], row = ["Car", "row_in_Traffic"], stale = "Traffic_stale", update = "Traffic_update"}{{.*}}ent.transient}
 // CHECK-LABEL: ent.system @Traffic_update()
 // CHECK: ent.read @Traffic_whole "value"
 // CHECK: ent.query
@@ -46,7 +47,7 @@ schedule frame() {
 // CHECK: ent.append @Traffic
 // CHECK: ent.invoke proc @Traffic_number
 // CHECK-LABEL: ent.system @late()
-// CHECK: ent.spawn (@Car, @Spot)(%{{.*}}, %{{.*}}, %{{.*}}) : i64, i32, f32
+// CHECK: ent.spawn (@Car, @Spot)(%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}) : i64, i32, i64, f32
 // CHECK-LABEL: ent.system @look()
 // CHECK: ent.lookup %{{.*}} @Car "row_in_Traffic" : i32
 
