@@ -131,7 +131,7 @@ Errors, each naming the construct and what it waits for:
 |---|---|---|
 | sending or accumulating a fraction (`f32`, `f64`), or sending with `=` | combined at the commit point in the order of the rows, which the GPU does not keep: needs the sends sorted by target and combined in that order on the GPU (keep such a system on the CPU) | later |
 | sending to a field the query also reads or writes | what is sent lands when the query ends; on the GPU it lands as it is sent | never |
-| `Marks += { ... }` (rows given to a buffer) | rows in the order of the entities: needs an ordered compaction | G2 |
+| `Marks += { ... }` (rows given to a buffer) but in a `for ... by` (below) | rows in the order of the entities: needs an ordered compaction | G2 |
 | `extern fn` | the C runs on the CPU; the GPU's own functions round differently from the machine's library, which breaks the same-results rule (`math` is written in ent and runs on both, see below) | G2 |
 | a `for` over other entities inside the `for` | fine on a GPU (it is its best case), but needs the `old` copy and the inner loop's order kept | G2 |
 | further up a tree than the parent (`*`, `hops`, siblings, paths), a tree's edges (`for` over them), a `sorted` tree | the links and the lists in order are the CPU's | later |
@@ -139,7 +139,7 @@ Errors, each naming the construct and what it waits for:
 | `connect`, `disconnect` | the relation is sorted again on the CPU | later |
 | `on changed ...` (reactive) | event logs and stamps | later |
 | `spawn`, `destroy`, `add`/`remove` of an `apart` component | change which rows an archetype holds; the compaction runs on the CPU | later |
-| `by`, `in turn by` | one entity after another: no parallel form | never |
+| `by` whose body does more than read and give each entity's rows to buffers (each `+=` in the body itself); `in turn by` | one entity after another: no parallel form | never |
 | a text (`text[N]`, `text`), a table's too | not on the GPU yet | later |
 | a fn given the entities of a component | it reads other entities through a function of the CPU's, given the world | later |
 | `extern proc` | the outside world | never |
@@ -802,3 +802,40 @@ days are the same. A hundred days of a million people infect 857,886
 both ways. On the CPU it costs 3% a day on one core and 11% on four
 threads (178.7 against 172.9 ms, 68.1 against 61.2, on the slow cores:
 `chance` sends 8 bytes where it sent 4), and 60 MB.
+
+## A `for ... by` on the GPU (2026-10-23)
+
+A `for` that goes by a field, whose body only reads and gives each
+entity's rows to buffers (each `+=` in the body itself, not under an `if`
+or in a loop: the form the CPU runs on many threads, docs/indexes.md step
+1), runs on the GPU in a `gpu system` (`lowerOrderedOnGpu`):
+
+- the entities are listed by a kernel for each archetype, each with its
+  key and, in place of its id, its archetype's place among those the
+  `for` goes over and its row (no row moves while it runs, so the visit
+  needs no entity table);
+- a radix sort of the GPU's puts them in order: the least key and the
+  most found first (a kernel, each piece's put in at once with atomic
+  `min` and `max`, read back), a pass for each byte of the most less the
+  least (keys of both signs differ in every byte as they are), each a
+  kernel that counts each piece's keys by their byte, a running sum over
+  all the counts byte value by byte value and piece by piece (the
+  running sums' own scan, `emitRunningScan`), and a kernel that puts each
+  piece's keys where those say, in their order: a stable sort, so the
+  order the CPU's gives;
+- each entity is then visited at its place in the order, writing its
+  rows at the place times the rows it gives, after those its buffers
+  had. The buffers' counts are the CPU's, as archetypes' are: the system
+  reads them and writes them on the CPU, and asks whether there is room
+  (`placeGpuCopies` copies such a count to the CPU before the run and
+  marks it the CPU's after; the rows are the GPU's).
+
+Checked in `test/Integration/gpu.test` (`Inputs/gpu_by.ent`, 301,000
+entities of two archetypes, keys with many the same and below nought):
+the same rows in the same order as on the CPU, with `--parallel` too, 40
+runs, and with `ENT_GPU_PROTECT`. On the RTX 4050 (on battery) the sort
+and visit of those take about 1.05 ms a frame on the GPU: two passes,
+each about 230 us putting keys in place (to places all over), 60 us
+counting; the visit 110 us. (First 8 ms: all eight passes, the least
+and most found by one thread, the counts cleared in the counting
+kernel.)

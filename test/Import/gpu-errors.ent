@@ -147,9 +147,31 @@ gpu system react() {
 
 component Thing { born: i32 }
 gpu system order() {
-  // expected-error @+1 {{it visits its entities one after another, in the order of a field}}
+  // expected-error @+1 {{it visits its entities in the order of a field: on the GPU, its body only reads and gives each entity's rows to buffers}}
   for t: mut Thing by t.born {
     t.born = 0
+  }
+}
+
+// -----
+
+component Thing { born: i32 }
+buffer Born { at: i32 } capacity 8
+gpu system order() {
+  // expected-error @+1 {{its body only reads and gives each entity's rows to buffers (each '+=' in the body itself, not under an 'if' or in a loop)}}
+  for t: Thing by t.born {
+    if t.born > 0 { Born += { at: t.born } }
+  }
+}
+
+// -----
+
+component Thing { born: i32 }
+buffer Born { at: i32 } capacity 8
+gpu system order() {
+  // expected-error @+1 {{its entities take turns, one after another, in the order of a field}}
+  for t: Thing in turn by t.born {
+    Born += { at: t.born }
   }
 }
 

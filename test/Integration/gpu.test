@@ -191,3 +191,17 @@
 // CHECK: scenery 0: pos (7.0000, 7.0000)
 // CHECK: player: pos (1.5000, 1.5000)
 // CHECK: frame: 3
+
+// A `for ... by` whose body only gives rows to buffers: its entities (of
+// two archetypes, 301,000) listed, sorted and visited on the GPU, each
+// entity's rows at its place in the order: the same rows in the same
+// order, frame by frame as the keys change (many the same, some below
+// nought).
+// RUN: %ent run %S/Inputs/gpu_by.ent > %t.by.cpu
+// RUN: %ent run %S/Inputs/gpu_by.ent --gpu > %t.by.gpu
+// RUN: %ent run %S/Inputs/gpu_by.ent --gpu --parallel > %t.by.gpupar
+// RUN: diff %t.by.cpu %t.by.gpu
+// RUN: diff %t.by.cpu %t.by.gpupar
+// RUN: FileCheck %s --check-prefix=BY --input-file=%t.by.gpu
+// BY: frame 0 rows 602000 301000 hash 5544980611785813485 2835094989288384706 first -2500 last 2500
+// BY: frame 2 rows 602000 301000 hash 8746012038621469105 2451871882340062265 first -10000 last 10000

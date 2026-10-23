@@ -1,0 +1,61 @@
+// A `for ... by` on the GPU (test/Integration/gpu.test): entities of two
+// archetypes, 300,000 and 1,000, put in the order of a whole number with
+// many the same (their order then theirs before) and below nought too,
+// each giving two rows to one buffer and one to another. A hash of the
+// rows in their order, frame by frame as the keys change.
+import console
+import wyhash
+
+component Dot { key: i32, mass: i64 } capacity 300000
+component Spin { turn: i32 } capacity 1000
+archetype Plain { Dot } capacity 300000
+archetype Spun { Dot, Spin } capacity 1000
+
+buffer Marks { who: i64, key: i32 } capacity 700000
+buffer Weights { mass: i64 } capacity 400000
+unique Frame { n: i64, hash: u64, weights: u64 }
+
+world {
+  for i in 0..300000 {
+    spawn { Dot { key: wyrand_below(1, i as i64, 5000) as i32 - 2500, mass: i as i64 } }
+  }
+  for i in 0..1000 {
+    spawn { Dot { key: wyrand_below(2, i as i64, 5000) as i32 - 2500, mass: 1000000 + i as i64 },
+                 Spin { turn: i as i32 } }
+  }
+}
+
+system clear() {
+  Marks = []
+  Weights = []
+}
+
+gpu system lay() {
+  for e, d: Dot by d.key {
+    Marks += { who: d.mass, key: d.key }
+    Weights += { mass: d.mass * 3 }
+    Marks += { who: 0 - d.mass, key: d.key + 1 }
+  }
+}
+
+system shuffle() {
+  for d: mut Dot {
+    d.key = (wyrand_below(Frame.n as u64 + 7, d.mass, 20000) as i32) - 10000
+  }
+}
+
+system check() {
+  var h: u64 = 1
+  for i in 0..len(Marks) {
+    h = wyhash64(h, (Marks[i].who as u64) * 65536 + (Marks[i].key as u64))
+  }
+  var w: u64 = 1
+  for i in 0..len(Weights) {
+    w = wyhash64(w, Weights[i].mass as u64)
+  }
+  put("frame {Frame.n} rows {len(Marks)} {len(Weights)} hash {h} {w} first {Marks[0].key} last {Marks[len(Marks) - 1].key}")
+  Frame.n += 1
+}
+
+schedule frame() { clear() lay() check() shuffle() }
+main { frame() frame() frame() }

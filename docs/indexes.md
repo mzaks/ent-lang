@@ -360,13 +360,11 @@ so.
   by` where it is 11.1 on one core (10.0 with only the sort on many
   threads); 0.84 ms of it on one thread (the scans between the passes,
   and what is allocated). 120,000: 0.70 ms where 0.84.
-- The GPU: not yet. `for ... by` is not for a `gpu system`, which
-  docs/gpu.md says of it "one entity after another: no parallel form".
-  A `for ... by` that only gives rows has one now; on the GPU it needs
-  rows given to buffers in the order of the entities (`Marks += ..`, G2
-  there, not built) and a radix sort of its own (counts per block and a
-  scan of them, not 64 pieces and a scan on one core). Not needed by the
-  grid.
+- The GPU (2026-10-23): a `for ... by` that only gives rows runs in a
+  `gpu system`, its entities listed, sorted by a radix sort of the GPU's
+  and visited there (docs/gpu.md, "A `for ... by` on the GPU"). Rows
+  given to buffers by other `for`s, in the order of the entities, are
+  still not on the GPU.
 
 **Step 2, as it stands** (2026-10-22). `index Name of C grid (x, y, z)
 cell w [wrap size] { .. }` (`docs/syntax.md`, Grids) is a sorted index

@@ -1290,9 +1290,13 @@ notForGpu(SymbolTableCollection &symbolTable, Operation *op) {
     // (From a loop of the body too: combined where it is sent, a value
     // needs no place of its own.)
   }
-  if (isa<AppendOp>(op))
+  // (Of a `for` that goes by a field, each entity's rows go at its place
+  // in the order: see verifyGpuQueries.)
+  if (auto query = op->getParentOfType<QueryOp>();
+      isa<AppendOp>(op) && !(query && query.hasBy()))
     return std::string("gives a buffer rows, in the order of the "
-                       "entities: not on the GPU yet");
+                       "entities: not on the GPU yet (in a 'for' that goes "
+                       "by a field it is)");
   if (isa<EachOp>(op))
     return std::string("has a 'for' over other entities in its body: not "
                        "on the GPU yet");
@@ -1370,9 +1374,39 @@ static LogicalResult verifyGpuQueries(SymbolTableCollection &symbolTable,
     if (query->hasAttr(QueryOp::kTriggersAttr))
       return fail(query, "it reacts to events (`on`), which are kept "
                          "where the GPU does not reach them");
-    if (query.hasBy())
-      return fail(query, "it visits its entities one after another, in "
-                         "the order of a field");
+    // In the order of a field: where the body only reads and gives each
+    // entity's rows to buffers, which then go at its place in the order
+    // (sorted on the GPU), as on the CPU on many threads.
+    if (query.hasBy()) {
+      if (query.isTurn())
+        return fail(query, "its entities take turns, one after another, in "
+                           "the order of a field");
+      Block *top = &query.getBody().front();
+      WalkResult rows = query.getBody().walk([&](Operation *op) {
+        if (isa<AppendOp>(op))
+          return op->getBlock() == top ? WalkResult::advance()
+                                       : WalkResult::interrupt();
+        if (auto invoke = dyn_cast<InvokeOp>(op))
+          return invoke.getProc() ? WalkResult::interrupt()
+                                  : WalkResult::advance();
+        if (auto handed = dyn_cast<BufferOfOp>(op))
+          return handed.getResult().getType().getMut() ? WalkResult::interrupt()
+                                                       : WalkResult::advance();
+        // (Branches and loops of what only computes: scf's.)
+        if (isa<GetOp, ReadOp, BufferAtOp, BufferLenOp, LookupOp, EntityOp,
+                HasOp, BoundOp, YieldOp>(op) ||
+            op->getName().getDialectNamespace() == "scf")
+          return WalkResult::advance();
+        if (op->getNumRegions() == 0 && isMemoryEffectFree(op))
+          return WalkResult::advance();
+        return WalkResult::interrupt();
+      });
+      if (rows.wasInterrupted())
+        return fail(query, "it visits its entities in the order of a field: "
+                           "on the GPU, its body only reads and gives each "
+                           "entity's rows to buffers (each '+=' in the body "
+                           "itself, not under an 'if' or in a loop)");
+    }
     // (A parent is fine: its edge is the child's. Further up, siblings
     // and paths are not on the GPU yet.)
     for (Type type : query.getBody().getArgumentTypes())

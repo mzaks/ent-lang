@@ -16407,6 +16407,324 @@ appendsOnly(QueryOp query) {
   return rows;
 }
 
+static Value parallelTurns(IRRewriter &rewriter, Location loc, Value count,
+                           bool gpu);
+static int64_t runningChunk(bool gpu);
+static Value carryingLoop(IRRewriter &rewriter, Location loc, Value from,
+                          Value to, Value init,
+                          function_ref<Value(Value index, Value carried)> step);
+static Value emitRunningScan(IRRewriter &rewriter, Location loc, Value scratch,
+                             Value count, Value start, StringRef rule,
+                             Type valueType, bool gpu,
+                             function_ref<Value(Value at)> total);
+
+/// A query of a `gpu` system that goes by a field (a body that only gives
+/// rows to buffers, see appendsOnly; the verifier sees to that), on the
+/// GPU: the entities listed with their keys, each with its archetype's
+/// place among those matched and its row (no rows move while it runs, so
+/// no entity table is needed); put in the order of their keys by a radix
+/// sort of the GPU's, the same passes as the CPU's (and so the same
+/// order); and each visited at its place in the order, writing its rows
+/// where they go, after those the buffer had: the place times the rows
+/// it gives. The buffers' counts are the CPU's, as the archetypes' are
+/// (see placeGpuCopies), which asks whether there is room, as the CPU's
+/// form of this does.
+static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
+                              const WorldLayout &layout, WorldAccess &world,
+                              ArrayRef<const WorldArchetype *> matched,
+                              int64_t capacity, Value tick) {
+  Location loc = query.getLoc();
+  ModuleOp program = query->getParentOfType<ModuleOp>();
+  StringAttr byComponent = query.getByComponent().getAttr();
+  StringAttr byField = query.getByField();
+  std::optional<SmallVector<std::pair<StringAttr, int64_t>>> appended =
+      appendsOnly(query);
+  assert(appended && "a gpu system's 'by' only gives rows (the verifier)");
+  Type i32 = rewriter.getI32Type();
+  Type i64 = rewriter.getI64Type();
+  auto constant = [&](int64_t value) -> Value {
+    return arith::ConstantIndexOp::create(rewriter, loc, value);
+  };
+  auto whole = [&](int64_t value, Type type) -> Value {
+    return arith::ConstantIntOp::create(rewriter, loc, type, value);
+  };
+  auto load = [&](Value from, Value at) -> Value {
+    return memref::LoadOp::create(rewriter, loc, from, ValueRange{at});
+  };
+  auto store = [&](Value value, Value to, Value at) {
+    memref::StoreOp::create(rewriter, loc, value, to, ValueRange{at});
+  };
+  auto add = [&](Value a, Value b) -> Value {
+    return arith::AddIOp::create(rewriter, loc, a, b);
+  };
+  auto mul = [&](Value a, Value b) -> Value {
+    return arith::MulIOp::create(rewriter, loc, a, b);
+  };
+  auto toIndex = [&](Value value) -> Value {
+    return arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
+                                      value);
+  };
+  Value zero = constant(0);
+  Value one = constant(1);
+  // In the GPU's memory, kept by devices/gpu.c from run to run (a query
+  // that goes by a field keeps no running sums, whose those are).
+  auto scratch = [&](int64_t slot, Type element, Value count) -> Value {
+    Value bytes = arith::IndexCastOp::create(
+        rewriter, loc, i64,
+        mul(count, constant(element.getIntOrFloatBitWidth() / 8)));
+    Value raw = callGpu(rewriter, loc, program, "ent_gpu_scratch",
+                        ValueRange{whole(slot, i64), bytes},
+                        TypeRange{MemRefType::get({ShapedType::kDynamic},
+                                                  rewriter.getI8Type())})
+                    .getResult(0);
+    return memref::ViewOp::create(
+        rewriter, loc, MemRefType::get({ShapedType::kDynamic}, element), raw,
+        zero, ValueRange{count});
+  };
+  Value room = constant(capacity);
+  Value keys[2] = {scratch(0, i64, room), scratch(2, i64, room)};
+  Value whose[2] = {scratch(1, i64, room), scratch(3, i64, room)};
+
+  // The entities there are now, each archetype's after those before it: a
+  // key and, in the 32 bits above its row, the archetype's place.
+  Value listed = zero;
+  for (auto [number, archetype] : llvm::enumerate(matched)) {
+    Value rows = world.count(loc, *archetype);
+    Value before = listed;
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      Value row = parallelTurns(rewriter, loc, rows, /*gpu=*/true);
+      Value stored = load(world.column(*archetype, byComponent, byField), row);
+      Type type = archetype->find(byComponent, byField)->type;
+      unsigned width = cast<IntegerType>(stored.getType()).getWidth();
+      Value key =
+          width == 64 ? stored
+          : hasNoSign(type)
+              ? arith::ExtUIOp::create(rewriter, loc, i64, stored).getResult()
+              : arith::ExtSIOp::create(rewriter, loc, i64, stored).getResult();
+      Value at = add(before, row);
+      store(key, keys[0], at);
+      store(add(arith::ShLIOp::create(rewriter, loc, whole(number, i64),
+                                      whole(32, i64)),
+                arith::IndexCastOp::create(rewriter, loc, i64, row)),
+            whose[0], at);
+    }
+    listed = add(listed, rows);
+  }
+
+  // A radix sort of their bytes, the lowest first, on the GPU (as the
+  // CPU's, emitParallelRadixSort, with a thread for each piece of the
+  // keys), of each key less the least, a pass for each byte of the most
+  // less the least (keys that differ in sign differ in every byte as they
+  // are; the order is the same): each piece of
+  // at least 64 keys (at most 4096 pieces) counts its keys by their byte;
+  // a running sum over the counts, byte value by byte value and piece by
+  // piece, says where each piece's keys of a value go; and each piece
+  // puts them there in their order.
+  Value pieces = arith::MaxUIOp::create(
+      rewriter, loc, one,
+      arith::MinUIOp::create(rewriter, loc, constant(4096),
+                             arith::DivUIOp::create(rewriter, loc,
+                                                    add(listed, constant(63)),
+                                                    constant(64))));
+  Value span = arith::DivUIOp::create(
+      rewriter, loc,
+      add(listed, arith::SubIOp::create(rewriter, loc, pieces, one)), pieces);
+  Value radix = constant(256);
+  Value countsMany = mul(pieces, radix);
+  // (With room after them for the levels of the scan: see lowerRunning.)
+  Value counts =
+      scratch(4, i32,
+              add(countsMany,
+                  add(arith::DivUIOp::create(rewriter, loc, countsMany,
+                                             constant(runningChunk(true) - 1)),
+                      constant(64))));
+  // (The least key, once it is known.)
+  Value least;
+  auto digit = [&](Value key, Value shift) -> Value {
+    Value moved = arith::ShRUIOp::create(
+        rewriter, loc, arith::SubIOp::create(rewriter, loc, key, least), shift);
+    return toIndex(
+        arith::AndIOp::create(rewriter, loc, moved, whole(255, i64)));
+  };
+  auto rowsOf = [&](Value p, function_ref<void(Value)> body) {
+    Value from = arith::MinUIOp::create(rewriter, loc, mul(p, span), listed);
+    Value to = arith::MinUIOp::create(rewriter, loc, add(from, span), listed);
+    auto loop = scf::ForOp::create(rewriter, loc, from, to, one);
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPointToStart(loop.getBody());
+    body(loop.getInductionVar());
+  };
+  // The least key and the most: of every so many keys from each piece's
+  // number (in any order the same: a block's threads read keys next to
+  // each other), each put into those of all at once (atomically), and
+  // read back.
+  Value ends = scratch(6, i64, constant(2));
+  {
+    OpBuilder::InsertionGuard guard(rewriter);
+    (void)parallelTurns(rewriter, loc, one, /*gpu=*/true);
+    store(whole(INT64_MAX, i64), ends, zero);
+    store(whole(INT64_MIN, i64), ends, one);
+  }
+  {
+    OpBuilder::InsertionGuard guard(rewriter);
+    Value p = parallelTurns(rewriter, loc, pieces, /*gpu=*/true);
+    auto every = scf::ForOp::create(
+        rewriter, loc, p, listed, pieces,
+        ValueRange{whole(INT64_MAX, i64), whole(INT64_MIN, i64)},
+        [&](OpBuilder &, Location, Value i, ValueRange carried) {
+          Value key = load(keys[0], i);
+          scf::YieldOp::create(
+              rewriter, loc,
+              ValueRange{
+                  arith::MinSIOp::create(rewriter, loc, carried[0], key),
+                  arith::MaxSIOp::create(rewriter, loc, carried[1], key)});
+        });
+    memref::AtomicRMWOp::create(rewriter, loc, arith::AtomicRMWKind::mins,
+                                every.getResult(0), ends, ValueRange{zero});
+    memref::AtomicRMWOp::create(rewriter, loc, arith::AtomicRMWKind::maxs,
+                                every.getResult(1), ends, ValueRange{one});
+  }
+  least = callGpu(rewriter, loc, program, "ent_gpu_scratch_get",
+                  ValueRange{whole(6, i64), whole(0, i64), whole(8, i64)},
+                  TypeRange{i64})
+              .getResult(0);
+  Value differing = arith::SubIOp::create(
+      rewriter, loc,
+      callGpu(rewriter, loc, program, "ent_gpu_scratch_get",
+              ValueRange{whole(6, i64), whole(8, i64), whole(8, i64)},
+              TypeRange{i64})
+          .getResult(0),
+      least);
+  // Which of the two arrays holds the keys now, of the passes before.
+  Value flipped = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
+  auto pick = [&](Value which, Value a, Value b) -> Value {
+    return arith::SelectOp::create(rewriter, loc, which, b, a);
+  };
+  for (int pass = 0; pass < 8; ++pass) {
+    Value shift = whole(8 * pass, i64);
+    Value byte = arith::AndIOp::create(
+        rewriter, loc, arith::ShRUIOp::create(rewriter, loc, differing, shift),
+        whole(255, i64));
+    Value differ = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::ne, byte, whole(0, i64));
+    auto ifDiffer = scf::IfOp::create(rewriter, loc, differ);
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPoint(ifDiffer.thenBlock()->getTerminator());
+      Value fromKeys = pick(flipped, keys[0], keys[1]);
+      Value fromWhose = pick(flipped, whose[0], whose[1]);
+      Value toKeys = pick(flipped, keys[1], keys[0]);
+      Value toWhose = pick(flipped, whose[1], whose[0]);
+      {
+        OpBuilder::InsertionGuard inner(rewriter);
+        store(whole(0, i32), counts,
+              parallelTurns(rewriter, loc, countsMany, /*gpu=*/true));
+      }
+      {
+        OpBuilder::InsertionGuard inner(rewriter);
+        Value p = parallelTurns(rewriter, loc, pieces, /*gpu=*/true);
+        rowsOf(p, [&](Value i) {
+          Value at = add(mul(digit(load(fromKeys, i), shift), pieces), p);
+          store(add(load(counts, at), whole(1, i32)), counts, at);
+        });
+      }
+      (void)emitRunningScan(rewriter, loc, counts, countsMany, whole(0, i32),
+                            "add", i32, /*gpu=*/true,
+                            [](Value) { return Value(); });
+      {
+        OpBuilder::InsertionGuard inner(rewriter);
+        Value p = parallelTurns(rewriter, loc, pieces, /*gpu=*/true);
+        rowsOf(p, [&](Value i) {
+          Value key = load(fromKeys, i);
+          Value at = add(mul(digit(key, shift), pieces), p);
+          Value taken = load(counts, at);
+          store(add(taken, whole(1, i32)), counts, at);
+          Value place = toIndex(taken);
+          store(key, toKeys, place);
+          store(load(fromWhose, i), toWhose, place);
+        });
+      }
+    }
+    flipped = arith::XOrIOp::create(rewriter, loc, flipped, differ);
+  }
+  Value sorted = pick(flipped, whose[0], whose[1]);
+
+  // Where each buffer's rows go: after those it has, as many as the
+  // entities times the rows each gives (asked on the CPU, whose counts
+  // they are).
+  WorldAccess &cpu = world.cpu();
+  Value many = arith::IndexCastOp::create(rewriter, loc, i64, listed);
+  llvm::DenseMap<Attribute, Value> bases;
+  for (auto [name, rows] : *appended) {
+    const WorldBuffer &buffer = layout.getBuffer(name);
+    Value counter = cpu.bufferCount(buffer);
+    Value base = load(counter, zero);
+    Value end = add(base, mul(many, whole(rows, i64)));
+    cf::AssertOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ule, end,
+                              whole(buffer.capacity, i64)),
+        rewriter.getStringAttr("no room for another row: the buffer @" +
+                               BufferOp(buffer.op).getSymName() + " holds " +
+                               Twine(buffer.capacity) +
+                               "; 'capacity' gives more"));
+    store(end, counter, zero);
+    bases[name] = base;
+  }
+
+  // Each entity at its place in the order, on the GPU.
+  query.getBody().walk([&](AppendOp append) {
+    append->setAttr(kAtOnceAttr, rewriter.getUnitAttr());
+  });
+  scf::ParallelOp each;
+  {
+    OpBuilder::InsertionGuard guard(rewriter);
+    Value at = parallelTurns(rewriter, loc, listed, /*gpu=*/true);
+    each = cast<scf::ParallelOp>(rewriter.getInsertionBlock()->getParentOp());
+    Value code = load(sorted, at);
+    Value number = arith::ShRUIOp::create(rewriter, loc, code, whole(32, i64));
+    Value row = toIndex(
+        arith::AndIOp::create(rewriter, loc, code, whole(0xffffffff, i64)));
+    Value place = arith::IndexCastOp::create(rewriter, loc, i64, at);
+    for (auto [k, archetype] : llvm::enumerate(matched)) {
+      auto ifThis = scf::IfOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq, number,
+                                whole(k, i64)));
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPoint(ifThis.thenBlock()->getTerminator());
+      emitQueryBody(rewriter, query, IRMapping(), *archetype, world, layout,
+                    row, world.count(loc, *archetype), tick, Value(),
+                    /*parallel=*/false, /*directApplies=*/true, KnownParent(),
+                    /*marksPending=*/false);
+    }
+    // Each row where it goes, in the GPU's copy of the buffer.
+    SmallVector<AppendOp> rows;
+    each.getBody()->walk([&](AppendOp append) { rows.push_back(append); });
+    for (AppendOp append : rows) {
+      rewriter.setInsertionPoint(append);
+      StringAttr name = append.getBufferAttr().getAttr();
+      int64_t given = llvm::find_if(*appended, [&](auto &entry) {
+                        return entry.first == name;
+                      })->second;
+      int64_t slot =
+          append->getAttrOfType<IntegerAttr>(kOrderedSlotAttr).getInt();
+      Value where =
+          toIndex(add(bases.lookup(name),
+                      add(mul(place, whole(given, i64)), whole(slot, i64))));
+      const WorldBuffer &buffer = layout.getBuffer(name);
+      for (auto [value, field] : llvm::zip(append.getValues(), buffer.fields))
+        store(world.toStorage(loc, value), world.bufferField(buffer, field),
+              where);
+      rewriter.eraseOp(append);
+    }
+  }
+  // (What it reads of uniques, read once, on the CPU, before.)
+  hoistResourceReads(rewriter, each, world);
+  rewriter.eraseOp(query);
+}
+
 /// Replace a query that goes by a field (`by @C "f"`) by a loop over its
 /// entities in that order: they are listed with the field's values, the
 /// smallest first, and each is then found by its id, since rows may move
@@ -16441,6 +16759,9 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
   Operation *module = ArchetypeOp(matched.front()->op)->getParentOp();
   rewriter.setInsertionPoint(query);
   Value tick = world.hasStamps() ? world.currentTick(loc) : Value();
+  if (options.gpu)
+    return lowerOrderedOnGpu(rewriter, query, layout, world, matched, capacity,
+                             tick);
   Type i64 = rewriter.getI64Type();
   Type index = rewriter.getIndexType();
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
@@ -22204,13 +22525,32 @@ static void placeGpuCopies(IRRewriter &rewriter, func::FuncOp func,
     for (const Column &column : access.reads)
       for (unsigned piece : shared.of(column, layout, world, false))
         sides.touched[gpu].insert(piece);
+    // (The counts of buffers a `for` of a `gpu` system that goes by a field
+    // gives rows: the CPU's, which it reads and writes; the rows the GPU's,
+    // see lowerOrderedOnGpu.)
+    llvm::DenseSet<Attribute> countedOnCpu;
+    if (gpu && ours)
+      ours.walk([&](AppendOp append) {
+        if (auto query = append->getParentOfType<QueryOp>();
+            query && query.hasBy())
+          countedOnCpu.insert(append.getBufferAttr().getAttr());
+      });
     for (const Column &column : access.writes)
       for (unsigned piece : shared.of(column, layout, world, false)) {
-        const WorldArchetype *archetype = shared.pieces[piece].archetype;
+        const GpuPiece &held = shared.pieces[piece];
+        const WorldArchetype *archetype = held.archetype;
         if (!gpu && ours && archetype &&
             onlyAppendsTo(ours, ArchetypeOp(archetype->op))) {
           sides.appended.insert(piece);
           sides.alone = true;
+          continue;
+        }
+        if (held.counter && held.buffer &&
+            countedOnCpu.contains(
+                cast<BufferOp>(held.buffer->op).getSymNameAttr())) {
+          sides.touched[0].insert(piece);
+          sides.written[0].insert(piece);
+          sides.any[0] = true;
           continue;
         }
         sides.touched[gpu].insert(piece);
