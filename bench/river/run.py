@@ -97,8 +97,15 @@ component Still { level: f32 } capacity 1024
 archetype Pool { Node, Still } capacity 1024
 """
 # A tree sorted across archetypes adds a node's inflows in another order:
-# its sums differ in their last bits, and are compared by their total.
-REORDERED = {"ent-two-sorted", "ent-two-sorted-par", "ent-two-mortal-sorted"}
+# its sums differ in their last bits, and are compared by their total. So
+# does an unsorted one across archetypes, and one whose nodes were made in
+# no order (`shuffled`): its order made again goes by the entities' keys,
+# each after its ancestors, not breadth first (since 2b961d6), and a
+# node's inflows come in the order their sources are in it. (With rain
+# whose sums are exact in an f32 all of them agree with the C.)
+REORDERED = {"ent-two-sorted", "ent-two-sorted-par", "ent-two-mortal-sorted",
+             "ent-two"}
+REORDERED_SHUFFLED = {"ent", "ent-mortal", "ent-two-mortal"}
 DEFAULT = ["c-order", "c-pairs", "c-sorted", "ent", "ent-sorted"]
 
 
@@ -186,7 +193,8 @@ def main():
                     float(fields["ns_per_step"]))
                 depths[(n, shape)] = int(fields["depth"])
                 totals.setdefault((n, shape), {})[name] = float(fields["total"])
-                if name not in REORDERED:
+                if name not in REORDERED and not (
+                        shape == "shuffled" and name in REORDERED_SHUFFLED):
                     checksums.setdefault((n, shape), {}).setdefault(
                         fields["checksum"], set()).add(name)
 

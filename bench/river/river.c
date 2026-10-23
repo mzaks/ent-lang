@@ -46,7 +46,9 @@
 //
 // A sorted tree across archetypes adds the flows into a node in another
 // order (by archetype, then row), so its checksum is its own; `total`, the
-// sum of all flows, says that it is the same river.
+// sum of all flows, says that it is the same river. So does an unsorted
+// one across archetypes, and one in `shuffled`, whose order made again
+// goes by the entities' keys (see run.py).
 //
 // Usage: river STEPS WARMUP SHAPE [resort|divert|move]
 // Prints: ns_per_step=... depth=... checksum=... total=...

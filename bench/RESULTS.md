@@ -3525,3 +3525,19 @@ into functions of their own for threads have what theirs has):
 | entsat 26114429... / 44092fcc... | 4.69 / 8.00 s | | 4.70 / 7.99 s |
 
 entsat keeps its 81 gathers; the melt's output is the same to the bit.
+
+## 2026-10-23: the river's checksums in a tree made again by key
+
+`bench/river/run.py` said CHECKSUM MISMATCH for `ent`, `ent-mortal` and
+`ent-two-mortal` in `shuffled` (1e5, 1e6), and for `ent-two` in every
+shape. Bisected: `ent` from 2b961d6 (an unsorted tree's order made again
+by the entities' keys, each after its ancestors, no longer breadth
+first), `ent-two` from before it. Not wrong sums: with rain whose sums
+are exact in an f32 (k / 1024, k < 8) every variant agrees with the C in
+every shape at 1e4, 1e5 and 1e6; the totals agree as they are. A node's
+inflows are added in the order their sources are in the tree's order,
+and that order is the language's to choose (`docs/syntax.md`), so those
+variants are now compared by their total, as the sorted trees across
+archetypes were. (`--move` in a deep tree still ties it into a cycle and
+stops, as the entry of 2026-10-06 says: give it `--shapes
+bushy,shuffled`.)
