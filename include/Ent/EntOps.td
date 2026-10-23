@@ -755,11 +755,34 @@ def Ent_QueryOp : Ent_Op<"query", [
     visited by the same query if its value of the field is not below the
     one of the entity that spawned it. Such a query is neither reactive
     nor along a tree.
+
+    A query that goes by a field may visit a part of that order, its
+    slice: the entities whose value is from one (`from`) up to below
+    another (`to`), and of those the first or the last so many (`first`,
+    `last`, an i32), in the order still:
+    ```mlir
+    ent.query (%c: !ent.ref<@Car>) by @Car "key" from %a : i64
+        to %b : i64 first %k { ... }
+    ```
+    The values are worked out before it starts. Not with `turn`.
   }];
+  let arguments = (ins Variadic<AnyType>:$slice);
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
   let extraClassDeclaration = [{
+    /// Of a query that goes by a field: which of `from`, `to`, `first`
+    /// and `last` its slice operands are, in their order.
+    static constexpr ::llvm::StringLiteral kSliceAttr = "slice_of";
+    /// The slice operand named `part`, or nothing.
+    ::mlir::Value getSlicePart(::llvm::StringRef part);
+    /// Set by --ent-indexes: the sorted index by the same field, over the
+    /// same entities, that the query takes its order from instead of
+    /// sorting them (the same order).
+    static constexpr ::llvm::StringLiteral kByIndexAttr = "by_index";
+    ::mlir::FlatSymbolRefAttr getByIndex() {
+      return (*this)->getAttrOfType<::mlir::FlatSymbolRefAttr>(kByIndexAttr);
+    }
     /// The attribute holding a reactive query's triggers: an array of
     /// [kind, component, field] entries, the field empty unless the kind
     /// is "changed" with a field.

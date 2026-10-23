@@ -16748,6 +16748,82 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
     flipped = arith::XOrIOp::create(rewriter, loc, flipped, differ);
   }
   Value sorted = pick(flipped, whose[0], whose[1]);
+  Value sortedKeys = pick(flipped, keys[0], keys[1]);
+
+  // A slice of the order (see lowerOrdered), found by one thread of the
+  // GPU's and read back: from where the visit starts, how many.
+  Value first = zero;
+  if (!query.getSlice().empty()) {
+    Type byType = matched.front()->find(byComponent, byField)->type;
+    Value ends = scratch(8, i64, constant(2));
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      (void)parallelTurns(rewriter, loc, one, /*gpu=*/true);
+      auto firstNotBelow = [&](Value bound) -> Value {
+        auto search = scf::WhileOp::create(
+            rewriter, loc,
+            TypeRange{rewriter.getIndexType(), rewriter.getIndexType()},
+            ValueRange{zero, listed},
+            [&](OpBuilder &, Location, ValueRange range) {
+              scf::ConditionOp::create(
+                  rewriter, loc,
+                  arith::CmpIOp::create(rewriter, loc,
+                                        arith::CmpIPredicate::ult, range[0],
+                                        range[1]),
+                  range);
+            },
+            [&](OpBuilder &, Location, ValueRange range) {
+              Value middle = arith::DivUIOp::create(
+                  rewriter, loc, add(range[0], range[1]), constant(2));
+              Value below = arith::CmpIOp::create(
+                  rewriter, loc, arith::CmpIPredicate::slt,
+                  load(sortedKeys, middle), bound);
+              scf::YieldOp::create(
+                  rewriter, loc,
+                  ValueRange{arith::SelectOp::create(rewriter, loc, below,
+                                                     add(middle, one),
+                                                     range[0]),
+                             arith::SelectOp::create(rewriter, loc, below,
+                                                     range[1], middle)});
+            });
+        return search.getResult(0);
+      };
+      Value lo = zero, hi = listed;
+      if (Value from = query.getSlicePart("from"))
+        lo = firstNotBelow(orderKey(rewriter, loc, from, byType));
+      if (Value to = query.getSlicePart("to"))
+        hi = arith::MaxUIOp::create(
+            rewriter, loc, lo,
+            firstNotBelow(orderKey(rewriter, loc, to, byType)));
+      auto many = [&](Value k) -> Value {
+        return toIndex(arith::MaxSIOp::create(rewriter, loc, k, whole(0, i32)));
+      };
+      if (Value k = query.getSlicePart("first"))
+        hi = arith::MinUIOp::create(rewriter, loc, hi, add(lo, many(k)));
+      if (Value k = query.getSlicePart("last"))
+        lo = arith::MaxUIOp::create(
+            rewriter, loc, lo,
+            arith::SubIOp::create(
+                rewriter, loc, hi,
+                arith::MinUIOp::create(
+                    rewriter, loc, many(k),
+                    arith::SubIOp::create(rewriter, loc, hi, lo))));
+      store(arith::IndexCastOp::create(rewriter, loc, i64, lo), ends, zero);
+      store(
+          arith::IndexCastOp::create(
+              rewriter, loc, i64, arith::SubIOp::create(rewriter, loc, hi, lo)),
+          ends, one);
+    }
+    auto readBack = [&](int64_t offset) -> Value {
+      return toIndex(
+          callGpu(rewriter, loc, program, "ent_gpu_scratch_get",
+                  ValueRange{whole(8, i64), whole(offset, i64), whole(8, i64)},
+                  TypeRange{i64})
+              .getResult(0));
+    };
+    first = readBack(0);
+    listed = readBack(8);
+  }
 
   // Where each buffer's rows go: after those it has, as many as the
   // entities times the rows each gives (asked on the CPU, whose counts
@@ -16781,7 +16857,7 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
     OpBuilder::InsertionGuard guard(rewriter);
     Value at = parallelTurns(rewriter, loc, listed, /*gpu=*/true);
     each = cast<scf::ParallelOp>(rewriter.getInsertionBlock()->getParentOp());
-    Value code = load(sorted, at);
+    Value code = load(sorted, add(at, first));
     Value number = arith::ShRUIOp::create(rewriter, loc, code, whole(32, i64));
     Value row = toIndex(
         arith::AndIOp::create(rewriter, loc, code, whole(0xffffffff, i64)));
@@ -16902,11 +16978,18 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
       callGpu(rewriter, loc, program, "ent_ranks_capture", ValueRange{});
   }
   // The entities there are now, listed as they are stored and then put in
-  // the order of their keys.
+  // the order of their keys; or, where a sorted index by the same field
+  // holds the same entities and is up to date (--ent-indexes), as it has
+  // them: the same order.
+  const WorldBuffer *byIndex = nullptr;
+  if (FlatSymbolRefAttr name = query.getByIndex(); name && !spread)
+    byIndex = &layout.getBuffer(name.getAttr());
   llvm::DenseMap<const WorldArchetype *, Value> startCounts;
   for (const WorldArchetype *archetype : matched) {
     Value rows = world.count(loc, *archetype);
     startCounts[archetype] = rows;
+    if (byIndex)
+      continue;
     Value from = zero;
     if (spread) {
       Value number = arith::ConstantIntOp::create(rewriter, loc,
@@ -16978,10 +17061,110 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
                               arith::SubIOp::create(rewriter, loc, rows, from)),
         cells, ValueRange{zero});
   }
-  // (On many threads from as many entities as a reactive query's events
-  // are walked on them.)
-  callOrderedSort(rewriter, loc, module, keys, ids, cells,
-                  options.parallelEntities ? options.parallelMinEvents : 0);
+  if (byIndex) {
+    // The index's rows, its keys as keys of the order (see orderKey) and
+    // its entities.
+    auto fieldOf = [&](StringRef name) -> const WorldColumn & {
+      return *llvm::find_if(byIndex->fields, [&](const WorldColumn &field) {
+        return field.field.getValue() == name;
+      });
+    };
+    const WorldColumn &keyField = fieldOf("key");
+    Value rows = world.toIndex(
+        loc, memref::LoadOp::create(rewriter, loc, world.bufferCount(*byIndex),
+                                    ValueRange{zero}));
+    auto copy = scf::ForOp::create(rewriter, loc, zero, rows, one);
+    {
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(copy.getBody());
+      Value r = copy.getInductionVar();
+      memref::StoreOp::create(
+          rewriter, loc,
+          orderKey(rewriter, loc,
+                   memref::LoadOp::create(rewriter, loc,
+                                          world.bufferField(*byIndex, keyField),
+                                          ValueRange{r}),
+                   keyField.type),
+          keys, ValueRange{r});
+      memref::StoreOp::create(
+          rewriter, loc,
+          memref::LoadOp::create(rewriter, loc,
+                                 world.bufferField(*byIndex, fieldOf("who")),
+                                 ValueRange{r}),
+          ids, ValueRange{r});
+    }
+    memref::StoreOp::create(rewriter, loc, rows, cells, ValueRange{zero});
+  } else {
+    // (On many threads from as many entities as a reactive query's events
+    // are walked on them.)
+    callOrderedSort(rewriter, loc, module, keys, ids, cells,
+                    options.parallelEntities ? options.parallelMinEvents : 0);
+  }
+  // A slice of the order: the first row whose key is not below `from`,
+  // up to the first not below `to`, and of those the first or the last
+  // so many (cells: where the visit starts, where it ends).
+  if (!query.getSlice().empty()) {
+    Value count =
+        memref::LoadOp::create(rewriter, loc, cells, ValueRange{zero});
+    Type byType = matched.front()->find(byComponent, byField)->type;
+    // The first row whose key is not below `bound` (a key of the order).
+    auto firstNotBelow = [&](Value bound) -> Value {
+      auto search = scf::WhileOp::create(
+          rewriter, loc, TypeRange{index, index}, ValueRange{zero, count},
+          [&](OpBuilder &, Location, ValueRange range) {
+            Value more = arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::ult, range[0], range[1]);
+            scf::ConditionOp::create(rewriter, loc, more, range);
+          },
+          [&](OpBuilder &, Location, ValueRange range) {
+            Value middle = arith::DivUIOp::create(
+                rewriter, loc,
+                arith::AddIOp::create(rewriter, loc, range[0], range[1]),
+                arith::ConstantIndexOp::create(rewriter, loc, 2));
+            Value below = arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::slt,
+                memref::LoadOp::create(rewriter, loc, keys, ValueRange{middle}),
+                bound);
+            scf::YieldOp::create(
+                rewriter, loc,
+                ValueRange{
+                    arith::SelectOp::create(
+                        rewriter, loc, below,
+                        arith::AddIOp::create(rewriter, loc, middle, one),
+                        range[0]),
+                    arith::SelectOp::create(rewriter, loc, below, range[1],
+                                            middle)});
+          });
+      return search.getResult(0);
+    };
+    Value lo = zero, hi = count;
+    if (Value from = query.getSlicePart("from"))
+      lo = firstNotBelow(orderKey(rewriter, loc, from, byType));
+    if (Value to = query.getSlicePart("to"))
+      hi = arith::MaxUIOp::create(
+          rewriter, loc, lo,
+          firstNotBelow(orderKey(rewriter, loc, to, byType)));
+    auto many = [&](Value k) -> Value {
+      return arith::IndexCastOp::create(
+          rewriter, loc, index,
+          arith::MaxSIOp::create(
+              rewriter, loc, k,
+              arith::ConstantIntOp::create(rewriter, loc, 0, 32)));
+    };
+    if (Value k = query.getSlicePart("first"))
+      hi = arith::MinUIOp::create(
+          rewriter, loc, hi, arith::AddIOp::create(rewriter, loc, lo, many(k)));
+    if (Value k = query.getSlicePart("last"))
+      lo = arith::MaxUIOp::create(
+          rewriter, loc, lo,
+          arith::SubIOp::create(
+              rewriter, loc, hi,
+              arith::MinUIOp::create(
+                  rewriter, loc, many(k),
+                  arith::SubIOp::create(rewriter, loc, hi, lo))));
+    memref::StoreOp::create(rewriter, loc, lo, cells, ValueRange{one});
+    memref::StoreOp::create(rewriter, loc, hi, cells, ValueRange{zero});
+  }
 
   // What is done where it stands: a row given to a buffer and, turn by
   // turn, an edge connected.
@@ -17032,8 +17215,11 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
   if (!turn && !spread && options.parallelEntities)
     appended = appendsOnly(query);
   if (appended) {
-    Value listed = memref::LoadOp::create(rewriter, loc, cells,
-                                          ValueRange{zero});
+    // (Of a slice, from where it starts.)
+    Value first = memref::LoadOp::create(rewriter, loc, cells, ValueRange{one});
+    Value listed = arith::SubIOp::create(
+        rewriter, loc,
+        memref::LoadOp::create(rewriter, loc, cells, ValueRange{zero}), first);
     auto ifMany = scf::IfOp::create(
         rewriter, loc,
         arith::CmpIOp::create(
@@ -17074,7 +17260,9 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
       OpBuilder::InsertionGuard inLoop(rewriter);
       rewriter.setInsertionPoint(each.getBody()->getTerminator());
       Value at = each.getInductionVars().front();
-      Value id = memref::LoadOp::create(rewriter, loc, ids, ValueRange{at});
+      Value id = memref::LoadOp::create(
+          rewriter, loc, ids,
+          ValueRange{arith::AddIOp::create(rewriter, loc, at, first)});
       Value place = arith::IndexCastOp::create(rewriter, loc, i64, at);
       emitLocate(
           rewriter, loc, layout, world, id,

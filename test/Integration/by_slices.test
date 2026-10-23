@@ -1,0 +1,33 @@
+// `for ... by` with slices (`from`, `to`, `first`, `last`), with a sorted
+// index by the same field and without it: the same entities in the same
+// order, on one core and on many, as keys change and entities come and
+// go. With the index, which the program also reads itself, the `for`
+// takes its order from it (`by_index`).
+// RUN: %ent run %S/Inputs/by_slices.ent 2>/dev/null > %t.index
+// RUN: sed -e '/\/\/ index$/d' %S/Inputs/by_slices.ent > %t.plain.ent
+// RUN: %ent run %t.plain.ent 2>/dev/null > %t.plain
+// RUN: cmp %t.index %t.plain
+// RUN: %ent run --parallel %S/Inputs/by_slices.ent 2>/dev/null > %t.index.all
+// RUN: cmp %t.index %t.index.all
+// RUN: %ent run --parallel %t.plain.ent 2>/dev/null > %t.plain.all
+// RUN: cmp %t.index %t.plain.all
+// RUN: ent-translate --import-ent %S/Inputs/by_slices.ent -I %S/../../devices \
+// RUN:   | ent-opt --ent-indexes | FileCheck %s --check-prefix=IR
+// RUN: FileCheck %s --input-file=%t.index --implicit-check-not=false
+
+// IR-LABEL: ent.system @Order_update(
+// IR: by @Dot "key" {
+// IR-LABEL: ent.system @walk(
+// IR: by @Dot "key" attributes {by_index = @Order}
+// IR: by @Dot "key" from %{{.*}} : i32 to %{{.*}} : i32 attributes {by_index = @Order}
+
+// Each walk against a scan over all the entities: as many, in order,
+// in the range, none passed over (no `false` anywhere).
+// CHECK: frame 0 walk 0 (0, 0, 0): 12000 visited, as a scan says true
+// CHECK: frame 0 walk 1 (10, 10, 0): 0 visited, as a scan says true
+// CHECK: frame 0 walk 1 (150, -150, 0): 0 visited, as a scan says true
+// CHECK: frame 0 walk 2 (-20, 0, 100): 100 visited, as a scan says true
+// CHECK: frame 0 walk 2 (-20, 0, -3): 0 visited, as a scan says true
+// CHECK: frame 0 walk 3 (0, 1000, 5): 5 visited, as a scan says true
+// CHECK: frame 0 lay: 5000 rows, 4999 after one not above
+// CHECK: frame 4 lay: 5000 rows, 4999 after one not above

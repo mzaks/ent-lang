@@ -3601,3 +3601,33 @@ The same rows, on one core and on many. Tried and not kept, one core:
 - Digits of as many bits each (three of 7 for 20 bits, where bytes are 8,
   8 and 4): 1-9% slower than bytes; a last pass of few values scatters to
   few places.
+
+## 2026-10-23: `for ... by` from a sorted index, and its slices
+
+`for c: Car by c.key` takes its order from a sorted index by `Car.key`
+over the same entities (`--ent-indexes` marks it), where the program reads
+the index itself; `from`, `to`, `first`, `last` after it cut a slice of
+the order, by halving the rows, with an index or sorted. 200,000
+entities with keys of 20 bits, 20 frames, ms a frame, the frames without
+the `for` taken off, `-march=native`, on mains (one core, CPU 2 / 23
+threads):
+
+| | sorted (before) | from the index |
+|---|---|---|
+| one in 1,000 keys moves by up to 10 | 1.69 / 0.49 | 0.17 / 0.055 |
+| one in 50 keys changes at random | about 1.2 / 0.5 (a sort) | 0.6 / 0.17 |
+
+Made for the `for` alone (nothing else reading it) the index cost more
+than the sort: 3.3 / 1.6 ms where keys change much (made anew, its rows
+written, each entity told its row), 1.14 / 0.99 where few do (made again
+in place, on one thread, where the sort runs on many). So the `for` uses
+an index only where the program keeps it anyway.
+
+Found on the way: a sorted index made again in place moved each row out
+of order down past those above it however far, so keys changed at random
+(one in 50 of 200,000) took 163 ms a frame to keep it. It now stops after
+as many steps as there are rows and makes the index anew: 2.6 ms (one
+core) / 1.3 (23 threads). Where few rows move little (one in 1,000) it is
+as before (0.64 / 0.65 ms), and so is the traffic highway, whose index
+is made again in place every step (6.25 / 1.23 s, 6.19 / 1.21 before the
+rows had their places: the rows are 8 bytes wider).

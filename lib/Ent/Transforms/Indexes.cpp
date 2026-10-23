@@ -90,6 +90,34 @@ Kept keptOf(BufferOp buffer, DictionaryAttr info,
   return kept;
 }
 
+/// Whether `system`, but for `query`, may change what `query`'s order is
+/// by or which entities there are before it runs: then the index, made
+/// when the system starts, is not what the `for` would sort. (Writes to
+/// the key in the query itself are fine: a `for ... by` goes by the values
+/// the key had when it started.)
+bool changesOrderOutside(SystemOp system, QueryOp query) {
+  FlatSymbolRefAttr component = query.getByComponent();
+  StringAttr field = query.getByField();
+  WalkResult result = system.walk([&](Operation *op) {
+    if (op == query.getOperation())
+      return WalkResult::skip();
+    if (isa<SpawnOp, DespawnOp, AddOp, RemoveOp>(op))
+      return WalkResult::interrupt();
+    if (auto invoke = dyn_cast<InvokeOp>(op); invoke && invoke.getProc())
+      return WalkResult::interrupt();
+    if (auto set = dyn_cast<SetOp>(op))
+      if (cast<RefType>(set.getRef().getType()).getComponent() == component &&
+          set.getFieldAttr() == field)
+        return WalkResult::interrupt();
+    if (auto apply = dyn_cast<ApplyOp>(op))
+      if (apply.getComponentAttr() == component &&
+          apply.getFieldAttr() == field)
+        return WalkResult::interrupt();
+    return WalkResult::advance();
+  });
+  return result.wasInterrupted();
+}
+
 bool touches(const llvm::SetVector<Column> &accessed,
              const llvm::SetVector<Column> &columns) {
   return llvm::any_of(columns,
@@ -119,6 +147,55 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
         it->second = computeAccess(system, archetypes);
       return it->second;
     };
+
+    // A `for` that goes by the field an index is by, over the entities it
+    // holds, takes its order from it (QueryOp::kByIndexAttr): the same
+    // order, without the sort; and so reads it. Only where the program
+    // reads the index itself, which keeps it up to date anyway: made only
+    // for such a `for`, the index costs more than the sort it saves where
+    // keys change much (made anew, and its rows written and told), and
+    // where few change it is made again on one thread where the sort runs
+    // on many (bench/RESULTS.md, 2026-10-23).
+    for (auto [buffer, info] : indexes) {
+      Kept kept = keptOf(buffer, info, archetypes, symbols);
+      bool read = false;
+      for (SystemOp system : module.getOps<SystemOp>()) {
+        StringAttr name = system.getSymNameAttr();
+        if (name == kept.update || name == kept.stale || name == kept.moved)
+          continue;
+        read |= touches(computeAccess(system, archetypes).reads, kept.readBy);
+      }
+      if (!read)
+        continue;
+      SmallVector<StringAttr> key = strings(info, "key");
+      SmallVector<StringAttr> of = strings(info, "of");
+      llvm::SmallDenseSet<Attribute> held;
+      for (ArchetypeOp archetype : archetypes)
+        if (llvm::all_of(of, [&](StringAttr component) {
+              return archetype.contains(FlatSymbolRefAttr::get(component)) &&
+                     !archetype.isOptional(FlatSymbolRefAttr::get(component));
+            }))
+          held.insert(archetype.getSymNameAttr());
+      StringAttr update = cast<StringAttr>(info.get("update"));
+      module.walk([&](QueryOp query) {
+        auto system = query->getParentOfType<SystemOp>();
+        // (Not the index's own making, which sorts the entities into it.)
+        if (!system || system.getSymNameAttr() == update || !query.hasBy() ||
+            query.getByIndex() || query.getByComponent().getAttr() != key[0] ||
+            query.getByField() != key[1])
+          return;
+        SmallVector<ArchetypeOp> matched = getMatchedArchetypes(query);
+        if (matched.size() != held.size() ||
+            !llvm::all_of(matched, [&](ArchetypeOp archetype) {
+              return held.contains(archetype.getSymNameAttr());
+            }))
+          return;
+        if (changesOrderOutside(system, query))
+          return;
+        query->setAttr(QueryOp::kByIndexAttr,
+                       FlatSymbolRefAttr::get(buffer.getSymNameAttr()));
+      });
+    }
 
     OpBuilder builder(module.getContext());
     for (auto [buffer, info] : indexes) {

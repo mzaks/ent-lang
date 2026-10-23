@@ -206,6 +206,21 @@
 // BY: frame 0 rows 602000 301000 hash 5544980611785813485 2835094989288384706 first -2500 last 2500
 // BY: frame 2 rows 602000 301000 hash 8746012038621469105 2451871882340062265 first -10000 last 10000
 
+// And slices of that order (`from .. to .. first`, `to .. last`), found
+// on the GPU: the same rows as on the CPU.
+// RUN: sed -e 's/  for e, d: Dot by d.key {/  for e, d: Dot by d.key from 0 - 1000 to 1000 first 50000 {/' %S/Inputs/gpu_by.ent > %t.first.ent
+// RUN: %ent run %t.first.ent > %t.first.cpu
+// RUN: %ent run %t.first.ent --gpu > %t.first.gpu
+// RUN: diff %t.first.cpu %t.first.gpu
+// RUN: FileCheck %s --check-prefix=FIRST --input-file=%t.first.gpu
+// FIRST: frame 0 rows 100000 50000 hash 678856078822532479 3894312181828149549 first -1000 last -166
+// RUN: sed -e 's/  for e, d: Dot by d.key {/  for e, d: Dot by d.key to 500 last 7000 {/' %S/Inputs/gpu_by.ent > %t.last.ent
+// RUN: %ent run %t.last.ent > %t.last.cpu
+// RUN: %ent run %t.last.ent --gpu > %t.last.gpu
+// RUN: diff %t.last.cpu %t.last.gpu
+// RUN: FileCheck %s --check-prefix=LAST --input-file=%t.last.gpu
+// LAST: frame 0 rows 14000 7000 hash 9859367445994158056 6983961741620595120 first 384 last 500
+
 // Rows given to buffers from `for`s of a `gpu` system (two archetypes,
 // every entity and those under an `if`, two `for`s one after the other
 // into one buffer): put in the order of the entities on the GPU, read

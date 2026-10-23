@@ -3401,17 +3401,25 @@ LogicalResult Parser::parseIndex() {
       // The rows in order again, where few are out of it: each that is
       // below the one before (by key, then by place) goes down past those
       // above it (insertion), and the entities of the rows that moved are
-      // told their rows.
+      // told their rows. Where that would move them more steps than
+      // there are rows, it stops and says so: they are better put in
+      // order anew (a sort is some passes over the rows; rows moved far,
+      // keys at random, would take as many steps as rows for each). What
+      // it moved by then is made anew as well.
       << "proc " << n << "_settle(order: mut " << n << ", held: mut "
-      << of.front() << ") {\n"
-      << "  for i in 1..len(order) {\n"
+      << of.front() << ") -> bool {\n"
+      << "  var steps = 0\n"
+      << "  var i = 1\n"
+      << "  while i < len(order) {\n"
       << "    if order[i].key <= order[i - 1].key && (order[i].key < "
          "order[i - 1].key || order[i].place < order[i - 1].place) {\n";
   for (const std::string &field : fields)
     out << "      let " << field << "_ = order[i]." << field << "\n";
   out << "      var j = i\n"
-      << "      while j > 0 && (order[j - 1].key > key_ || (order[j - 1].key "
-         "== key_ && order[j - 1].place > place_)) {\n";
+      << "      while j > 0 && steps <= len(order) && (order[j - 1].key > "
+         "key_ || (order[j - 1].key == key_ && order[j - 1].place > "
+         "place_)) {\n"
+      << "        steps += 1\n";
   for (const std::string &field : fields)
     out << "        order[j]." << field << " = order[j - 1]." << field << "\n";
   out << "        held[order[j].who]." << rowField << " = j\n"
@@ -3419,7 +3427,9 @@ LogicalResult Parser::parseIndex() {
   for (const std::string &field : fields)
     out << "      order[j]." << field << " = " << field << "_\n";
   out << "      held[who_]." << rowField << " = j\n"
-      << "    }\n  }\n}\n"
+      << "      if steps > len(order) { i = len(order) }\n"
+      << "    }\n    i += 1\n  }\n"
+      << "  steps <= len(order)\n}\n"
       // Made again: where the same entities are in it, each writes its
       // key and what is copied into its own row, and the rows are put in
       // order again; else all are put in order by their keys.
@@ -3726,16 +3736,21 @@ LogicalResult Parser::parseIndex() {
   for (const Copy &copy : copies)
     out << "      w[0]." << copy.name << " = " << through(copy) << "\n";
   out << "    }\n";
+  // (Where many rows are out of order, sorted on many threads; else each
+  // goes down past those above it. A grid counts them first, which a
+  // trace sees (and --tune chooses from): `Name_tangled`.)
   if (grid) {
-    // (Where many rows are out of order, sorted on many threads; else
-    // each goes down past those above it.)
     out << "    if " << n << "_tangled(" << n << "_below(" << n << "), len("
         << n << ")) {\n";
     anew("      ", /*counted=*/false);
-    out << "    } else {\n      " << n << "_settle(" << n << ", "
-        << of.front() << ")\n    }\n";
+    out << "    } else if !" << n << "_settle(" << n << ", " << of.front()
+        << ") {\n";
+    anew("      ", /*counted=*/false);
+    out << "    }\n";
   } else {
-    out << "    " << n << "_settle(" << n << ", " << of.front() << ")\n";
+    out << "    if !" << n << "_settle(" << n << ", " << of.front() << ") {\n";
+    anew("      ", /*counted=*/false);
+    out << "    }\n";
   }
   out << "  } else {\n";
   anew("    ", /*counted=*/true);
@@ -8058,6 +8073,9 @@ LogicalResult Parser::parseFor() {
   // [in turn] by name.field: in the order of a whole number the entities
   // have, one after another; `in turn`, each as a `for` of its own.
   bool turn = false;
+  llvm::StringMap<mlir::Value> slice;
+  SmallVector<Attribute> sliceOrder;
+  SmallVector<mlir::Value> sliceValues;
   Attribute by;
   llvm::SMLoc byAt = token.loc;
   if (token.isKeyword("in") && peek().isKeyword("turn")) {
@@ -8113,6 +8131,31 @@ LogicalResult Parser::parseFor() {
       if (binding.via)
         return error(byAt, "a 'for' that goes by a field binds what its "
                            "own entities have, not along a tree");
+    // A slice of the order: `from a` and `to b` (a <= value < b), then
+    // `first k` or `last k`; worked out before the `for` starts.
+    for (StringRef part : {"from", "to", "first", "last"}) {
+      llvm::SMLoc partAt = token.loc;
+      if (!consumeKeyword(part))
+        continue;
+      if (turn)
+        return error(partAt, "a 'for' in turn visits all its entities: no '" +
+                                 part.str() + "' yet");
+      if (part == "last" && slice.count("first"))
+        return error(partAt, "'first' or 'last': one of them");
+      Type wanted =
+          part == "from" || part == "to" ? type : Type(builder.getI32Type());
+      FailureOr<ExprPtr> bound = parseExpr();
+      if (failed(bound))
+        return failure();
+      FailureOr<mlir::Value> value = emit(**bound, wanted);
+      if (failed(value))
+        return failure();
+      if (value->getType() != wanted)
+        return mismatch((*bound)->loc, value->getType(), wanted);
+      slice[part] = *value;
+      sliceOrder.push_back(builder.getStringAttr(part));
+      sliceValues.push_back(*value);
+    }
   }
   ExprPtr where;
   if (consumeKeyword("where")) {
@@ -8259,6 +8302,10 @@ LogicalResult Parser::parseFor() {
     state.addAttribute(QueryOp::kByAttr, by);
   if (turn)
     state.addAttribute(QueryOp::kTurnAttr, builder.getUnitAttr());
+  if (!sliceValues.empty()) {
+    state.addOperands(sliceValues);
+    state.addAttribute(QueryOp::kSliceAttr, builder.getArrayAttr(sliceOrder));
+  }
   Region *body = state.addRegion();
   auto *block = new Block();
   body->push_back(block);

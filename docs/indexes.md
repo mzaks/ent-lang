@@ -134,7 +134,8 @@ index Traffic of Car by key { x: Spot.x, v: Speed.v }
   component (`row_in_Name`): `Name.row(e)` is one lookup.
 - Read as a buffer that only systems read (`Name[r].x`, `len(Name)`,
   handed to a fn), with `Name.find(key)`, the first row not below a key.
-  No query form uses it yet (`for e in Event ordered by time where ...`).
+  A `for ... by` the same field over the same entities takes its order
+  from it (2026-10-23, below).
 - Ties: in the order the entities are stored, however it was made
   (2026-10-23; before, made again in place, as they were in it): each
   row has its entity's place (`place`), counted when the index is made,
@@ -144,6 +145,22 @@ index Traffic of Car by key { x: Spot.x, v: Speed.v }
   `for ... by`: a fraction's bits, those but the sign's turned over
   below nought, nought below nought as nought (`test/Integration/
   float_keys.test`).
+- **Query forms** (built 2026-10-23, `test/Integration/by_slices.test`):
+  `for c: Car by c.key` takes its order from an index by `Car.key` that
+  holds the same entities, instead of sorting them (`--ent-indexes` marks
+  the `for`, `by_index`, and counts it as reading the index, so that it
+  is made before); with `from a to b` (a <= key < b), `first k`, `last k`
+  after it, a slice of the order, by halving the rows (with an index or
+  sorted). Without an index the same entities in the same order: the
+  index changes only how fast (principle 4). Only where the program reads
+  the index itself (else it would be made for the `for` alone, which
+  costs more than the sort: bench/RESULTS.md, 2026-10-23); not where the
+  system changes the key or which entities there are before the `for`,
+  nor on the GPU, where the slice is found after the GPU's sort.
+- Made again in place, an index stops moving rows down past those above
+  them once that has taken more steps than there are rows, and is made
+  anew (keys changed at random: 200,000 entities, one in 50 changed,
+  163 ms to 2.6 ms on one core).
 - `examples/traffic/lanes.ent` uses it: to the bit what the C version
   gives, as fast as the order it kept by hand, and its update six times
   cheaper made again in place (`bench/traffic/RESULTS.md`).
@@ -329,7 +346,7 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 | 1 | The shared sort-and-scan primitive (one core, parallel loops, GPU). `lay`'s order by hand ported to it, the same to the bit | The backend | built: `for ... by` listed, sorted and (giving rows) visited on many threads and on the GPU (see below); one radix sort for one core and many (2026-10-23) |
 | 2 | Uniform grid and `near ... within` (a Lennard-Jones melt as its example) | `rebuild`, scheduling of makes | built (see below), and `after me` (2b); grids of whole numbers, `between .. and ..`, `nearest k to` (2026-10-23) |
 | 3 | Hash index and `unique` | `incremental`, change tracking | |
-| 4 | Sorted index (secondary), then clustered | Ordered iteration, ranges, top-k | secondary built (5.2); query forms, float keys, ties, clustered to do |
+| 4 | Sorted index (secondary), then clustered | Ordered iteration, ranges, top-k | secondary built (5.2); ties, float keys, query forms (`by` with `from`, `to`, `first`, `last`) built 2026-10-23; clustered to do |
 | 5 | Morton linear quadtree and octree | Keys made of fields, ranges of prefixes | |
 | 6 | Relation indexes by source and target everywhere, indexes on edge fields | | |
 | 7 | Partitions by value | | |

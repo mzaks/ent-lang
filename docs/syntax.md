@@ -422,7 +422,22 @@ after the filters, where `top down` stands for a tree:
   all have, the smallest value first: a whole number or a fraction (`f32`,
   `f64`), of a component the `for` binds (`t.born`) or names after `with`
   (`Thing.born`). Entities with the same value (`==`: nought below nought
-  as nought) come in the storage's order. A NaN has no place of its own. The values are those
+  as nought) come in the storage's order. A NaN has no place of its own.
+- After it, a slice of that order: `from a` and `to b` (the entities
+  whose value is `a` or more and below `b`), and of those `first k` or
+  `last k` (the k smallest or largest, an i32; none for 0 or below),
+  visited smallest first still: `for c: mut Car by c.key from lo to hi
+  first 10 { }`. The values are worked out before the `for` starts; the
+  slice is of the entities the `for` goes over by their components (with,
+  without), and its `where` asks of those. Not with `in turn`.
+- Where a sorted index by the same field holds the same entities (`index
+  Name of Car by key`, see Indexes) and the program reads it too, the
+  `for` takes its order from it rather than sorting them: the same
+  entities in the same order, without the sort, and its slice found by
+  halving the rows. Not where nothing else reads the index (made for the
+  `for` alone it would cost more than the sort), where the system changes
+  the field or which entities there are elsewhere than in the `for`
+  itself (the index is made when the system starts), nor on the GPU. The values are those
   the field had when the `for` started.
 - It is one `for` still, with one end. What shows of the order is what
   shows of any order: a buffer's rows lie in it, a proc is called in it,
@@ -1958,7 +1973,9 @@ finds the car ahead and the cars beside each car so.
   16,384 entities on, built with `--parallel`),
   and the rows that are out of order then go down past those above them
   one by one (by key, then by place): about a pass over the rows where
-  few moved in the order. Of a grid, where more than one row in 64 is
+  few moved in the order, and where that would move them more steps than
+  there are rows (keys that changed much), it stops and the index is
+  made anew as below. Of a grid, where more than one row in 64 is
   below the one before, the entities are put in order instead by their
   cell, as a `for ... by` does, on many threads: the same order. (`ent build --tune` with a trace may choose another than
   64; see tools/ent.)

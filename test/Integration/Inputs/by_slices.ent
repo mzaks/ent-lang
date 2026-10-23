@@ -1,0 +1,142 @@
+// `for ... by` and its slices (test/Integration/by_slices.test): the
+// whole order, `from a to b`, `first k`, `last k`, a range with nothing
+// in it, k beyond what there is and below nought; of a body that writes
+// and sends, and one that only gives rows. With the sorted index by the
+// same field (the lines marked `index`) and without it, the same
+// output: the program reads the index itself (`peek`), which keeps it up
+// to date, and the `for` takes its order from it.
+import console
+import wyhash
+
+component Dot { key: i32, id: i64, hits: i64 } capacity 20000
+buffer Seen { id: i64, key: i32 } capacity 20000
+unique Check { frame: i64, next: i64 }
+
+index Order of Dot by key // index
+unique Peek { first: i64 } // index
+system peek() { if len(Order) > 0 { Peek.first = Order[0].key as i64 } } // index
+
+world {
+  for i in 0..12000 { spawn { Dot { key: wyrand_below(1, i as i64, 400) as i32 - 200, id: i as i64, hits: 0 } } }
+  Check.next = 12000
+}
+
+system shift() {
+  for d: mut Dot {
+    if wyrand_below(Check.frame as u64 + 5, d.id, 9) == 0 {
+      d.key = wyrand_below(Check.frame as u64 + 7, d.id, 400) as i32 - 200
+    }
+  }
+}
+system churn() {
+  for e, d: Dot { if wyrand_below(Check.frame as u64 + 3, d.id, 25) == 0 { e.destroy() } }
+}
+system arrive() {
+  for i in 0..300 {
+    spawn { Dot { key: wyrand_below(Check.frame as u64 + 11, i as i64, 400) as i32 - 200, id: Check.next, hits: 0 } }
+    Check.next += 1
+  }
+}
+
+// A body that writes its own entity and gives rows: one after another.
+system walk(lo: i32, hi: i32, k: i32, part: i32) {
+  Seen = []
+  if part == 0 {
+    for d: mut Dot by d.key {
+      d.hits += 1
+      Seen += { id: d.id, key: d.key }
+    }
+  } else if part == 1 {
+    for d: mut Dot by d.key from lo to hi {
+      d.hits += 1
+      Seen += { id: d.id, key: d.key }
+    }
+  } else if part == 2 {
+    for d: mut Dot by d.key from lo first k {
+      d.hits += 1
+      Seen += { id: d.id, key: d.key }
+    }
+  } else {
+    for d: mut Dot by d.key to hi last k {
+      d.hits += 1
+      Seen += { id: d.id, key: d.key }
+    }
+  }
+}
+unique Want { inside: i64, missed: i64, ordered: i64, outside: i64, hash: u64 }
+system show(lo: i32, hi: i32, k: i32, part: i32) {
+  var h: u64 = 1
+  var ordered = 0
+  var outside = 0
+  for i in 0..len(Seen) {
+    h = wyhash64(h, Seen[i].id as u64)
+    if i > 0 && Seen[i - 1].key <= Seen[i].key { ordered += 1 }
+    let key = Seen[i].key
+    if (part == 1 || part == 2) && key < lo { outside += 1 }
+    if (part == 1 || part == 3) && key >= hi { outside += 1 }
+  }
+  // What a scan over all of them says: how many are in the range, and
+  // (of `first`, `last`) how many of those were passed over though their
+  // key is nearer the start of the slice than its own end.
+  Want.ordered = ordered
+  Want.outside = outside
+  Want.hash = h
+  let low = if len(Seen) > 0 { Seen[0].key } else { 0 }
+  let top = if len(Seen) > 0 { Seen[len(Seen) - 1].key } else { 0 }
+  for d: Dot {
+    let inside = if part == 0 { true } else if part == 1 { d.key >= lo && d.key < hi }
+                 else if part == 2 { d.key >= lo } else { d.key < hi }
+    if inside { Want.inside += 1 }
+    if part == 2 && len(Seen) > 0 && d.key >= lo && d.key < top { Want.missed += 1 }
+    if part == 3 && len(Seen) > 0 && d.key < hi && d.key > low { Want.missed += 1 }
+  }
+}
+system judge(lo: i32, hi: i32, k: i32, part: i32) {
+  var want = Want.inside
+  if part >= 2 { want = min(want, max(k as i64, 0)) }
+  let fits = len(Seen) as i64 == want
+  // (Every key strictly inside what `first` or `last` took is among it.)
+  let whole = Want.missed <= len(Seen) as i64
+  let inOrder = Want.ordered == max(len(Seen) as i64 - 1, 0) && Want.outside == 0
+  put("frame {Check.frame} walk {part} ({lo}, {hi}, {k}): {len(Seen)} visited, as a scan says {fits}, nothing passed over {whole}, in order and in the range {inOrder}, {Want.hash}")
+  Want.inside = 0
+  Want.missed = 0
+}
+
+// A body that only gives rows: on many threads where built for them.
+system clear() { Seen = [] }
+system lay(lo: i32, hi: i32, k: i32) {
+  for d: Dot by d.key from lo to hi first k { Seen += { id: d.id, key: d.key } }
+}
+system laid() {
+  var h: u64 = 1
+  var ordered = 0
+  for i in 0..len(Seen) {
+    h = wyhash64(h, Seen[i].id as u64)
+    if i > 0 && Seen[i - 1].key <= Seen[i].key { ordered += 1 }
+  }
+  put("frame {Check.frame} lay: {len(Seen)} rows, {ordered} after one not above, {h}")
+  Check.frame += 1
+}
+
+schedule all() {
+  walk(0, 0, 0, 0) show(0, 0, 0, 0) judge(0, 0, 0, 0) walk(0 - 50, 50, 0, 1) show(0 - 50, 50, 0, 1) judge(0 - 50, 50, 0, 1) walk(10, 10, 0, 1) show(10, 10, 0, 1) judge(10, 10, 0, 1) walk(150, 0 - 150, 0, 1) show(150, 0 - 150, 0, 1) judge(150, 0 - 150, 0, 1)
+  walk(0 - 20, 0, 100, 2) show(0 - 20, 0, 100, 2) judge(0 - 20, 0, 100, 2) walk(0 - 20, 0, 100000, 2) show(0 - 20, 0, 100000, 2) judge(0 - 20, 0, 100000, 2) walk(0 - 20, 0, 0 - 3, 2) show(0 - 20, 0, 0 - 3, 2) judge(0 - 20, 0, 0 - 3, 2)
+  walk(0, 30, 70, 3) show(0, 30, 70, 3) judge(0, 30, 70, 3) walk(0, 1000, 5, 3) show(0, 1000, 5, 3) judge(0, 1000, 5, 3)
+  clear() lay(0 - 100, 100, 5000)
+}
+schedule keys() {
+  shift()
+  peek() // index
+  all() laid()
+}
+schedule both() {
+  churn() arrive() shift()
+  peek() // index
+  all() laid()
+}
+schedule start() {
+  peek() // index
+  all() laid()
+}
+main { start() keys() both() keys() both() }

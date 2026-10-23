@@ -1912,6 +1912,21 @@ ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
       result.addAttribute(kByAttr, b.getArrayAttr({component, field}));
       if (succeeded(parser.parseOptionalKeyword("turn")))
         result.addAttribute(kTurnAttr, b.getUnitAttr());
+      // Its slice: `from %a : t`, `to %b : t`, `first %k`, `last %k`.
+      SmallVector<Attribute> parts;
+      for (StringRef part : {"from", "to", "first", "last"}) {
+        if (failed(parser.parseOptionalKeyword(part)))
+          continue;
+        OpAsmParser::UnresolvedOperand operand;
+        Type type = b.getI32Type();
+        if (parser.parseOperand(operand) ||
+            ((part == "from" || part == "to") && parser.parseColonType(type)) ||
+            parser.resolveOperand(operand, type, result.operands))
+          return failure();
+        parts.push_back(b.getStringAttr(part));
+      }
+      if (!parts.empty())
+        result.addAttribute(kSliceAttr, b.getArrayAttr(parts));
     }
     if (failed(parser.parseOptionalKeyword("on")))
       return success();
@@ -1990,6 +2005,13 @@ void QueryOp::print(OpAsmPrinter &p) {
   if (hasBy())
     p << " by " << getByComponent() << " " << getByField()
       << (isTurn() ? " turn" : "");
+  if (auto parts = (*this)->getAttrOfType<ArrayAttr>(kSliceAttr))
+    for (auto [part, value] : llvm::zip(parts, getSlice())) {
+      StringRef name = cast<StringAttr>(part).getValue();
+      p << " " << name << " " << value;
+      if (name == "from" || name == "to")
+        p << " : " << value.getType();
+    }
   if (auto triggers = (*this)->getAttrOfType<ArrayAttr>(kTriggersAttr)) {
     p << " on [";
     llvm::interleaveComma(triggers, p, [&](Attribute attr) {
@@ -2017,8 +2039,18 @@ void QueryOp::print(OpAsmPrinter &p) {
   p.printOptionalAttrDictWithKeyword(
       (*this)->getAttrs(),
       {kTriggersAttr, kWithAttr, kWithoutAttr, kAnyAttr, kCascadeAttr,
-       kLeavesFirstAttr, kTraversalAttr, kByAttr, kTurnAttr});
+       kLeavesFirstAttr, kTraversalAttr, kByAttr, kTurnAttr, kSliceAttr});
   printBody(p, getBody());
+}
+
+Value QueryOp::getSlicePart(StringRef part) {
+  auto parts = (*this)->getAttrOfType<ArrayAttr>(kSliceAttr);
+  if (!parts)
+    return Value();
+  for (auto [name, value] : llvm::zip(parts, getSlice()))
+    if (cast<StringAttr>(name).getValue() == part)
+      return value;
+  return Value();
 }
 
 /// `attr` as a list of components, or failure if it is not one.
@@ -2074,6 +2106,25 @@ SmallVector<SmallVector<FlatSymbolRefAttr>> QueryOp::getAnyGroups() {
 
 LogicalResult QueryOp::verify() {
   Block &body = getBody().front();
+  // A slice: of a query that goes by a field, not in turns; `first` or
+  // `last`, whole numbers.
+  auto parts = (*this)->getAttrOfType<ArrayAttr>(kSliceAttr);
+  if (!getSlice().empty() || parts) {
+    if (!parts || parts.size() != getSlice().size())
+      return emitOpError("'") << kSliceAttr << "' names each slice operand";
+    if (!hasBy())
+      return emitOpError("has a slice (from, to, first, last) but does not "
+                         "go by a field");
+    if (isTurn())
+      return emitOpError("takes turns and has a slice (from, to, first, "
+                         "last): not yet");
+    if (getSlicePart("first") && getSlicePart("last"))
+      return emitOpError("has both 'first' and 'last'");
+    for (StringRef part : {"first", "last"})
+      if (Value count = getSlicePart(part);
+          count && !count.getType().isInteger(32))
+        return emitOpError("'") << part << "' takes an i32";
+  }
   for (StringRef name : {kWithAttr, kWithoutAttr})
     if (Attribute attr = (*this)->getAttr(name))
       if (failed(componentList(attr)))
@@ -2405,6 +2456,11 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
       return emitOpError("goes by '")
              << getByField().getValue() << "' of type " << type
              << "; the order is that of a whole number or a fraction";
+    for (StringRef part : {"from", "to"})
+      if (Value bound = getSlicePart(part); bound && bound.getType() != type)
+        return emitOpError("'")
+               << part << "' takes " << type << ", the type of '"
+               << getByField().getValue() << "'";
     if (!system.canRead(getByComponent()))
       return emitOpError("goes by a field of ")
              << getByComponent() << " but system @" << system.getSymName()
