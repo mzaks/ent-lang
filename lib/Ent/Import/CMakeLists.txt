@@ -6,6 +6,7 @@ add_mlir_library(MLIREntImport
   MLIREnt
   MLIRArithDialect
   MLIRMathDialect
+  MLIRMemRefDialect
   MLIRSCFDialect
   MLIRIR
 )

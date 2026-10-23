@@ -6,6 +6,7 @@ target_link_libraries(ent-translate PRIVATE
   MLIRArithDialect
   MLIRFuncDialect
   MLIRMathDialect
+  MLIRMemRefDialect
   MLIRSCFDialect
   MLIRTranslateLib
 )

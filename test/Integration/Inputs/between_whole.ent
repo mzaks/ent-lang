@@ -1,0 +1,64 @@
+// 400 dots at whole-number places (i32) from -500 to 490, a grid over
+// where they are, and the dots in a box around each (the corners within
+// it, a box over the grid's edge, one wholly past it, one with its
+// corners the wrong way round), by the grid index and by a scan
+// (test/Integration/between.test). The statements write as they go, so
+// the rows go by blocks.
+import console
+import wyhash
+component Dot { x: i32, y: i32 } capacity 1024
+component Seen { n: i64, sum: i64, scan: i64, scansum: i64 } capacity 1024
+unique Check { same: i64, pairs: i64 }
+
+index Cells of Dot grid (x, y) cell 70
+
+world {
+  for i in 0..400 {
+    spawn { Dot { x: wyrand_below(9, i as i64 * 2, 100) as i32 * 10 - 500,
+                  y: wyrand_below(9, i as i64 * 2 + 1, 100) as i32 * 10 - 500 },
+            Seen { n: 0, sum: 0, scan: 0, scansum: 0 } }
+  }
+}
+
+system count(dx0: i32, dy0: i32, dx1: i32, dy1: i32) {
+  for me, a: Dot, s: mut Seen {
+    let x0 = a.x + dx0
+    let y0 = a.y + dy0
+    let x1 = a.x + dx1
+    let y1 = a.y + dy1
+    s.n = 0
+    s.sum = 0
+    for o, b: Dot between (x0, y0) and (x1, y1) in Cells {
+      s.n += 1
+      s.sum += (b.x * 3 + b.y) as i64
+    }
+    var m = 0
+    var msum: i64 = 0
+    for o, b: Dot {
+      if b.x >= x0 && b.x <= x1 && b.y >= y0 && b.y <= y1 {
+        m += 1
+        msum += (b.x * 3 + b.y) as i64
+      }
+    }
+    s.scan = m
+    s.scansum = msum
+  }
+}
+
+system report() {
+  for s: Seen {
+    if s.n == s.scan && s.sum == s.scansum { Check.same += 1 }
+    Check.pairs += s.n
+  }
+  put("same counts and sums {Check.same} of 400, pairs {Check.pairs}")
+  Check.same = 0
+  Check.pairs = 0
+}
+
+schedule s() {
+  count(0 - 70, 0 - 40, 70, 110) report()
+  count(0 - 300, 0 - 10, 600, 10) report()
+  count(2000, 0, 2100, 100) report()
+  count(50, 50, 0 - 50, 0 - 50) report()
+}
+main { s() }

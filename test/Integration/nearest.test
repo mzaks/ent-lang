@@ -1,0 +1,35 @@
+// `for ... nearest k to (x, y) [within r] in Index where ..` against k
+// scans, each for the nearest after the one before (by how far, then by
+// row): the same dots in the same order, nearest first; one, five, at
+// most twelve within a distance, none, and more than there are (all).
+// In a box that wraps, and of whole numbers on a lattice (many as far as
+// others) over where the dots are, also from a place past the grid; and
+// of three sides. The same on one core and on all.
+// RUN: %ent run %S/Inputs/nearest.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel %S/Inputs/nearest.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --check-prefix=WRAP --input-file=%t.one
+// RUN: %ent run %S/Inputs/nearest_whole.ent 2>/dev/null > %t.whole
+// RUN: %ent run --parallel %S/Inputs/nearest_whole.ent 2>/dev/null > %t.whole.all
+// RUN: cmp %t.whole %t.whole.all
+// RUN: FileCheck %s --check-prefix=WHOLE --input-file=%t.whole
+// RUN: %ent run %S/Inputs/nearest_3d.ent 2>/dev/null > %t.three
+// RUN: %ent run --parallel %S/Inputs/nearest_3d.ent 2>/dev/null > %t.three.all
+// RUN: cmp %t.three %t.three.all
+// RUN: FileCheck %s --check-prefix=THREE --input-file=%t.three
+
+// WRAP:      same order 400 of 400, visited 400, farther before nearer 0
+// WRAP-NEXT: same order 400 of 400, visited 2000, farther before nearer 0
+// WRAP-NEXT: same order 400 of 400, visited 830, farther before nearer 0
+// WRAP-NEXT: same order 400 of 400, visited 0, farther before nearer 0
+// WRAP-NEXT: same order 400 of 400, visited 159600, farther before nearer 0
+// WHOLE:      same order 400 of 400, visited 400, farther before nearer 0
+// WHOLE-NEXT: same order 400 of 400, visited 2000, farther before nearer 0
+// WHOLE-NEXT: same order 400 of 400, visited 774, farther before nearer 0
+// WHOLE-NEXT: same order 400 of 400, visited 2800, farther before nearer 0
+// WHOLE-NEXT: same order 400 of 400, visited 159600, farther before nearer 0
+// THREE:      same order 400 of 400, visited 400, farther before nearer 0
+// THREE-NEXT: same order 400 of 400, visited 2000, farther before nearer 0
+// THREE-NEXT: same order 400 of 400, visited 1114, farther before nearer 0
+// THREE-NEXT: same order 400 of 400, visited 0, farther before nearer 0
+// THREE-NEXT: same order 400 of 400, visited 159600, farther before nearer 0

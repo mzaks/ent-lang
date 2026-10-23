@@ -387,8 +387,15 @@ its `where` (`test/Integration/near.test`).
   4.9 s where the C takes 4.25; on 12 threads 0.76 s.
 - The policy is still `lazy`: made before `forces` reads it, after
   `kick_drift` moved the atoms, every step (0.6 ms of a step of 48).
-- Not yet: a range (`in box`), `nearest k`. A grid of whole numbers
-  built (2026-10-23, `test/Integration/near_whole.test`).
+- Built 2026-10-23: a grid of whole numbers (`near_whole.test`), a
+  range as `between (x0, y0) and (x1, y1)` (`between.test`) and
+  `nearest k to (x, y)` (`nearest.test`), of any grid, in
+  `docs/syntax.md`. `nearest` looks within a distance from how many
+  entities the grid holds for its size (k and a half of them, were they
+  as many everywhere), twice that where fewer were, and keeps the
+  nearest k in order in a list on the heap: on one core, of 100,000 dots
+  in 2D and 8 nearest each, about twice what `near` takes within the
+  distance that has 9 (measured on battery, by itself).
 
 **Step 2b, each pair once: `after me`** (built 2026-10-22, as proposed
 below; `test/Integration/near_after.test`. The half melt on one core

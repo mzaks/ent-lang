@@ -2053,6 +2053,27 @@ uniques. `examples/lj/lj.ent` finds the atoms near each atom so.
   which are within `r` one bit each, then the body for each of those, in
   the order of the rows; so no branch for a row that may go either way
   (`examples/lj/lj.ent`'s lists, filled so).
+- `for e, b: Component between (x0, y0) and (x1, y1) in Name where .. {
+  }` visits the entities of the index in a box: from the one corner to
+  the other on every side (`x0 <= x <= x1`, ..; none where a corner is
+  past the other), the same order as `near`, `after me` too. In a box
+  that wraps, an entity is seen at its image from the lowest corner on,
+  less than a box past it (`b.x` is that image): a box as wide as the
+  world box or wider has every entity in it, once.
+- `for e, b: Component nearest k to (x, y) in Name where .. { }` visits
+  the `k` entities of the index nearest a place (an i32, none where it
+  is 0 or less), the nearest first, those as near in the order of their
+  rows; fewer where the index has fewer that the `where` takes (it is
+  asked as they are chosen: `where o != me` leaves `me` out and still
+  gives `k`). `within r` after the place takes none farther than `r`.
+  Where the box wraps, how far is to the nearest image, as with `near`.
+  It looks within a distance that k and a half of the entities would be
+  in, were they as many everywhere, keeping the nearest k in a list in
+  order, and within twice that where fewer were: the statements run
+  after, so what they do changes nothing of which are chosen. No `after
+  me`.
+- Of a grid of whole numbers, the corners, the place and `within` are
+  whole numbers too, and how far things are is worked out to the unit.
 
 ### Entities given to a fn or proc
 

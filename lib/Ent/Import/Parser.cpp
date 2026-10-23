@@ -16,6 +16,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/Builders.h"
@@ -5511,20 +5512,26 @@ LogicalResult Parser::parseEach(llvm::SMLoc at) {
       into.push_back(symbol(*component));
     } while (consumeIf(Token::Comma));
   }
-  // `near (x, y) within r in Index`: the entities of a grid index near
-  // a place.
-  if (token.isKeyword("near")) {
+  // `near (x, y) within r in Index`, `between (..) and (..) in Index`,
+  // `nearest k to (x, y) in Index`: the entities of a grid index near a
+  // place, in a box, or nearest it.
+  if (token.isKeyword("near") || token.isKeyword("between") ||
+      token.isKeyword("nearest")) {
+    std::string form = "'for ... " + token.spelling.str() + "'";
     if (inFunction)
-      return error("a fn or proc has no index: a 'for ... near' is in a "
+      return error("a fn or proc has no index: a " + form +
+                   " is in a "
                    "system's 'for'");
     if (!with.empty() || !without.empty())
-      return error("a 'for ... near' visits the entities of an index, "
+      return error("a " + form +
+                   " visits the entities of an index, "
                    "which have its components: no 'with' or 'without'");
     SmallVector<std::pair<std::string, std::string>> bound;
     for (const Bound &binding : bindings) {
       if (binding.old)
-        return error(at, "a 'for ... near' reads the index as it was made, "
-                         "before the 'for' around started: no 'old'");
+        return error(at, "a " + form +
+                             " reads the index as it was made, "
+                             "before the 'for' around started: no 'old'");
       bound.push_back({binding.name, binding.component});
     }
     return parseNear(at, entity, bound);
@@ -5721,6 +5728,8 @@ static bool onlyReads(Operation *op) {
 }
 
 // for [e,] b: Component, .. near (x, y[, z]) within r in Index [where c] { }
+// for [e,] b: Component, .. between (x0, y0) and (x1, y1) in Index ..
+// for [e,] b: Component, .. nearest k to (x, y) [within r] in Index ..
 //
 // The entities of a grid index within `r` of a place, in the order of the
 // cells around the place's (as many out as `r` reaches: z, then y, then
@@ -5729,32 +5738,73 @@ static bool onlyReads(Operation *op) {
 // nearest it, where the box wraps), and the distance is of that; what
 // the index copies is read from its row; anything else of the bound
 // components is looked up. The vars go round as in any loop.
+//
+// `between`: those from one corner to the other on every side, the same
+// order (seen at the image from the lowest corner on). `nearest k`: the k
+// nearest the place, nearest first (by their rows where as near), of those its
+// `where` takes: those within a distance that doubles, from a cell's
+// width, until k are, kept as a list in order; then visited.
 LogicalResult
 Parser::parseNear(llvm::SMLoc at, const std::string &entity,
                   ArrayRef<std::pair<std::string, std::string>> bound) {
   Location where = loc(at);
-  advance(); // near
-  if (failed(expect(Token::LParen, "'(' and the place: 'near (x, y) "
-                                   "within r in Index'")))
-    return failure();
-  SmallVector<ExprPtr> place;
-  do {
-    FailureOr<ExprPtr> coordinate = parseExpr();
-    if (failed(coordinate))
+  enum class Kind { Near, Between, Nearest };
+  Kind kind = token.isKeyword("between")   ? Kind::Between
+              : token.isKeyword("nearest") ? Kind::Nearest
+                                           : Kind::Near;
+  std::string form = kind == Kind::Near ? "'near (x, y) within r in Index'"
+                     : kind == Kind::Between
+                         ? "'between (x0, y0) and (x1, y1) in Index'"
+                         : "'nearest k to (x, y) in Index'";
+  advance(); // near, between or nearest
+  auto places = [&](SmallVector<ExprPtr> &into,
+                    StringRef what) -> LogicalResult {
+    if (failed(expect(Token::LParen, "'(' and " + what.str() + ": " + form)))
       return failure();
-    place.push_back(std::move(*coordinate));
-  } while (consumeIf(Token::Comma));
-  if (failed(expect(Token::RParen, "')'")))
-    return failure();
-  if (!consumeKeyword("within"))
-    return error("expected 'within' and how far: 'near (x, y) within r in "
-                 "Index'");
-  FailureOr<ExprPtr> radius = parseExpr();
-  if (failed(radius))
-    return failure();
+    do {
+      FailureOr<ExprPtr> coordinate = parseExpr();
+      if (failed(coordinate))
+        return failure();
+      into.push_back(std::move(*coordinate));
+    } while (consumeIf(Token::Comma));
+    return expect(Token::RParen, "')'");
+  };
+  SmallVector<ExprPtr> place, high;
+  ExprPtr radius, count;
+  if (kind == Kind::Near) {
+    if (failed(places(place, "the place")))
+      return failure();
+    if (!consumeKeyword("within"))
+      return error("expected 'within' and how far: " + form);
+    FailureOr<ExprPtr> parsed = parseExpr();
+    if (failed(parsed))
+      return failure();
+    radius = std::move(*parsed);
+  } else if (kind == Kind::Between) {
+    if (failed(places(place, "the lowest corner")))
+      return failure();
+    if (!consumeKeyword("and"))
+      return error("expected 'and' and the highest corner: " + form);
+    if (failed(places(high, "the highest corner")))
+      return failure();
+  } else {
+    FailureOr<ExprPtr> parsed = parseExpr();
+    if (failed(parsed))
+      return failure();
+    count = std::move(*parsed);
+    if (!consumeKeyword("to"))
+      return error("expected 'to' and the place: " + form);
+    if (failed(places(place, "the place")))
+      return failure();
+    if (consumeKeyword("within")) {
+      FailureOr<ExprPtr> farthest = parseExpr();
+      if (failed(farthest))
+        return failure();
+      radius = std::move(*farthest);
+    }
+  }
   if (!consumeKeyword("in"))
-    return error("expected 'in' and the grid index: 'near (x, y) within r "
-                 "in Index'");
+    return error("expected 'in' and the grid index: " + form);
   llvm::SMLoc indexAt = token.loc;
   FailureOr<std::string> named = identifier("an index");
   if (failed(named))
@@ -5767,10 +5817,11 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
   std::string symbolName = held->symbol;
   Index &index = indexes[symbolName];
   unsigned dims = index.positions.size();
-  if (place.size() != dims)
-    return error(at, "'" + *named + "' is a grid of " + Twine(dims) +
-                         " places; the place is given " +
-                         Twine(place.size()));
+  if (place.size() != dims || (kind == Kind::Between && high.size() != dims))
+    return error(at,
+                 "'" + *named + "' is a grid of " + Twine(dims) +
+                     " places; the place is given " +
+                     Twine(place.size() != dims ? place.size() : high.size()));
   for (auto &[name, component] : bound)
     if (!llvm::is_contained(index.of, resolve(component)))
       return error(at, "the entities of '" + *named + "' have its "
@@ -5779,6 +5830,9 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
   // the entity the `for` around visits, read through its binding of the
   // index's first component.
   mlir::Value afterRow;
+  if (token.isKeyword("after") && kind == Kind::Nearest)
+    return error("'nearest' visits the nearest first, not by rows: no "
+                 "'after'");
   if (consumeKeyword("after")) {
     llvm::SMLoc meAt = token.loc;
     FailureOr<std::string> me =
@@ -5820,25 +5874,46 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
     return error("expected '{' and the statements to run for each entity");
 
   Type t = index.positionType;
+  Type i32 = builder.getI32Type();
   Type i64 = builder.getI64Type();
   Type indexType = builder.getIndexType();
-  SmallVector<mlir::Value> at_;
-  for (const ExprPtr &coordinate : place) {
-    FailureOr<mlir::Value> value = emit(*coordinate, t);
+  auto emitPlace = [&](ArrayRef<ExprPtr> given,
+                       SmallVector<mlir::Value> &into) -> LogicalResult {
+    for (const ExprPtr &coordinate : given) {
+      FailureOr<mlir::Value> value = emit(*coordinate, t);
+      if (failed(value))
+        return failure();
+      if (value->getType() != t)
+        return mismatch(coordinate->loc, value->getType(), t);
+      into.push_back(*value);
+    }
+    return success();
+  };
+  SmallVector<mlir::Value> at_, hi_;
+  if (failed(emitPlace(place, at_)) || failed(emitPlace(high, hi_)))
+    return failure();
+  mlir::Value given;
+  if (radius) {
+    FailureOr<mlir::Value> value = emit(*radius, t);
     if (failed(value))
       return failure();
     if (value->getType() != t)
-      return mismatch(coordinate->loc, value->getType(), t);
-    at_.push_back(*value);
+      return mismatch(radius->loc, value->getType(), t);
+    given = *value;
   }
-  FailureOr<mlir::Value> reach = emit(**radius, t);
-  if (failed(reach))
-    return failure();
-  if (reach->getType() != t)
-    return mismatch((*radius)->loc, reach->getType(), t);
+  mlir::Value wanted;
+  if (count) {
+    FailureOr<mlir::Value> value = emit(*count, i32);
+    if (failed(value))
+      return failure();
+    if (value->getType() != i32)
+      return mismatch(count->loc, value->getType(), i32);
+    wanted = *value;
+  }
   // How far things are, squared: of the places' type, or, of a grid of
   // whole numbers, an i64.
   bool whole = isa<IntegerType>(t);
+  Type distanceType = whole ? i64 : t;
   auto wide = [&](mlir::Value v) -> mlir::Value {
     return whole && v.getType() != i64
                ? arith::ExtSIOp::create(builder, where, i64, v).getResult()
@@ -5859,62 +5934,277 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
       return arith::MulIOp::create(builder, where, wide(a), wide(a));
     return arith::MulFOp::create(builder, where, a, a);
   };
-  auto atMost = [&](mlir::Value a, mlir::Value b) -> mlir::Value {
-    if (whole)
-      return arith::CmpIOp::create(builder, where, arith::CmpIPredicate::sle, a,
-                                   b);
-    return arith::CmpFOp::create(builder, where, arith::CmpFPredicate::OLE, a,
-                                 b);
+  auto compare = [&](arith::CmpIPredicate whole_, arith::CmpFPredicate real,
+                     mlir::Value a, mlir::Value b) -> mlir::Value {
+    if (isa<IntegerType>(a.getType()))
+      return arith::CmpIOp::create(builder, where, whole_, a, b);
+    return arith::CmpFOp::create(builder, where, real, a, b);
   };
-  mlir::Value far = squared(*reach);
+  auto atMost = [&](mlir::Value a, mlir::Value b) -> mlir::Value {
+    return compare(arith::CmpIPredicate::sle, arith::CmpFPredicate::OLE, a, b);
+  };
+  auto below = [&](mlir::Value a, mlir::Value b) -> mlir::Value {
+    return compare(arith::CmpIPredicate::slt, arith::CmpFPredicate::OLT, a, b);
+  };
+  auto both = [&](mlir::Value a, mlir::Value b) -> mlir::Value {
+    return a ? arith::AndIOp::create(builder, where, a, b).getResult() : b;
+  };
+  auto zeroOf = [&](Type type) -> mlir::Value {
+    if (whole)
+      return integer(where, type, 0);
+    return arith::ConstantOp::create(builder, where,
+                                     builder.getFloatAttr(type, 0.0));
+  };
   auto grid = FlatSymbolRefAttr::get(context, index.gridUnique);
   auto read = [&](StringRef field, Type type) -> mlir::Value {
     return ReadOp::create(builder, where, type, grid,
                           builder.getStringAttr(field))
         .getResult();
   };
-  auto call = [&](StringRef fn, ValueRange args) -> mlir::Value {
-    return InvokeOp::create(builder, where, i64,
-                            FlatSymbolRefAttr::get(context, (symbolName + fn).str()),
-                            args, UnitAttr())
+  auto call = [&](StringRef fn, ValueRange args,
+                  Type type = Type()) -> mlir::Value {
+    return InvokeOp::create(
+               builder, where, type ? type : i64,
+               FlatSymbolRefAttr::get(context, (symbolName + fn).str()), args,
+               UnitAttr())
         ->getResult(0);
   };
   mlir::Value size = index.wrap ? read("size", t) : mlir::Value();
-  SmallVector<mlir::Value> sides, from, many, starts, widths;
+  SmallVector<mlir::Value> sides, starts, widths;
   for (unsigned d = 0; d < dims; ++d) {
     std::string number = std::to_string(d);
-    mlir::Value n = read("n" + number, i64);
-    mlir::Value width = read("w" + number, t);
-    mlir::Value lo = read("lo" + number, t);
-    mlir::Value own = call("_cell", {at_[d], lo, width, n});
-    mlir::Value out = call("_reach", {*reach, width});
-    sides.push_back(n);
-    starts.push_back(lo);
-    widths.push_back(width);
-    from.push_back(call("_from", {own, out, n}));
-    many.push_back(call("_many", {own, out, n}));
+    sides.push_back(read("n" + number, i64));
+    widths.push_back(read("w" + number, t));
+    starts.push_back(read("lo" + number, t));
   }
+  // Of `between`, where the box wraps: the corners moved by a whole number
+  // of boxes so that the lowest is in the box (`shift` how far); each
+  // entity is seen at its image from the lowest corner on, less than a
+  // box past it.
+  SmallVector<mlir::Value> lowCorner(at_), highCorner(hi_), shift;
+  if (kind == Kind::Between && index.wrap)
+    for (unsigned d = 0; d < dims; ++d) {
+      mlir::Value boxes;
+      if (whole) {
+        mlir::Value q = arith::DivSIOp::create(builder, where, at_[d], size);
+        mlir::Value under = arith::CmpIOp::create(
+            builder, where, arith::CmpIPredicate::sgt,
+            arith::MulIOp::create(builder, where, q, size), at_[d]);
+        boxes = arith::SubIOp::create(
+            builder, where, q,
+            arith::ExtUIOp::create(builder, where, t, under));
+        boxes = arith::MulIOp::create(builder, where, boxes, size);
+      } else {
+        boxes = arith::MulFOp::create(
+            builder, where,
+            math::FloorOp::create(
+                builder, where,
+                arith::DivFOp::create(builder, where, at_[d], size)),
+            size);
+      }
+      shift.push_back(boxes);
+      lowCorner[d] =
+          whole
+              ? arith::SubIOp::create(builder, where, at_[d], boxes).getResult()
+              : arith::SubFOp::create(builder, where, at_[d], boxes)
+                    .getResult();
+      highCorner[d] =
+          whole
+              ? arith::SubIOp::create(builder, where, hi_[d], boxes).getResult()
+              : arith::SubFOp::create(builder, where, hi_[d], boxes)
+                    .getResult();
+    }
+  // The cells each side's walk goes over (`from`, and how `many`), and,
+  // of `between`, the first and last cell of the corners on each side,
+  // counted on from the first (not round the box).
+  SmallVector<mlir::Value> from(dims), many(dims), lowCell(dims),
+      highCell(dims);
+  // The reach of a distance: the cells around the place's as far as it
+  // reaches (`near`, `nearest`).
+  mlir::Value reach, far;
+  auto aim = [&](mlir::Value distance) {
+    reach = distance;
+    far = squared(distance);
+    for (unsigned d = 0; d < dims; ++d) {
+      mlir::Value own = call("_cell", {at_[d], starts[d], widths[d], sides[d]});
+      mlir::Value out = call("_reach", {distance, widths[d]});
+      from[d] = call("_from", {own, out, sides[d]});
+      many[d] = call("_many", {own, out, sides[d]});
+    }
+  };
+  if (kind == Kind::Near)
+    aim(given);
+  if (kind == Kind::Between)
+    for (unsigned d = 0; d < dims; ++d) {
+      mlir::Value none = zeroOf(t);
+      mlir::Value l = call("_low", {lowCorner[d], none, starts[d], widths[d]});
+      mlir::Value h =
+          call("_high", {highCorner[d], none, starts[d], widths[d]});
+      mlir::Value one = integer(where, i64, 1);
+      if (!index.wrap) {
+        l = arith::MaxSIOp::create(builder, where, l, integer(where, i64, 0));
+        h = arith::MinSIOp::create(
+            builder, where, h,
+            arith::SubIOp::create(builder, where, sides[d], one));
+      }
+      lowCell[d] = l;
+      highCell[d] = h;
+      from[d] = l;
+      mlir::Value span = arith::AddIOp::create(
+          builder, where, arith::SubIOp::create(builder, where, h, l), one);
+      many[d] = arith::MaxSIOp::create(
+          builder, where, integer(where, i64, 0),
+          arith::MinSIOp::create(builder, where, span, sides[d]));
+    }
   auto cells = FlatSymbolRefAttr::get(context, index.cells);
   auto rows = FlatSymbolRefAttr::get(context, symbolName);
   mlir::Value zero = arith::ConstantIndexOp::create(builder, where, 0);
+  mlir::Value two = arith::ConstantIndexOp::create(builder, where, 2);
   SmallVector<mlir::Value> cell(dims);
-  // The rows of the cells along the first side that are within reach,
+  auto rowOf = [&](mlir::Value counted) -> mlir::Value {
+    return asIndex(where,
+                   arith::IndexCastOp::create(builder, where, i32, counted),
+                   IndexOfType::get(context, rows));
+  };
+  // Where a row's entity is seen from the place (or, of `between`, the
+  // image in the corners), and whether it is in what the form takes; of
+  // a distance, how far it is, squared, too.
+  auto seenAt = [&](mlir::Value row, NearRows &near,
+                    mlir::Value *distanceOut = nullptr) -> mlir::Value {
+    mlir::Value distance, inside;
+    for (unsigned d = 0; d < dims; ++d) {
+      mlir::Value stored =
+          BufferAtOp::create(builder, where, t, rows,
+                             builder.getStringAttr(index.positions[d]), row);
+      if (kind == Kind::Between) {
+        mlir::Value seen = stored;
+        if (index.wrap) {
+          auto add = [&](mlir::Value a, mlir::Value b, bool less) {
+            if (whole)
+              return less ? arith::SubIOp::create(builder, where, a, b)
+                                .getResult()
+                          : arith::AddIOp::create(builder, where, a, b)
+                                .getResult();
+            return less
+                       ? arith::SubFOp::create(builder, where, a, b).getResult()
+                       : arith::AddFOp::create(builder, where, a, b)
+                             .getResult();
+          };
+          seen =
+              arith::SelectOp::create(builder, where, below(seen, lowCorner[d]),
+                                      add(seen, size, false), seen);
+          seen = arith::SelectOp::create(
+              builder, where, atMost(add(lowCorner[d], size, false), seen),
+              add(seen, size, true), seen);
+        }
+        inside = both(inside, atMost(lowCorner[d], seen));
+        inside = both(inside, atMost(seen, highCorner[d]));
+        if (index.wrap)
+          seen = whole ? arith::AddIOp::create(builder, where, seen, shift[d])
+                             .getResult()
+                       : arith::AddFOp::create(builder, where, seen, shift[d])
+                             .getResult();
+        near.seen.push_back({index.component, index.positions[d], seen});
+        continue;
+      }
+      mlir::Value seen =
+          index.wrap ? call("_image", {stored, at_[d], size}, t) : stored;
+      near.seen.push_back({index.component, index.positions[d], seen});
+      mlir::Value square = squared(minus(seen, at_[d]));
+      distance = distance ? plus(distance, square) : square;
+    }
+    if (distanceOut)
+      *distanceOut = distance;
+    if (kind == Kind::Between)
+      return inside;
+    return far ? atMost(distance, far) : mlir::Value();
+  };
+  // The statements for the entity of a row the form takes (its `where`
+  // too, unless that was asked already).
+  auto visit = [&](mlir::Value row, const NearRows &near,
+                   bool asked = false) -> LogicalResult {
+    mlir::Value who =
+        BufferAtOp::create(builder, where, EntityType::get(context), rows,
+                           builder.getStringAttr("who"), row);
+    ScopeGuard scope(*this);
+    llvm::SaveAndRestore inside(inEach, true);
+    std::optional<NearRows> outer = nearRows;
+    nearRows = near;
+    auto restore = llvm::make_scope_exit([&] { nearRows = outer; });
+    for (auto &[name, component] : bound) {
+      Variable variable{Variable::Near, who, component, false};
+      variable.which = row;
+      bind(name, variable);
+    }
+    if (!entity.empty())
+      bind(entity, Variable::ofValue(who));
+    if (!condition || asked)
+      return parseBlock();
+    FailureOr<mlir::Value> holds = emit(*condition, builder.getI1Type());
+    if (failed(holds))
+      return failure();
+    if (!holds->getType().isInteger(1))
+      return error(condition->loc, "'where' takes a bool");
+    return ifWithVars(where, *holds, [&] { return parseBlock(); });
+  };
+  // Whether the entity of a row is one the `where` takes (true without
+  // one), with what it reads of it bound as the statements have it.
+  auto takes = [&](mlir::Value row,
+                   const NearRows &near) -> FailureOr<mlir::Value> {
+    if (!condition)
+      return mlir::Value(arith::ConstantIntOp::create(builder, where, 1, 1));
+    mlir::Value who =
+        BufferAtOp::create(builder, where, EntityType::get(context), rows,
+                           builder.getStringAttr("who"), row);
+    ScopeGuard scope(*this);
+    llvm::SaveAndRestore inside(inEach, true);
+    std::optional<NearRows> outer = nearRows;
+    nearRows = near;
+    auto restore = llvm::make_scope_exit([&] { nearRows = outer; });
+    for (auto &[name, component] : bound) {
+      Variable variable{Variable::Near, who, component, false};
+      variable.which = row;
+      bind(name, variable);
+    }
+    if (!entity.empty())
+      bind(entity, Variable::ofValue(who));
+    FailureOr<mlir::Value> holds = emit(*condition, builder.getI1Type());
+    if (failed(holds))
+      return failure();
+    if (!holds->getType().isInteger(1))
+      return error(condition->loc, "'where' takes a bool");
+    return *holds;
+  };
+  // What is done for a row the form may take (`plain`: the statements
+  // asked of each row; else `found`, given the row, whether the form
+  // takes it and how far it is).
+  using Found = function_ref<LogicalResult(mlir::Value row, mlir::Value counted,
+                                           mlir::Value in, mlir::Value distance,
+                                           NearRows & near)>;
+  // The rows of the cells along the first side that the form reaches,
   // where the other sides' cells are `cell` (`outer` how far, at least,
   // those are, squared): those cells as up to two runs of cells next to
   // each other (where they go round the box), and so of rows next to
-  // each other; then the entities within reach in them.
-  auto visitRuns = [&](mlir::Value outer) -> LogicalResult {
-    mlir::Value left = *reach;
-    if (outer && whole) {
-      left = call("_root", {arith::SubIOp::create(builder, where, far, outer)});
-      if (t != i64)
-        left = arith::TruncIOp::create(builder, where, t, left);
-    } else if (outer) {
-      left = math::SqrtOp::create(
-          builder, where, arith::SubFOp::create(builder, where, far, outer));
+  // each other; then the entities in them the form takes.
+  auto visitRuns = [&](mlir::Value outer, Found found) -> LogicalResult {
+    mlir::Value low, high;
+    if (kind == Kind::Between) {
+      low = lowCell[0];
+      high = highCell[0];
+    } else {
+      mlir::Value left = reach;
+      if (outer && whole) {
+        left =
+            call("_root", {arith::SubIOp::create(builder, where, far, outer)});
+        if (t != i64)
+          left = arith::TruncIOp::create(builder, where, t, left);
+      } else if (outer) {
+        left = math::SqrtOp::create(
+            builder, where, arith::SubFOp::create(builder, where, far, outer));
+      }
+      low = call("_low", {at_[0], left, starts[0], widths[0]});
+      high = call("_high", {at_[0], left, starts[0], widths[0]});
     }
-    mlir::Value low = call("_low", {at_[0], left, starts[0], widths[0]});
-    mlir::Value high = call("_high", {at_[0], left, starts[0], widths[0]});
     auto part = [&](int64_t which) {
       return call("_run", {integer(where, i64, which), low, high, from[0],
                            many[0], sides[0]});
@@ -5925,7 +6215,6 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
       base = arith::MulIOp::create(
           builder, where, arith::AddIOp::create(builder, where, base, cell[d]),
           sides[d - 1]);
-    Type i32 = builder.getI32Type();
     // (Rows the index has, by the cells: read by row numbers, which are
     // not asked whether they are rows of the buffer.)
     auto cellRow = IndexOfType::get(context, cells);
@@ -5951,59 +6240,6 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
       start1 = arith::MaxSIOp::create(builder, where, start1, next);
       start2 = arith::MaxSIOp::create(builder, where, start2, next);
     }
-    // Where a row's entity is seen from the place, and how far it is,
-    // squared.
-    auto seenAt = [&](mlir::Value row, NearRows &near) -> mlir::Value {
-      mlir::Value distance;
-      for (unsigned d = 0; d < dims; ++d) {
-        mlir::Value stored =
-            BufferAtOp::create(builder, where, t, rows,
-                               builder.getStringAttr(index.positions[d]), row);
-        mlir::Value seen =
-            index.wrap
-                ? InvokeOp::create(
-                      builder, where, t,
-                      FlatSymbolRefAttr::get(context, symbolName + "_image"),
-                      ValueRange{stored, at_[d], size}, UnitAttr())
-                      ->getResult(0)
-                : stored;
-        near.seen.push_back({index.component, index.positions[d], seen});
-        mlir::Value square = squared(minus(seen, at_[d]));
-        distance = distance ? plus(distance, square) : square;
-      }
-      return distance;
-    };
-    auto rowOf = [&](mlir::Value counted) -> mlir::Value {
-      return asIndex(where,
-                     arith::IndexCastOp::create(builder, where, i32, counted),
-                     IndexOfType::get(context, rows));
-    };
-    // The statements for the entity of a row within reach.
-    auto visit = [&](mlir::Value row, const NearRows &near) -> LogicalResult {
-      mlir::Value who =
-          BufferAtOp::create(builder, where, EntityType::get(context), rows,
-                             builder.getStringAttr("who"), row);
-      ScopeGuard scope(*this);
-      llvm::SaveAndRestore inside(inEach, true);
-      std::optional<NearRows> outer = nearRows;
-      nearRows = near;
-      auto restore = llvm::make_scope_exit([&] { nearRows = outer; });
-      for (auto &[name, component] : bound) {
-        Variable variable{Variable::Near, who, component, false};
-        variable.which = row;
-        bind(name, variable);
-      }
-      if (!entity.empty())
-        bind(entity, Variable::ofValue(who));
-      if (!condition)
-        return parseBlock();
-      FailureOr<mlir::Value> holds = emit(*condition, builder.getI1Type());
-      if (failed(holds))
-        return failure();
-      if (!holds->getType().isInteger(1))
-        return error(condition->loc, "'where' takes a bool");
-      return ifWithVars(where, *holds, [&] { return parseBlock(); });
-    };
     // A run's first and end, of the two.
     auto runAt = [&](mlir::Value run) -> std::pair<mlir::Value, mlir::Value> {
       mlir::Value second = arith::CmpIOp::create(
@@ -6016,10 +6252,9 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
               builder, where, indexType,
               arith::SelectOp::create(builder, where, second, end2, end1))};
     };
-    mlir::Value two = arith::ConstantIndexOp::create(builder, where, 2);
     // The runs one after the other, each a loop over its rows, asking of
-    // each whether it is within reach: where the statements only read
-    // and set vars, the loop is done many rows at once as it is.
+    // each whether the form takes it: where the statements only read and
+    // set vars, the loop is done many rows at once as it is.
     auto plain = [&]() -> LogicalResult {
       return loopWithVars(
           where, zero, two, [&](mlir::Value run) -> LogicalResult {
@@ -6028,17 +6263,22 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
                 where, first, end, [&](mlir::Value counted) -> LogicalResult {
                   mlir::Value row = rowOf(counted);
                   NearRows near{symbolName, row, {}};
-                  mlir::Value within = atMost(seenAt(row, near), far);
-                  return ifWithVars(where, within,
+                  mlir::Value distance;
+                  mlir::Value in = seenAt(row, near, &distance);
+                  if (found)
+                    return found(row, counted, in, distance, near);
+                  return ifWithVars(where, in,
                                     [&] { return visit(row, near); });
                 });
           });
     };
+    if (found)
+      return plain();
     // Where they write, a branch for each row would go one way or the
     // other as it may: each run by blocks of 64 rows instead, which of a
-    // block's rows are within reach one bit each (a loop without
-    // branches, done many rows at once), then the statements for each of
-    // those, in the order of the rows.
+    // block's rows the form takes one bit each (a loop without branches,
+    // done many rows at once), then the statements for each of those, in
+    // the order of the rows.
     auto blocked = [&]() -> LogicalResult {
       mlir::Value one = arith::ConstantIndexOp::create(builder, where, 1);
       mlir::Value block = arith::ConstantIndexOp::create(builder, where, 64);
@@ -6071,14 +6311,12 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
                     builder.setInsertionPointToStart(bits.getBody());
                     mlir::Value i = bits.getInductionVar();
                     NearRows near{symbolName, {}, {}};
-                    mlir::Value within =
-                        atMost(seenAt(rowOf(arith::AddIOp::create(
-                                          builder, where, low, i)),
-                                      near),
-                               far);
+                    mlir::Value in = seenAt(
+                        rowOf(arith::AddIOp::create(builder, where, low, i)),
+                        near);
                     mlir::Value bit = arith::ShLIOp::create(
                         builder, where,
-                        arith::ExtUIOp::create(builder, where, i64, within),
+                        arith::ExtUIOp::create(builder, where, i64, in),
                         arith::IndexCastOp::create(builder, where, i64, i));
                     scf::YieldOp::create(
                         builder, where,
@@ -6154,21 +6392,16 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
   // visited, which leaves out no entity within it, nor changes the order
   // of those visited.
   auto gapSquared = [&](unsigned d) -> mlir::Value {
-    mlir::Value gap =
-        InvokeOp::create(
-            builder, where, t,
-            FlatSymbolRefAttr::get(context, symbolName + "_gap"),
-            ValueRange{cell[d], at_[d], starts[d], widths[d],
-                       size ? size : widths[d]},
-            UnitAttr())
-            ->getResult(0);
+    mlir::Value gap = call(
+        "_gap",
+        {cell[d], at_[d], starts[d], widths[d], size ? size : widths[d]}, t);
     return squared(gap);
   };
   // The cells around on every side but the first, the last side's
-  // outermost, those farther than `r` left out; `outer` how far, at
-  // least, the row of cells is on the sides outside this one.
-  std::function<LogicalResult(unsigned, mlir::Value)> sideLoop =
-      [&](unsigned d, mlir::Value outer) -> LogicalResult {
+  // outermost, those farther than `r` left out (of a distance); `outer`
+  // how far, at least, the row of cells is on the sides outside this one.
+  std::function<LogicalResult(unsigned, mlir::Value, Found)> sideLoop =
+      [&](unsigned d, mlir::Value outer, Found found) -> LogicalResult {
     return loopWithVars(
         where, zero,
         arith::IndexCastOp::create(builder, where, indexType, many[d]),
@@ -6177,17 +6410,358 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
               arith::IndexCastOp::create(builder, where, i64, counted);
           mlir::Value along = arith::AddIOp::create(builder, where, from[d], k);
           cell[d] = index.wrap ? call("_at", {along, sides[d]}) : along;
+          auto inner = [&](mlir::Value gap) {
+            return d == 1 ? visitRuns(gap, found) : sideLoop(d - 1, gap, found);
+          };
+          if (kind == Kind::Between)
+            return inner(mlir::Value());
           mlir::Value gap = gapSquared(d);
           if (outer)
             gap = plus(outer, gap);
-          mlir::Value near = atMost(gap, far);
-          return ifWithVars(where, near, [&]() -> LogicalResult {
-            return d == 1 ? visitRuns(gap) : sideLoop(d - 1, gap);
-          });
+          return ifWithVars(where, atMost(gap, far),
+                            [&] { return inner(gap); });
         });
   };
-  return dims == 1 ? visitRuns(mlir::Value())
-                   : sideLoop(dims - 1, mlir::Value());
+  auto walk = [&](Found found) -> LogicalResult {
+    return dims == 1 ? visitRuns(mlir::Value(), found)
+                     : sideLoop(dims - 1, mlir::Value(), found);
+  };
+  if (kind != Kind::Nearest)
+    return walk(nullptr);
+
+  // `nearest k`: a list of the k nearest so far, in order (by how far,
+  // then by row), of the rows within a distance and taken by the
+  // `where`; the distance from a cell's width doubled until k are in it,
+  // or it is as far as any entity may be (or `within` says).
+  auto listType = MemRefType::get({ShapedType::kDynamic}, i32);
+  auto farType = MemRefType::get({ShapedType::kDynamic}, distanceType);
+  mlir::Value k =
+      arith::MaxSIOp::create(builder, where, wanted, integer(where, i32, 0));
+  mlir::Value capacity =
+      arith::IndexCastOp::create(builder, where, indexType, k);
+  mlir::Value listed =
+      memref::AllocOp::create(builder, where, listType, ValueRange{capacity});
+  mlir::Value distances =
+      memref::AllocOp::create(builder, where, farType, ValueRange{capacity});
+  auto countType = MemRefType::get({1}, i32);
+  mlir::Value counter = memref::AllocOp::create(builder, where, countType);
+  // As far as any entity may be, squared: half the box on each side where
+  // it wraps, else the farther end of the grid from the place.
+  mlir::Value farthest;
+  for (unsigned d = 0; d < dims; ++d) {
+    mlir::Value span;
+    if (index.wrap) {
+      span = whole ? arith::DivSIOp::create(builder, where, size,
+                                            integer(where, t, 2))
+                         .getResult()
+                   : arith::MulFOp::create(
+                         builder, where, size,
+                         arith::ConstantOp::create(
+                             builder, where, builder.getFloatAttr(t, 0.5)))
+                         .getResult();
+      // (Half of an odd whole size rounds down: one more.)
+      if (whole)
+        span =
+            arith::AddIOp::create(builder, where, span, integer(where, t, 1));
+    } else {
+      mlir::Value top =
+          whole ? arith::AddIOp::create(builder, where, wide(starts[d]),
+                                        arith::MulIOp::create(builder, where,
+                                                              sides[d],
+                                                              wide(widths[d])))
+                      .getResult()
+                : arith::AddFOp::create(
+                      builder, where, starts[d],
+                      arith::MulFOp::create(
+                          builder, where, widths[d],
+                          arith::SIToFPOp::create(builder, where, t, sides[d])))
+                      .getResult();
+      if (whole) {
+        mlir::Value p = wide(at_[d]);
+        mlir::Value a =
+            arith::SubIOp::create(builder, where, p, wide(starts[d]));
+        mlir::Value b = arith::SubIOp::create(builder, where, top, p);
+        mlir::Value absA = math::AbsIOp::create(builder, where, a);
+        mlir::Value absB = math::AbsIOp::create(builder, where, b);
+        span = arith::MaxSIOp::create(builder, where, absA, absB);
+      } else {
+        mlir::Value a = math::AbsFOp::create(
+            builder, where,
+            arith::SubFOp::create(builder, where, at_[d], starts[d]));
+        mlir::Value b = math::AbsFOp::create(
+            builder, where, arith::SubFOp::create(builder, where, top, at_[d]));
+        span = arith::MaximumFOp::create(builder, where, a, b);
+      }
+    }
+    mlir::Value square = squared(span);
+    farthest = farthest ? plus(farthest, square) : square;
+  }
+  // The first distance: where the entities are as many everywhere, the
+  // one that half as many again as k are within (in the area, or volume,
+  // the grid is over: a ball of it as big as k and a half of the
+  // entities' shares), no farther than `within`.
+  Type f64 = builder.getF64Type();
+  auto real = [&](mlir::Value v) -> mlir::Value {
+    if (v.getType() == f64)
+      return v;
+    if (isa<IntegerType>(v.getType()))
+      return arith::SIToFPOp::create(builder, where, f64, v);
+    return arith::ExtFOp::create(builder, where, f64, v);
+  };
+  mlir::Value volume;
+  for (unsigned d = 0; d < dims; ++d) {
+    mlir::Value side =
+        arith::MulFOp::create(builder, where, real(sides[d]), real(widths[d]));
+    volume =
+        volume ? arith::MulFOp::create(builder, where, volume, side).getResult()
+               : side;
+  }
+  mlir::Value entities = arith::MaxSIOp::create(
+      builder, where, BufferLenOp::create(builder, where, i32, rows),
+      integer(where, i32, 1));
+  // (A ball of radius 1: pi, of three sides 4 pi / 3.)
+  double ball = dims == 2 ? M_PI : dims == 3 ? 4.0 * M_PI / 3.0 : 2.0;
+  mlir::Value share = arith::DivFOp::create(
+      builder, where,
+      arith::MulFOp::create(
+          builder, where, volume,
+          arith::MulFOp::create(
+              builder, where, real(k),
+              arith::ConstantOp::create(builder, where,
+                                        builder.getF64FloatAttr(1.5)))),
+      arith::MulFOp::create(
+          builder, where, real(entities),
+          arith::ConstantOp::create(builder, where,
+                                    builder.getF64FloatAttr(ball))));
+  // (A guess: of three sides from the fourth root, three steps of
+  // Newton's towards the third, without a library for it.)
+  mlir::Value guess = share;
+  if (dims >= 2)
+    guess = math::SqrtOp::create(builder, where, share);
+  if (dims == 3) {
+    guess = math::SqrtOp::create(builder, where, guess);
+    mlir::Value third = arith::ConstantOp::create(
+        builder, where, builder.getF64FloatAttr(1.0 / 3.0));
+    // (Of nothing, nothing: not a share over a root of nothing.)
+    mlir::Value tiny = arith::ConstantOp::create(
+        builder, where, builder.getF64FloatAttr(1e-300));
+    for (int step = 0; step < 3; ++step) {
+      mlir::Value y = arith::MaximumFOp::create(builder, where, guess, tiny);
+      guess = arith::MulFOp::create(
+          builder, where, third,
+          arith::AddFOp::create(
+              builder, where, arith::AddFOp::create(builder, where, y, y),
+              arith::DivFOp::create(
+                  builder, where, share,
+                  arith::MulFOp::create(builder, where, y, y))));
+    }
+  }
+  mlir::Value first;
+  if (whole)
+    first = arith::AddIOp::create(
+        builder, where, arith::FPToSIOp::create(builder, where, t, guess),
+        integer(where, t, 1));
+  else
+    first = t == f64
+                ? guess
+                : arith::TruncFOp::create(builder, where, t, guess).getResult();
+  if (given) {
+    first =
+        whole ? arith::MinSIOp::create(builder, where, first, given).getResult()
+              : arith::MinimumFOp::create(builder, where, first, given)
+                    .getResult();
+    mlir::Value cap = squared(given);
+    farthest =
+        whole
+            ? arith::MinSIOp::create(builder, where, farthest, cap).getResult()
+            : arith::MinimumFOp::create(builder, where, farthest, cap)
+                  .getResult();
+  }
+  mlir::Value c0 = arith::ConstantIndexOp::create(builder, where, 0);
+  auto whileLoop =
+      scf::WhileOp::create(builder, where, TypeRange{t}, ValueRange{first});
+  {
+    OpBuilder::InsertionGuard guard(builder);
+    Block *before =
+        builder.createBlock(&whileLoop.getBefore(), {}, {t}, {where});
+    mlir::Value distance = before->getArgument(0);
+    memref::StoreOp::create(builder, where, integer(where, i32, 0), counter,
+                            ValueRange{c0});
+    aim(distance);
+    SmallVector<VarState> varsBefore = captureVars();
+    // Each row within the distance and taken: into the list where it is
+    // nearer than its last (or the list is not full), past those farther.
+    auto insert = [&](mlir::Value row, mlir::Value counted, mlir::Value in,
+                      mlir::Value howFar, NearRows &near) -> LogicalResult {
+      FailureOr<mlir::Value> taken = takes(row, near);
+      if (failed(taken))
+        return failure();
+      mlir::Value number =
+          arith::IndexCastOp::create(builder, where, i32, counted);
+      auto branch = scf::IfOp::create(builder, where, both(in, *taken),
+                                      /*withElseRegion=*/false);
+      OpBuilder::InsertionGuard inner(builder);
+      builder.setInsertionPoint(branch.thenBlock()->getTerminator());
+      mlir::Value n =
+          memref::LoadOp::create(builder, where, counter, ValueRange{c0});
+      // (Nearer than the list's `at`: by how far, then by row.)
+      auto nearer = [&](mlir::Value atIndex) -> mlir::Value {
+        mlir::Value otherFar = memref::LoadOp::create(builder, where, distances,
+                                                      ValueRange{atIndex});
+        mlir::Value otherRow =
+            memref::LoadOp::create(builder, where, listed, ValueRange{atIndex});
+        mlir::Value same = compare(arith::CmpIPredicate::eq,
+                                   arith::CmpFPredicate::OEQ, howFar, otherFar);
+        mlir::Value earlier = arith::CmpIOp::create(
+            builder, where, arith::CmpIPredicate::slt, number, otherRow);
+        return arith::OrIOp::create(
+            builder, where, below(howFar, otherFar),
+            arith::AndIOp::create(builder, where, same, earlier));
+      };
+      mlir::Value room = arith::CmpIOp::create(builder, where,
+                                               arith::CmpIPredicate::slt, n, k);
+      mlir::Value any = arith::CmpIOp::create(
+          builder, where, arith::CmpIPredicate::sgt, k, integer(where, i32, 0));
+      // Where it goes in from: the end, or the last place of a full list.
+      auto goesIn =
+          scf::IfOp::create(builder, where, TypeRange{builder.getI1Type()},
+                            room, /*withElseRegion=*/true);
+      {
+        OpBuilder::InsertionGuard g(builder);
+        builder.setInsertionPointToStart(goesIn.thenBlock());
+        scf::YieldOp::create(
+            builder, where,
+            ValueRange{arith::ConstantIntOp::create(builder, where, 1, 1)});
+        builder.setInsertionPointToStart(goesIn.elseBlock());
+        auto ask = scf::IfOp::create(builder, where,
+                                     TypeRange{builder.getI1Type()}, any,
+                                     /*withElseRegion=*/true);
+        {
+          OpBuilder::InsertionGuard g2(builder);
+          builder.setInsertionPointToStart(ask.thenBlock());
+          mlir::Value lastAt = arith::IndexCastOp::create(
+              builder, where, indexType,
+              arith::SubIOp::create(builder, where, k, integer(where, i32, 1)));
+          scf::YieldOp::create(builder, where, ValueRange{nearer(lastAt)});
+          builder.setInsertionPointToStart(ask.elseBlock());
+          scf::YieldOp::create(
+              builder, where,
+              ValueRange{arith::ConstantIntOp::create(builder, where, 0, 1)});
+        }
+        scf::YieldOp::create(builder, where, ask.getResults());
+      }
+      auto put = scf::IfOp::create(builder, where, goesIn.getResult(0),
+                                   /*withElseRegion=*/false);
+      builder.setInsertionPoint(put.thenBlock()->getTerminator());
+      mlir::Value slot = arith::SelectOp::create(
+          builder, where, room, n,
+          arith::SubIOp::create(builder, where, k, integer(where, i32, 1)));
+      // Past those farther: each moved one on.
+      auto past = scf::WhileOp::create(builder, where, TypeRange{i32},
+                                       ValueRange{slot});
+      {
+        OpBuilder::InsertionGuard g(builder);
+        Block *ask = builder.createBlock(&past.getBefore(), {}, {i32}, {where});
+        mlir::Value j = ask->getArgument(0);
+        mlir::Value more =
+            arith::CmpIOp::create(builder, where, arith::CmpIPredicate::sgt, j,
+                                  integer(where, i32, 0));
+        auto check = scf::IfOp::create(builder, where,
+                                       TypeRange{builder.getI1Type()}, more,
+                                       /*withElseRegion=*/true);
+        {
+          OpBuilder::InsertionGuard g2(builder);
+          builder.setInsertionPointToStart(check.thenBlock());
+          mlir::Value previous = arith::IndexCastOp::create(
+              builder, where, indexType,
+              arith::SubIOp::create(builder, where, j, integer(where, i32, 1)));
+          scf::YieldOp::create(builder, where, ValueRange{nearer(previous)});
+          builder.setInsertionPointToStart(check.elseBlock());
+          scf::YieldOp::create(
+              builder, where,
+              ValueRange{arith::ConstantIntOp::create(builder, where, 0, 1)});
+        }
+        scf::ConditionOp::create(builder, where, check.getResult(0),
+                                 ValueRange{j});
+        Block *move = builder.createBlock(&past.getAfter(), {}, {i32}, {where});
+        mlir::Value to = move->getArgument(0);
+        mlir::Value back =
+            arith::SubIOp::create(builder, where, to, integer(where, i32, 1));
+        mlir::Value toAt =
+            arith::IndexCastOp::create(builder, where, indexType, to);
+        mlir::Value backAt =
+            arith::IndexCastOp::create(builder, where, indexType, back);
+        memref::StoreOp::create(
+            builder, where,
+            memref::LoadOp::create(builder, where, listed, ValueRange{backAt}),
+            listed, ValueRange{toAt});
+        memref::StoreOp::create(builder, where,
+                                memref::LoadOp::create(builder, where,
+                                                       distances,
+                                                       ValueRange{backAt}),
+                                distances, ValueRange{toAt});
+        scf::YieldOp::create(builder, where, ValueRange{back});
+      }
+      mlir::Value placed = arith::IndexCastOp::create(builder, where, indexType,
+                                                      past.getResult(0));
+      memref::StoreOp::create(builder, where, number, listed,
+                              ValueRange{placed});
+      memref::StoreOp::create(builder, where, howFar, distances,
+                              ValueRange{placed});
+      memref::StoreOp::create(
+          builder, where,
+          arith::MinSIOp::create(
+              builder, where,
+              arith::AddIOp::create(builder, where, n, integer(where, i32, 1)),
+              k),
+          counter, ValueRange{c0});
+      return success();
+    };
+    if (failed(walk(insert)))
+      return failure();
+    restoreVars(varsBefore);
+    mlir::Value n =
+        memref::LoadOp::create(builder, where, counter, ValueRange{c0});
+    mlir::Value short_ =
+        arith::CmpIOp::create(builder, where, arith::CmpIPredicate::slt, n, k);
+    // (An index with no rows has no grid to be as far as.)
+    mlir::Value some = arith::CmpIOp::create(
+        builder, where, arith::CmpIPredicate::sgt,
+        BufferLenOp::create(builder, where, i32, rows), integer(where, i32, 0));
+    mlir::Value more = arith::AndIOp::create(
+        builder, where, arith::AndIOp::create(builder, where, short_, some),
+        below(far, farthest));
+    mlir::Value twice = plus(distance, distance);
+    mlir::Value next =
+        given ? (whole ? arith::MinSIOp::create(builder, where, twice, given)
+                             .getResult()
+                       : arith::MinimumFOp::create(builder, where, twice, given)
+                             .getResult())
+              : twice;
+    scf::ConditionOp::create(builder, where, more, ValueRange{next});
+    Block *after = builder.createBlock(&whileLoop.getAfter(), {}, {t}, {where});
+    scf::YieldOp::create(builder, where, ValueRange{after->getArgument(0)});
+  }
+  // Then the statements for each, nearest first (where they are seen
+  // from, again; how far was asked already).
+  far = mlir::Value();
+  mlir::Value found = arith::IndexCastOp::create(
+      builder, where, indexType,
+      memref::LoadOp::create(builder, where, counter, ValueRange{c0}));
+  if (failed(
+          loopWithVars(where, zero, found, [&](mlir::Value i) -> LogicalResult {
+            mlir::Value row = rowOf(arith::IndexCastOp::create(
+                builder, where, indexType,
+                memref::LoadOp::create(builder, where, listed, ValueRange{i})));
+            NearRows near{symbolName, row, {}};
+            seenAt(row, near);
+            return visit(row, near, /*asked=*/true);
+          })))
+    return failure();
+  memref::DeallocOp::create(builder, where, listed);
+  memref::DeallocOp::create(builder, where, distances);
+  memref::DeallocOp::create(builder, where, counter);
+  return success();
 }
 
 LogicalResult Parser::parseEdges(llvm::SMLoc at) {
@@ -11923,7 +12497,7 @@ OwningOpRef<ModuleOp>
 mlir::ent::importEnt(llvm::SourceMgr &sourceMgr, MLIRContext *context,
                      ArrayRef<std::string> directories, ImportedFiles *files) {
   context->loadDialect<EntDialect, arith::ArithDialect, math::MathDialect,
-                       scf::SCFDialect>();
+                       memref::MemRefDialect, scf::SCFDialect>();
   Parser parser(sourceMgr, context, directories);
   parser.files = files;
   return parser.parseModule();

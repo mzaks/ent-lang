@@ -1,0 +1,94 @@
+// 400 dots in a box of 10 that wraps, and the k nearest each other dot,
+// by the grid index (`nearest k to`) and by k scans, each for the
+// nearest after the one before (by how far, then by row in the index):
+// the same dots in the same order (test/Integration/nearest.test). Also
+// within a distance (fewer where fewer are), none, and more than there
+// are (all, in order).
+import console
+import wyhash
+component Dot { x: f64, y: f64 } capacity 1024
+component Seen { n: i64, order: u64, scan: i64, scanorder: u64, worse: i64 } capacity 1024
+unique Check { same: i64, pairs: i64, worse: i64 }
+
+index Cells of Dot grid (x, y) cell 0.5 wrap 10.0
+
+world {
+  for i in 0..400 {
+    spawn { Dot { x: wyrand_unit(4, i as i64 * 2) * 10.0, y: wyrand_unit(4, i as i64 * 2 + 1) * 10.0 },
+            Seen { n: 0, order: 0, scan: 0, scanorder: 0, worse: 0 } }
+  }
+}
+
+fn image(d: f64) -> f64 {
+  if d > 5.0 { d - 10.0 } else if d < 0.0 - 5.0 { d + 10.0 } else { d }
+}
+
+fn mixed(h: u64, row: i32) -> u64 { wyhash64(h, row as u64) }
+
+system count(k: i32, r: f64) {
+  for me, a: Dot, s: mut Seen {
+    var n = 0
+    var order: u64 = 7
+    var last: f64 = 0.0
+    var worse = 0
+    for o, b: Dot nearest k to (a.x, a.y) within r in Cells where o != me {
+      n += 1
+      order = mixed(order, b.row_in_Cells)
+      let d = (b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y)
+      if d < last { worse += 1 }
+      last = d
+    }
+    // k times the nearest after the one before.
+    var m = 0
+    var morder: u64 = 7
+    var pd: f64 = 0.0 - 1.0
+    var prow = 0 - 1
+    for i in 0..k {
+      var bd: f64 = 1000000.0
+      var brow = 0 - 1
+      for o, b: Dot where o != me {
+        let dx = image(b.x - a.x)
+        let dy = image(b.y - a.y)
+        let d = dx * dx + dy * dy
+        let row = b.row_in_Cells
+        if d <= r * r && (d > pd || (d == pd && row > prow)) &&
+           (d < bd || (d == bd && row < brow)) {
+          bd = d
+          brow = row
+        }
+      }
+      if brow >= 0 {
+        m += 1
+        morder = mixed(morder, brow)
+        pd = bd
+        prow = brow
+      }
+    }
+    s.n = n
+    s.order = order
+    s.scan = m
+    s.scanorder = morder
+    s.worse = worse
+  }
+}
+
+system report() {
+  for s: Seen {
+    if s.n == s.scan && s.order == s.scanorder { Check.same += 1 }
+    Check.pairs += s.n
+    Check.worse += s.worse
+  }
+  put("same order {Check.same} of 400, visited {Check.pairs}, farther before nearer {Check.worse}")
+  Check.same = 0
+  Check.pairs = 0
+  Check.worse = 0
+}
+
+schedule s() {
+  count(1, 100.0) report()
+  count(5, 100.0) report()
+  count(12, 0.4) report()
+  count(0, 100.0) report()
+  count(500, 100.0) report()
+}
+main { s() }

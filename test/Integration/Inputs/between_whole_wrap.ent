@@ -1,0 +1,84 @@
+// The same as between.ent of whole-number places (i32) in a box of 1000
+// that wraps, cells at least 70 wide; the last box has every place in it
+// (test/Integration/between.test).
+import console
+import wyhash
+import math
+component Dot { x: i32, y: i32 } capacity 1024
+component Seen { n: i64, sum: f64, scan: i64, scansum: f64, outside: i64 } capacity 1024
+unique Check { same: i64, pairs: i64, outside: i64, worst: f64 }
+
+index Cells of Dot grid (x, y) cell 70 wrap 1000
+
+world {
+  for i in 0..400 {
+    spawn { Dot { x: wyrand_below(3, i as i64 * 2, 1000) as i32, y: wyrand_below(3, i as i64 * 2 + 1, 1000) as i32 },
+            Seen { n: 0, sum: 0.0, scan: 0, scansum: 0.0, outside: 0 } }
+  }
+}
+
+// The image of `x` nearest `m`.
+fn fl(a: i32, b: i32) -> i32 { var q = a / b
+  if q * b > a { q -= 1 }
+  q }
+fn image(x: i32, lo: i32) -> i32 {
+  let d = x - lo
+  lo + d - fl(d, 1000) * 1000
+}
+
+
+system count(dx0: i32, dy0: i32, dx1: i32, dy1: i32) {
+  for me, a: Dot, s: mut Seen {
+    let x0 = a.x + dx0
+    let y0 = a.y + dy0
+    let x1 = a.x + dx1
+    let y1 = a.y + dy1
+    var n = 0
+    var sum: f64 = 0.0
+    var outside = 0
+    for o, b: Dot between (x0, y0) and (x1, y1) in Cells where o != me {
+      n += 1
+      sum += (b.x * 3 + b.y) as f64
+      if b.x < x0 || b.x > x1 || b.y < y0 || b.y > y1 { outside += 1 }
+    }
+    // (The corners moved into the box by whole boxes, as the scan sees
+    // them: the image nearest the middle, moved back.)
+    var m = 0
+    var msum: f64 = 0.0
+    for o, b: Dot where o != me {
+      let ix = image(b.x, x0)
+      let iy = image(b.y, y0)
+      if ix >= x0 && ix <= x1 && iy >= y0 && iy <= y1 {
+        m += 1
+        msum += (ix * 3 + iy) as f64
+      }
+    }
+    s.n = n
+    s.sum = sum
+    s.scan = m
+    s.scansum = msum
+    s.outside = outside
+  }
+}
+
+system report() {
+  for s: Seen {
+    if s.n == s.scan { Check.same += 1 }
+    Check.worst max= abs64(s.sum - s.scansum)
+    Check.pairs += s.n
+    Check.outside += s.outside
+  }
+  put("same counts {Check.same} of 400, pairs {Check.pairs}, seen outside {Check.outside}, sums off by more than 1e-9: {Check.worst > 0.000000001}")
+  Check.same = 0
+  Check.pairs = 0
+  Check.outside = 0
+  Check.worst = 0.0
+}
+
+schedule s() {
+  count(0 - 70, 0 - 40, 70, 110) report()
+  count(2030, 0 - 3100, 2190, 0 - 2950) report()
+  count(0 - 470, 0 - 490, 470, 509) report()
+  count(0 - 499, 0 - 499, 500, 500) report()
+}
+main { s() }

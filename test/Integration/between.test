@@ -1,0 +1,39 @@
+// `for ... between (x0, y0) and (x1, y1) in Index` against a scan of all:
+// every dot's count of the dots in a box around it, and the sum of where
+// they are seen. In a box that wraps (each seen at its image from the
+// lowest corner on: never outside the corners), across its edges, a
+// whole number of boxes away, and almost or quite as wide as it; in a
+// grid of whole numbers over where the dots are, past its edge and with
+// the corners the wrong way round (by blocks of rows, as the statements
+// write). The same on one core and on all.
+// RUN: %ent run %S/Inputs/between.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel %S/Inputs/between.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --check-prefix=WRAP --input-file=%t.one
+// RUN: %ent run %S/Inputs/between_whole_wrap.ent 2>/dev/null > %t.ww
+// RUN: %ent run --parallel %S/Inputs/between_whole_wrap.ent 2>/dev/null > %t.ww.all
+// RUN: cmp %t.ww %t.ww.all
+// RUN: FileCheck %s --check-prefix=WHOLEWRAP --input-file=%t.ww
+// RUN: %ent run %S/Inputs/between_whole.ent 2>/dev/null > %t.open
+// RUN: %ent run --parallel %S/Inputs/between_whole.ent 2>/dev/null > %t.open.all
+// RUN: cmp %t.open %t.open.all
+// RUN: FileCheck %s --check-prefix=OPEN --input-file=%t.open
+// RUN: ent-translate --import-ent %S/Inputs/between_whole.ent -I %S/../../devices \
+// RUN:   | FileCheck %s --check-prefix=IR
+
+// WRAP:      same counts 400 of 400, pairs 3412, seen outside 0, sums off by more than 1e-9: false
+// WRAP-NEXT: same counts 400 of 400, pairs 3825, seen outside 0, sums off by more than 1e-9: false
+// WRAP-NEXT: same counts 400 of 400, pairs 142543, seen outside 0, sums off by more than 1e-9: false
+// WRAP-NEXT: same counts 400 of 400, pairs 158066, seen outside 0, sums off by more than 1e-9: false
+// WHOLEWRAP:      same counts 400 of 400, pairs 3460, seen outside 0, sums off by more than 1e-9: false
+// WHOLEWRAP-NEXT: same counts 400 of 400, pairs 3863, seen outside 0, sums off by more than 1e-9: false
+// WHOLEWRAP-NEXT: same counts 400 of 400, pairs 150134, seen outside 0, sums off by more than 1e-9: false
+// WHOLEWRAP-NEXT: same counts 400 of 400, pairs 159600, seen outside 0, sums off by more than 1e-9: false
+// OPEN:      same counts and sums 400 of 400, pairs 3846
+// OPEN-NEXT: same counts and sums 400 of 400, pairs 3542
+// OPEN-NEXT: same counts and sums 400 of 400, pairs 0
+// OPEN-NEXT: same counts and sums 400 of 400, pairs 0
+
+// IR-LABEL: ent.system @count(
+// IR:       math.ctpop
+// IR:       math.cttz

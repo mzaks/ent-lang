@@ -158,3 +158,47 @@ system look() {
     for o, b: Dot near (m.x, m.x) within 1.0 in Cells after me { }
   }
 }
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+index Cells of Dot grid (x, y) cell 1.0
+system look() {
+  for me, a: Dot {
+    // expected-error @+1 {{expected 'and' and the highest corner: 'between (x0, y0) and (x1, y1) in Index'}}
+    for o, b: Dot between (a.x, a.y) to (a.x, a.y) in Cells { }
+  }
+}
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+index Cells of Dot grid (x, y) cell 1.0
+system look() {
+  for me, a: Dot {
+    // expected-error @+1 {{'Cells' is a grid of 2 places; the place is given 1}}
+    for o, b: Dot between (a.x, a.y) and (a.x) in Cells { }
+  }
+}
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+index Cells of Dot grid (x, y) cell 1.0
+system look() {
+  for me, a: Dot {
+    // expected-error @+1 {{'nearest' visits the nearest first, not by rows: no 'after'}}
+    for o, b: Dot nearest 3 to (a.x, a.y) in Cells after me { }
+  }
+}
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+index Cells of Dot grid (x, y) cell 1.0
+system look() {
+  for me, a: Dot {
+    // expected-error @+1 {{expected 'to' and the place: 'nearest k to (x, y) in Index'}}
+    for o, b: Dot nearest 3 (a.x, a.y) in Cells { }
+  }
+}

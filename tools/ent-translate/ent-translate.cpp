@@ -7,6 +7,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Tools/mlir-translate/MlirTranslateMain.h"
@@ -1007,13 +1008,11 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
 int main(int argc, char **argv) {
   TranslateToMLIRRegistration import(
       "import-ent", "Parse ent-lang source (a .ent file) into the ent dialect",
-      [](llvm::SourceMgr &sourceMgr,
-         MLIRContext *context) -> OwningOpRef<Operation *> {
-        return importEnt(sourceMgr, context);
-      },
+      [](llvm::SourceMgr &sourceMgr, MLIRContext *context)
+          -> OwningOpRef<Operation *> { return importEnt(sourceMgr, context); },
       [](DialectRegistry &registry) {
         registry.insert<EntDialect, arith::ArithDialect, math::MathDialect,
-                        scf::SCFDialect>();
+                        memref::MemRefDialect, scf::SCFDialect>();
       });
   // What a program is made of, for what builds it: one line for each
   // source (`source`, a tab, its path) and each file it declares
@@ -1042,7 +1041,8 @@ int main(int argc, char **argv) {
       },
       [](DialectRegistry &registry) {
         registry.insert<EntDialect, arith::ArithDialect, func::FuncDialect,
-                        math::MathDialect, scf::SCFDialect>();
+                        math::MathDialect, memref::MemRefDialect,
+                        scf::SCFDialect>();
       });
   TranslateFromMLIRRegistration externHeader(
       "ent-to-c-extern-header",
@@ -1055,7 +1055,8 @@ int main(int argc, char **argv) {
       },
       [](DialectRegistry &registry) {
         registry.insert<EntDialect, arith::ArithDialect, func::FuncDialect,
-                        math::MathDialect, scf::SCFDialect>();
+                        math::MathDialect, memref::MemRefDialect,
+                        scf::SCFDialect>();
       });
   return failed(mlirTranslateMain(argc, argv, "ent-lang translation tool"));
 }
