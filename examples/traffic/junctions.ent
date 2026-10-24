@@ -1,5 +1,6 @@
-// The junctions of town.ent in a window: four streets meet, and the cars
-// find their way through in one of four ways. Choose with the keys 1 to 4:
+// The scenes of town.ent in a window: four streets meet, and the cars find
+// their way through in one of four ways, or cars from an on-ramp change
+// into a highway. Choose with the keys 1 to 5:
 //
 //   1. Traffic lights: north and south go, then east and west; a car that
 //      turns left waits for a gap in the cars that come the other way.
@@ -8,6 +9,15 @@
 //      for a gap of five seconds in it.
 //   4. A stop at every street: each car stops, and the first to stop goes
 //      first.
+//   5. An on-ramp: the cars from the ramp drive on a lane of their own
+//      beside the highway, which ends, and change into the highway where
+//      there is a gap. With many cars the highway jams there, and the jam
+//      goes back against the cars.
+//
+// Under the lights and on the priority road the streets have two lanes
+// each way: the outer one for turning right and going straight on, the
+// inner one for going straight on and turning left; the cars change
+// lanes to the one they need, and to pass.
 //
 //   tools/ent run examples/traffic/junctions.ent
 //
@@ -65,7 +75,7 @@ system look() {
   if down && !View.was_down { Sim.inflow = max(100.0, Sim.inflow - 100.0) }
   if right && !View.was_right { View.pace = min(32, View.pace * 2) }
   if left && !View.was_left { View.pace = max(1, View.pace / 2) }
-  for i in 0..4 {
+  for i in 0..5 {
     if key_down('1' as i32 + i) { Sim.scene = i }
   }
   View.was_space = space
@@ -74,9 +84,26 @@ system look() {
   View.was_left = left
   View.was_right = right
   View.left = if View.paused { 0 } else { View.pace }
-  View.scale = min(Window.width as f32, Window.height as f32 - 60.0) / (2.0 * FAR + 8.0)
-  View.ox = Window.width as f32 * 0.5
-  View.oy = (Window.height as f32 - 60.0) * 0.5 + 4.0
+}
+
+// The roads as big as the window lets them be, between the words at the
+// top and at the bottom.
+system fit() {
+  var x0 = 1000000.0
+  var y0 = 1000000.0
+  var x1 = -1000000.0
+  var y1 = -1000000.0
+  for r in 0..len(Roads) {
+    x0 = min(x0, min(Roads[r].x0, Roads[r].x1))
+    y0 = min(y0, min(Roads[r].y0, Roads[r].y1))
+    x1 = max(x1, max(Roads[r].x0, Roads[r].x1))
+    y1 = max(y1, max(Roads[r].y0, Roads[r].y1))
+  }
+  let high = Window.height as f32 - 110.0
+  let sc = min((Window.width as f32 - 32.0) / (x1 - x0 + 8.0), high / (y1 - y0 + 8.0))
+  View.scale = sc
+  View.ox = Window.width as f32 * 0.5 - (x0 + x1) * 0.5 * sc
+  View.oy = 46.0 + high * 0.5 - (y0 + y1) * 0.5 * sc
 }
 
 // The grass, the roads (discs along each, that run together), what is
@@ -118,6 +145,7 @@ system marks() {
       line(x0 + 1.0, y0, x1 + 1.0, y1, Paint[p].color)
       line(x0, y0 + 1.0, x1, y1 + 1.0, Paint[p].color)
     }
+    if kind == 3 { line(x0, y0, x1, y1, Paint[p].color) }
     if kind == 2 {
       let long = sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0))
       let n = (long / (3.0 * sc)) as i32
@@ -154,28 +182,42 @@ system marks() {
   }
 }
 
-// Every car: three discs along it, from its front to its back.
+// Every car: three discs along it, from its front to its back (a truck
+// five), to the side of its lane where it is still changing into it, in
+// the colour of how fast it goes against what its road allows.
 system cars() {
   let sc = View.scale
   let ox = View.ox
   let oy = View.oy
-  for c: Car, at: Spot, s: Speed {
+  for c: Car, at: Spot, s: Speed, sh: Shift {
     let r = c.road
     let t = max(0.0, at.u - c.length * 0.5) / Roads[r].length
-    let x = bez(Roads[r].x0, Roads[r].cx, Roads[r].x1, t)
-    let y = bez(Roads[r].y0, Roads[r].cy, Roads[r].y1, t)
     let tx = bez_d(Roads[r].x0, Roads[r].cx, Roads[r].x1, t)
     let ty = bez_d(Roads[r].y0, Roads[r].cy, Roads[r].y1, t)
     let n = max(0.001, sqrt(tx * tx + ty * ty))
+    // (To the right of the way it goes: (-ty, tx).)
+    let x = bez(Roads[r].x0, Roads[r].cx, Roads[r].x1, t) - ty / n * sh.side
+    let y = bez(Roads[r].y0, Roads[r].cy, Roads[r].y1, t) + tx / n * sh.side
     let along = c.length * 0.3 / n
     let dot = 1.9 * sc
-    let color = speed_color(s.v, LIMIT)
-    Shapes += { x: ox + (x + tx * along) * sc - dot * 0.5, y: oy + (y + ty * along) * sc - dot * 0.5,
-                w: dot, h: dot, color: color, round: true }
+    let color = speed_color(s.v, Roads[r].limit)
+    Shapes += { x: ox + (x + tx * along) * sc - dot * 0.5,
+                y: oy + (y + ty * along) * sc - dot * 0.5, w: dot, h: dot, color: color,
+                round: true }
     Shapes += { x: ox + x * sc - dot * 0.5, y: oy + y * sc - dot * 0.5, w: dot, h: dot,
                 color: color, round: true }
-    Shapes += { x: ox + (x - tx * along) * sc - dot * 0.5, y: oy + (y - ty * along) * sc - dot * 0.5,
-                w: dot, h: dot, color: color, round: true }
+    Shapes += { x: ox + (x - tx * along) * sc - dot * 0.5,
+                y: oy + (y - ty * along) * sc - dot * 0.5, w: dot, h: dot, color: color,
+                round: true }
+    if c.length > 8.0 {
+      let half = along * 0.5
+      Shapes += { x: ox + (x + tx * half) * sc - dot * 0.5,
+                  y: oy + (y + ty * half) * sc - dot * 0.5, w: dot, h: dot, color: color,
+                  round: true }
+      Shapes += { x: ox + (x - tx * half) * sc - dot * 0.5,
+                  y: oy + (y - ty * half) * sc - dot * 0.5, w: dot, h: dot, color: color,
+                  round: true }
+    }
   }
 }
 
@@ -194,21 +236,30 @@ system words() {
   } else if scene == PRIORITY {
     label("3  Priority road: east and west first; north and south wait for 5 s free", 16.0,
           12.0, 20.0, 0xffffff)
-  } else {
+  } else if scene == STOP {
     label("4  Stop on every street: the first to stop goes first", 16.0, 12.0, 20.0, 0xffffff)
+  } else {
+    label("5  On-ramp: the cars from the ramp change into the highway before their lane ends",
+          16.0, 12.0, 20.0, 0xffffff)
   }
   let per = if Sim.time > 1.0 { (Sim.gone as f32 * 3600.0 / Sim.time) as i32 } else { 0 }
   let inflow = Sim.inflow as i32
   let seconds = Sim.time as i32
   let state = if View.paused { "held" } else { "{View.pace} steps a frame" }
   let bottom = Window.height as f32 - 46.0
-  label("{inflow} cars an hour on each street; {cars} on the roads, {waiting} waiting to come in, {per} through an hour",
-        16.0, bottom, 16.0, 0xd0d4d8)
-  label("{seconds} s, {state}.   1-4: junction   up/down: cars   left/right: time   space: hold",
+  if scene == RAMP {
+    let main = (Sim.inflow * 6.0) as i32
+    let ramp = (Sim.inflow * 1.2) as i32
+    label("{main} cars an hour on the highway, {ramp} on the ramp; {cars} on the roads, {waiting} waiting, {per} an hour through, {Sim.changes} lane changes",
+          16.0, bottom, 16.0, 0xd0d4d8)
+  } else {
+    label("{inflow} cars an hour on each street; {cars} on the roads, {waiting} waiting, {per} an hour through, {Sim.changes} lane changes",
+          16.0, bottom, 16.0, 0xd0d4d8)
+  }
+  label("{seconds} s, {state}.   1-5: scene   up/down: cars   left/right: time   space: hold",
         16.0, bottom + 22.0, 14.0, 0x9aa0a6)
 }
 
-// (A new scene is laid at the start of a frame.)
 system count() { View.left -= 1 }
 
 // (A new scene is laid at the start of a frame.)
@@ -216,6 +267,7 @@ schedule frame() {
   begin()
   look()
   lay()
+  fit()
 }
 
 schedule advance() run_if View.left > 0 {

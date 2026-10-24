@@ -1,8 +1,10 @@
-// The four junctions of examples/traffic/town.ent, ten minutes each with
-// 600 cars an hour on every street, more than the lights and the stops
-// let through: how many cars went through, in how many steps a car stood
-// on the car ahead, and in how many two cars on different roads came
-// within 2.5 m of each other (where their paths cross, join or split).
+// The five scenes of examples/traffic/town.ent, ten minutes each with 600
+// cars an hour on every street (3,600 on the highway, 720 on its ramp),
+// more than the lights, the stops and the highway let through: how many
+// cars went through, how often one changed lanes, in how many steps a car
+// stood on the car ahead, and in how many two cars on different roads
+// came within 2.5 m of each other (where their paths cross, join or
+// split, or in lanes side by side).
 import console
 import town
 
@@ -33,7 +35,7 @@ system close() {
 }
 
 system report() {
-  put("scene {Sim.scene}: {Sim.gone} through, {Sim.overlaps} overlaps, {Close.n} close")
+  put("scene {Sim.scene}: {Sim.gone} through, {Sim.changes} lane changes, {Sim.overlaps} overlaps, {Close.n} close")
   Sim.scene += 1
   Sim.overlaps = 0
   Close.n = 0
@@ -51,5 +53,5 @@ main {
   loop {
     loop { tick() } until Sim.time >= 600.0
     tell()
-  } until Sim.scene == 4
+  } until Sim.scene == 5
 }
