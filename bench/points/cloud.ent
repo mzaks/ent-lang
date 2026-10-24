@@ -1,0 +1,156 @@
+// The points of a file the Problem Based Benchmark Suite's generator made
+// (github.com/cmuparlay/pbbsbench, testData/geometryData/randPoints): the
+// file `points.pts`, a line "pbbs_sequencePoint2d" or "..3d" and then a
+// line for each point, its coordinates as "-5.15266269103e-01", which
+// `load` reads. bench/points/knn2.ent and knn3.ent go over them, and
+// `save` writes the neighbours they found as PBBS's own programs do.
+import console
+import files
+import clock
+import math
+
+capacity Bytes 700000000
+
+// How many points there are, of how many sides, how many neighbours each
+// is to have, how wide a cell of the grid is, and the runs.
+unique G { n: i32, dims: i32, k: i32, cell: f64, runs: i32, started: f64,
+           made: f64, slots: i32 }
+
+// Where the points are: from the lowest to the highest on every side.
+unique Box { x0: f64, x1: f64, y0: f64, y1: f64, z0: f64, z1: f64 }
+
+component Point { x: f64, y: f64, z: f64, id: i32 } capacity 1048576
+
+// The neighbours of every point, `G.k` rows for each, nearest first.
+buffer Found { id: i32 } capacity 10485760
+
+proc now() -> f64 { wait_until(0.0) }
+
+// 10 to the power of `e`, exactly where `e` is no more than 22.
+fn ten(e: i32) -> f64 {
+  var p: f64 = 1.0
+  for i in 0..e { p *= 10.0 }
+  p
+}
+
+system load() {
+  let size = read_file("points.pts", Bytes)
+  if size < 0 { put("no points.pts") }
+  var i = 0
+  while i < size && Bytes[i].value != 10 { i += 1 }
+  // "pbbs_sequencePoint2d": the side count is the one before the last byte.
+  G.dims = Bytes[i - 2].value as i32 - 48
+  i += 1
+  var n = 0
+  var side = 0
+  var x: f64 = 0.0
+  var y: f64 = 0.0
+  while i < size {
+    // A number: its digits as a whole number, how many came after the
+    // point, and the power of ten after the "e", as strtod reads them.
+    var negative = false
+    if Bytes[i].value == 45 {
+      negative = true
+      i += 1
+    }
+    var m: i64 = 0
+    var after = 0
+    var dot = false
+    var c = Bytes[i].value as i32
+    while (c >= 48 && c <= 57) || c == 46 {
+      if c == 46 { dot = true } else {
+        m = m * 10 + (c - 48) as i64
+        if dot { after += 1 }
+      }
+      i += 1
+      c = Bytes[i].value as i32
+    }
+    var e = 0
+    if c == 101 || c == 69 {
+      i += 1
+      var below = false
+      if Bytes[i].value == 45 {
+        below = true
+        i += 1
+      } else if Bytes[i].value == 43 { i += 1 }
+      c = Bytes[i].value as i32
+      while c >= 48 && c <= 57 {
+        e = e * 10 + c - 48
+        i += 1
+        c = Bytes[i].value as i32
+      }
+      if below { e = 0 - e }
+    }
+    e -= after
+    var v: f64 = if e < 0 { m as f64 / ten(0 - e) } else { m as f64 * ten(e) }
+    if negative { v = 0.0 - v }
+    if side == 0 { x = v } else if side == 1 { y = v }
+    side += 1
+    if side == G.dims {
+      let z = if G.dims == 3 { v } else { 0.0 }
+      spawn { Point { x: x, y: y, z: z, id: n } }
+      n += 1
+      side = 0
+    }
+    // Past the spaces and the end of the line.
+    while i < size && (Bytes[i].value == 32 || Bytes[i].value == 10) { i += 1 }
+  }
+  G.n = n
+  Bytes = []
+}
+
+// A cell of the grid about as wide as would hold two points, were they as
+// many everywhere in the box around them.
+system size_cells() {
+  Box.x0 = 1.0e300
+  Box.x1 = 0.0 - 1.0e300
+  Box.y0 = 1.0e300
+  Box.y1 = 0.0 - 1.0e300
+  Box.z0 = 1.0e300
+  Box.z1 = 0.0 - 1.0e300
+  for p: Point {
+    Box.x0 min= p.x
+    Box.x1 max= p.x
+    Box.y0 min= p.y
+    Box.y1 max= p.y
+    Box.z0 min= p.z
+    Box.z1 max= p.z
+  }
+  let x0 = Box.x0
+  let x1 = Box.x1
+  let y0 = Box.y0
+  let y1 = Box.y1
+  let z0 = Box.z0
+  let z1 = Box.z1
+  if G.dims == 2 {
+    G.cell = sqrt((x1 - x0) * (y1 - y0) * 2.0 / G.n as f64)
+  } else {
+    G.cell = pow64((x1 - x0) * (y1 - y0) * (z1 - z0) * 2.0 / G.n as f64, 1.0 / 3.0)
+  }
+  put("{G.n} points of {G.dims} sides, cells {G.cell} wide")
+}
+
+system start() {
+  G.started = now()
+  G.slots = 0
+}
+
+// The neighbours as PBBS's programs write them (`-o`): a line
+// "sequenceInt" and then a line for each, `G.k` for each point.
+system save() {
+  Bytes = []
+  var header: text[20] = "sequenceInt\n"
+  for i in 0..len(header) { Bytes += { value: header[i] as u8 } }
+  for r in 0..len(Found) {
+    let v = Found[r].id
+    var power = 1
+    while power * 10 <= v { power *= 10 }
+    while power > 0 {
+      Bytes += { value: (v / power % 10 + 48) as u8 }
+      power /= 10
+    }
+    Bytes += { value: 10 }
+  }
+  if !write_file("found.out", Bytes) { put("could not write found.out") }
+  Bytes = []
+}

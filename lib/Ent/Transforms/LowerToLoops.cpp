@@ -1255,7 +1255,17 @@ static bool isEntityLocal(QueryOp query) {
   for (ArchetypeOp archetype : getMatchedArchetypes(query))
     if (isStructuralFor(query, archetype))
       return false;
-  WalkResult result = query.getBody().walk([](Operation *op) {
+  WalkResult result = query.getBody().walk([&](Operation *op) {
+    // Memory the body allocates itself (`nearest k`'s list) is the
+    // entity's own, made and let go of in its turn: written as it likes.
+    if (isa<memref::AllocOp, memref::AllocaOp, memref::DeallocOp>(op))
+      return WalkResult::advance();
+    if (auto store = dyn_cast<memref::StoreOp>(op)) {
+      Operation *made = store.getMemref().getDefiningOp();
+      if (isa_and_nonnull<memref::AllocOp, memref::AllocaOp>(made) &&
+          query->isProperAncestor(made))
+        return WalkResult::advance();
+    }
     // (What is combined where it is sent, whatever the order: one thread.)
     if (op->hasAttr("ent.order_free"))
       return WalkResult::interrupt();

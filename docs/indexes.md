@@ -460,7 +460,7 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 | 2 | Uniform grid and `near ... within` (a Lennard-Jones melt as its example) | `rebuild`, scheduling of makes | built (see below), and `after me` (2b); grids of whole numbers, `between .. and ..`, `nearest k to` (2026-10-23) |
 | 3 | Hash index and `unique` | `incremental`, change tracking | built: `by key hash [unique]`, `get`, `where x.key == value` through it, every way of section 4 (2026-10-23) |
 | 4 | Sorted index (secondary), then clustered | Ordered iteration, ranges, top-k | built: secondary (5.2); ties, float keys, query forms (`by` with `from`, `to`, `first`, `last`) and `clustered` (2026-10-23) |
-| 5 | Morton linear quadtree and octree | Keys made of fields, ranges of prefixes | |
+| 5 | Morton linear quadtree and octree | Keys made of fields, ranges of prefixes | reference: PBBS `nearestNeighbors` and its `octTree` (`bench/points`, 2026-10-24); the grid there for now |
 | 6 | Relation indexes by source and target everywhere, indexes on edge fields | | built: copies in the index's order, kept in order in place, `by` and `where` on edge loops and `index .. of Relation` (2026-10-24, see 5.6) |
 | 7 | Partitions by value | | |
 | 8 | k-d tree and `nearest k` | | `nearest k` built on grids (2026-10-23); k-d tree to do |

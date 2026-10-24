@@ -4035,3 +4035,47 @@ bit, where a row of a plain loop costs 0.1. On one core GAP varies from
 3.31 to 3.51 between runs, ent from 3.37 to 3.52; bottom up is 1.73 ms
 where GAP's is 1.53. PageRank is as before (47.7 ms, GAP 40.8; 8.45 and
 6.55 on all cores).
+
+## 2026-10-24: nearest neighbours against PBBS
+
+`bench/points/run.py`: the k nearest neighbours of every point, as the
+Problem Based Benchmark Suite asks (pbbsbench at 3932578, its
+`nearestNeighbors` tests), by the grid index's `nearest k`
+(`bench/points/knn2.ent`, `knn3.ent`) against PBBS's `octTree`, a kd-tree
+split by the Morton order of the points (Blelloch and Dobson, ALENEX
+2022), built `-O3 -march=native` with ParlayLib's own threads. The points
+are PBBS's (`randPoints`); 1M of each where PBBS has 10M, the clustered
+ones (Kuzmin, Plummer) 100,000. A run makes the index (the tree) anew and
+asks every point. Every point `bench/points/check.cc` draws (200) has all
+k neighbours a scan finds, nearest first, of ent-lang and of octTree
+(PBBS's own check holds only the first). Ryzen AI 9 HX 370 on mains
+power, one core is CPU 2; ms, the median of 3 processes of each one's
+best run, and of ent's the making of the index.
+
+| points | n | k | ent | (made) | octTree | ent, all | (made) | octTree, all |
+|---|---|---|---|---|---|---|---|---|
+| 2DinCube | 1M | 1 | 293.6 | 23.8 | 238.7 | 52.9 | 30.2 | 25.0 |
+| 2Dkuzmin | 100k | 1 | 9262 | 0.6 | 20.4 | 1250 | 3.3 | 2.8 |
+| 3DinCube | 1M | 1 | 650.8 | 27.2 | 365.1 | 94.7 | 41.9 | 38.1 |
+| 3DonSphere | 1M | 1 | 1651 | 24.9 | 280.1 | 188.2 | 39.4 | 28.8 |
+| 3DinCube | 1M | 10 | 1742 | 27.0 | 1105 | 190.5 | 44.5 | 99.7 |
+| 3Dplummer | 100k | 10 | 11232 | 1.1 | 136.9 | 1641 | 3.9 | 21.1 |
+
+- Points spread evenly: 1.2 to 1.8 times octTree on one core, 1.9 to 2.5
+  on all. On a sphere's surface 5.9 (6.5): the cells cut through it, and
+  the distance `nearest` first looks within is worked out as though the
+  points filled the box.
+- Clustered: 450 and 82 times octTree on one core. The grid's cells are
+  as wide everywhere, a cell for about two points over the box around all
+  of them; most points are in a few cells near the middle, and every
+  point there goes over thousands. It grows as the square: Plummer k 10
+  at 20,000 points 0.58 s, at 100,000 11.4 s (octTree 0.023 and 0.14);
+  at 1M it would take hours, which is why those run at 100,000.
+- The index is made in 24 to 27 ms on one core, slower on all cores (30
+  to 44 ms).
+- Until now a `for` with a `nearest` in it ran on one thread whatever
+  the build: the k nearest so far are kept in memory the body allocates
+  for each entity, and storing into it was taken as an effect shared
+  between entities. Memory a query's body allocates is now its entity's
+  own (`isEntityLocal`; `test/Transforms/parallel-entities.mlir`): 3DinCube
+  k 10 on all cores 190 ms where it was 1,760.

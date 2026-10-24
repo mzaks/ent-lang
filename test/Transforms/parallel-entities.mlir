@@ -74,8 +74,41 @@ ent.system @shiftAndLog() writes [@L] {
 // FUSED:       } else {
 // FUSED:         scf.for
 // FUSED:       call @shiftAndLog(
+// Memory the body allocates itself (as `nearest k` keeps its list) is the
+// entity's own: written in its turn, the loop may still be parallel. Memory
+// from outside the query is shared: serial.
+// ALWAYS-LABEL: func.func private @ownScratch(
+// ALWAYS:       scf.parallel
+// ALWAYS:         memref.alloc
+ent.system @ownScratch() writes [@L] {
+  ent.query (%l: !ent.ref<@L, mut>) {
+    %x = ent.get %l "x" : !ent.ref<@L, mut> -> f32
+    %c0 = arith.constant 0 : index
+    %m = memref.alloc() : memref<1xf32>
+    memref.store %x, %m[%c0] : memref<1xf32>
+    %y = memref.load %m[%c0] : memref<1xf32>
+    memref.dealloc %m : memref<1xf32>
+    ent.set %l "x", %y : !ent.ref<@L, mut>, f32
+  }
+}
+
+// ALWAYS-LABEL: func.func private @sharedScratch(
+// ALWAYS-NOT:   scf.parallel
+// ALWAYS:       scf.for
+ent.system @sharedScratch() writes [@L] {
+  %m = memref.alloc() : memref<1xf32>
+  ent.query (%l: !ent.ref<@L, mut>) {
+    %x = ent.get %l "x" : !ent.ref<@L, mut> -> f32
+    %c0 = arith.constant 0 : index
+    memref.store %x, %m[%c0] : memref<1xf32>
+  }
+  memref.dealloc %m : memref<1xf32>
+}
+
 ent.schedule @frame(%d: f32) {
   ent.run @shiftSmall(%d) : f32
   ent.run @shiftLarge(%d) : f32
   ent.run @shiftAndLog()
+  ent.run @ownScratch()
+  ent.run @sharedScratch()
 }
