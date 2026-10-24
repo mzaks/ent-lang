@@ -46,11 +46,20 @@ which need the cars in their order by lane and position every step.
   With one lane it is `idm.ent`'s model to the bit.
 - `check/lanes.c`: the same in plain C, which `lanes.ent` matches to the
   bit, lane changes and all.
+- `show.ent`: `lanes.ent`'s roads in a window: Sugiyama's 22 cars, two
+  lanes with trucks and three lanes too full to flow evenly, each car
+  in the colour of how fast it goes against how fast its driver would.
+  Under them, one road over the last 150 seconds, a line a second, read
+  from the index `Traffic`: a jam is a red stripe that goes back
+  against the cars. Space holds the cars, the arrows up and down make
+  the time go faster or slower, 1 to 3 or a click choose the road, and
+  B makes one of its cars brake hard.
 
 ```sh
 tools/ent run --parallel examples/traffic/flow.ent > flow.csv
 examples/traffic/check/flow.py
 tools/ent run examples/traffic/sugiyama.ent
+tools/ent run examples/traffic/show.ent
 ```
 
 `test/Integration/traffic_ring.test` runs a few roads and checks the
@@ -58,5 +67,6 @@ flows without braking to the cell; `test/Integration/traffic_idm.test`
 runs two roads of the driver model in ent and in C and compares them to
 the bit, on one core and on all; `test/Integration/traffic_lanes.test`
 does so for `lanes.ent` with one lane (against `check/idm.c`) and with
-two and three (against `check/lanes.c`). `bench/traffic` times 120,000
+two and three (against `check/lanes.c`); `test/Integration/traffic_show.test`
+compiles `show.ent`. `bench/traffic` times 120,000
 cars on roads of three lanes.

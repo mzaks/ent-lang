@@ -1,0 +1,21 @@
+// examples/traffic/show.ent compiles: the ring roads of lanes.ent in a
+// window, the cars drawn as rows of the window's `Shapes`, and a picture
+// of a road over time read from the index `Traffic`, which is made again
+// before it is read. Running it needs a display and raylib, which a test
+// cannot ask for.
+// RUN: ent-translate --import-ent %S/../../examples/traffic/show.ent \
+// RUN:     -I %S/../../devices -I %S/../../examples/traffic -o %t.mlir
+// RUN: ent-opt %t.mlir --ent-indexes --ent-lower-to-loops=fuse-systems=1 \
+// RUN:     --symbol-dce --convert-scf-to-cf --convert-to-llvm \
+// RUN:     --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir | FileCheck %s
+
+// CHECK-DAG: declare void @ent_window_draw_shapes(
+// CHECK-DAG: declare void @ent_window_draw_pixels(
+
+// A step of the cars, then the index made again where they moved, before
+// the picture is read from it.
+// CHECK-LABEL: define void @advance(
+// CHECK: call void @lanes.drive
+// CHECK: call void @lanes.Traffic_update
+// CHECK: call void @record

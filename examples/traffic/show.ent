@@ -1,0 +1,282 @@
+// The ring roads of lanes.ent in a window: every car where it is on its
+// road, in the colour of how fast it goes (red standing, yellow at half
+// what its driver would go, green at all of it; a truck is the longer
+// one), and below the road that is chosen as it was over the last minutes:
+// a line for every second, where it is across and how fast in its colour,
+// the newest under the white mark. A jam is a red stripe there that goes
+// back against the cars.
+//
+//   tools/ent run examples/traffic/show.ent
+//
+// The roads: Sugiyama's 22 cars on 230 m (sugiyama.ent), where a jam
+// forms that nothing caused, after a few minutes; two lanes with trucks,
+// where the cars pass them; three lanes, too full to flow evenly.
+// Space holds the cars still, the arrows up and down make the time go
+// faster or slower, 1, 2 and 3 (or a click on a road) choose the road the
+// picture below is of, and B makes a car of it brake hard.
+import window
+import math
+import lanes
+
+// What is drawn of a lane: its middle's circle (a centre and a radius),
+// its width, how many points a metre of it is, and its road's number;
+// a row each, as the lanes are strips. Made again every frame, for a
+// window of any size.
+buffer Strips { cx: f32, cy: f32, r: f32, width: f32, scale: f32, road: i32 } capacity 64
+
+// How fast the cars of each road go, all together, and how many stand.
+unique Tally { sum: f32, stood: i32 }
+
+// What the viewer chose, and what the keys were the frame before (a key
+// counts when it goes down). `pace` is the steps a frame; `left`, how
+// many of them are still to run in this one. `row` is the picture's line
+// to draw next.
+unique View { chosen: i32, paused: bool, pace: i32, left: i32, row: i32,
+              brake: bool, was_space: bool, was_up: bool, was_down: bool,
+              was_b: bool, was_click: bool, top: f32 }
+
+// The picture: so many places across and lines down.
+const PLACES: i32 = 400
+const LINES: i32 = 150
+const ROAD_COLOR: i32 = 0x2e3238
+const PAST_COLOR: i32 = 0x1a1d21
+
+world {
+  Window.width = 1280
+  Window.height = 800
+  Window.title = "ent-lang: traffic"
+  Window.background = 0x101215
+  Window.fps = 60
+  Window.resizable = true
+  View.pace = 4
+  Sim.seed = 1
+  Sim.dt = 0.1
+  Plan += { ring: 230.0, lanes: 1, cars: 22, length: 5.0, v0: 15.0, t: 1.0, s0: 2.0,
+            a: 1.0, b: 1.5, polite: 0.0, threshold: 0.1, safe: 4.0, kick: 0.5,
+            trucks: 0, truck_v0: 0.0, truck_length: 5.0, spread: 0.0 }
+  Plan += { ring: 1000.0, lanes: 2, cars: 40, length: 5.0, v0: 33.3, t: 1.5, s0: 2.0,
+            a: 1.0, b: 1.5, polite: 0.2, threshold: 0.1, safe: 4.0, kick: 1.0,
+            trucks: 5, truck_v0: 22.2, truck_length: 12.0, spread: 0.3 }
+  Plan += { ring: 1000.0, lanes: 3, cars: 96, length: 5.0, v0: 33.3, t: 1.5, s0: 2.0,
+            a: 1.0, b: 1.5, polite: 0.2, threshold: 0.1, safe: 4.0, kick: 1.0,
+            trucks: 4, truck_v0: 22.2, truck_length: 12.0, spread: 0.4 }
+  Pixels = [{ color: PAST_COLOR }; PLACES * LINES]
+}
+
+// Red to yellow to green, as `v` goes from 0 to `v0`.
+fn speed_color(v: f32, v0: f32) -> i32 {
+  let part = min(1.0, max(0.0, v / v0))
+  if part < 0.5 { blend(0xe0383c, 0xf2c94c, part * 2.0) } else {
+    blend(0xf2c94c, 0x4cc76a, (part - 0.5) * 2.0)
+  }
+}
+
+// The keys and the mouse.
+system look() {
+  let space = Keys.space
+  let up = Keys.up
+  let down = Keys.down
+  let b = key_down('B' as i32)
+  let click = Mouse.left
+  if space && !View.was_space { View.paused = !View.paused }
+  if up && !View.was_up { View.pace = min(64, View.pace * 2) }
+  if down && !View.was_down { View.pace = max(1, View.pace / 2) }
+  if b && !View.was_b { View.brake = true }
+  var chosen = View.chosen
+  for i in 0..len(Plan) {
+    if key_down('1' as i32 + i) { chosen = i }
+  }
+  if click && !View.was_click && Mouse.y < View.top {
+    let cell = (Mouse.x * len(Plan) as f32 / Window.width as f32) as i32
+    chosen = min(len(Plan) - 1, max(0, cell))
+  }
+  if chosen != View.chosen {
+    View.chosen = chosen
+    View.row = 0
+    for k in 0..PLACES * LINES { Pixels[k].color = PAST_COLOR }
+  }
+  View.was_space = space
+  View.was_up = up
+  View.was_down = down
+  View.was_b = b
+  View.was_click = click
+  View.left = if View.paused { 0 } else { View.pace }
+}
+
+// Where the roads are drawn: side by side in the upper part of the
+// window, each as big as its room allows, the lanes from the inside out.
+system layout() {
+  let roads = len(Plan)
+  let top = Window.height as f32 * 0.6
+  View.top = top
+  let room = Window.width as f32 / roads as f32
+  Strips = []
+  for i in 0..roads {
+    let lanes = Plan[i].lanes
+    let outer = min(room, top - 40.0) * 0.5 - 14.0
+    let width = max(5.0, outer * 0.075)
+    let inner = outer - width * lanes as f32
+    for l in 0..lanes {
+      let r = inner + width * (l as f32 + 0.5)
+      Strips += { cx: room * (i as f32 + 0.5), cy: top * 0.5 - 6.0, r: r, width: width,
+                  scale: 2.0 * 3.14159265 * r / Plan[i].ring, road: i }
+    }
+  }
+}
+
+// A car of the road chosen brakes, down to a fifth of how fast it went.
+system brake() {
+  var first = 0
+  for i in 0..View.chosen { first += Plan[i].cars }
+  let cars = Plan[View.chosen].cars
+  let victim = first + ((Window.frame * 7919) % cars as i64) as i32
+  for c: Car, s: mut Speed {
+    if c.number == victim { s.v = s.v * 0.2 }
+  }
+  View.brake = false
+}
+
+// A line of the picture: the chosen road as it is now, from the index
+// the cars are kept in by lane and place (lanes.ent's `Traffic`).
+system record() {
+  let row = View.row
+  let road = View.chosen
+  let ring = Plan[road].ring
+  for k in 0..PLACES { Pixels[row * PLACES + k].color = ROAD_COLOR }
+  for k in 0..len(Traffic) {
+    let strip = (Traffic[k].key >> 32) as i32
+    if Strips[strip].road == road {
+      if let v0 = Driver(Traffic[k].who).v0, let length = Car(Traffic[k].who).length {
+        // All of the car, from its back to its front, round the ring.
+        let front = (Traffic[k].x / ring * PLACES as f32) as i32
+        let back = ((Traffic[k].x - length) / ring * PLACES as f32) as i32
+        let color = speed_color(Traffic[k].v, v0)
+        for place in back..front + 1 {
+          Pixels[row * PLACES + (place + PLACES) % PLACES].color = color
+        }
+      }
+    }
+  }
+  View.row = (row + 1) % LINES
+}
+
+system tick() { View.left -= 1 }
+
+// The roads, their lanes and their names.
+system roads() {
+  for i in 0..len(Strips) {
+    let cx = Strips[i].cx
+    let cy = Strips[i].cy
+    let half = Strips[i].width * 0.5
+    let lit = if Strips[i].road == View.chosen { 0x3a4048 } else { ROAD_COLOR }
+    circle(cx, cy, Strips[i].r + half, lit)
+    let r = Strips[i].r - half
+    if i == 0 || Strips[i - 1].road != Strips[i].road { circle(cx, cy, r, Window.background) }
+    else {
+      // The line between this lane and the one inside it, in dashes.
+      for k in 0..48 {
+        let a0 = k as f32 * 3.14159265 / 24.0
+        let a1 = a0 + 3.14159265 / 60.0
+        line(cx + cos(a0) * r, cy + sin(a0) * r, cx + cos(a1) * r, cy + sin(a1) * r, 0x8a9099)
+      }
+    }
+  }
+}
+
+// Every car: a dot in the middle of it, or, where it is longer than a
+// dot, two: one at a quarter of it from the front and one from the back.
+// (A `for` gives a buffer at most one row from each of its appends.)
+fn around(x: f32, ring: f32) -> f32 { x / ring * 2.0 * 3.14159265 - 3.14159265 * 0.5 }
+
+system cars() {
+  for c: Car, at: Spot, s: Speed, d: Driver {
+    let lane = c.base + c.lane
+    let cx = Strips[lane].cx - Strips[lane].width * 0.39
+    let cy = Strips[lane].cy - Strips[lane].width * 0.39
+    let r = Strips[lane].r
+    let dot = Strips[lane].width * 0.78
+    let two = c.length * Strips[lane].scale > dot * 1.2
+    let color = speed_color(s.v, d.v0)
+    let a = around(at.x - c.length * (if two { 0.25 } else { 0.5 }), c.ring)
+    Shapes += { x: cx + cos(a) * r, y: cy + sin(a) * r, w: dot, h: dot, color: color,
+                round: true }
+    if two {
+      let b = around(at.x - c.length * 0.75, c.ring)
+      Shapes += { x: cx + cos(b) * r, y: cy + sin(b) * r, w: dot, h: dot, color: color,
+                  round: true }
+    }
+  }
+}
+
+// What is written: each road's name and how fast its cars go, the
+// picture and what the keys do.
+system words() {
+  let roads = len(Plan)
+  let room = Window.width as f32 / roads as f32
+  let top = View.top
+  for i in 0..roads {
+    Tally.sum = 0.0
+    Tally.stood = 0
+    for c: Car, s: Speed {
+      if Strips[c.base].road == i {
+        Tally.sum += s.v
+        if s.v < 1.0 { Tally.stood += 1 }
+      }
+    }
+    let sum = Tally.sum
+    let stood = Tally.stood
+    let cars = Plan[i].cars
+    let lanes = Plan[i].lanes
+    let mean = (sum * 3.6 / cars as f32) as i32
+    let ring = Plan[i].ring as i32
+    let x = room * i as f32 + 16.0
+    let color = if i == View.chosen { 0xffffff } else { 0xa0a6ad }
+    let named = if lanes == 1 { "1 lane" } else { "{lanes} lanes" }
+    label("{i + 1}: {cars} cars, {named}, {ring} m", x, top - 34.0, 18.0, color)
+    label("{mean} km/h on average, {stood} standing", x, top - 14.0, 14.0, 0x8a9099)
+  }
+  let x = 16.0
+  let y = top + 26.0
+  let w = Window.width as f32 - 32.0
+  let h = Window.height as f32 - y - 30.0
+  draw_pixels(Pixels, PLACES, LINES, x, y, w, h)
+  let mark = y + h * View.row as f32 / LINES as f32
+  rect(x, mark - 1.0, w, 2.0, 0xffffff)
+  label("road {View.chosen + 1}: where the cars are, across, and the last {LINES} seconds, down",
+        x, top + 6.0, 14.0, 0xa0a6ad)
+  let seconds = (Sim.step as f64 * Sim.dt as f64) as i64
+  let state = if View.paused { "held" } else { "{View.pace} steps a frame" }
+  label("{seconds} s, {state}.  Space: hold   up/down: faster/slower   1-3 or a click: a road   B: a car brakes",
+        x, Window.height as f32 - 22.0, 14.0, 0x8a9099)
+}
+
+schedule frame() {
+  begin()
+  look()
+  layout()
+}
+
+schedule draw() {
+  roads()
+  cars()
+  shapes()
+  words()
+  present()
+}
+
+// A step of the cars, and a line of the picture for every second.
+schedule advance() run_if View.left > 0 {
+  brake() run_if View.brake
+  step()
+  record() run_if Sim.step % 10 == 0
+  tick()
+}
+
+main {
+  setup()
+  loop {
+    frame()
+    loop { advance() } until View.left <= 0
+    draw()
+  } until Window.closed
+}
