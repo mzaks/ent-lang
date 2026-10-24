@@ -46,11 +46,12 @@ which need the cars in their order by lane and position every step.
   With one lane it is `idm.ent`'s model to the bit.
 - `check/lanes.c`: the same in plain C, which `lanes.ent` matches to the
   bit, lane changes and all.
-- `town.ent`: streets that meet, in one of five scenes: traffic lights
+- `town.ent`: streets that meet, in one of seven scenes: traffic lights
   where streets of two lanes each way cross (a car that turns left gives
-  way to the cars that come the other way), a roundabout, a priority road
-  of two lanes each way, a stop on every street, and a highway of two
-  lanes with an on-ramp. Streets are roads of one lane on curves, side by
+  way to the cars that come the other way), a roundabout of one lane and
+  one of two, a priority road of two lanes each way, a stop on every
+  street, and a highway of two lanes with an on-ramp and with an
+  off-ramp. Streets are roads of one lane on curves, side by
   side where there are more, and a car drives its route over them by the
   intelligent driver model, behind the car ahead on its own road or the
   next ones, behind a car that joins from another road nearer to where
@@ -64,15 +65,24 @@ which need the cars in their order by lane and position every step.
   and at the stops to whoever stopped first. The cars from the ramp drive
   on a lane that ends, and change into the highway where they safely can,
   more boldly the less of it is left; one that stands at its end is let
-  in by the next car on the highway, a car at a time.
-- `junctions.ent`: `town.ent` in a window: 1 to 5 choose the scene, up
+  in by the next car on the highway, a car at a time. A route says with
+  each road how many lanes a car on it still has to change, and a car
+  changes to lanes with fewer: the cars for the off-ramp go to the outer
+  lane on the way and into the ramp's lane when it comes. In the
+  roundabout of two lanes a car turning right takes the outer lane, one
+  turning left the inner, and those that go in or out from the inner lane
+  cross the outer one: they give way to its cars, which stop for one that
+  is crossing, and no car goes into a lane of the ring that holds a car
+  every 12 m.
+- `junctions.ent`: `town.ent` in a window: 1 to 7 choose the scene, up
   and down change how many cars come in, left and right how fast the time
   goes. Each car is in the colour of its speed against its road's limit,
   and the window says how many cars an hour get through. With 600 an hour
   on every street the lights (with two lanes each way) let some 2,100
-  through, the roundabout 1,750, the priority road 1,350 and the stops
-  830; the highway with 3,600 and 720 from the ramp some 3,100, and the
-  jam at the ramp goes back against the cars.
+  through, the roundabout of two lanes 2,150 and of one 1,750, the
+  priority road 1,350 and the stops 850; the highway with 3,600 and 720
+  from the ramp some 3,100, and the jam at the ramp goes back against the
+  cars; with 3,600 and a quarter leaving, some 3,400.
 - `show.ent`: `lanes.ent`'s roads in a window: Sugiyama's 22 cars, two
   lanes with trucks and three lanes too full to flow evenly, each car
   in the colour of how fast it goes against how fast its driver would.

@@ -1,6 +1,6 @@
 // The scenes of town.ent in a window: four streets meet, and the cars find
-// their way through in one of four ways, or cars from an on-ramp change
-// into a highway. Choose with the keys 1 to 5:
+// their way through in one of five ways, or cars change lanes on a
+// highway with an on-ramp or an off-ramp. Choose with the keys 1 to 7:
 //
 //   1. Traffic lights: north and south go, then east and west; a car that
 //      turns left waits for a gap in the cars that come the other way.
@@ -13,6 +13,13 @@
 //      beside the highway, which ends, and change into the highway where
 //      there is a gap. With many cars the highway jams there, and the jam
 //      goes back against the cars.
+//   6. An off-ramp: a quarter of the cars leave the highway; they change
+//      to its outer lane on the way, and from it into the lane of the ramp.
+//   7. A roundabout of two lanes, with two lanes each way on the streets:
+//      a car turning right takes the outer lane, one turning left the
+//      inner, and one going straight on either. One that goes in from the
+//      inner lane, or out from it, crosses the outer lane, and gives way
+//      to the cars on it; they stop for one that is crossing.
 //
 // Under the lights and on the priority road the streets have two lanes
 // each way: the outer one for turning right and going straight on, the
@@ -75,7 +82,7 @@ system look() {
   if down && !View.was_down { Sim.inflow = max(100.0, Sim.inflow - 100.0) }
   if right && !View.was_right { View.pace = min(32, View.pace * 2) }
   if left && !View.was_left { View.pace = max(1, View.pace / 2) }
-  for i in 0..5 {
+  for i in 0..7 {
     if key_down('1' as i32 + i) { Sim.scene = i }
   }
   View.was_space = space
@@ -146,6 +153,18 @@ system marks() {
       line(x0, y0 + 1.0, x1, y1 + 1.0, Paint[p].color)
     }
     if kind == 3 { line(x0, y0, x1, y1, Paint[p].color) }
+    if kind == 4 {
+      // A dashed circle.
+      let r = Paint[p].r * sc
+      for k in 0..64 {
+        if k % 2 == 0 {
+          let a0 = k as f32 * PI / 32.0
+          let a1 = a0 + PI / 32.0
+          line(x0 + cos(a0) * r, y0 + sin(a0) * r, x0 + cos(a1) * r, y0 + sin(a1) * r,
+               Paint[p].color)
+        }
+      }
+    }
     if kind == 2 {
       let long = sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0))
       let n = (long / (3.0 * sc)) as i32
@@ -238,8 +257,14 @@ system words() {
           12.0, 20.0, 0xffffff)
   } else if scene == STOP {
     label("4  Stop on every street: the first to stop goes first", 16.0, 12.0, 20.0, 0xffffff)
-  } else {
+  } else if scene == RAMP {
     label("5  On-ramp: the cars from the ramp change into the highway before their lane ends",
+          16.0, 12.0, 20.0, 0xffffff)
+  } else if scene == EXIT {
+    label("6  Off-ramp: a quarter of the cars leave, changing to the outer lane on the way",
+          16.0, 12.0, 20.0, 0xffffff)
+  } else {
+    label("7  Roundabout of two lanes: right from the outer, left from the inner, straight from either",
           16.0, 12.0, 20.0, 0xffffff)
   }
   let per = if Sim.time > 1.0 { (Sim.gone as f32 * 3600.0 / Sim.time) as i32 } else { 0 }
@@ -247,16 +272,19 @@ system words() {
   let seconds = Sim.time as i32
   let state = if View.paused { "held" } else { "{View.pace} steps a frame" }
   let bottom = Window.height as f32 - 46.0
+  let main = (Sim.inflow * 6.0) as i32
   if scene == RAMP {
-    let main = (Sim.inflow * 6.0) as i32
     let ramp = (Sim.inflow * 1.2) as i32
     label("{main} cars an hour on the highway, {ramp} on the ramp; {cars} on the roads, {waiting} waiting, {per} an hour through, {Sim.changes} lane changes",
+          16.0, bottom, 16.0, 0xd0d4d8)
+  } else if scene == EXIT {
+    label("{main} cars an hour on the highway, a quarter of them leaving; {cars} on the roads, {waiting} waiting, {per} an hour through, {Sim.changes} lane changes",
           16.0, bottom, 16.0, 0xd0d4d8)
   } else {
     label("{inflow} cars an hour on each street; {cars} on the roads, {waiting} waiting, {per} an hour through, {Sim.changes} lane changes",
           16.0, bottom, 16.0, 0xd0d4d8)
   }
-  label("{seconds} s, {state}.   1-5: scene   up/down: cars   left/right: time   space: hold",
+  label("{seconds} s, {state}.   1-7: scene   up/down: cars   left/right: time   space: hold",
         16.0, bottom + 22.0, 14.0, 0x9aa0a6)
 }
 

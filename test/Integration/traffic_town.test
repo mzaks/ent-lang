@@ -1,6 +1,7 @@
 // The scenes of examples/traffic/town.ent (lights and a priority road
-// where streets of two lanes each way cross, a roundabout, stops on every
-// street, and a highway with an on-ramp), ten minutes each with more cars
+// where streets of two lanes each way cross, roundabouts of one lane and
+// of two, stops on every street, and a highway with an on-ramp and with
+// an off-ramp), ten minutes each with more cars
 // than the lights, the stops and the highway let through: none stands on
 // the car ahead, no two on paths that cross, join or split, or in lanes
 // side by side, come within 2.5 m of each other, the cars change lanes
@@ -16,3 +17,5 @@
 // CHECK: scene 2: {{[12][0-9][0-9]}} through, {{[1-9][0-9]+}} lane changes, 0 overlaps, 0 close
 // CHECK: scene 3: {{1[0-9][0-9]}} through, 0 lane changes, 0 overlaps, 0 close
 // CHECK: scene 4: {{[45][0-9][0-9]}} through, {{[1-9][0-9]+}} lane changes, 0 overlaps, 0 close
+// CHECK: scene 5: {{[45][0-9][0-9]}} through, {{[1-9][0-9]+}} lane changes, 0 overlaps, 0 close
+// CHECK: scene 6: {{[23][0-9][0-9]}} through, {{[1-9][0-9]+}} lane changes, 0 overlaps, 0 close

@@ -57,6 +57,8 @@ const ROUNDABOUT: i32 = 1
 const PRIORITY: i32 = 2
 const STOP: i32 = 3
 const RAMP: i32 = 4
+const EXIT: i32 = 5
+const ROUND2: i32 = 6
 
 // The step (seconds), the time and the steps so far; the seed of the
 // draws and how many cars came and went; the scene to lay (`built` is the
@@ -78,9 +80,13 @@ buffer Roads { x0: f32, y0: f32, cx: f32, cy: f32, x1: f32, y1: f32, length: f32
 // the left and on the right (none: -1); the rows of `Conflicts` of the
 // paths that a car going onto it gives way to; the rows of `Feeds` of the
 // roads that lead onto it, and of `Splits` of those that go on from it;
-// and whether it is a lane that ends.
+// whether it is a lane that ends; the rows of `Crossings` of the roads
+// that cross it whose cars give way to its own; and whether its cars,
+// which cross other lanes on it, go first where it joins another road
+// (that they may not stand across those lanes).
 buffer Ties { left: i32, right: i32, first: i32, conflicts: i32, feed: i32, feeds: i32,
-              split: i32, splits: i32, ends: bool } capacity 64
+              split: i32, splits: i32, ends: bool, cross: i32, crosses: i32,
+              bold: bool } capacity 64
 
 // What is on a road every step, a row each: how many cars (and those let
 // go onto it), how soon the first comes to its end (seconds) and how near
@@ -97,11 +103,17 @@ buffer Load { cars: i32, soonest: f32, nearest: f32, coming: f32, room: f32, sin
 buffer Turns { road: i32, arm: i32, turn: i32, from: i32, to: i32 } capacity 32
 
 // What a car going onto a road gives way to: no car on `guard` (none:
-// -1), and as `kind` says: 0 nothing more, 1 no car coming onto `guard`
+// -1) that is not yet `upto` metres along it, and as `kind` says: 0 nothing more, 1 no car coming onto `guard`
 // within `gap` seconds (where there is no guard: to the end of `road`,
 // nor within 8 m of it), 2 no car that stopped at the end of `road`
-// before it.
-buffer Conflicts { road: i32, guard: i32, kind: i32, gap: f32 } capacity 512
+// before it, 3 fewer cars than `gap` on the 8 roads from `road` on (a
+// lane of a ring, which a car does not go into where it is full).
+buffer Conflicts { road: i32, guard: i32, kind: i32, gap: f32, upto: f32 } capacity 512
+
+// A road that crosses another (`road`), and how far along that it first
+// comes within 3 m of it: a car on that road, or coming onto it, stops
+// short of there while a car that was let go onto the other is on it.
+buffer Crossings { road: i32, other: i32, at: f32 } capacity 64
 
 // The roads that lead onto a road, from its row `feed` on; those that go
 // on from it, from its row `split` on.
@@ -109,10 +121,12 @@ buffer Feeds { from: i32 } capacity 128
 buffer Splits { to: i32 } capacity 128
 
 // The routes: the roads of each, one after the other, then -1 where the
-// last leaves the world at its end, -2 where its lane ends. Those to
+// last leaves the world at its end, -2 where its lane ends; and with
+// each road, how many lanes a car on it there still has to change to go
+// on to where the route goes (worked out when the routes are laid). Those to
 // each place the cars go to lie together, from `first` on: a row of
 // `Dests` for each.
-buffer Paths { road: i32 } capacity 512
+buffer Paths { road: i32, need: i32 } capacity 512
 buffer Dests { first: i32, count: i32 } capacity 8
 // Where cars come in: the first road of so many lanes side by side, how
 // many come there for every one of `Sim.inflow`, when the next comes
@@ -208,6 +222,44 @@ fn curves_cross(ax0: f32, ay0: f32, acx: f32, acy: f32, ax1: f32, ay1: f32, bx0:
     }
   }
   hit
+}
+
+// How far along the first curve (0 to 1) the second first comes within
+// `clear` of it, by 32 points of each; -1 where it does not.
+fn near_at(ax0: f32, ay0: f32, acx: f32, acy: f32, ax1: f32, ay1: f32, bx0: f32, by0: f32,
+           bcx: f32, bcy: f32, bx1: f32, by1: f32, clear: f32) -> f32 {
+  var at = -1.0
+  for i in 0..33 {
+    let s = i as f32 / 32.0
+    let x = bez(ax0, acx, ax1, s)
+    let y = bez(ay0, acy, ay1, s)
+    for j in 0..33 {
+      let t = j as f32 / 32.0
+      let dx = bez(bx0, bcx, bx1, t) - x
+      let dy = bez(by0, bcy, by1, t) - y
+      if at < 0.0 && dx * dx + dy * dy < clear * clear { at = s }
+    }
+  }
+  at
+}
+
+// And how far along it the second last comes within `clear` of it; 0
+// where it does not.
+fn near_last(ax0: f32, ay0: f32, acx: f32, acy: f32, ax1: f32, ay1: f32, bx0: f32, by0: f32,
+             bcx: f32, bcy: f32, bx1: f32, by1: f32, clear: f32) -> f32 {
+  var at = 0.0
+  for i in 0..33 {
+    let s = i as f32 / 32.0
+    let x = bez(ax0, acx, ax1, s)
+    let y = bez(ay0, acy, ay1, s)
+    for j in 0..33 {
+      let t = j as f32 / 32.0
+      let dx = bez(bx0, bcx, bx1, t) - x
+      let dy = bez(by0, bcy, by1, t) - y
+      if dx * dx + dy * dy < clear * clear { at = s }
+    }
+  }
+  at
 }
 
 // The intelligent driver model: how hard a car that goes `v` and would
@@ -306,6 +358,7 @@ system clear() {
   Paint = []
   Feeds = []
   Splits = []
+  Crossings = []
   Load = []
   Sim.time = 0.0
   Sim.gone = 0
@@ -395,7 +448,7 @@ system cross() {
     }
   }
   Ties = [{ left: -1, right: -1, first: 0, conflicts: 0, feed: 0, feeds: 0, split: 0,
-            splits: 0, ends: false }; len(Roads)]
+            splits: 0, ends: false, cross: 0, crosses: 0, bold: false }; len(Roads)]
   for r in 0..8 * n {
     let i = r % n
     if i + 1 < n { Ties[r].left = r + 1 }
@@ -425,7 +478,7 @@ system cross() {
           if rc < rl { kind = 1  gap = 5.0 }
           else if rc == rl && turns_across { kind = 1  gap = 4.0 }
         } else { kind = 2 }
-        Conflicts += { road: Turns[y].from, guard: l, kind: kind, gap: gap }
+        Conflicts += { road: Turns[y].from, guard: l, kind: kind, gap: gap, upto: 1000000.0 }
       }
     }
     Ties[c].conflicts = len(Conflicts) - Ties[c].first
@@ -434,10 +487,10 @@ system cross() {
     let first = len(Paths)
     for x in 0..len(Turns) {
       if (Turns[x].arm + Turns[x].turn) % 4 == b {
-        Paths += { road: Turns[x].from }
-        Paths += { road: Turns[x].road }
-        Paths += { road: Turns[x].to }
-        Paths += { road: -1 }
+        Paths += { road: Turns[x].from, need: 0 }
+        Paths += { road: Turns[x].road, need: 0 }
+        Paths += { road: Turns[x].to, need: 0 }
+        Paths += { road: -1, need: 0 }
       }
     }
     Dests += { first: first, count: len(Paths) - first }
@@ -450,111 +503,206 @@ system cross() {
   }
 }
 
-// Four streets and a ring of 20 m (to the middle of its lane) that the
-// cars go round anticlockwise. Each street's road in ends 9 m off the
-// ring, at the line, and a short road goes on into the ring 18 degrees
-// after the street; the road out leaves it 18 degrees before. The ring
-// is 8 roads: from each road out's start to the next road in's end, and
-// on to the next road out's. A car going in gives way to the cars that
-// come round to where it joins within 3 seconds.
+// Four streets and a ring that the cars go round anticlockwise, of one
+// lane (scene 1) or two (scene 6), with as many lanes each way on the
+// streets, laid out as at a crossing. The inner lane of the ring is 20 m
+// from the middle (to the middle of the lane), the outer ones 3.6 m more
+// each. A street's roads in end 9 m off the ring, at the line, and short
+// roads go on from each into its lane of the ring 18 degrees after the
+// street; from each lane of the ring a road out leaves it 18 degrees
+// before the street, onto that lane of the street. Each lane of the ring
+// is 8 roads: from where the roads out leave it to where the roads in
+// join it, past the street, and on to the next street.
+//
+// A car turning right comes in on the outer lane, one turning left on the
+// inner; one going straight on either. Going in, a car gives way to the
+// cars that come round to where it joins in its lane of the ring and in
+// those outside it, which it crosses, within 3 seconds, and does not go
+// in where its lane holds a car every 12 m already; going out from an
+// inner lane, to those in the lanes outside it that go on past the
+// street, within 4 (it crosses their lane some way on).
 system round() {
-  let ring = 20.0
+  let n = if Sim.scene == ROUND2 { 2 } else { 1 }
+  let lane = 2.0 * HALF
   let side = PI / 10.0
-  Paint += { kind: 0, x0: 0.0, y0: 0.0, x1: 0.0, y1: 0.0, r: ring - 2.3, color: 0x2c4a33 }
-  // Roads 0 to 7: in and out, as at a crossing.
+  let inner = 20.0
+  let near = inner + lane * (n - 1) as f32 + 9.0
+  let cin = 8 * n
+  let cout = 12 * n
+  let arcs = 16 * n
+  Paint += { kind: 0, x0: 0.0, y0: 0.0, x1: 0.0, y1: 0.0, r: inner - 2.3, color: 0x2c4a33 }
+  for m in 1..n {
+    Paint += { kind: 4, x0: 0.0, y0: 0.0, x1: 0.0, y1: 0.0, r: inner + lane * (m as f32 - 0.5),
+               color: 0xd8d8d0 }
+  }
+  // Roads 0 to 8n - 1: the streets' roads in and out, as at a crossing.
   for k in 0..4 {
     let th = 0.0 - PI * 0.5 - k as f32 * PI * 0.5
     let dx = cos(th)
     let dy = sin(th)
-    let ix = dy * HALF
-    let iy = 0.0 - dx * HALF
-    let near = ring + 9.0
-    let x0 = dx * FAR + ix
-    let y0 = dy * FAR + iy
-    let x1 = dx * near + ix
-    let y1 = dy * near + iy
-    Roads += { x0: x0, y0: y0, cx: (x0 + x1) * 0.5, cy: (y0 + y1) * 0.5, x1: x1, y1: y1,
-               length: FAR - near, limit: LIMIT, light: -1, stop: false }
-    let ox = 0.0 - dy * HALF
-    let oy = dx * HALF
-    Roads += { x0: dx * near + ox, y0: dy * near + oy, cx: dx * (FAR + near) * 0.5 + ox,
-               cy: dy * (FAR + near) * 0.5 + oy, x1: dx * FAR + ox, y1: dy * FAR + oy,
-               length: FAR - near, limit: LIMIT, light: -1, stop: false }
-    Paint += { kind: 2, x0: dx * near, y0: dy * near, x1: dx * FAR, y1: dy * FAR, r: 0.0,
-               color: 0xd8d8d0 }
-    Paint += { kind: 2, x0: x1 + ix, y0: y1 + iy, x1: x1 - ix, y1: y1 - iy, r: 0.0,
-               color: 0xffffff }
+    for i in 0..n {
+      let off = HALF + lane * (n - 1 - i) as f32
+      let x0 = dx * FAR + dy * off
+      let y0 = dy * FAR - dx * off
+      let x1 = dx * near + dy * off
+      let y1 = dy * near - dx * off
+      Roads += { x0: x0, y0: y0, cx: (x0 + x1) * 0.5, cy: (y0 + y1) * 0.5, x1: x1, y1: y1,
+                 length: FAR - near, limit: LIMIT, light: -1, stop: false }
+    }
+    for i in 0..n {
+      let off = HALF + lane * (n - 1 - i) as f32
+      let x0 = dx * near - dy * off
+      let y0 = dy * near + dx * off
+      let x1 = dx * FAR - dy * off
+      let y1 = dy * FAR + dx * off
+      Roads += { x0: x0, y0: y0, cx: (x0 + x1) * 0.5, cy: (y0 + y1) * 0.5, x1: x1, y1: y1,
+                 length: FAR - near, limit: LIMIT, light: -1, stop: false }
+    }
+    Paint += { kind: if n == 1 { 2 } else { 3 }, x0: dx * near, y0: dy * near, x1: dx * FAR,
+               y1: dy * FAR, r: 0.0, color: 0xd8d8d0 }
+    for m in 1..n {
+      let off = lane * m as f32
+      Paint += { kind: 2, x0: dx * near + dy * off, y0: dy * near - dx * off,
+                 x1: dx * FAR + dy * off, y1: dy * FAR - dx * off, r: 0.0, color: 0xd8d8d0 }
+      Paint += { kind: 2, x0: dx * near - dy * off, y0: dy * near + dx * off,
+                 x1: dx * FAR - dy * off, y1: dy * FAR + dx * off, r: 0.0, color: 0xd8d8d0 }
+    }
+    let wide = lane * n as f32
+    Paint += { kind: 2, x0: dx * near, y0: dy * near, x1: dx * near + dy * wide,
+               y1: dy * near - dx * wide, r: 0.0, color: 0xffffff }
   }
-  // Roads 8 to 11 into the ring, 12 to 15 out of it.
+  // Roads 8n on: into the ring (street k, lane i: 8n + nk + i), out of it
+  // (12n + nk + i), and the ring's (16n + 8i + 2k past street k, + 1 on
+  // from it).
   for k in 0..4 {
     let th = 0.0 - PI * 0.5 - k as f32 * PI * 0.5
-    let mx = cos(th - side) * ring
-    let my = sin(th - side) * ring
-    let (cx, cy) = meet(Roads[2 * k].x1, Roads[2 * k].y1, Roads[2 * k].x1 - Roads[2 * k].x0,
-                        Roads[2 * k].y1 - Roads[2 * k].y0, mx, my, sin(th - side),
-                        0.0 - cos(th - side))
-    Roads += { x0: Roads[2 * k].x1, y0: Roads[2 * k].y1, cx: cx, cy: cy, x1: mx, y1: my,
-               length: curve_length(Roads[2 * k].x1, Roads[2 * k].y1, cx, cy, mx, my),
-               limit: 7.0, light: -1, stop: false }
+    for i in 0..n {
+      let ring = inner + lane * (n - 1 - i) as f32
+      let from = 2 * n * k + i
+      let mx = cos(th - side) * ring
+      let my = sin(th - side) * ring
+      let (cx, cy) = meet(Roads[from].x1, Roads[from].y1, Roads[from].x1 - Roads[from].x0,
+                          Roads[from].y1 - Roads[from].y0, mx, my, sin(th - side),
+                          0.0 - cos(th - side))
+      Roads += { x0: Roads[from].x1, y0: Roads[from].y1, cx: cx, cy: cy, x1: mx, y1: my,
+                 length: curve_length(Roads[from].x1, Roads[from].y1, cx, cy, mx, my),
+                 limit: 7.0, light: -1, stop: false }
+    }
   }
   for k in 0..4 {
     let th = 0.0 - PI * 0.5 - k as f32 * PI * 0.5
-    let dx = cos(th + side) * ring
-    let dy = sin(th + side) * ring
-    let o = 2 * k + 1
-    let (cx, cy) = meet(dx, dy, sin(th + side), 0.0 - cos(th + side), Roads[o].x0,
-                        Roads[o].y0, Roads[o].x1 - Roads[o].x0, Roads[o].y1 - Roads[o].y0)
-    Roads += { x0: dx, y0: dy, cx: cx, cy: cy, x1: Roads[o].x0, y1: Roads[o].y0,
-               length: curve_length(dx, dy, cx, cy, Roads[o].x0, Roads[o].y0), limit: 8.0,
-               light: -1, stop: false }
+    for i in 0..n {
+      let ring = inner + lane * (n - 1 - i) as f32
+      let dx = cos(th + side) * ring
+      let dy = sin(th + side) * ring
+      let o = 2 * n * k + n + i
+      let (cx, cy) = meet(dx, dy, sin(th + side), 0.0 - cos(th + side), Roads[o].x0,
+                          Roads[o].y0, Roads[o].x1 - Roads[o].x0, Roads[o].y1 - Roads[o].y0)
+      Roads += { x0: dx, y0: dy, cx: cx, cy: cy, x1: Roads[o].x0, y1: Roads[o].y0,
+                 length: curve_length(dx, dy, cx, cy, Roads[o].x0, Roads[o].y0), limit: 8.0,
+                 light: -1, stop: false }
+    }
   }
-  // Roads 16 to 19: past the street, from out to in; 20 to 23: on to the
-  // next street's out.
-  for k in 0..8 {
-    let th = 0.0 - PI * 0.5 - (k / 2) as f32 * PI * 0.5
-    let from = if k % 2 == 0 { th + side } else { th - side }
-    let to = if k % 2 == 0 { th - side } else { th - PI * 0.5 + side }
-    let mid = (from + to) * 0.5
-    let reach = ring / cos((from - to) * 0.5)
-    let x0 = cos(from) * ring
-    let y0 = sin(from) * ring
-    let x1 = cos(to) * ring
-    let y1 = sin(to) * ring
-    let cx = cos(mid) * reach
-    let cy = sin(mid) * reach
-    Roads += { x0: x0, y0: y0, cx: cx, cy: cy, x1: x1, y1: y1,
-               length: curve_length(x0, y0, cx, cy, x1, y1), limit: 8.0, light: -1,
-               stop: false }
+  for i in 0..n {
+    let ring = inner + lane * (n - 1 - i) as f32
+    for k in 0..8 {
+      let th = 0.0 - PI * 0.5 - (k / 2) as f32 * PI * 0.5
+      let from = if k % 2 == 0 { th + side } else { th - side }
+      let to = if k % 2 == 0 { th - side } else { th - PI * 0.5 + side }
+      let mid = (from + to) * 0.5
+      let reach = ring / cos((from - to) * 0.5)
+      let x0 = cos(from) * ring
+      let y0 = sin(from) * ring
+      let x1 = cos(to) * ring
+      let y1 = sin(to) * ring
+      let cx = cos(mid) * reach
+      let cy = sin(mid) * reach
+      Roads += { x0: x0, y0: y0, cx: cx, cy: cy, x1: x1, y1: y1,
+                 length: curve_length(x0, y0, cx, cy, x1, y1), limit: 8.0, light: -1,
+                 stop: false }
+    }
   }
   Ties = [{ left: -1, right: -1, first: 0, conflicts: 0, feed: 0, feeds: 0, split: 0,
-            splits: 0, ends: false }; len(Roads)]
-  // (The ring's roads were laid in turn: past street k is 16 + 2k, on
-  // from it 17 + 2k.) Going in at street k gives way to what comes past.
+            splits: 0, ends: false, cross: 0, crosses: 0, bold: false }; len(Roads)]
+  for r in 0..8 * n {
+    let i = r % n
+    if i + 1 < n { Ties[r].left = r + 1 }
+    if i > 0 { Ties[r].right = r - 1 }
+  }
   for k in 0..4 {
-    Ties[8 + k].first = len(Conflicts)
-    Ties[8 + k].conflicts = 1
-    Conflicts += { road: 16 + 2 * k, guard: -1, kind: 1, gap: 3.0 }
+    for i in 0..n {
+      let into = cin + n * k + i
+      Ties[into].first = len(Conflicts)
+      for j in 0..i + 1 {
+        Conflicts += { road: arcs + 8 * j + 2 * k, guard: -1, kind: 1, gap: 3.0,
+                       upto: 1000000.0 }
+      }
+      // Nor into its lane of the ring where that holds a car every 12 m.
+      let ring = inner + lane * (n - 1 - i) as f32
+      Conflicts += { road: arcs + 8 * i, guard: -1, kind: 3, gap: 2.0 * PI * ring / 12.0,
+                     upto: 1000000.0 }
+      Ties[into].conflicts = len(Conflicts) - Ties[into].first
+      let out = cout + n * k + i
+      Ties[out].first = len(Conflicts)
+      for j in 0..i {
+        // (Not for a car on the lane outside that is already past where
+        // the two come within 3 m of each other.)
+        let past = arcs + 8 * j + 2 * k
+        let upto = near_last(Roads[past].x0, Roads[past].y0, Roads[past].cx, Roads[past].cy,
+                             Roads[past].x1, Roads[past].y1, Roads[out].x0, Roads[out].y0,
+                             Roads[out].cx, Roads[out].cy, Roads[out].x1, Roads[out].y1, 3.0)
+        Conflicts += { road: past, guard: past, kind: 1, gap: 4.0,
+                       upto: upto * Roads[past].length }
+      }
+      Ties[out].conflicts = len(Conflicts) - Ties[out].first
+    }
+  }
+  // Where the roads in and out of the inner lanes cross the lanes outside
+  // them (and from where they come near), whose cars stop for one there.
+  for k in 0..4 {
+    for i in 1..n {
+      Ties[cin + n * k + i].bold = true
+      Ties[cout + n * k + i].bold = true
+    }
+  }
+  for r in arcs..arcs + 8 * n {
+    Ties[r].cross = len(Crossings)
+    for x in cin..arcs {
+      let crosses = curves_cross(Roads[r].x0, Roads[r].y0, Roads[r].cx, Roads[r].cy,
+                                 Roads[r].x1, Roads[r].y1, Roads[x].x0, Roads[x].y0,
+                                 Roads[x].cx, Roads[x].cy, Roads[x].x1, Roads[x].y1)
+      let at = near_at(Roads[r].x0, Roads[r].y0, Roads[r].cx, Roads[r].cy, Roads[r].x1,
+                       Roads[r].y1, Roads[x].x0, Roads[x].y0, Roads[x].cx, Roads[x].cy,
+                       Roads[x].x1, Roads[x].y1, 3.0)
+      if crosses { Crossings += { road: r, other: x, at: at * Roads[r].length } }
+    }
+    Ties[r].crosses = len(Crossings) - Ties[r].cross
   }
   for b in 0..4 {
     let first = len(Paths)
     for turn in 1..4 {
       let a = (b - turn + 4) % 4
-      Paths += { road: 2 * a }
-      Paths += { road: 8 + a }
-      Paths += { road: 17 + 2 * a }
-      for j in 1..turn {
-        let s = (a + j) % 4
-        Paths += { road: 16 + 2 * s }
-        Paths += { road: 17 + 2 * s }
+      for i in 0..n {
+        if turn == 2 || (turn == 1 && i == 0) || (turn == 3 && i == n - 1) {
+          let ring = arcs + 8 * i
+          Paths += { road: 2 * n * a + i, need: 0 }
+          Paths += { road: cin + n * a + i, need: 0 }
+          Paths += { road: ring + 2 * a + 1, need: 0 }
+          for j in 1..turn {
+            let s = (a + j) % 4
+            Paths += { road: ring + 2 * s, need: 0 }
+            Paths += { road: ring + 2 * s + 1, need: 0 }
+          }
+          Paths += { road: cout + n * b + i, need: 0 }
+          Paths += { road: 2 * n * b + n + i, need: 0 }
+          Paths += { road: -1, need: 0 }
+        }
       }
-      Paths += { road: 12 + b }
-      Paths += { road: 2 * b + 1 }
-      Paths += { road: -1 }
     }
     Dests += { first: first, count: len(Paths) - first }
   }
   for a in 0..4 {
-    Entries += { road: 2 * a, lanes: 1, share: 1.0, next: 0.0, due: 0 }
+    Entries += { road: 2 * n * a, lanes: n, share: 1.0, next: 0.0, due: 0 }
     for turn in 1..4 {
       Choices += { entry: a, dest: (a + turn) % 4, weight: if turn == 2 { 0.5 } else { 0.25 } }
     }
@@ -595,7 +743,7 @@ system ramp() {
              length: curve_length(rx, ry, cx, cy, join, cy), limit: 22.0, light: -1,
              stop: false }
   Ties = [{ left: -1, right: -1, first: 0, conflicts: 0, feed: 0, feeds: 0, split: 0,
-            splits: 0, ends: false }; len(Roads)]
+            splits: 0, ends: false, cross: 0, crosses: 0, bold: false }; len(Roads)]
   Ties[0].left = 1
   Ties[1].right = 0
   Ties[2].left = 3
@@ -610,22 +758,99 @@ system ramp() {
   Paint += { kind: 2, x0: join, y0: lane, x1: end, y1: lane, r: 0.0, color: 0xd8d8d0 }
   Paint += { kind: 3, x0: west, y0: lane, x1: join, y1: lane, r: 0.0, color: 0xd8d8d0 }
   Paint += { kind: 3, x0: end, y0: lane, x1: east, y1: lane, r: 0.0, color: 0xd8d8d0 }
-  Paths += { road: 0 }
-  Paths += { road: 3 }
-  Paths += { road: 5 }
-  Paths += { road: -1 }
-  Paths += { road: 1 }
-  Paths += { road: 4 }
-  Paths += { road: 6 }
-  Paths += { road: -1 }
-  Paths += { road: 7 }
-  Paths += { road: 2 }
-  Paths += { road: -2 }
+  Paths += { road: 0, need: 0 }
+  Paths += { road: 3, need: 0 }
+  Paths += { road: 5, need: 0 }
+  Paths += { road: -1, need: 0 }
+  Paths += { road: 1, need: 0 }
+  Paths += { road: 4, need: 0 }
+  Paths += { road: 6, need: 0 }
+  Paths += { road: -1, need: 0 }
+  Paths += { road: 7, need: 0 }
+  Paths += { road: 2, need: 0 }
+  Paths += { road: -2, need: 0 }
   Dests += { first: 0, count: len(Paths) }
   Entries += { road: 0, lanes: 2, share: 6.0, next: 0.0, due: 0 }
   Entries += { road: 7, lanes: 1, share: 1.2, next: 0.0, due: 0 }
   Choices += { entry: 0, dest: 0, weight: 1.0 }
   Choices += { entry: 1, dest: 0, weight: 1.0 }
+}
+
+// A highway of two lanes to the east, 460 m, and an off-ramp to the
+// south-east: 200 m of two lanes (roads 0 and 1, the outer first); 150 m
+// where a third lane lies on the outside (road 2) for the cars that
+// leave, which goes on into the ramp (road 7), beside the highway's lanes
+// (3 and 4); and 110 m of two lanes again (5 and 6). A quarter of the cars
+// leave: they change to the outer lane on the way, and from it into the
+// lane of the ramp before the highway's own lanes take them past it.
+system exit() {
+  let lane = 2.0 * HALF
+  let west = -230.0
+  let split = -30.0
+  let end = 120.0
+  let east = 230.0
+  for i in 0..2 {
+    let y = HALF - lane * i as f32
+    Roads += { x0: west, y0: y, cx: (west + split) * 0.5, cy: y, x1: split, y1: y,
+               length: split - west, limit: HIGHWAY, light: -1, stop: false }
+  }
+  for i in 0..3 {
+    let y = HALF + lane - lane * i as f32
+    Roads += { x0: split, y0: y, cx: (split + end) * 0.5, cy: y, x1: end, y1: y,
+               length: end - split, limit: HIGHWAY, light: -1, stop: false }
+  }
+  for i in 0..2 {
+    let y = HALF - lane * i as f32
+    Roads += { x0: end, y0: y, cx: (end + east) * 0.5, cy: y, x1: east, y1: y,
+               length: east - end, limit: HIGHWAY, light: -1, stop: false }
+  }
+  let cy = HALF + lane
+  let cx = end + 50.0
+  let rx = end + 110.0
+  let ry = 45.0
+  Roads += { x0: end, y0: cy, cx: cx, cy: cy, x1: rx, y1: ry,
+             length: curve_length(end, cy, cx, cy, rx, ry), limit: 22.0, light: -1,
+             stop: false }
+  Ties = [{ left: -1, right: -1, first: 0, conflicts: 0, feed: 0, feeds: 0, split: 0,
+            splits: 0, ends: false, cross: 0, crosses: 0, bold: false }; len(Roads)]
+  Ties[0].left = 1
+  Ties[1].right = 0
+  Ties[2].left = 3
+  Ties[3].left = 4
+  Ties[3].right = 2
+  Ties[4].right = 3
+  Ties[5].left = 6
+  Ties[6].right = 5
+  Paint += { kind: 2, x0: west, y0: 0.0, x1: east, y1: 0.0, r: 0.0, color: 0xd8d8d0 }
+  Paint += { kind: 2, x0: split, y0: lane, x1: end, y1: lane, r: 0.0, color: 0xd8d8d0 }
+  Paint += { kind: 3, x0: west, y0: lane, x1: split, y1: lane, r: 0.0, color: 0xd8d8d0 }
+  Paint += { kind: 3, x0: end, y0: lane, x1: east, y1: lane, r: 0.0, color: 0xd8d8d0 }
+  // On along the highway.
+  Paths += { road: 0, need: 0 }
+  Paths += { road: 3, need: 0 }
+  Paths += { road: 5, need: 0 }
+  Paths += { road: -1, need: 0 }
+  Paths += { road: 1, need: 0 }
+  Paths += { road: 4, need: 0 }
+  Paths += { road: 6, need: 0 }
+  Paths += { road: -1, need: 0 }
+  Dests += { first: 0, count: len(Paths) }
+  // Off: from the lane of the ramp; in the highway's lanes they have to
+  // leave (their routes end with them).
+  let first = len(Paths)
+  Paths += { road: 2, need: 0 }
+  Paths += { road: 7, need: 0 }
+  Paths += { road: -1, need: 0 }
+  Paths += { road: 0, need: 0 }
+  Paths += { road: 3, need: 0 }
+  Paths += { road: -2, need: 0 }
+  Paths += { road: 1, need: 0 }
+  Paths += { road: 4, need: 0 }
+  Paths += { road: -2, need: 0 }
+  Dests += { first: first, count: len(Paths) - first }
+  Entries += { road: 0, lanes: 2, share: 6.0, next: 0.0, due: 0 }
+  Choices += { entry: 0, dest: 0, weight: 0.75 }
+  Choices += { entry: 0, dest: 1, weight: 0.25 }
 }
 
 // Which roads lead onto each and go on from it, from the routes.
@@ -657,9 +882,51 @@ system feeds() {
       }
     }
     Ties[j].splits = len(Splits) - split
-    for p in 0..len(Paths) - 1 {
-      if Paths[p].road == j && Paths[p + 1].road == -2 { Ties[j].ends = true }
+  }
+  // How many lanes a car has to change: none on a route that goes on to
+  // its end, many on one whose lane ends; then, again and again, no more
+  // than on the road after it on its route, or one more than in the lane
+  // beside it on a route to the same place.
+  for p in 0..len(Paths) {
+    var end = 0
+    var on = true
+    for q in p..len(Paths) {
+      if on && Paths[q].road < 0 {
+        end = Paths[q].road
+        on = false
+      }
     }
+    Paths[p].need = if end == -2 { 99 } else { 0 }
+  }
+  for round in 0..4 {
+    for d in 0..len(Dests) {
+      let first = Dests[d].first
+      for p in first..first + Dests[d].count {
+        let r = Paths[p].road
+        if r >= 0 {
+          var need = Paths[p].need
+          if Paths[p + 1].road >= 0 { need = min(need, Paths[p + 1].need) }
+          for q in first..first + Dests[d].count {
+            let other = Paths[q].road
+            if other >= 0 && (other == Ties[r].left || other == Ties[r].right) {
+              need = min(need, Paths[q].need + 1)
+            }
+          }
+          Paths[p].need = need
+        }
+      }
+    }
+  }
+  // A lane ends where no route goes on from it.
+  for j in 0..len(Roads) {
+    var stops = false
+    var goes = false
+    for p in 0..len(Paths) - 1 {
+      if Paths[p].road == j {
+        if Paths[p + 1].road == -2 { stops = true } else { goes = true }
+      }
+    }
+    Ties[j].ends = stops && !goes
   }
   Sim.built = Sim.scene + 1
 }
@@ -678,11 +945,16 @@ system survey() {
     if let held = Gate(Flow[k].who).held, let pass = Gate(Flow[k].who).pass,
        let stopped = Gate(Flow[k].who).stopped {
       if k + 1 == len(Flow) || Flow[k + 1].road != r { Load[r].going = pass || !held }
-      if k == 0 || Flow[k - 1].road != r { Load[r].room = Flow[k].u - Flow[k].length }
+      if k == 0 || Flow[k - 1].road != r {
+        Load[r].room = min(Load[r].room, Flow[k].u - Flow[k].length)
+      }
       // One that was let go on is on its way: the road it goes onto is
       // taken already.
       let next = Paths[pos + 1].road
-      if pass && next >= 0 { Load[next].cars += 1 }
+      if pass && next >= 0 {
+        Load[next].cars += 1
+        Load[next].room = min(Load[next].room, -1.0)
+      }
       if stopped >= 0.0 && !pass && (Load[r].since < 0.0 || stopped < Load[r].since) {
         Load[r].since = stopped
       }
@@ -749,6 +1021,25 @@ system think() {
         }
       }
     }
+    // Short of where a road that crosses its own (or the next on its way)
+    // comes near, while a car that was let go is on that road: its own
+    // cars give way to it.
+    let cross = Ties[c.road].cross
+    for q in cross..cross + Ties[c.road].crosses {
+      let near = Crossings[q].at - at.u
+      if near > 0.0 && near < 40.0 && Load[Crossings[q].other].cars > 0 {
+        a = min(a, idm(v0, s.v, 0.0, near - 2.0))
+      }
+    }
+    if next >= 0 {
+      let cross = Ties[next].cross
+      for q in cross..cross + Ties[next].crosses {
+        let near = rem + Crossings[q].at
+        if near < 40.0 && Load[Crossings[q].other].cars > 0 {
+          a = min(a, idm(v0, s.v, 0.0, near - 2.0))
+        }
+      }
+    }
     var held = false
     if next == -2 {
       // The lane ends: braking evenly to stand 4 m before its end, and
@@ -774,7 +1065,8 @@ system think() {
         }
       }
       // A car let go onto the same road from another, nearer to where
-      // the two join, goes first.
+      // the two join, goes first; one that crosses lanes to get there
+      // unless the other is 8 m nearer.
       let feed = Ties[next].feed
       for q in feed..feed + Ties[next].feeds {
         let f = Feeds[q].from
@@ -782,7 +1074,10 @@ system think() {
           let fr = Flow.find(((f + 1) as i64) << 32) - 1
           if fr >= 0 && Flow[fr].road == f && Paths[Flow[fr].pos + 1].road == next {
             let near = Roads[f].length - Flow[fr].u
-            if Load[f].going && near < rem {
+            let first = if Ties[f].bold == Ties[c.road].bold { near < rem } else if Ties[f].bold {
+              near < rem + 8.0
+            } else { near + 8.0 < rem }
+            if Load[f].going && first {
               a = min(a, idm(v0, s.v, Flow[fr].v, rem - near - Flow[fr].length))
             }
           }
@@ -805,7 +1100,9 @@ system think() {
         let first = Ties[next].first
         for q in first..first + Ties[next].conflicts {
           let guard = Conflicts[q].guard
-          if guard >= 0 && Load[guard].cars > 0 { ok = false }
+          if guard >= 0 && Load[guard].cars > 0 && Load[guard].room < Conflicts[q].upto {
+            ok = false
+          }
           let road = Conflicts[q].road
           let kind = Conflicts[q].kind
           if kind == 1 {
@@ -814,6 +1111,11 @@ system think() {
             } else if Load[road].soonest < Conflicts[q].gap || Load[road].nearest < 8.0 {
               ok = false
             }
+          }
+          if kind == 3 {
+            var cars = 0
+            for r in road..road + 8 { cars += Load[r].cars }
+            if cars as f32 >= Conflicts[q].gap { ok = false }
           }
           if kind == 2 {
             let since = Load[road].since
@@ -839,29 +1141,32 @@ system think() {
 // Which cars change lanes, by MOBIL: to the left in even steps and to the
 // right in odd ones, so that no two go into a lane from both sides at
 // once; not within 3 s of the last change, nor in the last 25 m before
-// a line, nor into a lane that ends.
+// a line. A car that has lanes to change goes to a lane where it has
+// fewer wherever it safely can; one that has none only to a lane where it
+// still has none.
 system change() {
   let time = Sim.time
   let even = Sim.steps % 2 == 0
   for c: mut Car, at: Spot, s: Speed, d: Driver, acc: Accel, g: mut Gate, sh: mut Shift {
     let t = if even { Ties[c.road].left } else { Ties[c.road].right }
     let rem = Roads[c.road].length - at.u
-    let must = Paths[c.pos + 1].road == -2
-    if t >= 0 && time - g.changed > 3.0 && !g.pass && (rem > 25.0 || must) {
-      // A route on from there to where it goes.
+    let need = Paths[c.pos].need
+    if t >= 0 && time - g.changed > 3.0 && !g.pass && (rem > 25.0 || need > 0) {
+      // The route on from there to where it goes with fewest changes.
       var q = -1
       let first = Dests[c.dest].first
       for p in first..first + Dests[c.dest].count {
-        if q < 0 && Paths[p].road == t && Paths[p + 1].road != -2 { q = p }
+        if Paths[p].road == t && (q < 0 || Paths[p].need < Paths[q].need) { q = p }
       }
-      if q >= 0 {
+      let must = q >= 0 && Paths[q].need < need
+      if q >= 0 && (must || Paths[q].need == 0 && need == 0) {
         let v0 = min(d.wish * Roads[t].limit, d.top)
         let (gap, lv) = ahead(Flow, Roads, Paths, t, q, at.u)
         let mine = idm(v0, s.v, lv, gap)
         var gain = mine - acc.a
         // The car that would be behind it there, on that road or the one
         // before, need not brake harder than 4 m/s²; than up to 8 where the
-        // car's own lane is running out.
+        // car has to leave its lane and that is running out.
         let hard = if must { 4.0 + 4.0 * min(1.0, at.u / Roads[c.road].length) } else { 4.0 }
         // And so itself, behind the car ahead there.
         var safe = gap > 1.0 && mine > 0.0 - hard
@@ -949,10 +1254,11 @@ system drive() {
 // Cars come in on every street, a few seconds apart at random, as many an
 // hour as `Sim.inflow` times the street's share; one that finds no room at
 // the street's start waits for it. It goes where a draw by the weights
-// says, in the lane with most room of those its routes start in.
+// says, in the lane with most room of those its routes start in (and with
+// fewest lanes to change: one is worth 200 m of room).
 system arrive() {
   let time = Sim.time
-  let trucks = if Sim.scene == RAMP { 0.12 } else { 0.0 }
+  let trucks = if Sim.scene == RAMP || Sim.scene == EXIT { 0.12 } else { 0.0 }
   for i in 0..len(Entries) {
     if time >= Entries[i].next {
       let mean = 3600.0 / (Sim.inflow * Entries[i].share)
@@ -978,6 +1284,7 @@ system arrive() {
       var pos = -1
       var room = 0.0
       var lead = 0.0
+      var best = -1000000.0
       for l in 0..Entries[i].lanes {
         let r = Entries[i].road + l
         var q = -1
@@ -988,7 +1295,8 @@ system arrive() {
         let f = Flow.find((r as i64) << 32)
         let there = f < len(Flow) && Flow[f].road == r
         let free = if there { Flow[f].u - Flow[f].length } else { 1000.0 }
-        if q >= 0 && free > room {
+        if q >= 0 && free - 200.0 * Paths[q].need as f32 > best {
+          best = free - 200.0 * Paths[q].need as f32
           pos = q
           room = free
           lead = if there { Flow[f].v } else { -1.0 }
@@ -1024,8 +1332,10 @@ schedule lay() {
   clear() run_if Sim.built != Sim.scene + 1
   cross() run_if Sim.built != Sim.scene + 1 &&
                  (Sim.scene == LIGHTS || Sim.scene == PRIORITY || Sim.scene == STOP)
-  round() run_if Sim.built != Sim.scene + 1 && Sim.scene == ROUNDABOUT
+  round() run_if Sim.built != Sim.scene + 1 &&
+                 (Sim.scene == ROUNDABOUT || Sim.scene == ROUND2)
   ramp() run_if Sim.built != Sim.scene + 1 && Sim.scene == RAMP
+  exit() run_if Sim.built != Sim.scene + 1 && Sim.scene == EXIT
   feeds() run_if Sim.built != Sim.scene + 1
 }
 
