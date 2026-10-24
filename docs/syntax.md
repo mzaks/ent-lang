@@ -390,7 +390,8 @@ field, `inner.w += 1.0`, which lands when the outer `for` ends, like
 
 Edges are visited in a fixed order: by source, then in the order they were
 connected (a tree's edges into an entity: in the order they were
-connected). `s.disconnect()` removes the edge when the outer `for` ends.
+connected); in another with `by s.field`, and only some with `where`
+(see Indexes of a relation). `s.disconnect()` removes the edge when the outer `for` ends.
 Edge loops do not nest, and a `for` may not visit a relation both ways if
 either loop writes the edges. A `+=` into another entity's field inside an
 edge loop runs once per edge.
@@ -2173,6 +2174,63 @@ uniques. `examples/lj/lj.ent` finds the atoms near each atom so.
   me`.
 - Of a grid of whole numbers, the corners, the place and `within` are
   whole numbers too, and how far things are is worked out to the unit.
+
+#### Indexes of a relation
+
+```
+relation (Neuron)-[Synapse { weight: f32, delay: i32 }]->(Neuron) capacity 100000
+index Strongest of Synapse by weight
+index Pairs of Synapse by source, target
+
+for e, n: mut Neuron {
+  for (e)-[s: Synapse]->(post) by s.weight last 3 { n.out += s.weight }
+  for (e)-[s: Synapse]->(post) by s.delay from 2 to 5 { n.mid += 1 }
+  for (pre)-[s: Synapse]->(e) where pre == Best.who { n.linked = true }
+}
+```
+
+- A loop over an entity's edges goes `by s.field` (a whole number or a
+  fraction of the edge, which is named), in the order of that field,
+  edges alike in it in the order they are visited in anyway (by source,
+  then as they were connected). After it a slice of that order, as for
+  a `for` over entities: `from a` and `to b` (`a <= value < b`), then
+  `first k` or `last k` (the last k in the order, the lightest of them
+  first); worked out before the loop.
+- `where cond` after the arrow (and after `by`) runs the body for the
+  edges where it holds. Where it says the other end is an entity that is
+  the same for every edge (`where v == b`, `b` a unique's field, a `let`
+  outside the loop, ..; or one of the conditions `&&` joins), the edges
+  to that entity are found as below.
+- `index Name of Relation by field` keeps every entity's edges in the
+  order of that field, and `index Name of Relation by source, target` in
+  the order of their other ends: a loop `by` the field reads the order,
+  with its slice found by halving, and `where v == b` finds b's edges by
+  halving in the other ends' order (where an entity has more than 32
+  edges; fewer are gone over, each held against b). Without an index a
+  loop `by` a field puts each entity's edges in order where it visits
+  them (of `first k` and `last k`, k up to 32, only those k), and `where
+  v == b` holds every edge against b: the same edges, in the same order,
+  only slower. An index is made again before a query that reads it,
+  where the relation was sorted since (edges came or went) or a loop
+  wrote the field; out of an entity in the order of the table's runs,
+  into it in that of the index by target.
+- Not along a tree (`by`), nor in a `gpu` system, yet.
+- What an index pays: `bench/graph/pick.ent` (bench/RESULTS.md).
+
+#### Relations that change
+
+A relation that systems connect or disconnect keeps its edges in order
+in place, in a program with `main` (devices/edges.c): every entity's run
+of edges has room after it, an edge connected goes to the end of its
+entity's run (and of its target's in the index by target, where the
+relation is read both ways), one disconnected is taken out and those
+after it move down; so the order the loops see is the one a sort of all
+the edges gives. A run without room takes it from the nearest run that
+has some. All of them are sorted anew where more than a sixteenth of the
+edges changed since that was last done, or where room had to come from
+far; `ENT_EDGES_ANEW=1` in the environment sorts anew every time, to
+hold the two against each other. (A program run by a C host keeps its
+edges side by side, as its header says.)
 
 ### Entities given to a fn or proc
 

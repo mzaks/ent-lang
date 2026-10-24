@@ -1,0 +1,74 @@
+// Edges picked by an index of the relation (see web.ent for the graph,
+// GAP's): every page's three heaviest links out (`by l.w last 3`), their
+// weights added up; and how many of its links go to the hub, vertex 0
+// (`where v == hub`), of every page and of the pages with more than 1,000
+// links out. With the lines that end in `//I` the relation keeps
+// indexes by the weight and by the ends; without them every page's links
+// are put in order where they are gone over, and every link is held
+// against the hub. Five times each; it prints the time of each (ms) and
+// what was found, which is the same either way.
+import console
+import clock
+import math
+import web
+
+index Heavy of Link by w //I
+index Pairs of Link by source, target //I
+
+unique P { runs: i32, at: f64, top: f64, hub: i64, least: i32 }
+
+system start() { P.at = now() }
+
+system top() {
+  for e, n: Node, r: mut Rank {
+    var sum = 0.0
+    for (e)-[l: Link]->(v) by l.w last 3 { sum += l.w }
+    r.score = sum
+  }
+}
+
+system topped() {
+  let ms = (now() - P.at) * 1000.0
+  P.top = 0.0
+  for r: Rank { P.top += r.score as f64 }
+  put("top {ms} ms, {P.top}")
+}
+
+system linked() {
+  let hub = Ids[0].who
+  let least = P.least
+  for e, n: Node, d: mut Depth {
+    var count = 0
+    if n.degree > least {
+      for (e)-[l: Link]->(v) where v == hub { count += 1 }
+    }
+    d.d = count
+  }
+}
+
+system found() {
+  let ms = (now() - P.at) * 1000.0
+  P.hub = 0
+  for d: Depth { P.hub += d.d as i64 }
+  put("hub of more than {P.least} {ms} ms, {P.hub}")
+  P.least = if P.least == 0 { 1000 } else { 0 }
+  if P.least == 0 { P.runs += 1 }
+}
+
+schedule setup() { load() }
+schedule round() {
+  start()
+  top()
+  topped()
+  start()
+  linked()
+  found()
+  start()
+  linked()
+  found()
+}
+
+main {
+  setup()
+  loop { round() } until P.runs >= 5
+}

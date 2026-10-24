@@ -1,0 +1,21 @@
+// Loops over an entity's edges in the order of a field of theirs (`by
+// s.w last 3`, `first 2`, `from 10 to 20`), into it in such an order, and
+// to or from a given entity (`where v == hub`), on a relation read both
+// ways whose edges change and whose weights are written every step: with
+// indexes of the relation by those fields and by the other ends, and
+// without them (each entity's edges put in order where they are visited,
+// every edge held against the given entity), on one core and on all, and
+// sorted anew every step: the same.
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: grep -v '//I$' %S/Inputs/edge_order.ent > %t/plain.ent
+// RUN: %ent run %S/Inputs/edge_order.ent 2>/dev/null > %t/indexed
+// RUN: %ent run %t/plain.ent 2>/dev/null > %t/plain
+// RUN: %ent run --parallel %S/Inputs/edge_order.ent 2>/dev/null > %t/all
+// RUN: env ENT_EDGES_ANEW=1 %ent run %S/Inputs/edge_order.ent 2>/dev/null > %t/anew
+// RUN: cmp %t/indexed %t/plain
+// RUN: cmp %t/indexed %t/all
+// RUN: cmp %t/indexed %t/anew
+// RUN: FileCheck %s < %t/indexed
+
+// CHECK: step 0: {{[0-9]+}}
+// CHECK: step 29: {{[0-9]+}}

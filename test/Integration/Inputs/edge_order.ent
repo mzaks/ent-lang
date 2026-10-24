@@ -1,0 +1,128 @@
+// Loops over edges in the order of a field of theirs, and to a given
+// entity (see test/Integration/edge_order.test), on a relation read both
+// ways whose edges change every step and whose weights fade: the three
+// heaviest edges out of every node, the two lightest, those whose number
+// is from 10 up to below 20, the two heaviest into it, its edges to and
+// from the hub, which is another node every step, and how many of its
+// edges out are heavier than nought and not to the hub. Without the lines
+// that end in `//I` the same, by sorting on the spot and looking at every
+// edge.
+import console
+import wyhash
+
+component Node { id: i32, top: f32, low: f32, mid: i32, hub: i32, best: f32, from: i32,
+                 heavy: i32 } capacity 4096
+relation (Node)-[Tie { w: f32, n: i32 }]->(Node) capacity 40000
+
+index Heavy of Tie by w //I
+index Numbered of Tie by n //I
+index Pairs of Tie by source, target //I
+
+buffer Ids { who: entity } capacity 4096
+unique S { step: i64, hash: u64 }
+unique Hub { who: entity }
+
+world {
+  for i in 0..1000 {
+    let e = spawn { Node { id: i, top: 0.0, low: 0.0, mid: 0, hub: 0, best: 0.0, from: 0,
+                           heavy: 0 } }
+    Ids += { who: e }
+  }
+  for i in 0..1000 {
+    for j in 0..8 {
+      let to = (wyhash64(3, (i * 8 + j) as u64) % 1000) as i32
+      let draw = wyhash64(5, (i * 8 + j) as u64)
+      // (Weights of few values, so that some are alike.)
+      let w = (draw % 17) as f32 * 0.25 - 1.0
+      let a = Ids[i].who
+      let b = Ids[to].who
+      connect (a)-[Tie { w: w, n: ((draw >> 8) % 30) as i32 }]->(b)
+    }
+  }
+}
+
+system pick() {
+  Hub.who = Ids[((S.step * 37) % 1000) as i32].who
+}
+
+system orders() {
+  let hub = Hub.who
+  for e, n: mut Node {
+    var top = 0.0
+    for (e)-[s: Tie]->(v) by s.w last 3 { top = top * 2.0 + s.w }
+    var low = 0.0
+    for (e)-[s: Tie]->(v) by s.w first 2 { low = low * 3.0 + s.w }
+    var mid = 0
+    for (e)-[s: Tie]->(v) by s.n from 10 to 20 { mid = mid * 5 + s.n }
+    var linked = 0
+    for (e)-[s: Tie]->(v) where v == hub { linked += 1 + s.n }
+    var heavy = 0
+    for (e)-[s: Tie]->(v) where s.w > 0.0 && v != hub { heavy += 1 }
+    n.top = top
+    n.low = low
+    n.mid = mid
+    n.hub = linked
+    n.heavy = heavy
+  }
+}
+
+system into() {
+  let hub = Hub.who
+  for e, n: mut Node {
+    var best = 0.0
+    for (u)-[s: Tie]->(e) by s.w last 2 { best = best * 2.0 + s.w }
+    var from = 0
+    for (u)-[s: Tie]->(e) where u == hub { from += 1 }
+    n.best = best
+    n.from = from
+  }
+}
+
+// Every 11th node lets go of its first edge out and links to another.
+system rewire() {
+  let step = S.step
+  for e, n: Node where (n.id as i64 + step) % 11 == 0 {
+    var first = true
+    for (e)-[t: Tie]->(v) {
+      if first {
+        t.disconnect()
+        first = false
+      }
+    }
+    let to = (wyhash64(step as u64, n.id as u64) % 1000) as i32
+    let b = Ids[to].who
+    connect (e)-[Tie { w: (step % 9) as f32 * 0.5 - 2.0, n: (n.id + step as i32) % 30 }]->(b)
+  }
+}
+
+system fade() {
+  let step = S.step
+  for e, n: Node where (n.id as i64 + step) % 3 == 0 {
+    for (e)-[mut t: Tie]->(v) { t.w = t.w * 0.5 }
+  }
+}
+
+system report() {
+  S.hash = 0
+  for n: Node {
+    S.hash += (bits_of(n.top) as u64 + bits_of(n.low) as u64 * 3 + n.mid as u64 * 7 +
+               n.hub as u64 * 11 + bits_of(n.best) as u64 * 13 + n.from as u64 * 17 +
+               n.heavy as u64 * 19) *
+              (n.id as u64 + 1)
+  }
+  put("step {S.step}: {S.hash}")
+  S.step += 1
+}
+
+schedule step() {
+  pick()
+  orders()
+  into()
+  rewire()
+  fade()
+  report()
+}
+
+main {
+  loop { step() } until S.step == 30
+}

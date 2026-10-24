@@ -1088,11 +1088,13 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       for (const WorldColumn &field : relation.fields)
         relation.copied.push_back(!written.contains(field.field.getValue()));
       // (Whether a loop into an entity goes to an edge's own place: see
-      // lowerEdges.)
+      // lowerEdges; or orders them by a field that is written.)
       module.walk([&](EdgesOp loop) {
         if (loop.getRelationAttr().getAttr() != name || loop.isOut())
           return;
         loop.walk([&](DisconnectOp) { relation.positions = true; });
+        if (auto field = loop.getOrderFieldAttr())
+          relation.positions |= written.contains(field.getValue());
         for (Operation *user :
              loop.getBody().front().getArgument(0).getUsers()) {
           auto get = dyn_cast<GetOp>(user);
@@ -1109,6 +1111,32 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
           relation.slotOffset = place(offsetBytes, edges);
       }
       relation.mendsOffset = place(8, 2);
+    }
+    // The orders an index of the relation keeps, where loops read them:
+    // by its field (`by s.field`) or by the other end (`where v == b`), in
+    // the table's runs or the index's.
+    if (auto ordered = op->getAttrOfType<ArrayAttr>("ordered_by")) {
+      module.walk([&](EdgesOp loop) {
+        if (loop.getRelationAttr().getAttr() != name)
+          return;
+        StringRef by;
+        if (auto field = loop.getOrderFieldAttr())
+          by = field.getValue();
+        else if (loop.getSlicePart("other"))
+          by = loop.isOut() ? "target" : "source";
+        if (by.empty() || !llvm::any_of(ordered, [&](Attribute a) {
+              return cast<StringAttr>(a).getValue() == by;
+            }))
+          return;
+        bool table = relation.isSorted(!loop.isOut());
+        if (relation.findOrder(by, table))
+          return;
+        WorldRelation::EdgeOrder order{StringAttr::get(op->getContext(), by),
+                                       table, 0, 0};
+        order.orderOffset = place(offsetBytes, edges);
+        order.cleanOffset = place(8, 1);
+        relation.orders.push_back(order);
+      });
     }
     relation.cursorOffset = place(offsetBytes, keys);
     relation.sourceScratchOffset = place(idBytes, edges);

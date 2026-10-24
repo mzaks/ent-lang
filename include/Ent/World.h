@@ -291,6 +291,24 @@ struct WorldRelation {
   /// sort anew, and why the last mending did not (devices/edges.c).
   uint64_t endsOffset = 0;
   uint64_t indexEndsOffset = 0;
+  /// An index of the relation by a field of its edges, or by their other
+  /// ends (`source`, `target`): each key's run of edges, of the table or
+  /// of the index by target (`table`), in that order, as positions in the
+  /// run's array (`orderOffset`, as many as it has); `cleanOffset` (an
+  /// i64) is 1 where it is current. A sort of the relation and a write of
+  /// the field make it old; a query that reads it makes it again first.
+  struct EdgeOrder {
+    StringAttr field;
+    bool table;
+    uint64_t orderOffset, cleanOffset;
+  };
+  SmallVector<EdgeOrder> orders;
+  const EdgeOrder *findOrder(StringRef field, bool table) const {
+    for (const EdgeOrder &order : orders)
+      if (order.field.getValue() == field && order.table == table)
+        return &order;
+    return nullptr;
+  }
   /// Whether a loop over the edges into an entity goes to an edge's own
   /// place (it writes a field of it, disconnects it, or reads a field that
   /// has no copy): only then are the index's positions, and `slot`, kept

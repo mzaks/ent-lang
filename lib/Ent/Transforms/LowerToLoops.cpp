@@ -679,6 +679,15 @@ public:
     return view(relation.indexEdgesOffset, relation.capacity,
                 offsetType(relation));
   }
+  /// An order an index of the relation keeps (see WorldRelation::orders),
+  /// and whether it is current.
+  Value edgeOrder(const WorldRelation &relation,
+                  const WorldRelation::EdgeOrder &order) {
+    return view(order.orderOffset, relation.capacity, offsetType(relation));
+  }
+  Value edgeOrderClean(const WorldRelation::EdgeOrder &order) {
+    return scalar(order.cleanOffset);
+  }
   /// The copies a sort leaves in the order of the index (see
   /// WorldRelation::indexOffset): the sources or the targets, or a field.
   Value indexIds(const WorldRelation &relation, bool source) {
@@ -6450,6 +6459,9 @@ static Value callEdges(IRRewriter &rewriter, Location loc, ModuleOp module,
                        const WorldLayout &layout, WorldAccess &world,
                        const WorldRelation &relation, StringRef name,
                        TypeRange results = {});
+static Value edgesSpec(IRRewriter &rewriter, Location loc, ModuleOp module,
+                       const WorldLayout &layout, WorldAccess &world,
+                       const WorldRelation &relation);
 static void appendEdge(IRRewriter &rewriter, Location loc,
                        const WorldLayout &layout, WorldAccess &world,
                        const WorldRelation &relation, Value source,
@@ -7186,6 +7198,58 @@ emitLinkedEdges(IRRewriter &rewriter, Location loc, WorldAccess &world,
   return {loop, slot};
 }
 
+/// What edges are ordered by for devices/edges.c, where an order is of
+/// `by` (a field of the edges, or `source` or `target`, an end) in the
+/// table's runs (`table`) or the index's: the column in the arena, the
+/// bytes and kind of its values (0 a whole number without sign, 1 one
+/// with, 2 a fraction) and, for a field with no copy in the index's order,
+/// the index's positions to go by.
+namespace {
+struct EdgeValue {
+  int64_t column, bytes, kind, indirect;
+};
+} // namespace
+static EdgeValue edgeValue(IRRewriter &rewriter, const WorldLayout &layout,
+                           WorldAccess &world, const WorldRelation &relation,
+                           StringRef by, bool table) {
+  if (by == "source" || by == "target") {
+    bool source = by == "source";
+    uint64_t column =
+        table ? (source ? relation.sourceOffset : relation.targetOffset)
+              : (source ? relation.sourceScratchOffset
+                        : relation.targetScratchOffset);
+    return {int64_t(column), int64_t(layout.entities.idBits / 8), 0, 0};
+  }
+  const WorldColumn *field = relation.find(rewriter.getStringAttr(by));
+  int64_t bytes = world.storageBytes(field->type);
+  int64_t kind = isa<FloatType>(field->type)       ? 2
+                 : field->type.isUnsignedInteger() ? 0
+                                                   : 1;
+  unsigned k = field - relation.fields.begin();
+  if (table)
+    return {int64_t(field->offset), bytes, kind, 0};
+  if (relation.copied[k])
+    return {int64_t(relation.fieldScratchOffsets[k]), bytes, kind, 0};
+  return {int64_t(field->offset), bytes, kind,
+          int64_t(relation.indexEdgesOffset)};
+}
+
+/// A value as devices/edges.c compares it: its bits, as an i64.
+static Value orderBits(IRRewriter &rewriter, Location loc, Value value,
+                       const EdgeValue &kind) {
+  Type i64 = rewriter.getI64Type();
+  Type type = value.getType();
+  if (isa<FloatType>(type))
+    value = arith::BitcastOp::create(
+        rewriter, loc, rewriter.getIntegerType(type.getIntOrFloatBitWidth()),
+        value);
+  if (value.getType().getIntOrFloatBitWidth() == 64)
+    return value;
+  if (kind.kind == 1)
+    return arith::ExtSIOp::create(rewriter, loc, i64, value);
+  return arith::ExtUIOp::create(rewriter, loc, i64, value);
+}
+
 /// Replace `edges` (cloned into the body of a query for `row` of
 /// `archetype`) by a loop over the edges of the entity at that row, and
 /// return the loop. Get and set through the edge ref become loads and
@@ -7227,6 +7291,12 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
   // that is written elsewhere.
   bool copies =
       !relation.linked && !relation.isSorted(!out) && relation.hasCopies();
+  // (The entity the other end must be, if one is given; whether an index
+  // found its edges; the positions in an order, where the loop goes by
+  // one.)
+  Value otherIs = edges.getSlicePart("other");
+  bool otherFound = false;
+  Value sequence;
   bool ownPlace = !copies;
   for (Operation *user : edges.getBody().front().getArgument(0).getUsers()) {
     if (auto get = dyn_cast<GetOp>(user)) {
@@ -7246,13 +7316,165 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
     auto [begin, end] =
         emitEdgeRange(rewriter, loc, world, relation, !out, key);
     Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-    loop = scf::ForOp::create(rewriter, loc, begin, end, one, inits);
+    // In the order of a field of the edges (`by`): the positions as an
+    // index of the relation keeps them, or put in that order here; then a
+    // slice of them. Where the other end is a given entity, an index by
+    // the other ends finds its edges.
+    StringAttr orderBy = edges.getOrderFieldAttr();
+    bool table = relation.isSorted(!out);
+    StringRef otherEnd = out ? "target" : "source";
+    const WorldRelation::EdgeOrder *order =
+        orderBy   ? relation.findOrder(orderBy.getValue(), table)
+        : otherIs ? relation.findOrder(otherEnd, table)
+                  : nullptr;
+    Value from = begin, to = end;
+    if (orderBy || order) {
+      Type i64 = rewriter.getI64Type();
+      Type offsetType = world.offsetType(relation);
+      auto constant = [&](int64_t v) {
+        return arith::ConstantIntOp::create(rewriter, loc, v, 64);
+      };
+      EdgeValue value = edgeValue(
+          rewriter, layout, world, relation,
+          order ? order->field.getValue() : orderBy.getValue(), table);
+      ModuleOp module = edges->getParentOfType<ModuleOp>();
+      Value arena = worldPointer(rewriter, loc, world.getArena());
+      if (order) {
+        sequence = world.edgeOrder(relation, *order);
+      } else {
+        Value n = arith::SubIOp::create(rewriter, loc, end, begin);
+        sequence = memref::AllocOp::create(
+            rewriter, loc, MemRefType::get({ShapedType::kDynamic}, offsetType),
+            ValueRange{n});
+        Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+        auto fill = scf::ForOp::create(rewriter, loc, zero, n, one);
+        {
+          OpBuilder::InsertionGuard inner(rewriter);
+          rewriter.setInsertionPoint(fill.getBody()->getTerminator());
+          Value i = fill.getInductionVar();
+          memref::StoreOp::create(
+              rewriter, loc,
+              arith::IndexCastOp::create(
+                  rewriter, loc, offsetType,
+                  arith::AddIOp::create(rewriter, loc, begin, i)),
+              sequence, ValueRange{i});
+        }
+        // (Of so many first or last, only those in order, without a
+        // slice by value.)
+        Value first = edges.getSlicePart("first"),
+              last = edges.getSlicePart("last");
+        if ((first || last) && !edges.getSlicePart("from") &&
+            !edges.getSlicePart("to"))
+          callGpu(rewriter, loc, module, "ent_edges_order_some",
+                  ValueRange{arena, worldPointer(rewriter, loc, sequence),
+                             constant(relation.offsetBits / 8),
+                             arith::IndexCastOp::create(rewriter, loc, i64, n),
+                             arith::ExtSIOp::create(rewriter, loc, i64,
+                                                    first ? first : last),
+                             arith::ConstantIntOp::create(rewriter, loc,
+                                                          last ? 1 : 0, 32),
+                             constant(value.column), constant(value.bytes),
+                             constant(value.kind), constant(value.indirect),
+                             constant(relation.offsetBits / 8)});
+        else
+          callGpu(rewriter, loc, module, "ent_edges_order_run",
+                  ValueRange{arena, worldPointer(rewriter, loc, sequence),
+                             constant(relation.offsetBits / 8),
+                             arith::IndexCastOp::create(rewriter, loc, i64, n),
+                             constant(value.column), constant(value.bytes),
+                             constant(value.kind), constant(value.indirect),
+                             constant(relation.offsetBits / 8)});
+        from = zero;
+        to = n;
+      }
+      auto find = [&](Value bits, bool upper) -> Value {
+        Value at =
+            callGpu(
+                rewriter, loc, module, "ent_edges_order_find",
+                ValueRange{arena, worldPointer(rewriter, loc, sequence),
+                           constant(relation.offsetBits / 8),
+                           arith::IndexCastOp::create(rewriter, loc, i64, from),
+                           arith::IndexCastOp::create(rewriter, loc, i64, to),
+                           constant(value.column), constant(value.bytes),
+                           constant(value.kind), constant(value.indirect),
+                           constant(relation.offsetBits / 8), bits,
+                           arith::ConstantIntOp::create(rewriter, loc,
+                                                        upper ? 1 : 0, 32)},
+                TypeRange{i64})
+                .getResult(0);
+        return arith::IndexCastOp::create(rewriter, loc,
+                                          rewriter.getIndexType(), at);
+      };
+      if (orderBy) {
+        Value low = edges.getSlicePart("from"), high = edges.getSlicePart("to");
+        Value newFrom =
+            low ? find(orderBits(rewriter, loc, low, value), false) : from;
+        Value newTo =
+            high ? find(orderBits(rewriter, loc, high, value), false) : to;
+        from = newFrom;
+        to = arith::MaxSIOp::create(rewriter, loc, newFrom, newTo);
+        auto count = [&](Value k) {
+          return arith::IndexCastOp::create(
+              rewriter, loc, rewriter.getIndexType(),
+              arith::MaxSIOp::create(
+                  rewriter, loc, k,
+                  arith::ConstantIntOp::create(rewriter, loc, 0, 32)));
+        };
+        if (Value k = edges.getSlicePart("first"))
+          to = arith::MinSIOp::create(
+              rewriter, loc, to,
+              arith::AddIOp::create(rewriter, loc, from, count(k)));
+        if (Value k = edges.getSlicePart("last"))
+          from = arith::MaxSIOp::create(
+              rewriter, loc, from,
+              arith::SubIOp::create(rewriter, loc, to, count(k)));
+      } else {
+        // (The edges to or from the given entity: its id's run in the
+        // order of the other ends, found by halving where the entity has
+        // more than 32 edges; fewer are gone over, each held against it,
+        // which costs less.)
+        Value id = world.toStorage(loc, otherIs);
+        Value bits =
+            id.getType() == i64
+                ? id
+                : arith::ExtUIOp::create(rewriter, loc, i64, id).getResult();
+        Type index = rewriter.getIndexType();
+        Value many = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::sgt,
+            arith::SubIOp::create(rewriter, loc, to, from),
+            arith::ConstantIndexOp::create(rewriter, loc, 32));
+        auto ifMany = scf::IfOp::create(rewriter, loc, TypeRange{index, index},
+                                        many, /*withElseRegion=*/true);
+        {
+          OpBuilder::InsertionGuard inner(rewriter);
+          rewriter.setInsertionPointToStart(ifMany.thenBlock());
+          Value low = find(bits, false);
+          Value high = find(bits, true);
+          scf::YieldOp::create(rewriter, loc, ValueRange{low, high});
+          rewriter.setInsertionPointToStart(ifMany.elseBlock());
+          scf::YieldOp::create(rewriter, loc, ValueRange{from, to});
+        }
+        from = ifMany.getResult(0);
+        to = ifMany.getResult(1);
+      }
+    }
+    loop = scf::ForOp::create(rewriter, loc, from, to, one, inits);
+    // (Positions put in order here are let go of after the loop.)
+    if (sequence && !order) {
+      OpBuilder::InsertionGuard after(rewriter);
+      rewriter.setInsertionPointAfter(loop);
+      memref::DeallocOp::create(rewriter, loc, sequence);
+    }
     if (!inits.empty()) {
       rewriter.setInsertionPointToEnd(loop.getBody());
       scf::YieldOp::create(rewriter, loc, loop.getRegionIterArgs());
     }
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-    position = loop.getInductionVar();
+    position = sequence
+                   ? world.toIndex(loc, memref::LoadOp::create(
+                                            rewriter, loc, sequence,
+                                            ValueRange{loop.getInductionVar()}))
+                   : loop.getInductionVar();
     if (relation.isSorted(!out))
       edge = position;
     else if (ownPlace)
@@ -7274,6 +7496,7 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
   bool ownEndTrusted =
       relation.getTrusted(/*target=*/!out) != FlatSymbolRefAttr();
   // (A linked tree's edge out is its entity's or not there.)
+  Value mine;
   if (layout.entities.hasGenerations() && !ownEndTrusted &&
       !(relation.linked && out)) {
     Value own =
@@ -7284,8 +7507,28 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
             : memref::LoadOp::create(rewriter, loc,
                                      world.edgeIds(relation, /*source=*/out),
                                      ValueRange{edge});
-    Value mine = arith::CmpIOp::create(rewriter, loc,
-                                       arith::CmpIPredicate::eq, own, id);
+    mine =
+        arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq, own, id);
+  }
+  // (Where the other end must be a given entity that no index found: the
+  // edges to others are passed over.)
+  if (otherIs && !otherFound) {
+    Value end =
+        copies
+            ? memref::LoadOp::create(rewriter, loc,
+                                     world.indexIds(relation, /*source=*/!out),
+                                     ValueRange{position})
+            : memref::LoadOp::create(rewriter, loc,
+                                     world.edgeIds(relation, /*source=*/!out),
+                                     ValueRange{edge});
+    if (relation.linked && !out)
+      end = world.ownerId(loc, end);
+    Value same = arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
+                                       end, world.toStorage(loc, otherIs));
+    mine = mine ? arith::AndIOp::create(rewriter, loc, mine, same).getResult()
+                : same;
+  }
+  if (mine) {
     if (inits.empty()) {
       auto ifMine = scf::IfOp::create(rewriter, loc, mine);
       insertBefore = ifMine.thenBlock()->getTerminator();
@@ -7338,6 +7581,15 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
       memref::StoreOp::create(rewriter, set.getLoc(), stored,
                               world.edgeField(relation, *field),
                               ValueRange{edge});
+      // (An index by the field is old then.)
+      for (const WorldRelation::EdgeOrder &order : relation.orders)
+        if (order.field == set.getFieldAttr())
+          memref::StoreOp::create(
+              rewriter, set.getLoc(),
+              arith::ConstantIntOp::create(rewriter, set.getLoc(), 0, 64),
+              world.edgeOrderClean(order),
+              ValueRange{
+                  arith::ConstantIndexOp::create(rewriter, set.getLoc(), 0)});
       if (rankEdgeNotes)
         noteEdge(rewriter, set.getLoc(), layout, relation, edge,
                  field - relation.fields.begin(), stored, world, !out, key);
@@ -9843,10 +10095,9 @@ static void emitPartitionedSort(IRRewriter &rewriter, Location loc,
 /// WorldRelation::endsOffset) with what it needs to know of it: the
 /// arena's address and the offsets and sizes devices/edges.c's SPEC_*
 /// says, in a constant list.
-static Value callEdges(IRRewriter &rewriter, Location loc, ModuleOp module,
+static Value edgesSpec(IRRewriter &rewriter, Location loc, ModuleOp module,
                        const WorldLayout &layout, WorldAccess &world,
-                       const WorldRelation &relation, StringRef name,
-                       TypeRange results) {
+                       const WorldRelation &relation) {
   const EntityScheme &scheme = layout.entities;
   uint64_t keyMask =
       scheme.kind == EntityScheme::Rows
@@ -9896,11 +10147,18 @@ static Value callEdges(IRRewriter &rewriter, Location loc, ModuleOp module,
         /*constant=*/true, IntegerAttr());
   }
   Value list = memref::GetGlobalOp::create(rewriter, loc, type, global);
-  func::CallOp call =
-      callGpu(rewriter, loc, module, name,
-              ValueRange{worldPointer(rewriter, loc, world.getArena()),
-                         worldPointer(rewriter, loc, list)},
-              results);
+  return worldPointer(rewriter, loc, list);
+}
+
+static Value callEdges(IRRewriter &rewriter, Location loc, ModuleOp module,
+                       const WorldLayout &layout, WorldAccess &world,
+                       const WorldRelation &relation, StringRef name,
+                       TypeRange results) {
+  func::CallOp call = callGpu(
+      rewriter, loc, module, name,
+      ValueRange{worldPointer(rewriter, loc, world.getArena()),
+                 edgesSpec(rewriter, loc, module, layout, world, relation)},
+      results);
   return results.empty() ? Value() : call.getResult(0);
 }
 
@@ -9952,6 +10210,12 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
       arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq, clean,
                             arith::ConstantIntOp::create(rewriter, loc, 0, 64)));
   rewriter.setInsertionPointToStart(ifUnclean.thenBlock());
+  // (The orders an index of the relation keeps are old, once the edges
+  // are sorted or mended.)
+  for (const WorldRelation::EdgeOrder &order : relation.orders)
+    memref::StoreOp::create(rewriter, loc,
+                            arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+                            world.edgeOrderClean(order), ValueRange{zero});
   // (An order worked out for a query is no more.)
   if (relation.walkStateOffset)
     memref::StoreOp::create(
@@ -19587,6 +19851,53 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
 static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                        const WorldLayout &layout, WorldAccess &world,
                        const LoopOptions &given) {
+  // An index of a relation that a loop over edges goes by, made again
+  // before the query where it is old (devices/edges.c).
+  query.walk([&](EdgesOp edges) {
+    const WorldRelation &relation =
+        layout.getRelation(edges.getRelationAttr().getAttr());
+    if (relation.linked)
+      return;
+    bool table = relation.isSorted(!edges.isOut());
+    StringAttr orderBy = edges.getOrderFieldAttr();
+    const WorldRelation::EdgeOrder *order =
+        orderBy ? relation.findOrder(orderBy.getValue(), table)
+        : edges.getSlicePart("other")
+            ? relation.findOrder(edges.isOut() ? "target" : "source", table)
+            : nullptr;
+    if (!order)
+      return;
+    Location loc = query.getLoc();
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(query);
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value clean = memref::LoadOp::create(
+        rewriter, loc, world.edgeOrderClean(*order), ValueRange{zero});
+    auto ifOld = scf::IfOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::eq, clean,
+            arith::ConstantIntOp::create(rewriter, loc, 0, 64)));
+    rewriter.setInsertionPointToStart(ifOld.thenBlock());
+    EdgeValue value = edgeValue(rewriter, layout, world, relation,
+                                order->field.getValue(), table);
+    auto constant = [&](int64_t v) {
+      return arith::ConstantIntOp::create(rewriter, loc, v, 64);
+    };
+    Value spec = edgesSpec(rewriter, loc, query->getParentOfType<ModuleOp>(),
+                           layout, world, relation);
+    callGpu(rewriter, loc, query->getParentOfType<ModuleOp>(),
+            "ent_edges_orders",
+            ValueRange{
+                worldPointer(rewriter, loc, world.getArena()), spec,
+                constant(order->orderOffset),
+                arith::ConstantIntOp::create(rewriter, loc, table ? 1 : 0, 32),
+                constant(value.column), constant(value.bytes),
+                constant(value.kind), constant(value.indirect)});
+    memref::StoreOp::create(rewriter, loc,
+                            arith::ConstantIntOp::create(rewriter, loc, 1, 64),
+                            world.edgeOrderClean(*order), ValueRange{zero});
+  });
   // The `for`s over other entities in its body, first: what is left of
   // each is loops that read columns. (How many those entities are says
   // from how many of its own the query is worth running in parallel.)

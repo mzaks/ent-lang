@@ -259,3 +259,77 @@ fn first(t: i32) -> entity {
   // expected-error @+1 {{'ByTeam.get' is asked of the world's index, in a system}}
   ByTeam.get(t)
 }
+
+// -----
+
+// Of a relation: by a field of its edges, or by both ends.
+component N { v: f32 } capacity 8
+relation (N)-[Tie { w: f32, ok: bool }]->(N) capacity 8
+// expected-error @+1 {{relation 'Tie' has no field 'x'}}
+index Heavy of Tie by x
+
+// -----
+
+component N { v: f32 } capacity 8
+relation (N)-[Tie { w: f32, ok: bool }]->(N) capacity 8
+// expected-error @+1 {{an index of a relation is by a whole number or a fraction (f32, f64), or by 'source, target'; 'ok' is}}
+index Heavy of Tie by ok
+
+// -----
+
+component N { v: f32 } capacity 8
+relation (N)-[Tie { w: f32 }]->(N) capacity 8
+// expected-error @+1 {{an index by the edges' other ends is by both: 'index Pairs of Tie by source, target'}}
+index Pairs of Tie by target
+
+// -----
+
+component N { v: f32 } capacity 8
+relation (N)-[Tie { w: f32 }]->(N) capacity 8
+// expected-error @+1 {{an index of a relation keeps each entity's edges in order, and finds an edge to one entity by halving}}
+index Pairs of Tie by source, target hash
+
+// -----
+
+// Edge loops in an order, and to a given entity.
+component N { v: f32 } capacity 8
+relation (N)-[Tie { w: f32, ok: bool }]->(N) capacity 8
+system s() {
+  for e, n: mut N {
+    // expected-error @+1 {{the order is by a field of the edge: name it, '[s: Tie]', and say 'by s.field'}}
+    for (e)-[Tie]->(v) by w { n.v += 1.0 }
+  }
+}
+
+// -----
+
+component N { v: f32 } capacity 8
+relation (N)-[Tie { w: f32, ok: bool }]->(N) capacity 8
+system s() {
+  for e, n: mut N {
+    // expected-error @+1 {{the order is by a whole number or a fraction (f32, f64); 'ok' is}}
+    for (e)-[s: Tie]->(v) by s.ok { n.v += 1.0 }
+  }
+}
+
+// -----
+
+component N { v: f32 } capacity 8
+relation (N)-[Tie { w: f32 }]->(N) capacity 8
+system s() {
+  for e, n: mut N {
+    // expected-error @+1 {{'first' or 'last': one of them}}
+    for (e)-[s: Tie]->(v) by s.w first 2 last 1 { n.v += 1.0 }
+  }
+}
+
+// -----
+
+component N { v: f32 } capacity 8
+relation (N)-[Tree { w: f32 }]->(N) tree capacity 8
+system s() {
+  for e, n: mut N {
+    // expected-error @+1 {{goes along the tree @Tree in an order: not along a tree yet}}
+    for (c)-[t: Tree]->(e) by t.w { n.v += 1.0 }
+  }
+}

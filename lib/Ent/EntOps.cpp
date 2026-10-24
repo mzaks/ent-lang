@@ -3505,33 +3505,67 @@ ParseResult EdgesOp::parse(OpAsmParser &parser, OperationState &result) {
   result.addAttribute(getRelationAttrName(result.name), relation);
   result.addAttribute(getDirectionAttrName(result.name),
                       b.getStringAttr(direction));
-  // (The values that go round, after the block's arguments.)
+  // (What keeps some of the edges, then the values that go round, after
+  // the block's arguments.)
+  int32_t slices = 0, inits = 0;
   auto parseInits = [&]() -> ParseResult {
+    if (succeeded(parser.parseOptionalKeyword("slice"))) {
+      SmallVector<OpAsmParser::UnresolvedOperand> parts;
+      SmallVector<Type> types;
+      if (parser.parseLParen() || parser.parseOperandList(parts) ||
+          parser.parseColonTypeList(types) || parser.parseRParen() ||
+          parser.resolveOperands(parts, types, parser.getCurrentLocation(),
+                                 result.operands))
+        return failure();
+      slices = parts.size();
+    }
     if (failed(parser.parseOptionalKeyword("iter")))
       return success();
-    SmallVector<OpAsmParser::UnresolvedOperand> inits;
+    SmallVector<OpAsmParser::UnresolvedOperand> values;
     SmallVector<Type> types;
-    if (parser.parseLParen() || parser.parseOperandList(inits) ||
+    if (parser.parseLParen() || parser.parseOperandList(values) ||
         parser.parseColonTypeList(types) || parser.parseRParen() ||
-        parser.resolveOperands(inits, types, parser.getCurrentLocation(),
+        parser.resolveOperands(values, types, parser.getCurrentLocation(),
                                result.operands))
       return failure();
+    inits = values.size();
     result.addTypes(types);
     return success();
   };
-  return parseArgsAndBody<EdgesOp>(parser, result, parseInits);
+  if (failed(parseArgsAndBody<EdgesOp>(parser, result, parseInits)))
+    return failure();
+  result.addAttribute(
+      EdgesOp::getOperandSegmentSizesAttrName(result.name),
+      parser.getBuilder().getDenseI32ArrayAttr({slices, inits}));
+  return success();
+}
+
+Value EdgesOp::getSlicePart(StringRef part) {
+  auto parts = (*this)->getAttrOfType<ArrayAttr>(QueryOp::kSliceAttr);
+  if (!parts)
+    return Value();
+  for (auto [name, value] : llvm::zip(parts, getSlice()))
+    if (cast<StringAttr>(name).getValue() == part)
+      return value;
+  return Value();
 }
 
 void EdgesOp::print(OpAsmPrinter &p) {
   p << " " << getRelationAttr() << " " << getDirection() << " ";
   printArgs(p, getBody());
+  if (!getSlice().empty()) {
+    p << " slice(" << getSlice() << " : ";
+    llvm::interleaveComma(getSlice().getTypes(), p);
+    p << ")";
+  }
   if (!getInits().empty()) {
     p << " iter(" << getInits() << " : ";
     llvm::interleaveComma(getInits().getTypes(), p);
     p << ")";
   }
   p.printOptionalAttrDictWithKeyword(
-      (*this)->getAttrs(), {getRelationAttrName(), getDirectionAttrName()});
+      (*this)->getAttrs(), {getRelationAttrName(), getDirectionAttrName(),
+                            getOperandSegmentSizesAttrName()});
   if (getInits().empty()) {
     printBody(p, getBody());
   } else {
@@ -3542,6 +3576,29 @@ void EdgesOp::print(OpAsmPrinter &p) {
 }
 
 LogicalResult EdgesOp::verify() {
+  auto parts = (*this)->getAttrOfType<ArrayAttr>(QueryOp::kSliceAttr);
+  if ((parts ? parts.size() : 0) != getSlice().size())
+    return emitOpError("names each of its slice operands in '")
+           << QueryOp::kSliceAttr << "'";
+  for (auto [name, value] : llvm::zip(
+           parts ? parts.getValue() : ArrayRef<Attribute>(), getSlice())) {
+    StringRef part = cast<StringAttr>(name).getValue();
+    if (part == "other") {
+      if (!isa<EntityType>(value.getType()))
+        return emitOpError("'other' is an !ent.entity");
+      continue;
+    }
+    if (part != "from" && part != "to" && part != "first" && part != "last")
+      return emitOpError("a slice is 'from', 'to', 'first', 'last' or "
+                         "'other', not '")
+             << part << "'";
+    if (!getOrderFieldAttr())
+      return emitOpError("'") << part
+                              << "' is a slice of an order: it needs "
+                                 "'order_field'";
+  }
+  if (getSlicePart("first") && getSlicePart("last"))
+    return emitOpError("'first' or 'last': one of them");
   if (getDirection() != "out" && getDirection() != "in")
     return emitOpError("direction must be 'out' or 'in', got '")
            << getDirection() << "'";
@@ -3594,10 +3651,25 @@ LogicalResult EdgesOp::verify() {
 }
 
 LogicalResult EdgesOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  if (!symbolTable.lookupNearestSymbolFrom<RelationOp>(*this,
-                                                       getRelationAttr()))
+  auto relationOp =
+      symbolTable.lookupNearestSymbolFrom<RelationOp>(*this, getRelationAttr());
+  if (!relationOp)
     return emitOpError("visits unknown relation ") << getRelationAttr();
   auto system = (*this)->getParentOfType<SystemOp>();
+  // (In an order: not along a tree, nor on the GPU, yet; and not to a
+  // given other end there, where an index finds it.)
+  if (getOrderFieldAttr() && relationOp.getTree())
+    return emitOpError("goes along the tree ")
+           << getRelationAttr() << " in an order: not along a tree yet";
+  bool byEnds = false;
+  if (auto ordered = relationOp->getAttrOfType<ArrayAttr>("ordered_by"))
+    byEnds = llvm::any_of(ordered, [](Attribute a) {
+      return cast<StringAttr>(a).getValue() == "source";
+    });
+  if (system && system.getGpu() &&
+      (getOrderFieldAttr() || (getSlicePart("other") && byEnds)))
+    return emitOpError("goes in an order, or to a given entity by an index, "
+                       "in a 'gpu' system: not on the GPU yet");
   bool mut = cast<RefType>(getBody().getArgument(0).getType()).getIsMutable();
   if (mut && !system.canWrite(getRelationAttr()))
     return emitOpError("writes the edges of ")

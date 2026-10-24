@@ -1378,9 +1378,10 @@ def Ent_OtherOp : Ent_Op<"other"> {
   let hasVerifier = 1;
 }
 
-def Ent_EdgesOp : Ent_Op<"edges", [
-    SingleBlockImplicitTerminator<"YieldOp">,
-    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+def Ent_EdgesOp
+    : Ent_Op<"edges", [SingleBlockImplicitTerminator<"YieldOp">,
+                       AttrSizedOperandSegments,
+                       DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Run the body once for every edge of the visited entity";
   let description = [{
     ```mlir
@@ -1410,15 +1411,32 @@ def Ent_EdgesOp : Ent_Op<"edges", [
     run what the run before yielded, and what the last run yields is the
     op's result: the visited entity's own, so an edge loop adds into a
     `var` of the body around it, and into a resource by way of one.
+
+    ```mlir
+    ent.edges @Synapse out (%s: !ent.ref<@Synapse>, %post: !ent.entity)
+        slice(%k : i64) {order_field = "weight", slice_of = ["last"]} { ... }
+    ```
+    With `order_field` the edges are visited in the order of that field
+    of theirs (ties in the fixed order), and the slice operands, named by
+    `slice_of` as a query's are, keep some of them: the `first` or the
+    `last` so many, or those whose field is `from` one value up to below
+    another (`to`). An `other` operand keeps the edges whose other end is
+    that entity. An index on the relation by the field (or by `source` or
+    `target`, the other end, for `other`) gives the order and finds the
+    slice; without one each entity's edges are ordered where they are
+    visited, and `other` is held against every edge.
   }];
   let arguments = (ins FlatSymbolRefAttr:$relation, StrAttr:$direction,
-                       Variadic<AnyType>:$inits);
+      Variadic<AnyType>:$slice, Variadic<AnyType>:$inits,
+      OptionalAttr<StrAttr>:$order_field);
   let results = (outs Variadic<AnyType>:$results);
   let regions = (region SizedRegion<1>:$body);
   let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
   let extraClassDeclaration = [{
     bool isOut() { return getDirection() == "out"; }
+    /// The slice operand named `part` (see QueryOp::kSliceAttr), or nothing.
+    ::mlir::Value getSlicePart(::llvm::StringRef part);
   }];
 }
 

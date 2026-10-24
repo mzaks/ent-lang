@@ -599,3 +599,176 @@ void ent_edges_squeeze(char *arena, const int64_t *spec) {
   move_edges(&e, used, to, *count - used);
   *count = to + (*count - used);
 }
+
+// Edges in the order of a value of theirs (an index of the relation by a
+// field, or by the other end, and `for (e)-[s: R]->(v) by s.field`): the
+// value of the edge at `at` is `bytes` at `column` + at * bytes in the
+// arena, or at the position the index says (`indirect`, the offset of its
+// positions: an entry of the index whose field has no copy in its order);
+// of a kind: 0 a whole number without sign (an entity's id), 1 one with,
+// 2 a fraction. Its key orders as the value does (-0.0 as 0.0).
+static uint64_t key_of_bits(uint64_t bits, int64_t bytes, int64_t kind) {
+  if (kind == 2) {
+    if (bytes == 4) {
+      uint32_t b = (uint32_t)bits;
+      if ((b & 0x7fffffffu) == 0)
+        b = 0;
+      return (b & 0x80000000u) ? (uint32_t)~b : (b | 0x80000000u);
+    }
+    if ((bits << 1) == 0)
+      bits = 0;
+    return (bits >> 63) ? ~bits : (bits | (UINT64_C(1) << 63));
+  }
+  if (kind == 1) {
+    int64_t v = bytes == 1   ? (int64_t)(int8_t)bits
+                : bytes == 2 ? (int64_t)(int16_t)bits
+                : bytes == 4 ? (int64_t)(int32_t)bits
+                             : (int64_t)bits;
+    return (uint64_t)v ^ (UINT64_C(1) << 63);
+  }
+  return bytes == 8 ? bits : bits & ((UINT64_C(1) << (8 * bytes)) - 1);
+}
+
+typedef struct {
+  const char *arena;
+  int64_t column, bytes, kind, indirect, offset_bytes;
+} Value;
+
+static uint64_t value_key(const Value *v, int64_t at_) {
+  if (v->indirect)
+    at_ = get_at(v->arena + v->indirect, v->offset_bytes, at_);
+  uint64_t bits = 0;
+  memcpy(&bits, v->arena + v->column + at_ * v->bytes, v->bytes);
+  return key_of_bits(bits, v->bytes, v->kind);
+}
+
+typedef struct {
+  uint64_t key;
+  int64_t at;
+} Ranked;
+
+static int by_rank(const void *a, const void *b) {
+  const Ranked *x = a, *y = b;
+  if (x->key != y->key)
+    return x->key < y->key ? -1 : 1;
+  return (x->at > y->at) - (x->at < y->at);
+}
+
+// The `n` positions at `seq` (`seq_bytes` each) in the order of their
+// edges' values, ties in the order they had (by position).
+void ent_edges_order_run(char *arena, char *seq, int64_t seq_bytes, int64_t n,
+                         int64_t column, int64_t bytes, int64_t kind,
+                         int64_t indirect, int64_t offset_bytes) {
+  if (n < 2)
+    return;
+  Value v = {arena, column, bytes, kind, indirect, offset_bytes};
+  // (A few on the stack, put in order one by one; more sorted.)
+  Ranked few[64];
+  Ranked *ranked = n <= 64 ? few : malloc(sizeof(Ranked) * n);
+  for (int64_t i = 0; i < n; i++) {
+    int64_t at_ = get_at(seq, seq_bytes, i);
+    ranked[i].key = value_key(&v, at_);
+    ranked[i].at = at_;
+  }
+  if (n <= 64) {
+    for (int64_t i = 1; i < n; i++) {
+      Ranked one = ranked[i];
+      int64_t j = i;
+      for (; j > 0 && by_rank(&ranked[j - 1], &one) > 0; j--)
+        ranked[j] = ranked[j - 1];
+      ranked[j] = one;
+    }
+  } else
+    qsort(ranked, n, sizeof(Ranked), by_rank);
+  for (int64_t i = 0; i < n; i++)
+    set_at(seq, seq_bytes, i, ranked[i].at);
+  if (ranked != few)
+    free(ranked);
+}
+
+// An index of the relation made again: every key's run of the table
+// (`table`) or of the index by target, its positions at `out` (offsets,
+// as long as the table) in the order of their values.
+void ent_edges_orders(char *arena, const int64_t *spec, int64_t out,
+                      int32_t table, int64_t column, int64_t bytes,
+                      int64_t kind, int64_t indirect) {
+  Edges e = edges_of(arena, spec);
+  int starts = table ? SPEC_SORTED : SPEC_INDEX;
+  int ends = table ? SPEC_ENDS : SPEC_INDEX_ENDS;
+  for (int64_t k = 0; k < e.keys; k++) {
+    int64_t first = off(&e, starts, k);
+    int64_t last = spec[ends] ? off(&e, ends, k) : off(&e, starts, k + 1);
+    for (int64_t i = first; i < last; i++)
+      set_at(arena + out, e.offset_bytes, i, i);
+    ent_edges_order_run(arena, arena + out + first * e.offset_bytes,
+                        e.offset_bytes, last - first, column, bytes, kind,
+                        indirect, e.offset_bytes);
+  }
+}
+
+// Of the positions at `seq` from `lo` to `hi`, in the order of their
+// values: the first whose value is not below `value` (its bits), or (with
+// `upper`) above it.
+int64_t ent_edges_order_find(char *arena, char *seq, int64_t seq_bytes,
+                             int64_t lo, int64_t hi, int64_t column,
+                             int64_t bytes, int64_t kind, int64_t indirect,
+                             int64_t offset_bytes, int64_t value,
+                             int32_t upper) {
+  Value v = {arena, column, bytes, kind, indirect, offset_bytes};
+  uint64_t key = key_of_bits((uint64_t)value, bytes, kind);
+  while (lo < hi) {
+    int64_t mid = lo + (hi - lo) / 2;
+    uint64_t at_key = value_key(&v, get_at(seq, seq_bytes, mid));
+    if (at_key < key || (upper && at_key == key))
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  return lo;
+}
+
+// Of the `n` positions at `seq`, only the `k` first in the order of their
+// values (or with `last` the `k` last) in that order: at the start of
+// `seq` (or at its end), the others left where they may be. All of them
+// where k is more than 32 (or than n).
+void ent_edges_order_some(char *arena, char *seq, int64_t seq_bytes, int64_t n,
+                          int64_t k, int32_t last, int64_t column,
+                          int64_t bytes, int64_t kind, int64_t indirect,
+                          int64_t offset_bytes) {
+  if (k <= 0)
+    return;
+  if (k > 32 || k >= n) {
+    ent_edges_order_run(arena, seq, seq_bytes, n, column, bytes, kind, indirect,
+                        offset_bytes);
+    return;
+  }
+  Value v = {arena, column, bytes, kind, indirect, offset_bytes};
+  Ranked best[32];
+  int64_t had = 0;
+  for (int64_t i = 0; i < n; i++) {
+    Ranked one = {value_key(&v, get_at(seq, seq_bytes, i)),
+                  get_at(seq, seq_bytes, i)};
+    // (Kept in order, the first k so far: the smallest, or with `last` the
+    // greatest, where the one to go is at the start.)
+    int64_t j = had;
+    if (had == k) {
+      int worse = last ? by_rank(&one, &best[0]) <= 0
+                       : by_rank(&one, &best[k - 1]) >= 0;
+      if (worse)
+        continue;
+      if (last) {
+        // (The least of the greatest goes; the rest move down.)
+        for (int64_t m = 1; m < k; m++)
+          best[m - 1] = best[m];
+        j = k - 1;
+      } else
+        j = k - 1;
+    } else
+      had++;
+    for (; j > 0 && by_rank(&best[j - 1], &one) > 0; j--)
+      best[j] = best[j - 1];
+    best[j] = one;
+  }
+  for (int64_t i = 0; i < k; i++)
+    set_at(seq, seq_bytes, last ? n - k + i : i, best[i].at);
+}

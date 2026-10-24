@@ -3134,6 +3134,64 @@ LogicalResult Parser::parseIndex() {
   if (!consumeKeyword("of"))
     return error("expected 'of' and the components of the entities it "
                  "holds: 'index " + *name + " of Component by field'");
+  // Of a relation: each entity's edges in the order of a field of theirs
+  // (`by weight`), or of the entity at the other end (`by source, target`:
+  // out of an entity by their targets, into it by their sources), which a
+  // loop over them `by` that field, or `where` the other end is a given
+  // entity, reads (see EdgesOp).
+  if (token.is(Token::Identifier) && relations.count(token.spelling.str()) &&
+      !components.count(token.spelling.str())) {
+    std::string relation = token.spelling.str();
+    advance();
+    if (failed(expectKeyword("by")))
+      return failure();
+    SmallVector<Attribute> orders;
+    do {
+      llvm::SMLoc fieldAt = token.loc;
+      FailureOr<std::string> field = identifier("a field of the edges");
+      if (failed(field))
+        return failure();
+      if (*field != "source" && *field != "target") {
+        Type type = relations[relation].fieldType(*field);
+        if (!type)
+          return error(fieldAt, "relation '" + relation + "' has no field '" +
+                                    *field + "'");
+        if ((!type.isIntOrIndex() || type.isInteger(1)) && !type.isF32() &&
+            !type.isF64())
+          return error(fieldAt, "an index of a relation is by a whole "
+                                "number or a fraction (f32, f64), or by "
+                                "'source, target'; '" +
+                                    *field + "' is " + typeWords(type));
+        if (!orders.empty())
+          return error(fieldAt, "an index of a relation is by one field of "
+                                "the edges, or by 'source, target'");
+      }
+      orders.push_back(builder.getStringAttr(*field));
+    } while (consumeIf(Token::Comma));
+    auto ends = [&](StringRef end) {
+      return llvm::any_of(orders, [&](Attribute a) {
+        return cast<StringAttr>(a).getValue() == end;
+      });
+    };
+    if (ends("source") != ends("target"))
+      return error(at, "an index by the edges' other ends is by both: "
+                       "'index " +
+                           *name + " of " + relation + " by source, target'");
+    if (token.isKeyword("hash"))
+      return error("an index of a relation keeps each entity's edges in "
+                   "order, and finds an edge to one entity by halving: "
+                   "'by source, target', without 'hash'");
+    auto op = module.lookupSymbol<RelationOp>(symbol(relation).getAttr());
+    SmallVector<Attribute> all;
+    if (auto had = op->getAttrOfType<ArrayAttr>("ordered_by"))
+      llvm::append_range(all, had.getValue());
+    for (Attribute order : orders)
+      if (!llvm::is_contained(all, order))
+        all.push_back(order);
+    op->setAttr("ordered_by", builder.getArrayAttr(all));
+    (void)declareSymbol(at, *name);
+    return success();
+  }
   SmallVector<std::string> of;
   do {
     llvm::SMLoc componentAt = token.loc;
@@ -7577,16 +7635,162 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
   // Out of the visited entity if the arrow starts at it.
   StringRef direction = leftIsOwn != arrow->reversed ? "out" : "in";
 
+  // `by s.field`: the edges in the order of a field of theirs, then a
+  // slice of that order (`from a`, `to b`: a <= value < b; `first k` or
+  // `last k`), worked out before the loop, as a `for` over entities has it.
+  std::string orderField;
+  SmallVector<Attribute> sliceOrder;
+  SmallVector<mlir::Value> sliceValues;
+  if (token.isKeyword("by")) {
+    llvm::SMLoc byAt = token.loc;
+    advance();
+    llvm::SMLoc nameAt = token.loc;
+    FailureOr<std::string> name = identifier("the edge's name");
+    if (failed(name))
+      return failure();
+    if (edge.empty() || *name != edge)
+      return error(nameAt, "the order is by a field of the edge: name it, "
+                           "'[s: " +
+                               *relation + "]', and say 'by s.field'");
+    if (failed(expect(Token::Dot, "'.' and a field of the edge")))
+      return failure();
+    llvm::SMLoc fieldAt = token.loc;
+    FailureOr<std::string> field = identifier("a field");
+    if (failed(field))
+      return failure();
+    Type type = relations[*relation].fieldType(*field);
+    if (!type)
+      return error(fieldAt, "relation '" + *relation + "' has no field '" +
+                                *field + "'");
+    if ((!type.isIntOrIndex() || type.isInteger(1)) && !type.isF32() &&
+        !type.isF64())
+      return error(fieldAt, "the order is by a whole number or a fraction "
+                            "(f32, f64); '" +
+                                *field + "' is " + typeWords(type));
+    (void)byAt;
+    orderField = *field;
+    std::map<std::string, bool> had;
+    for (StringRef part : {"from", "to", "first", "last"}) {
+      llvm::SMLoc partAt = token.loc;
+      if (!consumeKeyword(part))
+        continue;
+      if (part == "last" && had.count("first"))
+        return error(partAt, "'first' or 'last': one of them");
+      Type wanted =
+          part == "from" || part == "to" ? type : Type(builder.getI32Type());
+      FailureOr<ExprPtr> bound = parseExpr();
+      if (failed(bound))
+        return failure();
+      FailureOr<mlir::Value> value = emit(**bound, wanted);
+      if (failed(value))
+        return failure();
+      if (value->getType() != wanted)
+        return mismatch((*bound)->loc, value->getType(), wanted);
+      had[part.str()] = true;
+      sliceOrder.push_back(builder.getStringAttr(part));
+      sliceValues.push_back(*value);
+    }
+  }
+  // `where cond`: the body runs for the edges where it holds. Where it
+  // says the other end is an entity worked out the same for every edge
+  // (`where v == b`, or one of the conditions `&&` joins), that entity is
+  // an operand too, which an index by the other end finds the edges of;
+  // the condition stays in the body.
+  ExprPtr where;
+  if (consumeKeyword("where")) {
+    FailureOr<ExprPtr> condition = parseExpr();
+    if (failed(condition))
+      return failure();
+    where = std::move(*condition);
+  }
+  if (where && !other.name.empty()) {
+    std::function<bool(const Expr &)> outside = [&](const Expr &expr) {
+      switch (expr.kind) {
+      case Expr::Int:
+      case Expr::Float:
+      case Expr::Bool:
+      case Expr::String:
+      case Expr::Const:
+        return true;
+      case Expr::Name: {
+        if (expr.name == edge || expr.name == other.name)
+          return false;
+        for (const End::Bound &bound : other.bindings)
+          if (bound.name == expr.name)
+            return false;
+        const Variable *variable = lookup(expr.name);
+        return variable && variable->kind == Variable::Value &&
+               !variable->isVar;
+      }
+      case Expr::Field: {
+        if (expr.name == edge || expr.name == other.name)
+          return false;
+        for (const End::Bound &bound : other.bindings)
+          if (bound.name == expr.name)
+            return false;
+        // (A unique's field, or a case of an enum.)
+        return !lookup(expr.name) &&
+               (uniques.count(expr.name) || enums.count(expr.name));
+      }
+      case Expr::Unary:
+      case Expr::Binary:
+      case Expr::Cast:
+        return llvm::all_of(expr.operands, [&](const ExprPtr &operand) {
+          return outside(*operand);
+        });
+      default:
+        return false;
+      }
+    };
+    SmallVector<const Expr *> conditions{where.get()};
+    bool found = false;
+    for (size_t i = 0; i < conditions.size() && !found; ++i) {
+      const Expr &condition = *conditions[i];
+      if (condition.kind != Expr::Binary)
+        continue;
+      if (condition.op == Token::AndAnd) {
+        for (const ExprPtr &operand : condition.operands)
+          conditions.push_back(operand.get());
+        continue;
+      }
+      if (condition.op != Token::Equal)
+        continue;
+      for (int side : {0, 1}) {
+        const Expr &name = *condition.operands[side];
+        const Expr &value = *condition.operands[1 - side];
+        if (found || name.kind != Expr::Name || name.name != other.name ||
+            !outside(value))
+          continue;
+        FailureOr<mlir::Value> entity = emit(value, EntityType::get(context));
+        if (failed(entity))
+          return failure();
+        if (!isa<EntityType>(entity->getType()))
+          continue;
+        sliceOrder.push_back(builder.getStringAttr("other"));
+        sliceValues.push_back(*entity);
+        found = true;
+      }
+    }
+  }
+
   // Every var goes round: what one edge leaves in it the next starts
   // with, and the loop gives what the last one left.
   SmallVector<VarState> vars = captureVars();
   OperationState state(loc(at), EdgesOp::getOperationName());
   state.addAttribute("relation", symbol(*relation));
   state.addAttribute("direction", builder.getStringAttr(direction));
+  state.addOperands(sliceValues);
   for (const VarState &var : vars) {
     state.addOperands(var.value);
     state.addTypes(var.value.getType());
   }
+  state.addAttribute(EdgesOp::getOperandSegmentSizesAttrName(state.name),
+                     builder.getDenseI32ArrayAttr(
+                         {int32_t(sliceValues.size()), int32_t(vars.size())}));
+  if (!sliceOrder.empty())
+    state.addAttribute(QueryOp::kSliceAttr, builder.getArrayAttr(sliceOrder));
+  if (!orderField.empty())
+    state.addAttribute("order_field", builder.getStringAttr(orderField));
   Region *body = state.addRegion();
   auto *block = new Block();
   body->push_back(block);
@@ -7625,10 +7829,17 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
   }
   inEdges = true;
   llvm::scope_exit leave([&] { inEdges = false; });
-  if (has) {
-    // (What the body leaves in a var where the other end has it all, or
-    // the var as it was.)
-    auto branch = scf::IfOp::create(builder, loc(other.loc), has,
+  // (The body where `cond` holds: what it leaves in a var there, or the
+  // var as it was.)
+  auto parseWhere = [&]() -> LogicalResult {
+    if (!where)
+      return parseBlock();
+    FailureOr<mlir::Value> holds = emit(*where, builder.getI1Type());
+    if (failed(holds))
+      return failure();
+    if (!holds->getType().isInteger(1))
+      return mismatch(where->loc, holds->getType(), builder.getI1Type());
+    auto branch = scf::IfOp::create(builder, loc(where->loc), *holds,
                                     /*withElseRegion=*/true);
     SmallVector<VarState> before = captureVars();
     {
@@ -7641,7 +7852,25 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
     restoreVars(before);
     branch.getElseRegion().getBlocks().clear();
     mergeBranches(branch, before, thenVars, before);
-  } else if (failed(parseBlock())) {
+    return success();
+  };
+  if (has) {
+    // (What the body leaves in a var where the other end has it all, or
+    // the var as it was.)
+    auto branch = scf::IfOp::create(builder, loc(other.loc), has,
+                                    /*withElseRegion=*/true);
+    SmallVector<VarState> before = captureVars();
+    {
+      OpBuilder::InsertionGuard inner(builder);
+      builder.setInsertionPoint(branch.thenBlock()->getTerminator());
+      if (failed(parseWhere()))
+        return failure();
+    }
+    SmallVector<VarState> thenVars = captureVars();
+    restoreVars(before);
+    branch.getElseRegion().getBlocks().clear();
+    mergeBranches(branch, before, thenVars, before);
+  } else if (failed(parseWhere())) {
     return failure();
   }
   SmallVector<mlir::Value> ends;

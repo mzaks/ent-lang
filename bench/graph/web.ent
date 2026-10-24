@@ -6,6 +6,7 @@ import console
 import files
 import clock
 import math
+import wyhash
 
 capacity Bytes 400000000
 
@@ -20,12 +21,18 @@ component Depth { d: i32 } capacity 1048576
 // The least depth sent to it in a step.
 component Next { at: i32 } capacity 1048576
 
-relation (Node)-[Link]->(Node) capacity 40000000
+// A link, and a weight of it from 0 up to below 1 that its ends make
+// (`weight`), which bench/graph/pick.ent goes by.
+relation (Node)-[Link { w: f32 }]->(Node) capacity 40000000
 
 buffer Ids { who: entity } capacity 1048576
 buffer Degree { n: i32 } capacity 1048576
 
 proc now() -> f64 { wait_until(0.0) }
+
+fn weight(from: i32, to: i32) -> f32 {
+  (wyhash64(from as u64, to as u64) % 1000) as f32 / 1000.0
+}
 
 // The graph: a line "u v" for every link, read twice, first for how many
 // pages there are and how many links leave each, then for the links.
@@ -68,7 +75,7 @@ system load() {
     } else if c == 10 {
       let a = Ids[from].who
       let b = Ids[value].who
-      connect (a)-[Link]->(b)
+      connect (a)-[Link { w: weight(from, value) }]->(b)
       value = 0
     }
     i += 1

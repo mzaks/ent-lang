@@ -24,6 +24,13 @@ takes to rewire (with keeping the links in order) and to gather, from
 the fourth step on, and the first three steps' rewiring in all (where the
 links as laid get room). Both must end with the same hash.
 
+Then pick.ent on one core, with the indexes of the links by weight and by
+their ends (`//I`) and without: every page's three heaviest links out
+(`by l.w last 3`), and its links to vertex 0 (`where v == hub`), of every
+page and of those with more than 1,000 links out. The best of five runs
+(the indexed ones' first, which makes the index, said apart); both must
+find the same.
+
 Usage: bench/graph/run.py [--scale 18] [--rounds 3] [--source 0]
 """
 
@@ -102,7 +109,17 @@ def build_ent():
     churn = os.path.join(OUT, "churn")
     run([ENT, "build", "-I", HERE, os.path.join(HERE, "churn.ent"), "-o", churn],
         env=env)
-    return binaries, churn
+    picks = {}
+    text = open(os.path.join(HERE, "pick.ent")).read()
+    plain = os.path.join(OUT, "pick_plain.ent")
+    open(plain, "w").write("".join(line for line in text.splitlines(True)
+                                   if not line.rstrip().endswith("//I")))
+    for name, program in (("indexed", os.path.join(HERE, "pick.ent")),
+                          ("plain", plain)):
+        out = os.path.join(OUT, "pick-" + name)
+        run([ENT, "build", "-I", HERE, program, "-o", out], env=env)
+        picks[name] = out
+    return binaries, churn, picks
 
 
 def ent_times(output):
@@ -133,7 +150,7 @@ def main():
     want = {line.split(" ")[0]: line for line in
             run([check, "-f", sg, "-r", str(args.source)]).splitlines()
             if line.startswith(("pr ", "bfs "))}
-    binaries, churn = build_ent()
+    binaries, churn, picks = build_ent()
     one = ["taskset", "-c", "2"]
     results = {}
     for _ in range(args.rounds):
@@ -191,6 +208,30 @@ def main():
         med = lambda xs, i: statistics.median(x[i] for x in xs)
         print(f"{k:<10} {med(mended, 0):9.2f} {med(mended, 1):9.2f} "
               f"{med(mended, 3):9.2f} {med(anew, 0):9.2f} {med(anew, 1):9.2f}")
+
+    found = {}
+    for _ in range(args.rounds):
+        for name, binary in picks.items():
+            out = run(one + [binary], cwd=folder)
+            lines = re.findall(r"(top|hub of more than \d+) ([0-9.]+) ms, (.*)", out)
+            what = {}
+            for kind, ms, value in lines:
+                what.setdefault(kind, []).append((float(ms), value))
+            for kind, runs in what.items():
+                values = {v for _, v in runs}
+                key = (kind,)
+                if found.setdefault(key, values) != values:
+                    raise SystemExit(f"pick {kind}: {values} vs {found[key]}")
+                times = [ms for ms, _ in runs]
+                found.setdefault((name, kind), []).append(
+                    (min(times[1:]), times[0]))
+    print(f"{'pick':<26} {'indexed':>9} {'(first)':>9} {'plain':>9}")
+    for kind in ("top", "hub of more than 0", "hub of more than 1000"):
+        idx = found[("indexed", kind)]
+        pl = found[("plain", kind)]
+        print(f"{kind:<26} {statistics.median(x[0] for x in idx):9.2f} "
+              f"{statistics.median(x[1] for x in idx):9.2f} "
+              f"{statistics.median(x[0] for x in pl):9.2f}")
 
 
 if __name__ == "__main__":

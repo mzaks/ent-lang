@@ -332,6 +332,25 @@ What relations have, extended:
 For: fan-in and fan-out in `examples/logic`, variables to clauses and
 back in the SAT solver, synapses by their neurons before and after.
 
+Built (2026-10-24; bench/graph, against the GAP Benchmark Suite):
+
+- Read both ways, the table is by source and an index of positions by
+  target (as before); its sort now also leaves the edges' ends and the
+  fields no loop writes in the index's order (in the scratch columns), so
+  a loop into an entity reads them in turn, as GAP's graph transposed:
+  PageRank 151 -> 45 ms at 2^18 (GAP 41).
+- Kept in order in place where few edges change (devices/edges.c): runs
+  with room, the order a sort gives, sorted anew past a sixteenth;
+  rewiring 1 to 10,000 of 7.6 million links costs 0.6 to 11 ms a step
+  instead of a sort (60 to 75 ms).
+- Indexes on edge fields: `index Name of R by field` and `by source,
+  target`, read by `for (e)-[s: R]->(v) by s.field [from a] [to b]
+  [first k | last k]` and `where v == b`, which work without an index
+  too (see docs/syntax.md, Indexes of a relation). The three heaviest
+  links of every page: 2.3 ms with the index, 52 without. An index by
+  the ends pays only for entities of many edges: on GAP's graph (29 a
+  page) going over them is as fast.
+
 ### 5.7 Similarity: locality-sensitive hashing (LSH)
 
 Hash functions under which similar entries collide.
@@ -442,7 +461,7 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 | 3 | Hash index and `unique` | `incremental`, change tracking | built: `by key hash [unique]`, `get`, `where x.key == value` through it, every way of section 4 (2026-10-23) |
 | 4 | Sorted index (secondary), then clustered | Ordered iteration, ranges, top-k | built: secondary (5.2); ties, float keys, query forms (`by` with `from`, `to`, `first`, `last`) and `clustered` (2026-10-23) |
 | 5 | Morton linear quadtree and octree | Keys made of fields, ranges of prefixes | |
-| 6 | Relation indexes by source and target everywhere, indexes on edge fields | | |
+| 6 | Relation indexes by source and target everywhere, indexes on edge fields | | built: copies in the index's order, kept in order in place, `by` and `where` on edge loops and `index .. of Relation` (2026-10-24, see 5.6) |
 | 7 | Partitions by value | | |
 | 8 | k-d tree and `nearest k` | | `nearest k` built on grids (2026-10-23); k-d tree to do |
 | 9 | Embeddings by brute force (int8 and binary, ranked again) | The recall to measure against | needs a vector type |

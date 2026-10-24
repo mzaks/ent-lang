@@ -3941,3 +3941,30 @@ index's positions (and each edge's slot in the index) are kept only where
 a loop into an entity needs an edge's own place; without them, an edge
 is found in its target's run by its source. PageRank and the search read
 the table with its room as fast as before (45.1 and 4.55 ms).
+
+### Edges picked by an index of the relation
+
+The links now carry a weight their ends make (`web.ent`'s `weight`), which
+the sort carries too: a sort anew of the 7.6 million takes 76 ms (60
+before), mending as before (0.59, 0.69, 11.3 ms for 1, 100, 10,000).
+`bench/graph/pick.ent`, one core, ms, the best of five runs (the indexed
+ones' first, which makes the index, apart):
+
+| | indexed | its first run | without |
+|---|---|---|---|
+| every page's three heaviest links out (`by l.w last 3`) | 2.33 | 366 | 52.4 |
+| every page's links to vertex 0 (`where v == hub`) | 5.94 | 126 | 2.82 |
+| of the pages with more than 1,000 links | 0.44 | 0.63 | 0.51 |
+
+With `index Heavy of Link by w` every page's run is kept in the order of
+the weights, and the three heaviest are its last three: 2.3 ms. Without,
+each run is gone over keeping the three heaviest so far (k up to 32;
+more are sorted): 52 ms, from 355 with a sort of every run, and that is
+about what making the index costs (366 ms, every run sorted; made again
+only where the links change or their weights are written). With `index
+Pairs of Link by source, target` a page's links to the hub are found by
+halving in the order of their targets where it has more than 32; fewer
+are gone over. On this graph that pays only for the pages with many
+links: the average page has 29, and going over them in table order, which
+the compiler does eight at a time, is faster than reading them in the
+order of the index (5.9 against 2.8 ms for all pages).
