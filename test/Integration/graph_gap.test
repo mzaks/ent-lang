@@ -1,0 +1,17 @@
+// bench/graph/graph.ent (GAP's PageRank and direction-optimizing search
+// over a relation, which reads its links both ways) on a Kronecker graph
+// GAP made (`converter -g 8 -k 16 -e`: 256 vertices, 4,310 links), on one
+// core and on all: what bench/graph/check.cc, on GAP's own graph builder,
+// finds there, to the bit. The links into a page come in the order of
+// the index by target, from the copies its sort leaves.
+// RUN: rm -rf %t && mkdir -p %t && cp %S/Inputs/graph_kron8.el %t/graph.el
+// RUN: cd %t && %ent run %S/../../bench/graph/graph.ent 2>/dev/null \
+// RUN:   | sed -e 's/ [0-9.]* ms,/,/' > %t/one
+// RUN: cd %t && %ent run --parallel %S/../../bench/graph/graph.ent 2>/dev/null \
+// RUN:   | sed -e 's/ [0-9.]* ms,/,/' > %t/all
+// RUN: cmp %t/one %t/all
+// RUN: FileCheck %s < %t/one
+
+// CHECK: 256 pages, 4310 links
+// CHECK-COUNT-3: pr, 10 iterations, error 0.000053, hash 32616778752281
+// CHECK-COUNT-3: bfs, 236 reached, depths 710

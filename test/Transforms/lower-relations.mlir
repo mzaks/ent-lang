@@ -96,25 +96,62 @@ ent.schedule @frame() {
 
 // -----
 
+// A field a loop writes has no copy in the order of the index (it would be
+// old after the write): `in` reads it at the edge's own place, which the
+// index gives, and its ends still from their copies.
+ent.component @N (v: f32) capacity 100
+ent.archetype @A (@N) capacity 100
+ent.relation @Syn (w: f32) capacity 1000
+
+// CHECK-LABEL: func.func private @gather(
+// CHECK:        scf.for %[[P:.*]] = {{.*}} iter_args
+// CHECK-NEXT:     %[[POS:.*]] = memref.load %{{.*}}[%[[P]]] : memref<1000xi32>
+// CHECK-NEXT:     %[[EDGE:.*]] = arith.index_cast %[[POS]]
+// CHECK-NEXT:     memref.load %{{.*}}[%[[P]]] : memref<1000xi32>
+// CHECK-NEXT:     memref.load %{{.*}}[%[[EDGE]]] : memref<1000xf32>
+ent.system @gather() {
+  ent.query (%n: !ent.ref<@N, mut>) {
+    ent.edges @Syn in (%s: !ent.ref<@Syn>, %p: !ent.entity) {
+      %w = ent.get %s "w" : !ent.ref<@Syn> -> f32
+      ent.set %n "v", %w : !ent.ref<@N, mut>, f32
+    }
+  }
+}
+
+ent.system @fade() {
+  ent.query (%n: !ent.ref<@N>) {
+    ent.edges @Syn out (%s: !ent.ref<@Syn, mut>, %t: !ent.entity) {
+      %w = ent.get %s "w" : !ent.ref<@Syn, mut> -> f32
+      %h = arith.mulf %w, %w : f32
+      ent.set %s "w", %h : !ent.ref<@Syn, mut>, f32
+    }
+  }
+}
+
+// -----
+
 // Generational ids: a slot may have been reused since the edges were
 // sorted, so an edge counts only if its own end is the visited entity.
 ent.component @N (v: f32) capacity 100
 ent.archetype @A (@N) capacity 100
 ent.relation @Syn (w: f32) capacity 1000
 
-// Visited both ways here, so `in` reads through the index by target. The
-// entity's own field the loop sets is carried as a value (through the
-// ownership check's `if`) and stored once after the loop, if it was set.
+// Visited both ways here, so `in` goes along the index by target, reading
+// the copies its sort leaves in that order: the edge's own end, its other
+// end and `w`, which no loop writes, at the index's position, without
+// going to the edge's place in the table. The entity's own field the loop
+// sets is carried as a value (through the ownership check's `if`) and
+// stored once after the loop, if it was set.
 // CHECK-LABEL: func.func private @pull(
 // CHECK:        %[[ID:.*]] = memref.load %{{.*}}[%{{.*}}] : memref<100xi32>
 // CHECK:        %[[V0:.*]] = memref.load %[[V:.*]][%[[ROW:.*]]] : memref<100xf32>
 // CHECK-NEXT:   %[[NO:.*]] = arith.constant false
 // CHECK-NEXT:   %[[R:.*]]:2 = scf.for %[[P:.*]] = {{.*}} iter_args(%[[CUR:.*]] = %[[V0]], %[[SET:.*]] = %[[NO]]) -> (f32, i1) {
-// CHECK-NEXT:     %[[POS:.*]] = memref.load %{{.*}}[%[[P]]] : memref<1000xi32>
-// CHECK-NEXT:     %[[EDGE:.*]] = arith.index_cast %[[POS]]
-// CHECK-NEXT:     %[[OWN:.*]] = memref.load %{{.*}}[%[[EDGE]]] : memref<1000xi32>
+// CHECK-NEXT:     %[[OWN:.*]] = memref.load %{{.*}}[%[[P]]] : memref<1000xi32>
 // CHECK-NEXT:     %[[MINE:.*]] = arith.cmpi eq, %[[OWN]], %[[ID]] : i32
 // CHECK-NEXT:     %[[B:.*]]:2 = scf.if %[[MINE]] -> (f32, i1) {
+// CHECK-NEXT:       memref.load %{{.*}}[%[[P]]] : memref<1000xi32>
+// CHECK-NEXT:       memref.load %{{.*}}[%[[P]]] : memref<1000xf32>
 // CHECK:            scf.yield %{{.*}}, %{{.*}} : f32, i1
 // CHECK-NEXT:     } else {
 // CHECK-NEXT:       scf.yield %[[CUR]], %[[SET]] : f32, i1

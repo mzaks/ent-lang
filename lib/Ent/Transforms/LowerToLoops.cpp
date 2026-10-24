@@ -672,6 +672,17 @@ public:
     return view(relation.indexEdgesOffset, relation.capacity,
                 offsetType(relation));
   }
+  /// The copies a sort leaves in the order of the index (see
+  /// WorldRelation::indexOffset): the sources or the targets, or a field.
+  Value indexIds(const WorldRelation &relation, bool source) {
+    return view(source ? relation.sourceScratchOffset
+                       : relation.targetScratchOffset,
+                relation.capacity, idType());
+  }
+  Value indexField(const WorldRelation &relation, const WorldColumn &field) {
+    return view(relation.fieldScratchOffsets[&field - relation.fields.begin()],
+                relation.capacity, storageType(field.type));
+  }
   Value edgeCursors(const WorldRelation &relation) {
     return view(relation.cursorOffset, layout.entityKeys,
                 offsetType(relation));
@@ -7187,6 +7198,21 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
   Value position, edge;
   // The values that go round (see EdgesOp): the loop's last ones.
   ValueRange inits = edges.getInits();
+  // Through the index: the ends, and the fields no loop writes, are read
+  // from their copies in its order; the edge's own place is looked up only
+  // where the body writes a field of it, disconnects it, or reads a field
+  // that is written elsewhere.
+  bool copies =
+      !relation.linked && !relation.isSorted(!out) && relation.hasCopies();
+  bool ownPlace = !copies;
+  for (Operation *user : edges.getBody().front().getArgument(0).getUsers()) {
+    if (auto get = dyn_cast<GetOp>(user)) {
+      const WorldColumn *field = relation.find(get.getFieldAttr());
+      ownPlace |= !relation.copied[field - relation.fields.begin()];
+    } else
+      ownPlace = true;
+  }
+  edges.walk([&](DisconnectOp) { ownPlace = true; });
   if (relation.linked) {
     // Its slot, or the slots of the edges to it; a slot is also the
     // edge's place in an apply's buffers.
@@ -7204,12 +7230,12 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
     }
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
     position = loop.getInductionVar();
-    edge = relation.isSorted(!out)
-               ? position
-               : world.toIndex(loc, memref::LoadOp::create(
-                                        rewriter, loc,
-                                        world.indexEdges(relation),
-                                        ValueRange{position}));
+    if (relation.isSorted(!out))
+      edge = position;
+    else if (ownPlace)
+      edge = world.toIndex(
+          loc, memref::LoadOp::create(rewriter, loc, world.indexEdges(relation),
+                                      ValueRange{position}));
   }
   for (ApplyOp apply : applies)
     memref::StoreOp::create(rewriter, loc, world.noEntity(loc),
@@ -7227,9 +7253,14 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
   // (A linked tree's edge out is its entity's or not there.)
   if (layout.entities.hasGenerations() && !ownEndTrusted &&
       !(relation.linked && out)) {
-    Value own = memref::LoadOp::create(
-        rewriter, loc, world.edgeIds(relation, /*source=*/out),
-        ValueRange{edge});
+    Value own =
+        copies
+            ? memref::LoadOp::create(rewriter, loc,
+                                     world.indexIds(relation, /*source=*/out),
+                                     ValueRange{position})
+            : memref::LoadOp::create(rewriter, loc,
+                                     world.edgeIds(relation, /*source=*/out),
+                                     ValueRange{edge});
     Value mine = arith::CmpIOp::create(rewriter, loc,
                                        arith::CmpIPredicate::eq, own, id);
     if (inits.empty()) {
@@ -7250,9 +7281,13 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
     }
   }
   rewriter.setInsertionPoint(insertBefore);
-  Value otherId = memref::LoadOp::create(
-      rewriter, loc, world.edgeIds(relation, /*source=*/!out),
-      ValueRange{edge});
+  Value otherId =
+      copies ? memref::LoadOp::create(rewriter, loc,
+                                      world.indexIds(relation, /*source=*/!out),
+                                      ValueRange{position})
+             : memref::LoadOp::create(rewriter, loc,
+                                      world.edgeIds(relation, /*source=*/!out),
+                                      ValueRange{edge});
   // A linked tree's slot has its source as its owner, the id and one.
   if (relation.linked && !out)
     otherId = world.ownerId(loc, otherId);
@@ -7265,9 +7300,12 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
     rewriter.setInsertionPoint(user);
     if (auto get = dyn_cast<GetOp>(user)) {
       const WorldColumn *field = relation.find(get.getFieldAttr());
-      Value value = memref::LoadOp::create(
-          rewriter, get.getLoc(), world.edgeField(relation, *field),
-          ValueRange{edge});
+      bool copy = copies && relation.copied[field - relation.fields.begin()];
+      Value value =
+          memref::LoadOp::create(rewriter, get.getLoc(),
+                                 copy ? world.indexField(relation, *field)
+                                      : world.edgeField(relation, *field),
+                                 ValueRange{copy ? position : edge});
       rewriter.replaceOp(get,
                          world.fromStorage(get.getLoc(), value, get.getType()));
     } else {
@@ -9744,6 +9782,19 @@ static void emitPartitionedSort(IRRewriter &rewriter, Location loc,
           world.indexEdges(relation), ValueRange{p});
     });
     offsetsOf(world.edgeOffsets(relation, /*in=*/true), /*target=*/true);
+    // And the edges' ends and the fields no loop writes, in that order.
+    if (relation.hasCopies())
+      forEach(zero, kept, [&](Value p) {
+        Value edge = world.toIndex(
+            loc, memref::LoadOp::create(
+                     rewriter, loc, world.indexEdges(relation), ValueRange{p}));
+        for (auto [k, column] : llvm::enumerate(table))
+          if (k < 2 || relation.copied[k - 2])
+            memref::StoreOp::create(
+                rewriter, loc,
+                memref::LoadOp::create(rewriter, loc, column, ValueRange{edge}),
+                scratch[k], ValueRange{p});
+      });
   }
   callGpu(rewriter, loc, module, "ent_ranks_sort_end", ValueRange{});
   (void)i32;
@@ -10370,6 +10421,19 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
           arith::IndexCastOp::create(rewriter, loc, offsetType, k),
           world.indexEdges(relation), ValueRange{position});
     });
+    // And the edges' ends and the fields no loop writes, in that order.
+    if (relation.hasCopies())
+      forEachApart(kept, [&](Value p) {
+        Value edge = world.toIndex(
+            loc, memref::LoadOp::create(
+                     rewriter, loc, world.indexEdges(relation), ValueRange{p}));
+        for (auto [k, column] : llvm::enumerate(table))
+          if (k < 2 || relation.copied[k - 2])
+            memref::StoreOp::create(
+                rewriter, loc,
+                memref::LoadOp::create(rewriter, loc, column, ValueRange{edge}),
+                scratch[k], ValueRange{p});
+      });
   }
 
   // A tree: list the entities with a parent, parents before children.
@@ -18602,24 +18666,27 @@ static void emitPlacement(IRRewriter &rewriter, Location loc,
                             world.edgesClean(relation), ValueRange{zero});
     callSort(rewriter, loc, relation, world.getArena());
     // (The rows past those kept given back to the system, and the copies
-    // the sort makes, which the next sort makes anew.)
-    auto dropAll = [&](uint64_t offset, int64_t each) {
-      callGpu(rewriter, loc, module, "ent_ranks_drop_rows",
-              ValueRange{worldPointer(rewriter, loc,
-                                      world.bytes(offset,
-                                                  relation.slots * each)),
-                         arith::ConstantIntOp::create(rewriter, loc, each, 64),
-                         arith::ConstantIntOp::create(rewriter, loc, 0, 64),
-                         arith::ConstantIntOp::create(rewriter, loc,
-                                                      relation.slots, 64)});
+    // the sort makes, which the next sort makes anew: all of them, but for
+    // those it keeps in the order of the index, past the edges kept.)
+    auto dropAll = [&](uint64_t offset, int64_t each, bool copy) {
+      callGpu(
+          rewriter, loc, module, "ent_ranks_drop_rows",
+          ValueRange{
+              worldPointer(rewriter, loc,
+                           world.bytes(offset, relation.slots * each)),
+              arith::ConstantIntOp::create(rewriter, loc, each, 64),
+              copy ? kept : arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+              arith::ConstantIntOp::create(rewriter, loc, relation.slots, 64)});
     };
     if (relation.sourceScratchOffset) {
       uint64_t idBytes = layout.entities.idBits / 8;
-      dropAll(relation.sourceScratchOffset, idBytes);
-      dropAll(relation.targetScratchOffset, idBytes);
-      for (auto [offset, field] :
-           llvm::zip(relation.fieldScratchOffsets, relation.fields))
-        dropAll(offset, world.storageBytes(field.type));
+      bool copies = relation.hasCopies();
+      dropAll(relation.sourceScratchOffset, idBytes, copies);
+      dropAll(relation.targetScratchOffset, idBytes, copies);
+      for (auto [k, offset, field] :
+           llvm::enumerate(relation.fieldScratchOffsets, relation.fields))
+        dropAll(offset, world.storageBytes(field.type),
+                copies && relation.copied[k]);
     }
     if (relation.indexEdgesOffset)
       callGpu(rewriter, loc, module, "ent_ranks_drop_rows",
@@ -23259,8 +23326,14 @@ struct GpuPieces {
           piece(held);
         };
         if (field && !field.getValue().empty()) {
-          if (const WorldColumn *column = relation.find(field))
+          if (const WorldColumn *column = relation.find(field)) {
             edges(column->offset, uint64_t(bytesOf(column->type)));
+            // (And its copy in the order of the index.)
+            unsigned k = column - relation.fields.begin();
+            if (relation.hasCopies() && relation.copied[k])
+              edges(relation.fieldScratchOffsets[k],
+                    uint64_t(bytesOf(column->type)));
+          }
           return made;
         }
         piece({relation.countOffset, 8, nullptr, nullptr, /*counter=*/true});
@@ -23274,6 +23347,11 @@ struct GpuPieces {
         if (relation.indexOffset) {
           whole(relation.indexOffset, offsetBytes, layout.entityKeys + 1);
           edges(relation.indexEdgesOffset, offsetBytes);
+          // (And the ends' copies in its order.)
+          if (relation.hasCopies()) {
+            edges(relation.sourceScratchOffset, idBytes);
+            edges(relation.targetScratchOffset, idBytes);
+          }
         }
         return made;
       }

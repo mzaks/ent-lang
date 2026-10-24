@@ -2,6 +2,7 @@
 #include "Ent/Structure.h"
 
 #include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -1060,6 +1061,18 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     if (hasIn && hasOut) {
       relation.indexOffset = place(offsetBytes, keys + 1);
       relation.indexEdgesOffset = place(offsetBytes, edges);
+      // (Which fields an edge loop writes: those are read at the edge's own
+      // place, the others from their copies in the order of the index.)
+      llvm::StringSet<> written;
+      module.walk([&](EdgesOp loop) {
+        if (loop.getRelationAttr().getAttr() != name)
+          return;
+        for (Operation *user : loop.getBody().front().getArgument(0).getUsers())
+          if (auto set = dyn_cast<SetOp>(user))
+            written.insert(set.getFieldAttr().getValue());
+      });
+      for (const WorldColumn &field : relation.fields)
+        relation.copied.push_back(!written.contains(field.field.getValue()));
     }
     relation.cursorOffset = place(offsetBytes, keys);
     relation.sourceScratchOffset = place(idBytes, edges);

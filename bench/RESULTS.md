@@ -3882,3 +3882,29 @@ keeps the graph twice, once each way. The search is twice GAP's: a step
 top down goes over every vertex for those reached last (GAP keeps them
 in a queue), and bottom up a vertex goes on over all its links after it
 found one reached last (GAP breaks off there), besides the index.
+
+### The links into a page, in their order
+
+A relation read both ways keeps its table in the order of the sources
+and, by target, an index of positions. Its sort now also leaves, in the
+scratch columns it sorts through (free between sorts), the edges' sources
+and targets and the fields no edge loop writes, in the order of the
+index; a loop over the edges into an entity reads those in turn and looks
+up an edge's own position only for a field it writes, a disconnect, or a
+field some loop writes (whose copy would be old). The same graph:
+
+| variant | PageRank | search |
+|---|---|---|
+| ent, before | 151.0 | 6.63 |
+| ent | 45.2 | 4.53 |
+| ent, without the search | 45.8 | |
+| GAP | 40.9 | 3.37 |
+| ent, all cores | 8.12 | 2.05 |
+| GAP, all cores | 6.29 | 0.67 |
+
+PageRank read both ways now costs what it costs read one way, 1.10 times
+GAP's on one core (1.29 on all). The search gains from it bottom up; what
+is left of it against GAP is the scan of every vertex top down and the
+links gone over after one was found bottom up. A sort of a relation with
+an index makes one pass more over its edges (copying them in the index's
+order), and no memory more.

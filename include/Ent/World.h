@@ -274,9 +274,15 @@ struct WorldRelation {
   /// Offsets by the end the table is sorted by, entityKeys + 1 of them.
   uint64_t sortedOffset = 0;
   /// By target, if the program visits edges both ways: offsets and the
-  /// table positions of the edges.
+  /// table positions of the edges. Then a sort also leaves in the scratch
+  /// columns the edges' sources and targets, and the fields no edge loop
+  /// writes (`copied`, one for each of `fields`), in the order of the
+  /// index: a loop over the edges into an entity reads those in turn and
+  /// goes to the edge's own place only for a field it writes, one it
+  /// disconnects, or a field that is written elsewhere.
   uint64_t indexOffset = 0;
   uint64_t indexEdgesOffset = 0;
+  SmallVector<bool> copied;
   /// For sorting: a cursor per key and a copy of every column.
   uint64_t cursorOffset = 0;
   uint64_t sourceScratchOffset = 0;
@@ -410,6 +416,9 @@ struct WorldRelation {
   uint64_t orderCountOffset = 0;
 
   bool hasIndex() const { return indexOffset != 0; }
+  /// Whether the edges' copies in the order of the index are kept (see
+  /// indexOffset).
+  bool hasCopies() const { return hasIndex() && !linked; }
   /// Whether a loop visiting incoming (`in`) or outgoing edges reads the
   /// table in order, rather than through the index.
   bool isSorted(bool in) const { return in == byTarget; }
