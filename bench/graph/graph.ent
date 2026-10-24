@@ -1,0 +1,247 @@
+// Two kernels of the GAP Benchmark Suite (Beamer, Asanović and Patterson,
+// 2015; github.com/sbeamer/gapbs) over a relation, on a graph GAP made:
+//
+// - PageRank as GAP's pr_spmv: every iteration each page's share is its
+//   score over how many links leave it, and its new score gathers the
+//   shares along the links into it; until the scores change by less than
+//   1e-4 together, or 20 times.
+// - Breadth-first search as GAP's bfs, which goes by direction (Beamer,
+//   Asanović and Patterson, 2012): from the pages reached last along the
+//   links out of them while those are few, and from the pages not yet
+//   reached along the links into them while the pages reached last are
+//   many. Each page's depth.
+//
+// The links are read both ways, as GAP reads its graph and the graph
+// transposed. bench/graph/run.py makes the graph (`converter -g scale -e`,
+// both directions of every edge, in the file `graph.el`), runs this and
+// GAP's own, and bench/graph/check.cc says what both must find.
+//
+// What it prints: the time of every run of each kernel (ms), and for
+// PageRank the iterations, the change in the last and a hash of every
+// score's bits; for the search the pages reached and their depths added.
+import console
+import files
+import clock
+import math
+
+capacity Bytes 400000000
+
+unique G { nodes: i32, edges: i64, source: i32, runs: i32, iters: i32, error: f64,
+           started: f64, hash: u64 }
+
+// A search: the depth reached, top down (0) or bottom up (1), how many
+// links leave the pages reached last (`scout`), how many are yet to be
+// looked at going top down, how many pages were reached last and before,
+// and what was reached in all.
+unique B { level: i32, mode: i32, scout: i64, left: i64, awake: i64, prev: i64,
+           reached: i64, depths: i64 }
+
+component Node { id: i32, degree: i32 } capacity 1048576
+component Rank { score: f32 } capacity 1048576
+component Out { contrib: f32 } capacity 1048576
+component Depth { d: i32 } capacity 1048576
+// The least depth sent to it in a step.
+component Next { at: i32 } capacity 1048576
+
+relation (Node)-[Link]->(Node) capacity 40000000
+
+buffer Ids { who: entity } capacity 1048576
+buffer Degree { n: i32 } capacity 1048576
+
+proc now() -> f64 { wait_until(0.0) }
+
+// The graph: a line "u v" for every link, read twice, first for how many
+// pages there are and how many links leave each, then for the links.
+system load() {
+  let size = read_file("graph.el", Bytes)
+  Degree = [{ n: 0 }; 1048576]
+  var most = 0
+  var edges: i64 = 0
+  var i = 0
+  var value = 0
+  var side = 0
+  var from = 0
+  while i < size {
+    let c = Bytes[i].value as i32
+    if c >= 48 && c <= 57 { value = value * 10 + c - 48 } else if c == 32 {
+      from = value
+      value = 0
+    } else if c == 10 {
+      Degree[from].n += 1
+      most = max(most, max(from, value))
+      edges += 1
+      value = 0
+    }
+    i += 1
+  }
+  G.nodes = most + 1
+  G.edges = edges
+  for k in 0..most + 1 {
+    let e = spawn { Node { id: k, degree: Degree[k].n }, Rank { score: 0.0 },
+                    Out { contrib: 0.0 }, Depth { d: -1 }, Next { at: 1000000000 } }
+    Ids += { who: e }
+  }
+  i = 0
+  value = 0
+  while i < size {
+    let c = Bytes[i].value as i32
+    if c >= 48 && c <= 57 { value = value * 10 + c - 48 } else if c == 32 {
+      from = value
+      value = 0
+    } else if c == 10 {
+      let a = Ids[from].who
+      let b = Ids[value].who
+      connect (a)-[Link]->(b)
+      value = 0
+    }
+    i += 1
+  }
+  Bytes = []
+  put("{G.nodes} pages, {G.edges} links")
+}
+
+system start() { G.started = now() }
+
+system pr_start() {
+  let init = 1.0 / G.nodes as f32
+  for r: mut Rank { r.score = init }
+  G.iters = 0
+}
+
+system contrib() {
+  for n: Node, r: Rank, o: mut Out { o.contrib = r.score / n.degree as f32 }
+}
+
+system pull() {
+  let base = (1.0 - 0.85) / G.nodes as f32
+  G.error = 0.0
+  for e, r: mut Rank {
+    var total = 0.0
+    for (u: Out)-[Link]->(e) { total += u.contrib }
+    let old = r.score
+    r.score = base + 0.85 * total
+    G.error += abs(r.score - old) as f64
+  }
+  G.iters += 1
+}
+
+system pr_done() {
+  let ms = (now() - G.started) * 1000.0
+  G.hash = 0
+  for n: Node, r: Rank { G.hash += (bits_of(r.score) as u64) * (n.id as u64 + 1) }
+  put("pr {ms} ms, {G.iters} iterations, error {G.error}, hash {G.hash}")
+}
+
+system bfs_start() {
+  let source = G.source
+  for n: Node, d: mut Depth, x: mut Next {
+    d.d = if n.id == source { 0 } else { -1 }
+    x.at = 1000000000
+  }
+  B.level = 0
+  B.mode = 0
+  B.scout = Degree[source].n as i64
+  B.left = G.edges
+  B.awake = 1
+  B.prev = 1
+}
+
+// Top down or bottom up, as GAP decides: bottom up where the links out of
+// the pages reached last are more than a fifteenth of those not yet
+// looked at, and on that way for as long as more pages are reached each
+// time, or more than an eighteenth of them.
+system plan() {
+  if B.mode == 0 {
+    if B.scout > B.left / 15 {
+      B.mode = 1
+      B.prev = B.awake
+    } else { B.left -= B.scout }
+  }
+}
+
+system down() {
+  let level = B.level
+  for e, n: Node, d: Depth where d.d == level {
+    for (e)-[Link]->(v: mut Next) { v.at min= level + 1 }
+  }
+}
+
+system up() {
+  let level = B.level
+  for e, d: Depth, x: mut Next where d.d < 0 {
+    var found = false
+    for (u)-[Link]->(e) {
+      if !found {
+        if let du = Depth(u).d { if du == level { found = true } }
+      }
+    }
+    if found { x.at = level + 1 }
+  }
+}
+
+system settle() {
+  let level = B.level + 1
+  B.awake = 0
+  B.scout = 0
+  for n: Node, d: mut Depth, x: Next where d.d < 0 && x.at <= level {
+    d.d = level
+    B.awake += 1
+    B.scout += n.degree as i64
+  }
+  B.level = level
+}
+
+system after() {
+  if B.mode == 1 {
+    let stay = B.awake >= B.prev || B.awake > (G.nodes / 18) as i64
+    B.prev = B.awake
+    if !stay {
+      B.mode = 0
+      B.scout = 1
+    }
+  }
+}
+
+system bfs_done() {
+  let ms = (now() - G.started) * 1000.0
+  B.reached = 0
+  B.depths = 0
+  for d: Depth where d.d >= 0 {
+    B.reached += 1
+    B.depths += d.d as i64
+  }
+  put("bfs {ms} ms, {B.reached} reached, depths {B.depths}")
+}
+
+system again() { G.runs += 1 }
+system zero() { G.runs = 0 }
+
+schedule setup() { load() }
+schedule pr_begin() { start() pr_start() }
+schedule pr_step() { contrib() pull() }
+schedule pr_end() { pr_done() again() }
+schedule bfs_begin() { start() bfs_start() }
+schedule bfs_step() {
+  plan()
+  down() run_if B.mode == 0
+  up() run_if B.mode == 1
+  settle()
+  after()
+}
+schedule bfs_end() { bfs_done() again() }
+schedule reset() { zero() }
+
+main {
+  setup()
+  loop {
+    pr_begin()
+    loop { pr_step() } until G.error < 0.0001 || G.iters >= 20
+    pr_end()
+  } until G.runs >= 3
+  reset()
+  loop {
+    bfs_begin()
+    loop { bfs_step() } until B.awake == 0
+    bfs_end()
+  } until G.runs >= 3
+}

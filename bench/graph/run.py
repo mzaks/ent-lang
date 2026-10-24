@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""Graph kernels over a relation (bench/graph/graph.ent) against the GAP
+Benchmark Suite (github.com/sbeamer/gapbs) on the same Kronecker graph.
+
+GAP is fetched at a fixed commit and built into build/bench/graph/gapbs with
+the machine's own instruction set; its converter makes the graph (`-g
+scale`), written once as an edge list for ent-lang and serialized for GAP.
+bench/graph/check.cc, built on GAP's graph builder, says what the kernels
+must find, and every ent-lang run is held against it.
+
+Variants, each its own process, round-robin:
+  ent / ent-par        graph.ent: PageRank and the search, so the links
+                       are read both ways
+  ent-pr / ent-pr-par  graph.ent without the search: the links are read
+                       only into a page
+  gap / gap-par        GAP's pr_spmv and bfs
+One core is CPU 2 (taskset), all cores whatever OpenMP and ent-lang take.
+Reports the median over --rounds of each process's best run, in ms.
+
+Usage: bench/graph/run.py [--scale 18] [--rounds 3] [--source 0]
+"""
+
+import argparse
+import os
+import re
+import statistics
+import subprocess
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(HERE))
+OUT = os.path.join(ROOT, "build", "bench", "graph")
+GAP = os.path.join(OUT, "gapbs")
+GAP_URL = "https://github.com/sbeamer/gapbs.git"
+GAP_COMMIT = "941462c"
+ENT = os.path.join(ROOT, "tools", "ent")
+FLAGS = "-std=c++11 -O3 -march=native -fopenmp"
+
+
+def run(cmd, **kw):
+    return subprocess.run(cmd, check=True, capture_output=True, text=True, **kw).stdout
+
+
+def fetch_gap():
+    if not os.path.isdir(GAP):
+        os.makedirs(OUT, exist_ok=True)
+        run(["git", "clone", "-q", GAP_URL, GAP])
+        run(["git", "-C", GAP, "checkout", "-q", GAP_COMMIT])
+    for kernel in ("pr_spmv", "bfs", "converter"):
+        if not os.path.exists(os.path.join(GAP, kernel)):
+            run(["make", "-C", GAP, kernel, "CXX=g++", f"CXX_FLAGS={FLAGS}"])
+    check = os.path.join(OUT, "check")
+    if not os.path.exists(check):
+        run(["g++", "-O2", "-ffp-contract=off", "-std=c++11", "-fopenmp",
+             "-I", os.path.join(GAP, "src"), os.path.join(HERE, "check.cc"),
+             "-o", check])
+    return check
+
+
+def make_graph(scale):
+    folder = os.path.join(OUT, f"kron{scale}")
+    os.makedirs(folder, exist_ok=True)
+    el = os.path.join(folder, "graph.el")
+    sg = os.path.join(folder, "graph.sg")
+    converter = os.path.join(GAP, "converter")
+    if not os.path.exists(el):
+        run([converter, "-g", str(scale), "-e", el])
+    if not os.path.exists(sg):
+        run([converter, "-f", el, "-b", sg])
+    return folder, sg
+
+
+def pr_only(source):
+    """graph.ent without the search, which reads the links out of a page."""
+    for name in ("down", "up"):
+        start = source.index(f"system {name}() {{")
+        end = source.index("\nsystem ", start + 5)
+        source = source[:start] + source[end + 1:]
+    return source.replace("  down() run_if B.mode == 0\n", "").replace(
+        "  up() run_if B.mode == 1\n", "")
+
+
+def build_ent():
+    env = dict(os.environ, ENT_CFLAGS="-march=native")
+    text = open(os.path.join(HERE, "graph.ent")).read()
+    variant = os.path.join(OUT, "graph_pr.ent")
+    open(variant, "w").write(pr_only(text))
+    binaries = {}
+    for name, program in (("ent", os.path.join(HERE, "graph.ent")),
+                          ("ent-pr", variant)):
+        for par in (False, True):
+            out = os.path.join(OUT, name + ("-par" if par else ""))
+            run([ENT, "build"] + (["--parallel"] if par else []) +
+                [program, "-o", out], env=env)
+            binaries[name + ("-par" if par else "")] = out
+    return binaries
+
+
+def ent_times(output):
+    times = {"pr": [], "bfs": []}
+    lines = {}
+    for line in output.splitlines():
+        m = re.match(r"(pr|bfs) ([0-9.]+) ms, (.*)", line)
+        if m:
+            times[m.group(1)].append(float(m.group(2)))
+            lines[m.group(1)] = f"{m.group(1)} {m.group(3)}"
+    return {k: min(v) for k, v in times.items() if v}, lines
+
+
+def gap_time(output):
+    trials = [float(t) for t in re.findall(r"Trial Time:\s+([0-9.]+)", output)]
+    return min(trials) * 1000.0
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--scale", type=int, default=18)
+    parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--source", type=int, default=0)
+    args = parser.parse_args()
+
+    check = fetch_gap()
+    folder, sg = make_graph(args.scale)
+    want = {line.split(" ")[0]: line for line in
+            run([check, "-f", sg, "-r", str(args.source)]).splitlines()
+            if line.startswith(("pr ", "bfs "))}
+    binaries = build_ent()
+    one = ["taskset", "-c", "2"]
+    results = {}
+    for _ in range(args.rounds):
+        for name, binary in binaries.items():
+            pinned = [] if name.endswith("-par") else one
+            out = run(pinned + [binary], cwd=folder)
+            times, lines = ent_times(out)
+            if name.startswith("ent-pr"):
+                # (Without its steps the search goes nowhere.)
+                times.pop("bfs", None)
+                lines.pop("bfs", None)
+            for kernel, line in lines.items():
+                if line != want[kernel]:
+                    raise SystemExit(f"{name}: {line!r}, want {want[kernel]!r}")
+            for kernel, ms in times.items():
+                results.setdefault((name, kernel), []).append(ms)
+        for par in (False, True):
+            env = dict(os.environ)
+            if not par:
+                env["OMP_NUM_THREADS"] = "1"
+            pinned = [] if par else one
+            name = "gap-par" if par else "gap"
+            for kernel, exe, extra in (("pr", "pr_spmv", []),
+                                       ("bfs", "bfs", ["-r", str(args.source)])):
+                out = run(pinned + [os.path.join(GAP, exe), "-f", sg, "-n", "3"] + extra,
+                          env=env)
+                results.setdefault((name, kernel), []).append(gap_time(out))
+
+    print(f"kron{args.scale}: {want['pr']}; {want['bfs']}")
+    print(f"{'variant':<12} {'pr ms':>9} {'bfs ms':>9}")
+    for name in ("ent", "ent-pr", "gap", "ent-par", "ent-pr-par", "gap-par"):
+        row = [statistics.median(results[(name, k)]) if (name, k) in results else None
+               for k in ("pr", "bfs")]
+        print(f"{name:<12} " + " ".join(f"{v:9.2f}" if v is not None else f"{'':>9}"
+                                         for v in row))
+
+
+if __name__ == "__main__":
+    main()

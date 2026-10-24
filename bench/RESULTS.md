@@ -3847,3 +3847,38 @@ by side. The `for`s a hash index answers go by the same tags; keeping
 the index costs as before (`bench/hash/run.py`: as fits 0.27 / 0.28,
 `incremental` 0.20 / 0.22, `rebuild` 1.26 / 1.21 ms a frame, 1,000 teams,
 one in 1,000 changing).
+
+## 2026-10-24: graph kernels against GAP
+
+`bench/graph/run.py`: two kernels of the GAP Benchmark Suite (gapbs at
+941462c, built `-O3 -march=native -fopenmp`) and `bench/graph/graph.ent`
+on the same Kronecker graph, 2^18 vertices and 7,610,898 links (both
+directions of 3,805,449 edges; GAP's `converter -g 18 -e`, read back as
+GAP and ent-lang read it). PageRank is GAP's `pr_spmv` (8 iterations to
+an error under 1e-4), the search its direction-optimizing `bfs` from
+vertex 0. ent-lang gives what `bench/graph/check.cc` (GAP's builder, one
+core, no fused multiply-add) gives, to the bit: every score's bits
+hashed, and 173,900 vertices reached at depths adding to 628,555; on all
+cores too. Ryzen AI 9 HX 370 on mains power, native builds, one core is
+CPU 2; ms, the median of 3 processes of each one's best of 3 runs.
+
+| variant | PageRank | search |
+|---|---|---|
+| ent | 151.0 | 6.63 |
+| ent, without the search | 45.1 | |
+| GAP | 40.9 | 3.33 |
+| ent, all cores | 33.6 | 2.26 |
+| ent without the search, all cores | 8.13 | |
+| GAP, all cores | 6.64 | 0.67 |
+
+The search reads the links out of a page (top down) and into it (bottom
+up), so the table of links is in the order of their sources and those
+into a page are found by an index of positions: each link a load of its
+position and then reads of its source and fields wherever that is.
+PageRank, which goes along the links into a page, is 3.7 times GAP's
+for that. Without the search in the program the table is in the order of
+the targets and PageRank is 1.10 times GAP's (1.22 on all cores). GAP
+keeps the graph twice, once each way. The search is twice GAP's: a step
+top down goes over every vertex for those reached last (GAP keeps them
+in a queue), and bottom up a vertex goes on over all its links after it
+found one reached last (GAP breaks off there), besides the index.
