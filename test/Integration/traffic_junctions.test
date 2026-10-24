@@ -1,0 +1,15 @@
+// examples/traffic/junctions.ent compiles: the junctions of town.ent in a
+// window, the roads and the cars drawn as rows of the window's `Shapes`.
+// Running it needs a display and raylib, which a test cannot ask for;
+// traffic_town.test runs the junctions without one.
+// RUN: ent-translate --import-ent %S/../../examples/traffic/junctions.ent \
+// RUN:     -I %S/../../devices -I %S/../../examples/traffic -o %t.mlir
+// RUN: ent-opt %t.mlir --ent-indexes --ent-lower-to-loops=fuse-systems=1 \
+// RUN:     --symbol-dce --convert-scf-to-cf --convert-to-llvm \
+// RUN:     --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir | FileCheck %s
+
+// CHECK-DAG: declare void @ent_window_draw_shapes(
+// CHECK-DAG: define void @town.think(
+// CHECK-DAG: define void @town.cross(
+// CHECK-DAG: define void @town.round(

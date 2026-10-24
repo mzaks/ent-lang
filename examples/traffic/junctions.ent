@@ -1,0 +1,242 @@
+// The junctions of town.ent in a window: four streets meet, and the cars
+// find their way through in one of four ways. Choose with the keys 1 to 4:
+//
+//   1. Traffic lights: north and south go, then east and west; a car that
+//      turns left waits for a gap in the cars that come the other way.
+//   2. A roundabout: the cars that go in give way to the cars in it.
+//   3. A priority road: east and west go first, and north and south wait
+//      for a gap of five seconds in it.
+//   4. A stop at every street: each car stops, and the first to stop goes
+//      first.
+//
+//   tools/ent run examples/traffic/junctions.ent
+//
+// Up and down: more or fewer cars come in (an hour, on every street);
+// left and right: slower or faster time; space holds it. Each car is in
+// the colour of how fast it goes, red standing and green at the speed
+// limit of 50 km/h. At the bottom: how many cars an hour the junction
+// lets through, and how many wait to come in; with more cars than it lets
+// through, the streets fill up.
+import window
+import math
+import town
+
+const GRASS: i32 = 0x1d2a20
+
+// What the viewer chose, and what the keys were the frame before. `pace`
+// is the steps a frame and `left` how many of them are still to run in
+// this one; `scale` and `ox`, `oy` put a metre of the world in the
+// window.
+unique View { pace: i32, left: i32, paused: bool, scale: f32, ox: f32, oy: f32,
+              was_space: bool, was_up: bool, was_down: bool, was_left: bool,
+              was_right: bool }
+unique Count { cars: i32 }
+
+world {
+  Window.width = 1280
+  Window.height = 860
+  Window.title = "ent-lang: junctions"
+  Window.background = GRASS
+  Window.fps = 60
+  Window.resizable = true
+  Sim.dt = 0.05
+  Sim.seed = 7
+  Sim.inflow = 250.0
+  View.pace = 2
+}
+
+// Red to yellow to green, as `v` goes from 0 to `v0`.
+fn speed_color(v: f32, v0: f32) -> i32 {
+  let part = min(1.0, max(0.0, v / v0))
+  if part < 0.5 { blend(0xe0383c, 0xf2c94c, part * 2.0) } else {
+    blend(0xf2c94c, 0x4cc76a, (part - 0.5) * 2.0)
+  }
+}
+
+// The keys.
+system look() {
+  let space = Keys.space
+  let up = Keys.up
+  let down = Keys.down
+  let left = Keys.left
+  let right = Keys.right
+  if space && !View.was_space { View.paused = !View.paused }
+  if up && !View.was_up { Sim.inflow = min(1500.0, Sim.inflow + 100.0) }
+  if down && !View.was_down { Sim.inflow = max(100.0, Sim.inflow - 100.0) }
+  if right && !View.was_right { View.pace = min(32, View.pace * 2) }
+  if left && !View.was_left { View.pace = max(1, View.pace / 2) }
+  for i in 0..4 {
+    if key_down('1' as i32 + i) { Sim.scene = i }
+  }
+  View.was_space = space
+  View.was_up = up
+  View.was_down = down
+  View.was_left = left
+  View.was_right = right
+  View.left = if View.paused { 0 } else { View.pace }
+  View.scale = min(Window.width as f32, Window.height as f32 - 60.0) / (2.0 * FAR + 8.0)
+  View.ox = Window.width as f32 * 0.5
+  View.oy = (Window.height as f32 - 60.0) * 0.5 + 4.0
+}
+
+// The grass, the roads (discs along each, that run together), what is
+// painted on them and the lights.
+system ground() {
+  let sc = View.scale
+  let ox = View.ox
+  let oy = View.oy
+  for p in 0..len(Paint) {
+    if Paint[p].kind == 0 {
+      circle(ox + Paint[p].x0 * sc, oy + Paint[p].y0 * sc, Paint[p].r * sc, Paint[p].color)
+    }
+  }
+  let w = 2.0 * HALF * sc + 1.0
+  for r in 0..len(Roads) {
+    let n = (Roads[r].length / 1.0) as i32 + 1
+    for k in 0..n + 1 {
+      let t = k as f32 / n as f32
+      let x = bez(Roads[r].x0, Roads[r].cx, Roads[r].x1, t)
+      let y = bez(Roads[r].y0, Roads[r].cy, Roads[r].y1, t)
+      Shapes += { x: ox + x * sc - w * 0.5, y: oy + y * sc - w * 0.5, w: w, h: w,
+                  color: ASPHALT, round: true }
+    }
+  }
+}
+
+system marks() {
+  let sc = View.scale
+  let ox = View.ox
+  let oy = View.oy
+  for p in 0..len(Paint) {
+    let kind = Paint[p].kind
+    let x0 = ox + Paint[p].x0 * sc
+    let y0 = oy + Paint[p].y0 * sc
+    let x1 = ox + Paint[p].x1 * sc
+    let y1 = oy + Paint[p].y1 * sc
+    if kind == 1 {
+      line(x0, y0, x1, y1, Paint[p].color)
+      line(x0 + 1.0, y0, x1 + 1.0, y1, Paint[p].color)
+      line(x0, y0 + 1.0, x1, y1 + 1.0, Paint[p].color)
+    }
+    if kind == 2 {
+      let long = sqrt((x1 - x0) * (x1 - x0) + (y1 - y0) * (y1 - y0))
+      let n = (long / (3.0 * sc)) as i32
+      for k in 0..n {
+        if k % 2 == 0 {
+          let t0 = k as f32 / n as f32
+          let t1 = (k + 1) as f32 / n as f32
+          line(x0 + (x1 - x0) * t0, y0 + (y1 - y0) * t0, x0 + (x1 - x0) * t1,
+               y0 + (y1 - y0) * t1, Paint[p].color)
+        }
+      }
+    }
+  }
+  let time = Sim.time
+  for r in 0..len(Roads) {
+    let light = Roads[r].light
+    if light >= 0 || Roads[r].stop {
+      // To the right of the line.
+      let dx = Roads[r].x1 - Roads[r].x0
+      let dy = Roads[r].y1 - Roads[r].y0
+      let n = sqrt(dx * dx + dy * dy)
+      let x = ox + (Roads[r].x1 - dy / n * 4.2) * sc
+      let y = oy + (Roads[r].y1 + dx / n * 4.2) * sc
+      if light >= 0 {
+        let state = light_state(light, time)
+        let color = if state == 2 { 0x3ddc5a } else if state == 1 { 0xf4c430 } else { 0xf03c3c }
+        circle(x, y, 1.4 * sc, 0x111111)
+        circle(x, y, 1.0 * sc, color)
+      } else {
+        circle(x, y, 1.3 * sc, 0xffffff)
+        circle(x, y, 1.0 * sc, 0xd02828)
+      }
+    }
+  }
+}
+
+// Every car: three discs along it, from its front to its back.
+system cars() {
+  let sc = View.scale
+  let ox = View.ox
+  let oy = View.oy
+  for c: Car, at: Spot, s: Speed {
+    let r = c.road
+    let t = max(0.0, at.u - c.length * 0.5) / Roads[r].length
+    let x = bez(Roads[r].x0, Roads[r].cx, Roads[r].x1, t)
+    let y = bez(Roads[r].y0, Roads[r].cy, Roads[r].y1, t)
+    let tx = bez_d(Roads[r].x0, Roads[r].cx, Roads[r].x1, t)
+    let ty = bez_d(Roads[r].y0, Roads[r].cy, Roads[r].y1, t)
+    let n = max(0.001, sqrt(tx * tx + ty * ty))
+    let along = c.length * 0.3 / n
+    let dot = 1.9 * sc
+    let color = speed_color(s.v, LIMIT)
+    Shapes += { x: ox + (x + tx * along) * sc - dot * 0.5, y: oy + (y + ty * along) * sc - dot * 0.5,
+                w: dot, h: dot, color: color, round: true }
+    Shapes += { x: ox + x * sc - dot * 0.5, y: oy + y * sc - dot * 0.5, w: dot, h: dot,
+                color: color, round: true }
+    Shapes += { x: ox + (x - tx * along) * sc - dot * 0.5, y: oy + (y - ty * along) * sc - dot * 0.5,
+                w: dot, h: dot, color: color, round: true }
+  }
+}
+
+system words() {
+  Count.cars = 0
+  for c: Car { Count.cars += 1 }
+  let cars = Count.cars
+  var waiting = 0
+  for i in 0..len(Entries) { waiting += Entries[i].due }
+  let scene = Sim.scene
+  if scene == LIGHTS {
+    label("1  Traffic lights: north and south go, then east and west; who turns left waits for a gap",
+          16.0, 12.0, 20.0, 0xffffff)
+  } else if scene == ROUNDABOUT {
+    label("2  Roundabout: who goes in gives way to who is in it", 16.0, 12.0, 20.0, 0xffffff)
+  } else if scene == PRIORITY {
+    label("3  Priority road: east and west first; north and south wait for 5 s free", 16.0,
+          12.0, 20.0, 0xffffff)
+  } else {
+    label("4  Stop on every street: the first to stop goes first", 16.0, 12.0, 20.0, 0xffffff)
+  }
+  let per = if Sim.time > 1.0 { (Sim.gone as f32 * 3600.0 / Sim.time) as i32 } else { 0 }
+  let inflow = Sim.inflow as i32
+  let seconds = Sim.time as i32
+  let state = if View.paused { "held" } else { "{View.pace} steps a frame" }
+  let bottom = Window.height as f32 - 46.0
+  label("{inflow} cars an hour on each street; {cars} on the roads, {waiting} waiting to come in, {per} through an hour",
+        16.0, bottom, 16.0, 0xd0d4d8)
+  label("{seconds} s, {state}.   1-4: junction   up/down: cars   left/right: time   space: hold",
+        16.0, bottom + 22.0, 14.0, 0x9aa0a6)
+}
+
+// (A new scene is laid at the start of a frame.)
+system count() { View.left -= 1 }
+
+// (A new scene is laid at the start of a frame.)
+schedule frame() {
+  begin()
+  look()
+  lay()
+}
+
+schedule advance() run_if View.left > 0 {
+  step()
+  count()
+}
+
+schedule draw() {
+  ground()
+  shapes()
+  marks()
+  cars()
+  shapes()
+  words()
+  present()
+}
+
+main {
+  loop {
+    frame()
+    loop { advance() } until View.left <= 0
+    draw()
+  } until Window.closed
+}

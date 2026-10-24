@@ -1,0 +1,15 @@
+// The junctions of examples/traffic/town.ent (lights, a roundabout, a
+// priority road and stops on every street), ten minutes each with more
+// cars than the lights and the stops let through: none stands on the car
+// ahead, no two on paths that cross, join or split come within 2.5 m of
+// each other, and none of the junctions locks up. The same on one core
+// and on all of them.
+// RUN: %ent run -I %S/../../examples/traffic %S/Inputs/traffic_town.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel -I %S/../../examples/traffic %S/Inputs/traffic_town.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s < %t.one
+
+// CHECK: scene 0: {{1[0-9][0-9]}} through, 0 overlaps, 0 close
+// CHECK: scene 1: {{[23][0-9][0-9]}} through, 0 overlaps, 0 close
+// CHECK: scene 2: {{1[0-9][0-9]}} through, 0 overlaps, 0 close
+// CHECK: scene 3: {{1[0-9][0-9]}} through, 0 overlaps, 0 close

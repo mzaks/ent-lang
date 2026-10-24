@@ -1,0 +1,55 @@
+// The four junctions of examples/traffic/town.ent, ten minutes each with
+// 600 cars an hour on every street, more than the lights and the stops
+// let through: how many cars went through, in how many steps a car stood
+// on the car ahead, and in how many two cars on different roads came
+// within 2.5 m of each other (where their paths cross, join or split).
+import console
+import town
+
+unique Close { n: i64 }
+
+world {
+  Sim.dt = 0.05
+  Sim.seed = 7
+  Sim.inflow = 600.0
+}
+
+system close() {
+  for i in 0..len(Flow) {
+    for j in i + 1..len(Flow) {
+      let ri = Flow[i].road
+      let rj = Flow[j].road
+      if ri != rj {
+        let ti = Flow[i].u / Roads[ri].length
+        let tj = Flow[j].u / Roads[rj].length
+        let dx = bez(Roads[ri].x0, Roads[ri].cx, Roads[ri].x1, ti) -
+                 bez(Roads[rj].x0, Roads[rj].cx, Roads[rj].x1, tj)
+        let dy = bez(Roads[ri].y0, Roads[ri].cy, Roads[ri].y1, ti) -
+                 bez(Roads[rj].y0, Roads[rj].cy, Roads[rj].y1, tj)
+        if dx * dx + dy * dy < 6.25 { Close.n += 1 }
+      }
+    }
+  }
+}
+
+system report() {
+  put("scene {Sim.scene}: {Sim.gone} through, {Sim.overlaps} overlaps, {Close.n} close")
+  Sim.scene += 1
+  Sim.overlaps = 0
+  Close.n = 0
+}
+
+schedule tell() { report() }
+
+schedule tick() {
+  lay()
+  step()
+  close()
+}
+
+main {
+  loop {
+    loop { tick() } until Sim.time >= 600.0
+    tell()
+  } until Sim.scene == 4
+}

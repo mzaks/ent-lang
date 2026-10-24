@@ -46,6 +46,24 @@ which need the cars in their order by lane and position every step.
   With one lane it is `idm.ent`'s model to the bit.
 - `check/lanes.c`: the same in plain C, which `lanes.ent` matches to the
   bit, lane changes and all.
+- `town.ent`: junctions where four streets meet, in one of four ways:
+  traffic lights (where a car that turns left gives way to the cars that
+  come the other way), a roundabout, a priority road and a stop on every
+  street. Streets are roads of one lane on curves, and a car drives its
+  route over them by the intelligent driver model, behind the car ahead
+  on its own road or the next ones, behind a car that joins from another
+  road nearer to where they meet, and behind one that went the other way
+  where a road splits, until it is clear. At a junction a car asks the
+  light, the stop, whether there is room on the road after, and the paths
+  that cross or join its own, worked out from the curves: it gives way to
+  a car on such a path, or coming onto it within its gap of time, and at
+  the stops to whoever stopped first.
+- `junctions.ent`: `town.ent` in a window: 1 to 4 choose the junction, up
+  and down change how many cars come in, left and right how fast the time
+  goes. Each car is in the colour of its speed, and the window says how
+  many cars an hour the junction lets through: with 600 an hour on every
+  street the roundabout lets some 1,800 through, the priority road and the
+  lights some 1,150, and the stops 860, and the streets fill up.
 - `show.ent`: `lanes.ent`'s roads in a window: Sugiyama's 22 cars, two
   lanes with trucks and three lanes too full to flow evenly, each car
   in the colour of how fast it goes against how fast its driver would.
@@ -60,6 +78,7 @@ tools/ent run --parallel examples/traffic/flow.ent > flow.csv
 examples/traffic/check/flow.py
 tools/ent run examples/traffic/sugiyama.ent
 tools/ent run examples/traffic/show.ent
+tools/ent run examples/traffic/junctions.ent
 ```
 
 `test/Integration/traffic_ring.test` runs a few roads and checks the
@@ -68,5 +87,7 @@ runs two roads of the driver model in ent and in C and compares them to
 the bit, on one core and on all; `test/Integration/traffic_lanes.test`
 does so for `lanes.ent` with one lane (against `check/idm.c`) and with
 two and three (against `check/lanes.c`); `test/Integration/traffic_show.test`
-compiles `show.ent`. `bench/traffic` times 120,000
+and `traffic_junctions.test` compile `show.ent` and `junctions.ent`, and
+`traffic_town.test` runs the four junctions of `town.ent` without a
+window: no car runs into another, none of them locks up. `bench/traffic` times 120,000
 cars on roads of three lanes.
