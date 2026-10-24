@@ -1,0 +1,103 @@
+// A relation whose edges change every step while loops go over them both
+// ways (see test/Integration/edges_mend.test): every step some nodes let
+// go of the first edge into them and of the first out of them, and link
+// to others; the edges' weights are made smaller going out of a node and
+// added up going into one, with how many there are. Then a hash of what
+// each node holds, every step.
+import console
+import wyhash
+
+component Node { id: i32, sum: f32, count: i32 } capacity 4096
+relation (Node)-[Tie { w: f32, n: i32 }]->(Node) capacity 40000
+
+buffer Ids { who: entity } capacity 4096
+unique S { step: i64, nodes: i32, hash: u64 }
+
+world {
+  S.nodes = 2000
+  for i in 0..2000 {
+    let e = spawn { Node { id: i, sum: 0.0, count: 0 } }
+    Ids += { who: e }
+  }
+  for i in 0..2000 {
+    for j in 0..6 {
+      let to = (wyhash64(7, (i * 6 + j) as u64) % 2000) as i32
+      let a = Ids[i].who
+      let b = Ids[to].who
+      connect (a)-[Tie { w: 1.0 + j as f32, n: j }]->(b)
+    }
+  }
+}
+
+// Every 7th node, by the step, lets go of the first edge into it.
+system cut() {
+  let step = S.step
+  for e, n: Node where (n.id as i64 + step) % 7 == 0 {
+    var first = true
+    for (u)-[t: Tie]->(e) {
+      if first {
+        t.disconnect()
+        first = false
+      }
+    }
+  }
+}
+
+// Every 23rd node lets go of its first edge out and links to two others.
+system rewire() {
+  let step = S.step
+  for e, n: Node where (n.id as i64 + step) % 23 == 0 {
+    var first = true
+    for (e)-[t: Tie]->(v) {
+      if first {
+        t.disconnect()
+        first = false
+      }
+    }
+    for k in 0..2 {
+      let to = (wyhash64(step as u64, (n.id * 2 + k) as u64) % 2000) as i32
+      let b = Ids[to].who
+      connect (e)-[Tie { w: 0.5 + k as f32, n: n.id % 9 }]->(b)
+    }
+  }
+}
+
+system fade() {
+  for e, n: Node {
+    for (e)-[mut t: Tie]->(v) { t.w = t.w * 0.9 + 0.01 }
+  }
+}
+
+system gather() {
+  for e, n: mut Node {
+    var sum = 0.0
+    var count = 0
+    for (u)-[t: Tie]->(e) {
+      sum += t.w * (t.n + 1) as f32
+      count += 1
+    }
+    n.sum = sum
+    n.count = count
+  }
+}
+
+system report() {
+  S.hash = 0
+  for n: Node {
+    S.hash += (bits_of(n.sum) as u64 + n.count as u64) * (n.id as u64 + 1)
+  }
+  put("step {S.step}: {S.hash}")
+  S.step += 1
+}
+
+schedule step() {
+  cut()
+  rewire()
+  fade()
+  gather()
+  report()
+}
+
+main {
+  loop { step() } until S.step == 40
+}

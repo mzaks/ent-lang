@@ -668,6 +668,13 @@ public:
                                       : relation.indexOffset,
                 layout.entityKeys + 1, offsetType(relation));
   }
+  /// Where each key's run of edges ends, in the order `in` or `out`
+  /// visits them (see WorldRelation::endsOffset).
+  Value edgeEnds(const WorldRelation &relation, bool in) {
+    return view(relation.isSorted(in) ? relation.endsOffset
+                                      : relation.indexEndsOffset,
+                layout.entityKeys, offsetType(relation));
+  }
   Value indexEdges(const WorldRelation &relation) {
     return view(relation.indexEdgesOffset, relation.capacity,
                 offsetType(relation));
@@ -2448,6 +2455,10 @@ static void printLayoutMap(const WorldLayout &layout) {
     add(relation.sortedOffset, name + ".sorted");
     add(relation.indexOffset, name + ".index");
     add(relation.indexEdgesOffset, name + ".indexEdges");
+    add(relation.endsOffset, name + ".ends");
+    add(relation.indexEndsOffset, name + ".indexEnds");
+    add(relation.slotOffset, name + ".slot");
+    add(relation.mendsOffset, name + ".mends");
     add(relation.cursorOffset, name + ".cursor");
     add(relation.sourceScratchOffset, name + ".sourceScratch");
     add(relation.targetScratchOffset, name + ".targetScratch");
@@ -6435,6 +6446,10 @@ static std::pair<Value, Value> emitEdgeRange(IRRewriter &rewriter,
                                              Location loc, WorldAccess &world,
                                              const WorldRelation &relation,
                                              bool in, Value key);
+static Value callEdges(IRRewriter &rewriter, Location loc, ModuleOp module,
+                       const WorldLayout &layout, WorldAccess &world,
+                       const WorldRelation &relation, StringRef name,
+                       TypeRange results = {});
 static void appendEdge(IRRewriter &rewriter, Location loc,
                        const WorldLayout &layout, WorldAccess &world,
                        const WorldRelation &relation, Value source,
@@ -6828,6 +6843,14 @@ static std::pair<Value, Value> emitEdgeRange(IRRewriter &rewriter,
                                              const WorldRelation &relation,
                                              bool in, Value key) {
   Value offsets = world.edgeOffsets(relation, in);
+  // (Kept in order in place, a run ends before the room after it.)
+  if (relation.mended()) {
+    Value begin =
+        memref::LoadOp::create(rewriter, loc, offsets, ValueRange{key});
+    Value end = memref::LoadOp::create(
+        rewriter, loc, world.edgeEnds(relation, in), ValueRange{key});
+    return {world.toIndex(loc, begin), world.toIndex(loc, end)};
+  }
   Value next = arith::AddIOp::create(
       rewriter, loc, key, arith::ConstantIndexOp::create(rewriter, loc, 1));
   Value begin = memref::LoadOp::create(rewriter, loc, offsets, ValueRange{key});
@@ -8183,6 +8206,22 @@ static void appendEdge(IRRewriter &rewriter, Location loc,
     rewriter.setInsertionPointToStart(ifHas.elseBlock());
   }
   Value counter = world.edgeCount(relation);
+  // (Kept in order in place: where the table is full, the room in its
+  // runs is taken out first.)
+  if (relation.mended()) {
+    Value had =
+        memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero});
+    auto ifFull = scf::IfOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sge, had,
+                              arith::ConstantIntOp::create(
+                                  rewriter, loc, relation.capacity, 64)));
+    rewriter.setInsertionPointToStart(ifFull.thenBlock());
+    callEdges(rewriter, loc,
+              rewriter.getBlock()->getParentOp()->getParentOfType<ModuleOp>(),
+              layout, world, relation, "ent_edges_squeeze");
+    rewriter.setInsertionPointAfter(ifFull);
+  }
   Value count = memref::LoadOp::create(rewriter, loc, counter,
                                        ValueRange{zero});
   Value at = world.toIndex(loc, count);
@@ -9800,6 +9839,71 @@ static void emitPartitionedSort(IRRewriter &rewriter, Location loc,
   (void)i32;
 }
 
+/// Call devices/edges.c's `name` for `relation` (mended in place, see
+/// WorldRelation::endsOffset) with what it needs to know of it: the
+/// arena's address and the offsets and sizes devices/edges.c's SPEC_*
+/// says, in a constant list.
+static Value callEdges(IRRewriter &rewriter, Location loc, ModuleOp module,
+                       const WorldLayout &layout, WorldAccess &world,
+                       const WorldRelation &relation, StringRef name,
+                       TypeRange results) {
+  const EntityScheme &scheme = layout.entities;
+  uint64_t keyMask =
+      scheme.kind == EntityScheme::Rows
+          ? (scheme.idBits == 64 ? ~uint64_t(0)
+                                 : (uint64_t(1) << scheme.idBits) - 1)
+          : (uint64_t(1) << scheme.slotBits) - 1;
+  SmallVector<int64_t> spec{
+      (relation.hasIndex() ? 1 : 0) | (relation.byTarget ? 2 : 0) |
+          (relation.positions ? 4 : 0),
+      layout.entityKeys,
+      relation.capacity,
+      relation.offsetBits / 8,
+      scheme.idBits / 8,
+      int64_t(keyMask),
+      int64_t(relation.countOffset),
+      int64_t(relation.sortedOffset),
+      int64_t(relation.endsOffset),
+      int64_t(relation.sourceOffset),
+      int64_t(relation.targetOffset),
+      int64_t(relation.deadOffset),
+      int64_t(relation.indexOffset),
+      int64_t(relation.indexEndsOffset),
+      int64_t(relation.indexEdgesOffset),
+      int64_t(relation.slotOffset),
+      int64_t(relation.hasIndex() ? relation.sourceScratchOffset : 0),
+      int64_t(relation.hasIndex() ? relation.targetScratchOffset : 0),
+      int64_t(relation.mendsOffset),
+      int64_t(relation.fields.size())};
+  for (auto [k, field] : llvm::enumerate(relation.fields)) {
+    spec.push_back(field.offset);
+    spec.push_back(world.storageBytes(field.type));
+    spec.push_back(relation.hasCopies() && relation.copied[k]
+                       ? relation.fieldScratchOffsets[k]
+                       : 0);
+  }
+  auto type = MemRefType::get({int64_t(spec.size())}, rewriter.getI64Type());
+  std::string global =
+      ("ent_edges_spec_" + RelationOp(relation.op).getSymName()).str();
+  if (!SymbolTable::lookupSymbolIn(module, global)) {
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(module.getBody());
+    memref::GlobalOp::create(
+        rewriter, loc, global, rewriter.getStringAttr("private"), type,
+        DenseIntElementsAttr::get(
+            RankedTensorType::get(type.getShape(), type.getElementType()),
+            ArrayRef(spec)),
+        /*constant=*/true, IntegerAttr());
+  }
+  Value list = memref::GetGlobalOp::create(rewriter, loc, type, global);
+  func::CallOp call =
+      callGpu(rewriter, loc, module, name,
+              ValueRange{worldPointer(rewriter, loc, world.getArena()),
+                         worldPointer(rewriter, loc, list)},
+              results);
+  return results.empty() ? Value() : call.getResult(0);
+}
+
 /// Emit the function that, if `relation` is unclean, sorts its edges by
 /// source with a stable counting sort through the scratch columns,
 /// dropping dead edges and edges with an end that is no longer alive,
@@ -10267,10 +10371,32 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
   // (Built for partitions: by this rank's own edges alone.)
   if (sortsPartitioned(layout, relation)) {
     emitPartitionedSort(rewriter, loc, module, layout, world, relation, keep);
+    // (Every run without room.)
+    if (relation.mended())
+      callEdges(rewriter, loc, module, layout, world, relation,
+                "ent_edges_dense");
     memref::StoreOp::create(rewriter, loc,
                             arith::ConstantIntOp::create(rewriter, loc, 1, 64),
                             world.edgesClean(relation), ValueRange{zero});
     return;
+  }
+  // Kept in order in place where few edges changed (devices/edges.c);
+  // else sorted anew, below, and every run given room again after.
+  if (relation.mended()) {
+    Value failed =
+        callEdges(rewriter, loc, module, layout, world, relation,
+                  "ent_edges_mend", TypeRange{rewriter.getI32Type()});
+    auto ifAnew = scf::IfOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::ne, failed,
+            arith::ConstantIntOp::create(rewriter, loc, 0, 32)),
+        /*withElseRegion=*/true);
+    rewriter.setInsertionPointToStart(ifAnew.elseBlock());
+    memref::StoreOp::create(rewriter, loc,
+                            arith::ConstantIntOp::create(rewriter, loc, 1, 64),
+                            world.edgesClean(relation), ValueRange{zero});
+    rewriter.setInsertionPointToStart(ifAnew.thenBlock());
   }
   // The table's columns and their scratch copies.
   SmallVector<Value> table{sources, targets}, scratch{
@@ -11091,6 +11217,9 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
       });
     }
   }
+  if (relation.mended())
+    callEdges(rewriter, loc, module, layout, world, relation,
+              "ent_edges_spread");
   memref::StoreOp::create(rewriter, loc,
                           arith::ConstantIntOp::create(rewriter, loc, 1, 64),
                           world.edgesClean(relation), ValueRange{zero});
@@ -12432,6 +12561,25 @@ static void appendLooped(IRRewriter &rewriter, SaPlaceOp place,
     rewriter.setInsertionPoint(split.thenBlock()->getTerminator());
     callSends(rewriter, loc, world, "ent_sends_slices", {list}, true);
     Value counter = world.edgeCount(relation);
+    // (Kept in order in place: where they do not fit, the room in the
+    // runs is taken out first.)
+    if (relation.mended()) {
+      Value had =
+          world.toIndex(loc, memref::LoadOp::create(rewriter, loc, counter,
+                                                    ValueRange{zero}));
+      auto ifFull = scf::IfOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::ugt,
+              arith::AddIOp::create(rewriter, loc, had, edges),
+              arith::ConstantIndexOp::create(rewriter, loc,
+                                             relation.capacity)));
+      OpBuilder::InsertionGuard full(rewriter);
+      rewriter.setInsertionPointToStart(ifFull.thenBlock());
+      callEdges(rewriter, loc,
+                rewriter.getBlock()->getParentOp()->getParentOfType<ModuleOp>(),
+                layout, world, relation, "ent_edges_squeeze");
+    }
     Value count =
         memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero});
     Value first = world.toIndex(loc, count);
@@ -23344,6 +23492,10 @@ struct GpuPieces {
         if (relation.deadOffset)
           edges(relation.deadOffset, 1);
         whole(relation.sortedOffset, offsetBytes, layout.entityKeys + 1);
+        if (relation.endsOffset)
+          whole(relation.endsOffset, offsetBytes, layout.entityKeys);
+        if (relation.indexEndsOffset)
+          whole(relation.indexEndsOffset, offsetBytes, layout.entityKeys);
         if (relation.indexOffset) {
           whole(relation.indexOffset, offsetBytes, layout.entityKeys + 1);
           edges(relation.indexEdgesOffset, offsetBytes);

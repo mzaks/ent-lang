@@ -1,0 +1,79 @@
+// The pages and links of a graph GAP made (github.com/sbeamer/gapbs's
+// `converter -g scale -e`): the file `graph.el`, a line "u v" for every
+// link, which `load` reads. bench/graph/graph.ent and churn.ent go over
+// them.
+import console
+import files
+import clock
+import math
+
+capacity Bytes 400000000
+
+// How many pages and links there are; the rest is the kernels'.
+unique G { nodes: i32, edges: i64, source: i32, runs: i32, iters: i32, error: f64,
+           started: f64, hash: u64 }
+
+component Node { id: i32, degree: i32 } capacity 1048576
+component Rank { score: f32 } capacity 1048576
+component Out { contrib: f32 } capacity 1048576
+component Depth { d: i32 } capacity 1048576
+// The least depth sent to it in a step.
+component Next { at: i32 } capacity 1048576
+
+relation (Node)-[Link]->(Node) capacity 40000000
+
+buffer Ids { who: entity } capacity 1048576
+buffer Degree { n: i32 } capacity 1048576
+
+proc now() -> f64 { wait_until(0.0) }
+
+// The graph: a line "u v" for every link, read twice, first for how many
+// pages there are and how many links leave each, then for the links.
+system load() {
+  let size = read_file("graph.el", Bytes)
+  Degree = [{ n: 0 }; 1048576]
+  var most = 0
+  var edges: i64 = 0
+  var i = 0
+  var value = 0
+  var side = 0
+  var from = 0
+  while i < size {
+    let c = Bytes[i].value as i32
+    if c >= 48 && c <= 57 { value = value * 10 + c - 48 } else if c == 32 {
+      from = value
+      value = 0
+    } else if c == 10 {
+      Degree[from].n += 1
+      most = max(most, max(from, value))
+      edges += 1
+      value = 0
+    }
+    i += 1
+  }
+  G.nodes = most + 1
+  G.edges = edges
+  for k in 0..most + 1 {
+    let e = spawn { Node { id: k, degree: Degree[k].n }, Rank { score: 0.0 },
+                    Out { contrib: 0.0 }, Depth { d: -1 }, Next { at: 1000000000 } }
+    Ids += { who: e }
+  }
+  i = 0
+  value = 0
+  while i < size {
+    let c = Bytes[i].value as i32
+    if c >= 48 && c <= 57 { value = value * 10 + c - 48 } else if c == 32 {
+      from = value
+      value = 0
+    } else if c == 10 {
+      let a = Ids[from].who
+      let b = Ids[value].who
+      connect (a)-[Link]->(b)
+      value = 0
+    }
+    i += 1
+  }
+  Bytes = []
+  put("{G.nodes} pages, {G.edges} links")
+}
+

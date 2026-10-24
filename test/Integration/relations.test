@@ -10,7 +10,7 @@
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.rows.ll
 // RUN: clang -O2 -Wno-override-module %t.rows.ll -I%t.dir \
-// RUN:     %S/Inputs/relations_main.c -o %t.rows
+// RUN:     %S/Inputs/relations_main.c %S/../../devices/edges.c -o %t.rows
 // RUN: %t.rows | FileCheck %s --check-prefix=ROWS
 // RUN: ent-opt %S/Inputs/relations.mlir \
 // RUN:     "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1 parallel-min-events=1" \
@@ -18,7 +18,7 @@
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.rowspar.ll
 // RUN: clang -O2 -Wno-override-module %t.rowspar.ll -I%t.dir \
-// RUN:     %S/Inputs/relations_main.c %S/../../devices/sends.c %openmp -o %t.rowspar
+// RUN:     %S/Inputs/relations_main.c %S/../../devices/sends.c %S/../../devices/edges.c %openmp -o %t.rowspar
 // RUN: %t.rowspar | FileCheck %s --check-prefix=ROWS
 
 // a -> b (0.5), a -> c (0.25), b -> c (4), c -> a (0.5); v = 1, 2, 3.
@@ -36,7 +36,7 @@
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.ids.ll
 // RUN: clang -O2 -Wno-override-module %t.ids.ll -I%t.dir \
-// RUN:     %S/Inputs/relations_ids_main.c -o %t.ids
+// RUN:     %S/Inputs/relations_ids_main.c %S/../../devices/edges.c -o %t.ids
 // RUN: %t.ids | FileCheck %s --check-prefix=IDS
 // RUN: ent-opt %S/Inputs/relations_ids.mlir \
 // RUN:     "--ent-lower-to-loops=parallel-entities=1 parallel-min-entities=1 parallel-min-events=1" \
@@ -44,7 +44,7 @@
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.idspar.ll
 // RUN: clang -O2 -Wno-override-module %t.idspar.ll -I%t.dir \
-// RUN:     %S/Inputs/relations_ids_main.c %S/../../devices/sends.c %openmp -o %t.idspar
+// RUN:     %S/Inputs/relations_ids_main.c %S/../../devices/sends.c %S/../../devices/edges.c %openmp -o %t.idspar
 // RUN: %t.idspar | FileCheck %s --check-prefix=IDS
 
 // The host connects c0 -> c2 (10) and c3 -> c1 (0.5); in frame 0 every
@@ -64,7 +64,7 @@
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.order.ll
 // RUN: clang -O2 -Wno-override-module %t.order.ll -I%t.dir \
-// RUN:     %S/Inputs/relations_order_main.c -o %t.order
+// RUN:     %S/Inputs/relations_order_main.c %S/../../devices/edges.c -o %t.order
 // RUN: %t.order | FileCheck %s --check-prefix=ORDER
 
 // Into a: from a (1, then 4, as connected), b (2), c (3).
@@ -80,7 +80,7 @@
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.typed.ll
 // RUN: clang -O2 -Wno-override-module %t.typed.ll -I%t.dir \
-// RUN:     %S/Inputs/relations_typed_main.c -o %t.typed
+// RUN:     %S/Inputs/relations_typed_main.c %S/../../devices/edges.c -o %t.typed
 // RUN: %t.typed | FileCheck %s --check-prefix=TYPED
 
 // TYPED:      0 -> 2: 1

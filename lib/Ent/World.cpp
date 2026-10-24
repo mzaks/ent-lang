@@ -975,6 +975,20 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
                      .getRelationAttr()
                      .getAttr() == name;
     });
+    // Mended in place where systems change it (see endsOffset): its
+    // room is marked dead. Not where a C host reads and connects edges
+    // (a program without `main`), which takes the table as edges side by
+    // side.
+    bool mended = false;
+    bool hosted = module.getOps<MainOp>().empty();
+    if (!relation.tree && !relation.linked && !hosted) {
+      mended = hasDead;
+      module.walk([&](ConnectOp connect) {
+        mended |= connect.getRelationAttr().getAttr() == name &&
+                  connect->getParentOfType<SystemOp>();
+      });
+      hasDead |= mended;
+    }
     relation.offsetBits = relation.capacity < (int64_t(1) << 31) &&
                                   layout.entityKeys < (int64_t(1) << 31)
                               ? 32
@@ -1073,6 +1087,28 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       });
       for (const WorldColumn &field : relation.fields)
         relation.copied.push_back(!written.contains(field.field.getValue()));
+      // (Whether a loop into an entity goes to an edge's own place: see
+      // lowerEdges.)
+      module.walk([&](EdgesOp loop) {
+        if (loop.getRelationAttr().getAttr() != name || loop.isOut())
+          return;
+        loop.walk([&](DisconnectOp) { relation.positions = true; });
+        for (Operation *user :
+             loop.getBody().front().getArgument(0).getUsers()) {
+          auto get = dyn_cast<GetOp>(user);
+          relation.positions |=
+              !get || written.contains(get.getFieldAttr().getValue());
+        }
+      });
+    }
+    if (mended) {
+      relation.endsOffset = place(offsetBytes, keys);
+      if (relation.hasIndex()) {
+        relation.indexEndsOffset = place(offsetBytes, keys);
+        if (relation.positions)
+          relation.slotOffset = place(offsetBytes, edges);
+      }
+      relation.mendsOffset = place(8, 2);
     }
     relation.cursorOffset = place(offsetBytes, keys);
     relation.sourceScratchOffset = place(idBytes, edges);

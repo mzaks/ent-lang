@@ -17,6 +17,13 @@ Variants, each its own process, round-robin:
 One core is CPU 2 (taskset), all cores whatever OpenMP and ent-lang take.
 Reports the median over --rounds of each process's best run, in ms.
 
+Then churn.ent on one core, as built and sorting anew after every change
+(ENT_EDGES_ANEW=1): k links let go of and k made each step, for k of 1,
+100 and 10,000, then every page gathers along its links in: the ms a step
+takes to rewire (with keeping the links in order) and to gather, from
+the fourth step on, and the first three steps' rewiring in all (where the
+links as laid get room). Both must end with the same hash.
+
 Usage: bench/graph/run.py [--scale 18] [--rounds 3] [--source 0]
 """
 
@@ -89,10 +96,13 @@ def build_ent():
                           ("ent-pr", variant)):
         for par in (False, True):
             out = os.path.join(OUT, name + ("-par" if par else ""))
-            run([ENT, "build"] + (["--parallel"] if par else []) +
+            run([ENT, "build", "-I", HERE] + (["--parallel"] if par else []) +
                 [program, "-o", out], env=env)
             binaries[name + ("-par" if par else "")] = out
-    return binaries
+    churn = os.path.join(OUT, "churn")
+    run([ENT, "build", "-I", HERE, os.path.join(HERE, "churn.ent"), "-o", churn],
+        env=env)
+    return binaries, churn
 
 
 def ent_times(output):
@@ -123,7 +133,7 @@ def main():
     want = {line.split(" ")[0]: line for line in
             run([check, "-f", sg, "-r", str(args.source)]).splitlines()
             if line.startswith(("pr ", "bfs "))}
-    binaries = build_ent()
+    binaries, churn = build_ent()
     one = ["taskset", "-c", "2"]
     results = {}
     for _ in range(args.rounds):
@@ -159,6 +169,28 @@ def main():
                for k in ("pr", "bfs")]
         print(f"{name:<12} " + " ".join(f"{v:9.2f}" if v is not None else f"{'':>9}"
                                          for v in row))
+
+    steps = {}
+    for _ in range(args.rounds):
+        for way, extra in (("mended", {}), ("anew", {"ENT_EDGES_ANEW": "1"})):
+            out = run(one + [churn], cwd=folder, env=dict(os.environ, **extra))
+            for m in re.finditer(r"k (\d+): rewire ([0-9.]+) ms, gather ([0-9.]+) ms "
+                                 r"a step, first ([0-9.]+) ms, hash (\d+)", out):
+                k = int(m.group(1))
+                steps.setdefault((way, k), []).append(
+                    (float(m.group(2)), float(m.group(3)), m.group(5),
+                     float(m.group(4))))
+    print(f"{'churn k':<10} {'rewire':>9} {'gather':>9} {'first 3':>9} "
+          f"{'anew':>9} {'gather':>9}")
+    for k in (1, 100, 10000):
+        hashes = {x[2] for way in ("mended", "anew") for x in steps[(way, k)]}
+        if len(hashes) != 1:
+            raise SystemExit(f"churn k {k}: hashes differ: {hashes}")
+        mended = steps[("mended", k)]
+        anew = steps[("anew", k)]
+        med = lambda xs, i: statistics.median(x[i] for x in xs)
+        print(f"{k:<10} {med(mended, 0):9.2f} {med(mended, 1):9.2f} "
+              f"{med(mended, 3):9.2f} {med(anew, 0):9.2f} {med(anew, 1):9.2f}")
 
 
 if __name__ == "__main__":

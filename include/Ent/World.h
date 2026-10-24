@@ -283,6 +283,21 @@ struct WorldRelation {
   uint64_t indexOffset = 0;
   uint64_t indexEdgesOffset = 0;
   SmallVector<bool> copied;
+  /// Kept in order where few edges change (devices/edges.c), for a
+  /// relation that systems connect or disconnect (not a tree): each key's
+  /// run of edges ends at `ends` (and in the index at `indexEnds`), with
+  /// room after it up to the next run; `slot` is each edge's position in
+  /// the index; `mends` (two i64s) how many edges changed since the last
+  /// sort anew, and why the last mending did not (devices/edges.c).
+  uint64_t endsOffset = 0;
+  uint64_t indexEndsOffset = 0;
+  /// Whether a loop over the edges into an entity goes to an edge's own
+  /// place (it writes a field of it, disconnects it, or reads a field that
+  /// has no copy): only then are the index's positions, and `slot`, kept
+  /// where it is mended.
+  bool positions = false;
+  uint64_t slotOffset = 0;
+  uint64_t mendsOffset = 0;
   /// For sorting: a cursor per key and a copy of every column.
   uint64_t cursorOffset = 0;
   uint64_t sourceScratchOffset = 0;
@@ -419,6 +434,8 @@ struct WorldRelation {
   /// Whether the edges' copies in the order of the index are kept (see
   /// indexOffset).
   bool hasCopies() const { return hasIndex() && !linked; }
+  /// Whether its runs end at `ends` (see endsOffset).
+  bool mended() const { return endsOffset != 0; }
   /// Whether a loop visiting incoming (`in`) or outgoing edges reads the
   /// table in order, rather than through the index.
   bool isSorted(bool in) const { return in == byTarget; }

@@ -1,0 +1,15 @@
+// A relation read both ways whose edges change every step: few of them,
+// so its order is mended in place (devices/edges.c) and not sorted anew,
+// the edges into a node through the index by target, with its positions
+// kept (an edge loop into a node disconnects, and the weights are written
+// going out). What the loops find every step is what they find where it
+// is sorted anew every step (ENT_EDGES_ANEW=1), on one core and on all.
+// RUN: %ent run %S/Inputs/edges_mend.ent 2>/dev/null > %t.mended
+// RUN: env ENT_EDGES_ANEW=1 %ent run %S/Inputs/edges_mend.ent 2>/dev/null > %t.anew
+// RUN: %ent run --parallel %S/Inputs/edges_mend.ent 2>/dev/null > %t.all
+// RUN: cmp %t.mended %t.anew
+// RUN: cmp %t.mended %t.all
+// RUN: FileCheck %s < %t.mended
+
+// CHECK: step 0: {{[0-9]+}}
+// CHECK: step 39: {{[0-9]+}}

@@ -1,0 +1,107 @@
+// A graph that changes while it is read: every step `k` pages each let go
+// of the first link out of them and link to another page, drawn from the
+// step and the page, and then every page gathers its links into it once,
+// as an iteration of PageRank does (bench/graph/graph.ent). On a graph GAP
+// made (see web.ent); for k of 1, 100 and 10,000, 50 steps each.
+//
+// What it prints, for each k: the ms a step took to rewire (keeping the
+// links in order after the connects and disconnects with it) and to
+// gather, from the fourth step on, and the first three steps' rewiring
+// (which find the links as they were laid, side by side, and make room
+// among them); and a hash of the scores at the end.
+import console
+import clock
+import math
+import wyhash
+import web
+
+unique C { k: i32, step: i64, steps: i64, at: f64, rewire: f64, gather: f64, first: f64 }
+
+world {
+  C.k = 1
+  C.steps = 50
+}
+
+system begin() {
+  let init = 1.0 / G.nodes as f32
+  for r: mut Rank { r.score = init }
+  C.step = 0
+  C.rewire = 0.0
+  C.gather = 0.0
+  C.first = 0.0
+}
+
+system tick() { C.at = now() }
+
+// The pages whose number is the step's phase in a stride of nodes / k.
+system rewire() {
+  let stride = max(1, G.nodes / C.k)
+  let phase = (C.step % stride as i64) as i32
+  let step = C.step
+  let nodes = G.nodes
+  for e, n: Node where n.id % stride == phase {
+    var first = true
+    for (e)-[l: Link]->(v) {
+      if first {
+        l.disconnect()
+        first = false
+      }
+    }
+    let to = (wyhash64(step as u64, n.id as u64) % nodes as u64) as i32
+    let t = Ids[to].who
+    connect (e)-[Link]->(t)
+  }
+}
+
+system rewired() {
+  let t = now()
+  if C.step < 3 { C.first += t - C.at } else { C.rewire += t - C.at }
+  C.at = t
+}
+
+system contrib() {
+  for n: Node, r: Rank, o: mut Out { o.contrib = r.score / max(1, n.degree) as f32 }
+}
+
+system pull() {
+  let base = (1.0 - 0.85) / G.nodes as f32
+  for e, r: mut Rank {
+    var total = 0.0
+    for (u: Out)-[Link]->(e) { total += u.contrib }
+    r.score = base + 0.85 * total
+  }
+}
+
+system gathered() {
+  if C.step >= 3 { C.gather += now() - C.at }
+  C.step += 1
+}
+
+system report() {
+  for n: Node, r: Rank { G.hash += (bits_of(r.score) as u64) * (n.id as u64 + 1) }
+  let steps = (C.steps - 3) as f64
+  put("k {C.k}: rewire {C.rewire * 1000.0 / steps} ms, gather {C.gather * 1000.0 / steps} ms a step, first {C.first * 1000.0} ms, hash {G.hash}")
+  G.hash = 0
+  C.k *= 100
+}
+
+schedule setup() { load() }
+schedule start() { begin() }
+schedule step() {
+  tick()
+  rewire()
+  rewired()
+  contrib()
+  pull()
+  gathered()
+}
+schedule end() { report() }
+
+main {
+  setup()
+  loop {
+    start()
+    loop { step() } until C.step >= C.steps
+    end()
+  } until C.k > 10000
+}

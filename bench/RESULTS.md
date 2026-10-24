@@ -3908,3 +3908,36 @@ is left of it against GAP is the scan of every vertex top down and the
 links gone over after one was found bottom up. A sort of a relation with
 an index makes one pass more over its edges (copying them in the index's
 order), and no memory more.
+
+### A graph that changes: the links kept in order in place
+
+`bench/graph/churn.ent` on the same graph: every step k pages each let go
+of their first link out and link to a page drawn at random, then every
+page gathers along its links in (an iteration of PageRank's). ms a step
+on one core, from the fourth step on; "anew" sorts the whole table after
+every change, as before (`ENT_EDGES_ANEW=1`); both end with the same
+hash of the scores, to the bit.
+
+| k | rewire | gather | first 3 steps | anew: rewire | gather |
+|---|---|---|---|---|---|
+| 1 | 0.60 | 5.89 | 142.5 | 60.19 | 5.91 |
+| 100 | 0.68 | 5.90 | 2.16 | 60.17 | 5.91 |
+| 10,000 | 8.95 | 6.01 | 20.48 | 62.23 | 5.94 |
+
+Before, one link changed cost a sort of all 7.6 million (60 ms, ten times
+an iteration of PageRank). Now a relation that systems connect or
+disconnect (in a program with `main`) keeps each entity's run of edges
+with room after it (devices/edges.c): an edge connected goes to the end of
+its run, one disconnected is taken out and those after it move down, so
+the order is the one a sort would give, and so is the index by target's
+(its runs in table order, kept with their copies). A full run takes room
+from the nearest that has some, the runs between moved over by one. It
+sorts anew where more than a sixteenth of the edges changed since the
+last sort, where the moves would cost more than the sort, or where room
+had to come from far away (then with room again in every run: an eighth
+of its length, and one for every key up to the last with an edge). The
+first steps pay that once here, for the table as laid has no room. The
+index's positions (and each edge's slot in the index) are kept only where
+a loop into an entity needs an edge's own place; without them, an edge
+is found in its target's run by its source. PageRank and the search read
+the table with its room as fast as before (45.1 and 4.55 ms).

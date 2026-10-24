@@ -310,6 +310,7 @@ def cache_key(arguments):
     # (The C that keeps what a `for` sends from a loop.)
     note_file(os.path.join(ROOT, "devices", "sends.c"))
     note_file(os.path.join(ROOT, "devices", "memory.c"))
+    note_file(os.path.join(ROOT, "devices", "edges.c"))
 
     include_directories = arguments.I + [os.path.join(ROOT, "devices")]
     files, assets = made_of(arguments)
@@ -737,6 +738,8 @@ def build(arguments, output, directory):
     given.append(os.path.join(ROOT, "devices", "sends.c"))
     # And where the world lives (in a file, with ENT_WORLD_DIR).
     given.append(os.path.join(ROOT, "devices", "memory.c"))
+    # (And what keeps a relation's edges in order where few change.)
+    given.append(os.path.join(ROOT, "devices", "edges.c"))
     # (With --trace: what keeps the times, see the ent-trace pass.)
     if arguments.trace:
         given.append(os.path.join(ROOT, "devices", "trace.c"))
