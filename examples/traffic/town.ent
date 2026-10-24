@@ -34,8 +34,8 @@
 // The lanes of a street are roads side by side. A car changes to the
 // lane beside it by MOBIL (Kesting, Treiber and Helbing, 2007), as in
 // lanes.ent: where it would speed up there by more than it does here,
-// counting what the car that would be behind it loses at a fifth of its
-// worth, with a little for keeping right, and only where that car need not
+// counting what the car that would be behind it loses at a share of its
+// worth (how polite the drivers are, `Sim.polite`), with a little for keeping right, and only where that car need not
 // brake harder than 4 m/s². A route is a road for each lane it may take,
 // so a car changes only to a lane from which a route goes on to where it
 // goes: a car that turns left does not go into the lane for turning
@@ -66,9 +66,16 @@ const ROUND2: i32 = 6
 // each street (on the highway six times as many, on the ramp 1.2 times).
 // `overlaps`: in how many steps a car stood no further behind the car
 // ahead than nought (none, it is to be hoped); `changes`: how often a car
-// changed lanes.
+// changed lanes. What may be changed while it runs: the seconds of green
+// for north and south (`green_ns`) and for east and west (`green_ew`),
+// and how polite the drivers are (`polite`): what a lane change costs the
+// car that would be behind counts for so much of its worth, and where a
+// lane ends a car on the highway lets in the one standing at its end,
+// braking no harder than 15 times that in m/s² (at 0.2, 3 m/s²; at 0,
+// nobody lets anyone in). Until `tuned` they are 20 s, 20 s and 0.2.
 unique Sim { dt: f32, time: f32, steps: i64, seed: u64, born: i64, gone: i64, scene: i32,
-             built: i32, inflow: f32, overlaps: i64, changes: i64 }
+             built: i32, inflow: f32, overlaps: i64, changes: i64, green_ns: f32,
+             green_ew: f32, polite: f32, tuned: bool }
 
 // A road: a lane on a curve from (x0, y0) to (x1, y1) bent toward (cx,
 // cy), how long it is and how fast one may go on it. At its end: the
@@ -334,14 +341,15 @@ fn behind(order: Flow, roads: Roads, paths: Paths, ties: Ties, feeds: Feeds, t: 
 }
 
 // The light of a group: 2 green, 1 yellow, 0 red. North and south (group
-// 0) have 20 s of green, then 3 of yellow and 2 of red everywhere; then
-// east and west (group 1) the same.
-fn light_state(group: i32, time: f32) -> i32 {
-  let cycle = 50.0
+// 0) have `ns` seconds of green, then 3 of yellow and 2 of red everywhere;
+// then east and west (group 1) `ew` seconds, and the same.
+fn light_state(group: i32, time: f32, ns: f32, ew: f32) -> i32 {
+  let cycle = ns + ew + 10.0
   let t = time - ((time / cycle) as i32) as f32 * cycle
-  var x = t - (if group == 0 { 0.0 } else { 25.0 })
+  let green = if group == 0 { ns } else { ew }
+  var x = t - (if group == 0 { 0.0 } else { ns + 5.0 })
   if x < 0.0 { x += cycle }
-  if x < 20.0 { 2 } else if x < 23.0 { 1 } else { 0 }
+  if x < green { 2 } else if x < green + 3.0 { 1 } else { 0 }
 }
 
 // Another scene: no cars, no roads.
@@ -363,6 +371,12 @@ system clear() {
   Sim.time = 0.0
   Sim.gone = 0
   Sim.changes = 0
+  if !Sim.tuned {
+    Sim.green_ns = 20.0
+    Sim.green_ew = 20.0
+    Sim.polite = 0.2
+    Sim.tuned = true
+  }
 }
 
 // Four streets that meet at a crossing, with two lanes each way (one at
@@ -1009,15 +1023,17 @@ system think() {
     }
     // Beside a lane that ends, it lets in the car that stands at its end,
     // where that is ahead of it: braking for it as for the car ahead, but
-    // no harder than 3 m/s². (One car each, as at a zip.)
+    // no harder than 15 times its politeness in m/s². (One car each, as at
+    // a zip.)
+    let letting = 15.0 * Sim.polite
     let side = Ties[c.road].right
     if side >= 0 && Ties[side].ends {
       let f = Flow.find(((side + 1) as i64) << 32) - 1
       if f >= 0 && Flow[f].road == side && Flow[f].v < 3.0 &&
          Roads[side].length - Flow[f].u < 30.0 {
         let room = Flow[f].u - Flow[f].length - at.u
-        if room > 0.0 && room < 80.0 {
-          a = min(a, max(-3.0, idm(v0, s.v, 0.0, room)))
+        if room > 0.0 && room < 80.0 && letting > 0.0 {
+          a = min(a, max(0.0 - letting, idm(v0, s.v, 0.0, room)))
         }
       }
     }
@@ -1066,7 +1082,8 @@ system think() {
       }
       // A car let go onto the same road from another, nearer to where
       // the two join, goes first; one that crosses lanes to get there
-      // unless the other is 8 m nearer.
+      // unless the other is 8 m nearer, or too near for it to fit in
+      // before.
       let feed = Ties[next].feed
       for q in feed..feed + Ties[next].feeds {
         let f = Feeds[q].from
@@ -1074,9 +1091,10 @@ system think() {
           let fr = Flow.find(((f + 1) as i64) << 32) - 1
           if fr >= 0 && Flow[fr].road == f && Paths[Flow[fr].pos + 1].road == next {
             let near = Roads[f].length - Flow[fr].u
+            // (Where there is room for it before the other.)
             let first = if Ties[f].bold == Ties[c.road].bold { near < rem } else if Ties[f].bold {
-              near < rem + 8.0
-            } else { near + 8.0 < rem }
+              near < rem + 8.0 && rem >= Flow[fr].length + 2.0
+            } else { near + 8.0 < rem || near < c.length + 2.0 }
             if Load[f].going && first {
               a = min(a, idm(v0, s.v, Flow[fr].v, rem - near - Flow[fr].length))
             }
@@ -1088,7 +1106,7 @@ system think() {
       if !g.pass && rem < 80.0 && (light >= 0 || stop || Ties[next].conflicts > 0) {
         var ok = true
         if light >= 0 {
-          let state = light_state(light, time)
+          let state = light_state(light, time, Sim.green_ns, Sim.green_ew)
           // On yellow a car goes on where it could not stop gently.
           if state == 0 || (state == 1 && rem > s.v * s.v / 6.0 + 1.0) { ok = false }
         }
@@ -1176,7 +1194,7 @@ system change() {
              let top = Driver(Flow[fr].who).top {
             let then = idm(min(wish * Roads[Flow[fr].road].limit, top), Flow[fr].v, s.v, back)
             safe = safe && back > 1.0 && then > 0.0 - hard
-            gain += 0.2 * (then - now)
+            gain += Sim.polite * (then - now)
           }
         }
         // A little for keeping right, and more for keeping out of the way

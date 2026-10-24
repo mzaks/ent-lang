@@ -29,7 +29,12 @@
 //   tools/ent run examples/traffic/junctions.ent
 //
 // Up and down: more or fewer cars come in (an hour, on every street);
-// left and right: slower or faster time; space holds it. Each car is in
+// left and right: slower or faster time; space holds it. While it runs:
+// Q and A give north and south more or less green, W and S east and
+// west (5 s a press), and P and O make the drivers more or less polite
+// (10% a press): how much a lane change that makes the car behind brake
+// counts against it, and how hard a car on the highway brakes to let in
+// one standing at the end of the on-ramp's lane. Each car is in
 // the colour of how fast it goes, red standing and green at the speed
 // limit of 50 km/h. At the bottom: how many cars an hour the junction
 // lets through, and how many wait to come in; with more cars than it lets
@@ -40,13 +45,14 @@ import town
 
 const GRASS: i32 = 0x1d2a20
 
-// What the viewer chose, and what the keys were the frame before. `pace`
+// What the viewer chose, and what the keys were the frame before (the
+// letters a bit each, in the order of `look`'s). `pace`
 // is the steps a frame and `left` how many of them are still to run in
 // this one; `scale` and `ox`, `oy` put a metre of the world in the
 // window.
 unique View { pace: i32, left: i32, paused: bool, scale: f32, ox: f32, oy: f32,
               was_space: bool, was_up: bool, was_down: bool, was_left: bool,
-              was_right: bool }
+              was_right: bool, letters: i32 }
 unique Count { cars: i32 }
 
 world {
@@ -85,6 +91,23 @@ system look() {
   for i in 0..7 {
     if key_down('1' as i32 + i) { Sim.scene = i }
   }
+  // Q and A: more or less green for north and south, W and S for east and
+  // west, 5 s at a time; P and O: more or less polite drivers.
+  var letters = 0
+  if key_down('Q' as i32) { letters = letters | 1 }
+  if key_down('A' as i32) { letters = letters | 2 }
+  if key_down('W' as i32) { letters = letters | 4 }
+  if key_down('S' as i32) { letters = letters | 8 }
+  if key_down('P' as i32) { letters = letters | 16 }
+  if key_down('O' as i32) { letters = letters | 32 }
+  let fresh = letters & (View.letters ^ 63)
+  View.letters = letters
+  if (fresh & 1) != 0 { Sim.green_ns = min(90.0, Sim.green_ns + 5.0) }
+  if (fresh & 2) != 0 { Sim.green_ns = max(5.0, Sim.green_ns - 5.0) }
+  if (fresh & 4) != 0 { Sim.green_ew = min(90.0, Sim.green_ew + 5.0) }
+  if (fresh & 8) != 0 { Sim.green_ew = max(5.0, Sim.green_ew - 5.0) }
+  if (fresh & 16) != 0 { Sim.polite = min(1.0, Sim.polite + 0.1) }
+  if (fresh & 32) != 0 { Sim.polite = max(0.0, Sim.polite - 0.1) }
   View.was_space = space
   View.was_up = up
   View.was_down = down
@@ -189,7 +212,7 @@ system marks() {
       let x = ox + (Roads[r].x1 - dy / n * 4.2) * sc
       let y = oy + (Roads[r].y1 + dx / n * 4.2) * sc
       if light >= 0 {
-        let state = light_state(light, time)
+        let state = light_state(light, time, Sim.green_ns, Sim.green_ew)
         let color = if state == 2 { 0x3ddc5a } else if state == 1 { 0xf4c430 } else { 0xf03c3c }
         circle(x, y, 1.4 * sc, 0x111111)
         circle(x, y, 1.0 * sc, color)
@@ -286,6 +309,17 @@ system words() {
   }
   label("{seconds} s, {state}.   1-7: scene   up/down: cars   left/right: time   space: hold",
         16.0, bottom + 22.0, 14.0, 0x9aa0a6)
+  // What may be changed while it runs, at the top right.
+  let polite = (Sim.polite * 100.0 + 0.5) as i32
+  let right = Window.width as f32 - 16.0
+  let says = "drivers {polite}% polite   P/O"
+  label(says, right - text_width(says, 16.0), 40.0, 16.0, 0xd0d4d8)
+  if scene == LIGHTS {
+    let ns = Sim.green_ns as i32
+    let ew = Sim.green_ew as i32
+    let lights = "green {ns} s north-south   Q/A      green {ew} s east-west   W/S"
+    label(lights, right - text_width(lights, 16.0), 62.0, 16.0, 0xd0d4d8)
+  }
 }
 
 system count() { View.left -= 1 }

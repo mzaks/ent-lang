@@ -76,7 +76,12 @@ which need the cars in their order by lane and position every step.
   every 12 m.
 - `junctions.ent`: `town.ent` in a window: 1 to 7 choose the scene, up
   and down change how many cars come in, left and right how fast the time
-  goes. Each car is in the colour of its speed against its road's limit,
+  goes. While it runs, Q and A give the lights more or less green for
+  north and south, W and S for east and west (5 s a press), and P and O
+  make the drivers more or less polite (10% a press): how much a lane
+  change that makes the car behind brake counts against it, and how hard
+  a car on the highway brakes to let in one standing at the end of the
+  on-ramp's lane (at 0, nobody does; the highway then lets more through). Each car is in the colour of its speed against its road's limit,
   and the window says how many cars an hour get through. With 600 an hour
   on every street the lights (with two lanes each way) let some 2,100
   through, the roundabout of two lanes 2,150 and of one 1,750, the

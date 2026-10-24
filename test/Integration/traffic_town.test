@@ -5,7 +5,8 @@
 // than the lights, the stops and the highway let through: none stands on
 // the car ahead, no two on paths that cross, join or split, or in lanes
 // side by side, come within 2.5 m of each other, the cars change lanes
-// where there are lanes, and nothing locks up. The same on one core and on
+// where there are lanes, and nothing locks up; and so with the lights
+// timed otherwise and drivers who are not polite. The same on one core and on
 // all of them.
 // RUN: %ent run -I %S/../../examples/traffic %S/Inputs/traffic_town.ent 2>/dev/null > %t.one
 // RUN: %ent run --parallel -I %S/../../examples/traffic %S/Inputs/traffic_town.ent 2>/dev/null > %t.all
@@ -19,3 +20,8 @@
 // CHECK: scene 4: {{[45][0-9][0-9]}} through, {{[1-9][0-9]+}} lane changes, 0 overlaps, 0 close
 // CHECK: scene 5: {{[45][0-9][0-9]}} through, {{[1-9][0-9]+}} lane changes, 0 overlaps, 0 close
 // CHECK: scene 6: {{[23][0-9][0-9]}} through, {{[1-9][0-9]+}} lane changes, 0 overlaps, 0 close
+
+// The lights with 45 s of green one way and 10 the other let fewer
+// through; the on-ramp with drivers who are not polite stays safe.
+// CHECK: scene 0: {{2[0-9][0-9]}} through, {{[1-9][0-9]+}} lane changes, 0 overlaps, 0 close
+// CHECK: scene 4: {{[4-6][0-9][0-9]}} through, {{[1-9][0-9]+}} lane changes, 0 overlaps, 0 close

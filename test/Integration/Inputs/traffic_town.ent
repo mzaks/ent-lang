@@ -41,7 +41,20 @@ system report() {
   Close.n = 0
 }
 
+// Then the lights again with 45 s of green for north and south and 10
+// for east and west, and the on-ramp with drivers who are not polite at
+// all: nobody lets anyone in.
+system retune() {
+  Sim.green_ns = 45.0
+  Sim.green_ew = 10.0
+  Sim.polite = 0.0
+  Sim.scene = 0
+}
+system again() { Sim.scene = 4 }
+
 schedule tell() { report() }
+schedule tune() { retune() }
+schedule ramp() { again() }
 
 schedule tick() {
   lay()
@@ -54,4 +67,10 @@ main {
     loop { tick() } until Sim.time >= 600.0
     tell()
   } until Sim.scene == 7
+  tune()
+  loop { tick() } until Sim.time >= 600.0
+  tell()
+  ramp()
+  loop { tick() } until Sim.time >= 600.0
+  tell()
 }
