@@ -3,7 +3,7 @@
 ent.component @Thing (born: i32, hp: i32)
 ent.archetype @Things (@Thing) capacity 4
 ent.system @s() {
-  // expected-error @+1 {{is 'turn' without a 'by': its entities take their turns in the order of a field}}
+  // expected-error @+1 {{is 'turn' without a 'by' or 'listed': its entities take their turns in the order of a field or of a buffer's rows}}
   ent.query (%t: !ent.ref<@Thing>) attributes {turn} {
   }
 }

@@ -3968,3 +3968,36 @@ are gone over. On this graph that pays only for the pages with many
 links: the average page has 29, and going over them in table order, which
 the compiler does eight at a time, is faster than reading them in the
 order of the index (5.9 against 2.8 ms for all pages).
+
+### The search with a queue and `break`
+
+Two things the language lacked, now there: `break` (out of a counted
+`for`, a `while`, a loop over edges) and a `for` over the entities a
+buffer's rows name (`for e, n: Node in Frontier`, also `in turn`). The
+search is now GAP's: a step top down goes from the pages reached last,
+kept in a buffer, each in its turn, giving those it reaches first their
+depth at once and the next frontier (no scan of every vertex); bottom up
+a vertex stops at the first link from one reached last; the frontier is
+made again from the depths only when the search turns back top down (as
+GAP makes its queue from its bitmap). The same graph, ms, the median of
+5 processes of each one's best of 3 runs:
+
+| variant | search |
+|---|---|
+| ent, before | 4.53 |
+| ent | 3.50 |
+| GAP | 3.51 |
+| ent, all cores, before | 2.05 |
+| ent, all cores | 1.27 |
+| GAP, all cores | 0.70 |
+
+On one core the search costs what GAP's does. Of a search, by step (one
+core): top down 0.72 ms (GAP 0.70), bottom up 2.38 ms and 0.07 to give
+the reached their depths (GAP 2.13, and 0.26 making its bitmap of the
+frontier), 0.18 the frontier again from the depths (GAP 0.09). Bottom up
+reads the depth of the link's source (4 bytes a vertex) where GAP reads a
+bitmap of the frontier (1 bit). On all cores the steps top down, in turn,
+run on one core, where GAP's take every core and set a depth by
+compare-and-swap; that is the gap left. PageRank is as before (48.2 ms,
+GAP 42.4; 8.54 and 6.68 on all cores). Churn as in the last section
+(rewire 0.54, 0.68, 13.3 ms; anew 83).

@@ -1,0 +1,68 @@
+import console
+
+component N { id: i32, first: i32, sum: i32, seen: i32 } capacity 64
+relation (N)-[L { w: i32 }]->(N) capacity 512
+buffer Ids { who: entity } capacity 64
+
+world {
+  for i in 0..8 {
+    let e = spawn { N { id: i, first: -1, sum: 0, seen: 0 } }
+    Ids += { who: e }
+  }
+  for i in 0..8 {
+    for j in 0..5 {
+      let a = Ids[i].who
+      let b = Ids[(i + j + 1) % 8].who
+      connect (a)-[L { w: i * 10 + j }]->(b)
+    }
+  }
+}
+
+system run() {
+  var a = 0
+  for i in 0..100 {
+    if i == 7 { break }
+    a += i
+  }
+  var b = 0
+  var k = 0
+  while k < 100 {
+    k += 1
+    if k > 9 {
+      b += 1000
+      break
+    }
+    b += k
+  }
+  var c = 0
+  for i in 0..5 {
+    for j in 0..5 {
+      if j == i { break }
+      c += 1
+    }
+  }
+  put("counted {a} while {b} {k} nested {c}")
+}
+
+system edges() {
+  for e, n: mut N {
+    var first = -1
+    var sum = 0
+    var seen = 0
+    for (e)-[l: L]->(v) {
+      sum += l.w
+      if l.w % 10 == 2 {
+        first = l.w
+        break
+      }
+      seen += 1
+    }
+    n.first = first
+    n.sum = sum
+    n.seen = seen
+  }
+  for n: N { put("{n.id}: first {n.first} sum {n.sum} seen {n.seen}") }
+}
+
+schedule all() { run() edges() }
+main { all() }

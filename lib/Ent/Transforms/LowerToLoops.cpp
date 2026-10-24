@@ -4908,10 +4908,10 @@ static void emitQueryBody(IRRewriter &rewriter, QueryOp query,
     Operation *loop = lowerEdges(rewriter, edges, archetype, world, layout,
                                  entity, tick, directApplies);
     // (A loop that already carries a value, a linked tree's walk from
-    // child to child, is left as it is.)
-    auto forLoop = cast<scf::ForOp>(loop);
+    // child to child, or one a `break` leaves, is left as it is.)
+    auto forLoop = dyn_cast<scf::ForOp>(loop);
     SmallVector<Operation *> lowered =
-        forLoop.getNumRegionIterArgs() == 0
+        forLoop && forLoop.getNumRegionIterArgs() == 0
             ? carryOwnFields(rewriter, forLoop)
             : SmallVector<Operation *>{loop};
     auto *at = llvm::find(roots, op);
@@ -7198,6 +7198,49 @@ emitLinkedEdges(IRRewriter &rewriter, Location loc, WorldAccess &world,
   return {loop, slot};
 }
 
+/// `loop` as a loop that also ends where its carried value `flag` (an i1)
+/// is true after a round (a `break` set it): an `scf.while` over the
+/// induction variable and the carried values, whose results after the
+/// first are the loop's.
+static scf::WhileOp untilBroken(IRRewriter &rewriter, scf::ForOp loop,
+                                unsigned flag) {
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPoint(loop);
+  Location loc = loop.getLoc();
+  SmallVector<Value> inits{loop.getLowerBound()};
+  llvm::append_range(inits, loop.getInitArgs());
+  SmallVector<Type> types;
+  for (Value init : inits)
+    types.push_back(init.getType());
+  auto run = scf::WhileOp::create(
+      rewriter, loc, types, inits,
+      [&](OpBuilder &b, Location l, ValueRange args) {
+        Value counting = arith::CmpIOp::create(b, l, arith::CmpIPredicate::slt,
+                                               args[0], loop.getUpperBound());
+        Value goesOn = arith::AndIOp::create(
+            b, l, counting,
+            arith::XOrIOp::create(b, l, args[1 + flag],
+                                  arith::ConstantIntOp::create(b, l, 1, 1)));
+        scf::ConditionOp::create(b, l, goesOn, args);
+      },
+      [&](OpBuilder &b, Location l, ValueRange args) {
+        IRMapping mapping;
+        mapping.map(loop.getInductionVar(), args[0]);
+        for (auto [arg, value] :
+             llvm::zip(loop.getRegionIterArgs(), args.drop_front()))
+          mapping.map(arg, value);
+        for (Operation &op : loop.getBody()->without_terminator())
+          b.clone(op, mapping);
+        SmallVector<Value> ends{
+            arith::AddIOp::create(b, l, args[0], loop.getStep())};
+        for (Value yielded : loop.getBody()->getTerminator()->getOperands())
+          ends.push_back(mapping.lookupOrDefault(yielded));
+        scf::YieldOp::create(b, l, ends);
+      });
+  rewriter.replaceOp(loop, run.getResults().drop_front());
+  return run;
+}
+
 /// What edges are ordered by for devices/edges.c, where an order is of
 /// `by` (a field of the edges, or `source` or `target`, an end) in the
 /// table's runs (`table`) or the index's: the column in the arena, the
@@ -7654,6 +7697,13 @@ static Operation *lowerEdges(IRRewriter &rewriter, EdgesOp edges,
                                  ? firstCarried + k
                                  : k,
                              end);
+  // (Left by a `break`: a loop that ends where its flag is set.)
+  if (auto flag = edges->getAttrOfType<IntegerAttr>("break_flag")) {
+    scf::WhileOp run =
+        untilBroken(rewriter, loop, firstCarried + flag.getInt());
+    rewriter.replaceOp(edges, run.getResults().take_back(inits.size()));
+    return run;
+  }
   rewriter.replaceOp(edges, loop.getResults().take_back(inits.size()));
   return loop;
 }
@@ -17810,8 +17860,13 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
                          const LoopOptions &options) {
   Location loc = query.getLoc();
   bool turn = query.isTurn();
-  StringAttr byComponent = query.getByComponent().getAttr();
+  FlatSymbolRefAttr byRef = query.getByComponent();
+  StringAttr byComponent = byRef ? byRef.getAttr() : StringAttr();
   StringAttr byField = query.getByField();
+  // (Or the entities the rows of a buffer name, in their order.)
+  const WorldBuffer *listed = nullptr;
+  if (FlatSymbolRefAttr name = query.getListedBuffer())
+    listed = &layout.getBuffer(name.getAttr());
   SmallVector<const WorldArchetype *> matched;
   int64_t capacity = 1;
   for (const WorldArchetype &archetype : layout.archetypes)
@@ -17819,6 +17874,8 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
       matched.push_back(&archetype);
       capacity += archetype.capacity;
     }
+  if (listed)
+    capacity = std::max<int64_t>(capacity, listed->capacity + 1);
   if (matched.empty()) {
     if (!ofModule(query))
       query.emitWarning("matches no archetype; the query is removed");
@@ -17894,7 +17951,7 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
   for (const WorldArchetype *archetype : matched) {
     Value rows = world.count(loc, *archetype);
     startCounts[archetype] = rows;
-    if (byIndex || viaHash)
+    if (byIndex || viaHash || listed)
       continue;
     Value from = zero;
     if (spread) {
@@ -17967,7 +18024,28 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
                               arith::SubIOp::create(rewriter, loc, rows, from)),
         cells, ValueRange{zero});
   }
-  if (byIndex) {
+  if (listed) {
+    // The buffer's entities, in its rows' order.
+    const WorldColumn &who =
+        *llvm::find_if(listed->fields, [&](const WorldColumn &field) {
+          return field.field == query.getListedField();
+        });
+    Value rows = world.toIndex(
+        loc, memref::LoadOp::create(rewriter, loc, world.bufferCount(*listed),
+                                    ValueRange{zero}));
+    auto copy = scf::ForOp::create(rewriter, loc, zero, rows, one);
+    {
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(copy.getBody());
+      Value r = copy.getInductionVar();
+      memref::StoreOp::create(
+          rewriter, loc,
+          memref::LoadOp::create(rewriter, loc, world.bufferField(*listed, who),
+                                 ValueRange{r}),
+          ids, ValueRange{r});
+    }
+    memref::StoreOp::create(rewriter, loc, rows, cells, ValueRange{zero});
+  } else if (byIndex) {
     // The index's rows, its keys as keys of the order (see orderKey) and
     // its entities.
     auto fieldOf = [&](StringRef name) -> const WorldColumn & {
@@ -18315,8 +18393,11 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
               // What was spawned in its turn that the query would visit
               // joins the list, by the value it was given: the rows that
               // are new, whoever made them (the body, or a function it
-              // called), before any row moves.
+              // called), before any row moves. (A buffer's rows were
+              // listed when it began.)
               for (auto [home, had] : llvm::zip(matched, before)) {
+                if (listed)
+                  break;
                 auto fresh = scf::ForOp::create(rewriter, loc, had,
                                                 world.count(loc, *home), one);
                 OpBuilder::InsertionGuard inner(rewriter);

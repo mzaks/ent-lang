@@ -706,6 +706,10 @@ private:
   //===--------------------------------------------------------------===//
 
   LogicalResult parseBlock(bool ownScope = true);
+  LogicalResult parseStatements();
+  std::string openBreak(Location where);
+  mlir::Value breakFlag();
+  void setVar(StringRef name, mlir::Value value);
   LogicalResult parseStatement();
   LogicalResult parseFor();
   LogicalResult parseCountedFor(llvm::SMLoc at);
@@ -1089,6 +1093,13 @@ private:
   /// Inside a `for`: the name of the visited entity, if bound.
   bool inQuery = false;
   bool inEdges = false;
+  /// The loops `break` may leave, innermost last: the name of each one's
+  /// flag, a var that `break` sets (see openBreak); and how many of them
+  /// are outside the `for` over entities the parser is in, which `break`
+  /// does not leave.
+  SmallVector<std::string> breakFlags;
+  size_t breakFloor = 0;
+  unsigned breaks = 0;
   /// The number of scopes outside the `for` over entities (and the edge
   /// loop) being parsed: a `var` of one of them is not the loop's own.
   unsigned queryScopes = 0, edgesScopes = 0;
@@ -4810,7 +4821,7 @@ LogicalResult Parser::parseBufferStatement(const std::string &name,
                      "value, .. }' gives it a row, '" + name + " = []' "
                      "empties it, '" + name + "[i].field = value' changes "
                      "a row");
-  if ((inEach && !inTurn && !inFunction) || inEdges)
+  if ((inEach || inEdges) && !inTurn && !inFunction)
     return error(at, "a row is given to a buffer once for each entity of a "
                      "'for', not in a loop over others in it");
   FailureOr<SmallVector<mlir::Value>> values = parseRow();
@@ -5817,15 +5828,81 @@ LogicalResult Parser::parseBlock(bool ownScope) {
   std::optional<ScopeGuard> scope;
   if (ownScope)
     scope.emplace(*this);
+  if (failed(parseStatements()))
+    return failure();
+  advance();
+  return success();
+}
+
+/// The statements of a block, up to its `}`. After one that may have left
+/// the loop the block is in (`break`, or an `if` with one in it), the rest
+/// run only where it did not.
+LogicalResult Parser::parseStatements() {
   while (!token.is(Token::RBrace)) {
     if (token.is(Token::Eof))
       return error("expected '}'");
+    mlir::Value flag = breakFlag();
+    llvm::SMLoc at = token.loc;
     if (failed(parseStatement()))
       return failure();
     consumeIf(Token::Semicolon);
+    mlir::Value now = breakFlag();
+    if (!flag || now == flag || token.is(Token::RBrace))
+      continue;
+    // (What the rest leaves in a var where it runs, or the var as it was.)
+    mlir::Value goesOn = arith::XOrIOp::create(
+        builder, loc(at), now,
+        arith::ConstantIntOp::create(builder, loc(at), 1, 1));
+    auto branch = scf::IfOp::create(builder, loc(at), goesOn,
+                                    /*withElseRegion=*/true);
+    SmallVector<VarState> before = captureVars();
+    SmallVector<VarState> thenVars;
+    {
+      OpBuilder::InsertionGuard inner(builder);
+      builder.setInsertionPoint(branch.thenBlock()->getTerminator());
+      // (What the rest declares is its own: the block ends with it.)
+      ScopeGuard rest(*this);
+      if (failed(parseStatements()))
+        return failure();
+      thenVars = captureVars();
+      thenVars.resize(before.size());
+    }
+    restoreVars(before);
+    branch.getElseRegion().getBlocks().clear();
+    mergeBranches(branch, before, thenVars, before);
+    return success();
   }
-  advance();
   return success();
+}
+
+/// A loop `break` may leave: its flag, a var that is false where the
+/// loop starts and that `break` sets, in the scope the caller opened for
+/// the loop; the innermost from here on.
+std::string Parser::openBreak(Location where) {
+  std::string name = " break " + std::to_string(breaks++);
+  bind(name,
+       Variable::ofVar(arith::ConstantIntOp::create(builder, where, 0, 1)));
+  breakFlags.push_back(name);
+  return name;
+}
+
+/// What the flag of the innermost loop `break` may leave holds here; none
+/// outside one.
+mlir::Value Parser::breakFlag() {
+  if (breakFlags.size() <= breakFloor)
+    return mlir::Value();
+  const Variable *flag = lookup(breakFlags.back());
+  return flag ? flag->value : mlir::Value();
+}
+
+void Parser::setVar(StringRef name, mlir::Value value) {
+  for (auto &scope : llvm::reverse(scopes)) {
+    auto found = scope.find(name);
+    if (found != scope.end()) {
+      found->second.value = value;
+      return;
+    }
+  }
 }
 
 /// Whether `name = Unique[.field] op` follows a `let`, with `op` one of
@@ -5948,6 +6025,17 @@ LogicalResult Parser::parseStatement() {
     return parseLoop(at);
   if (consumeKeyword("while"))
     return parseWhile(at);
+  // break: out of the innermost counted `for`, `while` or loop over
+  // edges; the statements after it are not run.
+  if (consumeKeyword("break")) {
+    if (breakFlags.size() <= breakFloor)
+      return error(at, "'break' leaves a loop: a counted 'for', a 'while' or "
+                       "a loop over edges ('for (e)-[R]->(v)'), not a 'for' "
+                       "over entities");
+    setVar(breakFlags.back(),
+           arith::ConstantIntOp::create(builder, loc(at), 1, 1));
+    return success();
+  }
   if (token.isKeyword("return"))
     return error("'" + token.spelling + "' is not supported yet");
   // binding.field(args), where the field holds a proc: a call of that
@@ -6333,6 +6421,7 @@ LogicalResult Parser::parseEach(llvm::SMLoc at) {
     builder.setInsertionPointToEnd(block);
     ScopeGuard scope(*this);
     llvm::SaveAndRestore inside(inEach, true);
+    llvm::SaveAndRestore floor(breakFloor, breakFlags.size());
     unsigned next = 0;
     for (const Bound &bound : bindings)
       bind(bound.name, {Variable::Ref, block->getArgument(next++),
@@ -6876,6 +6965,7 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
                            builder.getStringAttr("who"), row);
     ScopeGuard scope(*this);
     llvm::SaveAndRestore inside(inEach, true);
+    llvm::SaveAndRestore floor(breakFloor, breakFlags.size());
     std::optional<NearRows> outer = nearRows;
     nearRows = near;
     auto restore = llvm::make_scope_exit([&] { nearRows = outer; });
@@ -6906,6 +6996,7 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
                            builder.getStringAttr("who"), row);
     ScopeGuard scope(*this);
     llvm::SaveAndRestore inside(inEach, true);
+    llvm::SaveAndRestore floor(breakFloor, breakFlags.size());
     std::optional<NearRows> outer = nearRows;
     nearRows = near;
     auto restore = llvm::make_scope_exit([&] { nearRows = outer; });
@@ -7773,6 +7864,11 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
     }
   }
 
+  // (A `break` in it sets its flag, which the loop ends at: see
+  // EdgesOp's `break_flag`.)
+  ScopeGuard breakScope(*this);
+  std::string flag = openBreak(loc(at));
+  llvm::scope_exit closeBreak([&] { breakFlags.pop_back(); });
   // Every var goes round: what one edge leaves in it the next starts
   // with, and the loop gives what the last one left.
   SmallVector<VarState> vars = captureVars();
@@ -7791,6 +7887,9 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
     state.addAttribute(QueryOp::kSliceAttr, builder.getArrayAttr(sliceOrder));
   if (!orderField.empty())
     state.addAttribute("order_field", builder.getStringAttr(orderField));
+  for (auto [k, var] : llvm::enumerate(vars))
+    if (var.name == flag)
+      state.addAttribute("break_flag", builder.getI64IntegerAttr(k));
   Region *body = state.addRegion();
   auto *block = new Block();
   body->push_back(block);
@@ -7879,8 +7978,46 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
       ends.push_back(var.value);
   YieldOp::create(builder, loc(at), ends);
   builder.setInsertionPointAfter(edges);
-  for (auto [var, result] : llvm::zip(vars, edges->getResults()))
-    var.value = result;
+  // (A var no edge changes holds after the loop what it held before; and
+  // where no `break` set the flag, the loop does not carry it.)
+  for (auto [k, var, result] : llvm::enumerate(vars, edges->getResults()))
+    if (ends[k] != block->getArgument(2 + k))
+      var.value = result;
+  for (auto [k, var] : llvm::enumerate(vars))
+    if (var.name == flag && ends[k] == block->getArgument(2 + k)) {
+      Operation *yield = block->getTerminator();
+      yield->eraseOperand(k);
+      block->eraseArgument(2 + k);
+      OperationState again(edges->getLoc(), EdgesOp::getOperationName());
+      again.addAttributes(edges->getAttrs());
+      again.attributes.erase("break_flag");
+      SmallVector<mlir::Value> operands(edges->getOperands());
+      unsigned slices = sliceValues.size();
+      operands.erase(operands.begin() + slices + k);
+      again.addOperands(operands);
+      SmallVector<Type> types(edges->getResultTypes());
+      types.erase(types.begin() + k);
+      again.addTypes(types);
+      again.attributes.set(EdgesOp::getOperandSegmentSizesAttrName(again.name),
+                           builder.getDenseI32ArrayAttr(
+                               {int32_t(slices), int32_t(vars.size() - 1)}));
+      Region *region = again.addRegion();
+      region->takeBody(edges->getRegion(0));
+      Operation *rebuilt = builder.create(again);
+      unsigned next = 0;
+      for (auto [j, result] : llvm::enumerate(edges->getResults()))
+        if (j != k)
+          result.replaceAllUsesWith(rebuilt->getResult(next++));
+      for (VarState &state : vars)
+        for (auto [j, result] : llvm::enumerate(edges->getResults()))
+          if (state.value == result)
+            state.value = j < k   ? rebuilt->getResult(j)
+                          : j > k ? rebuilt->getResult(j - 1)
+                                  : state.value;
+      edges->erase();
+      edges = rebuilt;
+      break;
+    }
   restoreVars(vars);
   return success();
 }
@@ -7986,6 +8123,51 @@ LogicalResult Parser::parseConnect(llvm::SMLoc at) {
   return success();
 }
 
+/// `loop` as a loop that also ends where its carried value `flag` (an i1)
+/// is true after a round: an `scf.while` over the induction variable and
+/// the carried values. Gives what it ends with, as the loop gave.
+static SmallVector<mlir::Value> untilBroken(OpBuilder &builder, scf::ForOp loop,
+                                            unsigned flag) {
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPoint(loop);
+  Location where = loop.getLoc();
+  SmallVector<mlir::Value> inits{loop.getLowerBound()};
+  llvm::append_range(inits, loop.getInitArgs());
+  SmallVector<Type> types;
+  for (mlir::Value init : inits)
+    types.push_back(init.getType());
+  auto run = scf::WhileOp::create(
+      builder, where, types, inits,
+      [&](OpBuilder &b, Location l, ValueRange args) {
+        mlir::Value counting = arith::CmpIOp::create(
+            b, l, arith::CmpIPredicate::slt, args[0], loop.getUpperBound());
+        mlir::Value goesOn = arith::AndIOp::create(
+            b, l, counting,
+            arith::XOrIOp::create(b, l, args[1 + flag],
+                                  arith::ConstantIntOp::create(b, l, 1, 1)));
+        scf::ConditionOp::create(b, l, goesOn, args);
+      },
+      [&](OpBuilder &b, Location l, ValueRange args) {
+        IRMapping mapping;
+        mapping.map(loop.getInductionVar(), args[0]);
+        for (auto [arg, value] :
+             llvm::zip(loop.getRegionIterArgs(), args.drop_front()))
+          mapping.map(arg, value);
+        for (Operation &op : loop.getBody()->without_terminator())
+          b.clone(op, mapping);
+        SmallVector<mlir::Value> ends{
+            arith::AddIOp::create(b, l, args[0], loop.getStep())};
+        for (mlir::Value yielded :
+             loop.getBody()->getTerminator()->getOperands())
+          ends.push_back(mapping.lookupOrDefault(yielded));
+        scf::YieldOp::create(b, l, ends);
+      });
+  SmallVector<mlir::Value> results(run.getResults().drop_front());
+  loop.replaceAllUsesWith(results);
+  loop.erase();
+  return results;
+}
+
 // for i in a..b { statements }: i takes a, a + 1, ... b - 1, outside a
 // `for` over entities.
 LogicalResult Parser::parseCountedFor(llvm::SMLoc at) {
@@ -8083,6 +8265,11 @@ LogicalResult Parser::parseCountedFor(llvm::SMLoc at) {
   mlir::Value lower = arith::IndexCastOp::create(builder, where, index, *low);
   mlir::Value upper = arith::IndexCastOp::create(builder, where, index, *high);
   mlir::Value step = arith::ConstantIndexOp::create(builder, where, 1);
+  // (A `break` in it sets its flag; then it is a loop that ends there, or
+  // at the end of the count.)
+  ScopeGuard breakScope(*this);
+  std::string flag = openBreak(where);
+  llvm::scope_exit closeBreak([&] { breakFlags.pop_back(); });
   auto loop = scf::ForOp::create(builder, where, lower, upper, step);
   // Which vars the body assigns is known after it: inside, each var is a
   // placeholder for what it holds when a round starts.
@@ -8168,6 +8355,20 @@ LogicalResult Parser::parseCountedFor(llvm::SMLoc at) {
       before[i].value = carrying.getResult(k);
     }
     restoreVars(before);
+    for (Operation *placeholder : placeholders) {
+      placeholder->getResult(0).replaceAllUsesWith(placeholder->getOperand(0));
+      placeholder->erase();
+    }
+    // (Where a `break` set its flag, a loop that ends there.)
+    for (auto [k, i] : llvm::enumerate(carried))
+      if (before[i].name == flag) {
+        SmallVector<mlir::Value> results = untilBroken(builder, carrying, k);
+        for (auto [kk, ii] : llvm::enumerate(carried))
+          before[ii].value = results[kk];
+        restoreVars(before);
+        break;
+      }
+    return success();
   }
   for (Operation *placeholder : placeholders) {
     placeholder->getResult(0).replaceAllUsesWith(placeholder->getOperand(0));
@@ -8180,6 +8381,10 @@ LogicalResult Parser::parseCountedFor(llvm::SMLoc at) {
 // condition holds before them (not at all if it does not at first).
 LogicalResult Parser::parseWhile(llvm::SMLoc at) {
   Location where = loc(at);
+  // (A `break` in it sets its flag, which ends it.)
+  ScopeGuard breakScope(*this);
+  std::string flag = openBreak(where);
+  llvm::scope_exit closeBreak([&] { breakFlags.pop_back(); });
   SmallVector<VarState> vars = captureVars();
   SmallVector<mlir::Value> starts;
   SmallVector<Type> types;
@@ -8215,7 +8420,11 @@ LogicalResult Parser::parseWhile(llvm::SMLoc at) {
           parsed = error((*condition)->loc,
                          "a 'while' condition must be a bool");
         else
-          goesOn = *value;
+          goesOn = arith::AndIOp::create(
+              builder, where, *value,
+              arith::XOrIOp::create(
+                  builder, where, lookup(flag)->value,
+                  arith::ConstantIntOp::create(builder, where, 1, 1)));
         if (!goesOn)
           goesOn = arith::ConstantIntOp::create(builder, where, 0, 1);
         scf::ConditionOp::create(builder, where, goesOn, arguments);
@@ -8238,8 +8447,12 @@ LogicalResult Parser::parseWhile(llvm::SMLoc at) {
       });
   if (failed(parsed))
     return failure();
-  for (auto [state, result] : llvm::zip(vars, loop.getResults()))
-    state.value = result;
+  // (A var no round changes holds after the loop what it held before.)
+  Block *after = loop.getAfterBody();
+  Operation *yield = after->getTerminator();
+  for (auto [k, state, result] : llvm::enumerate(vars, loop.getResults()))
+    if (yield->getOperand(k) != after->getArgument(k))
+      state.value = result;
   restoreVars(vars);
   return success();
 }
@@ -8947,6 +9160,53 @@ LogicalResult Parser::parseFor() {
       return failure();
     cascade = *relation;
   }
+  // in Buffer[.field]: the entities the buffer's rows name (by its field
+  // of entities, the one it has or the one named), in the rows' order.
+  Attribute listed;
+  if (token.isKeyword("in") && !peek().isKeyword("turn")) {
+    llvm::SMLoc inAt = token.loc;
+    advance();
+    llvm::SMLoc bufferAt = token.loc;
+    FailureOr<std::string> buffer = identifier("a buffer");
+    if (failed(buffer))
+      return failure();
+    if (!buffers.count(*buffer))
+      return error(bufferAt, "a 'for' visits the entities the rows of a "
+                             "buffer name: '" +
+                                 *buffer + "' is no buffer");
+    const Record &record = buffers[*buffer];
+    std::string field;
+    if (consumeIf(Token::Dot)) {
+      llvm::SMLoc fieldAt = token.loc;
+      FailureOr<std::string> named = identifier("a field");
+      if (failed(named))
+        return failure();
+      Type type = record.fieldType(*named);
+      if (!type || !isa<EntityType>(type))
+        return error(fieldAt, "buffer '" + *buffer + "' has no field '" +
+                                  *named + "' of entities");
+      field = *named;
+    } else {
+      for (auto &[name, type] : record.fields)
+        if (isa<EntityType>(type)) {
+          if (!field.empty())
+            return error(bufferAt, "buffer '" + *buffer +
+                                       "' has more than "
+                                       "one field of entities: say which, '" +
+                                       *buffer + "." + field + "'");
+          field = name;
+        }
+      if (field.empty())
+        return error(bufferAt, "buffer '" + *buffer +
+                                   "' has no field of "
+                                   "entities to name the entities by");
+    }
+    if (cascade)
+      return error(inAt, "a 'for' goes along a tree or over the entities a "
+                         "buffer lists: it has one order");
+    listed =
+        builder.getArrayAttr({symbol(*buffer), builder.getStringAttr(field)});
+  }
   // [in turn] by name.field: in the order of a whole number the entities
   // have, one after another; `in turn`, each as a `for` of its own.
   bool turn = false;
@@ -8959,14 +9219,18 @@ LogicalResult Parser::parseFor() {
     advance();
     advance();
     turn = true;
-    if (!token.isKeyword("by"))
+    if (!listed && !token.isKeyword("by"))
       return error("'in turn' needs an order: 'in turn by name.field', a "
-                   "whole number the entities have");
+                   "whole number the entities have, or the rows of a "
+                   "buffer, 'in Name in turn'");
   }
   if (consumeKeyword("by")) {
     if (cascade)
       return error(byAt, "a 'for' goes along a tree or by a field: it has "
                          "one order");
+    if (listed)
+      return error(byAt, "a 'for' over the entities a buffer lists goes in "
+                         "the order of its rows");
     llvm::SMLoc componentAt = token.loc;
     FailureOr<std::string> name = identifier("a component or a binding");
     if (failed(name))
@@ -9281,6 +9545,8 @@ LogicalResult Parser::parseFor() {
                        builder.getStringAttr(traversal));
   if (by)
     state.addAttribute(QueryOp::kByAttr, by);
+  if (listed)
+    state.addAttribute(QueryOp::kListedAttr, listed);
   if (turn)
     state.addAttribute(QueryOp::kTurnAttr, builder.getUnitAttr());
   if (!keyEquals.empty())
@@ -9314,6 +9580,7 @@ LogicalResult Parser::parseFor() {
                                    block->getArgument(index))
                        .getResult()));
   inQuery = true;
+  llvm::SaveAndRestore floor(breakFloor, breakFlags.size());
   llvm::SaveAndRestore turns(inTurn, turn);
   queryEntity = entity;
   queryNames.clear();
@@ -9764,6 +10031,28 @@ LogicalResult Parser::parseNameStatement() {
     FailureOr<ExprPtr> value = parseStatementValue();
     if (failed(value))
       return failure();
+    // (Turn by turn, as any field: read as it is now, and set.)
+    if (inTurn) {
+      if (isa<TextType, StringType>(type))
+        return error(fieldAt, "a text of another entity is not set from "
+                              "here: that entity sets its own");
+      StringAttr fieldName = builder.getStringAttr(*field);
+      return emitAssignment(
+          at, op->first, op->second, [&] { return type; },
+          [&]() -> mlir::Value {
+            return LookupOp::create(builder, loc(at), type, builder.getI1Type(),
+                                    variable->value,
+                                    symbol(variable->component), fieldName)
+                .getValue();
+          },
+          [&](mlir::Value v) -> LogicalResult {
+            ApplyOp::create(builder, loc(at), variable->value,
+                            symbol(variable->component), fieldName,
+                            builder.getStringAttr("set"), v);
+            return success();
+          },
+          **value);
+    }
     StringRef rule;
     bool negate = false;
     if (op->second)

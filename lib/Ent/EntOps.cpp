@@ -1944,6 +1944,15 @@ ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
           result.addAttribute(kTraversalAttr, b.getStringAttr(traversal));
     }
     SmallVector<Attribute> parts;
+    if (succeeded(parser.parseOptionalKeyword("listed"))) {
+      FlatSymbolRefAttr buffer;
+      StringAttr field;
+      if (parser.parseAttribute(buffer) || parser.parseAttribute(field))
+        return failure();
+      result.addAttribute(kListedAttr, b.getArrayAttr({buffer, field}));
+      if (succeeded(parser.parseOptionalKeyword("turn")))
+        result.addAttribute(kTurnAttr, b.getUnitAttr());
+    }
     if (succeeded(parser.parseOptionalKeyword("by"))) {
       FlatSymbolRefAttr component;
       StringAttr field;
@@ -2053,8 +2062,11 @@ void QueryOp::print(OpAsmPrinter &p) {
   if (FlatSymbolRefAttr cascade = getCascade())
     p << " cascade " << cascade << (isLeavesFirst() ? " leaves first" : "")
       << (getTraversal().empty() ? "" : " ") << getTraversal();
-  if (hasBy())
+  if (hasByField())
     p << " by " << getByComponent() << " " << getByField()
+      << (isTurn() ? " turn" : "");
+  if (isListed())
+    p << " listed " << getListedBuffer() << " " << getListedField()
       << (isTurn() ? " turn" : "");
   if (auto parts = (*this)->getAttrOfType<ArrayAttr>(kSliceAttr))
     for (auto [part, value] : llvm::zip(parts, getSlice())) {
@@ -2088,9 +2100,9 @@ void QueryOp::print(OpAsmPrinter &p) {
     p << "]";
   }
   p.printOptionalAttrDictWithKeyword(
-      (*this)->getAttrs(),
-      {kTriggersAttr, kWithAttr, kWithoutAttr, kAnyAttr, kCascadeAttr,
-       kLeavesFirstAttr, kTraversalAttr, kByAttr, kTurnAttr, kSliceAttr});
+      (*this)->getAttrs(), {kTriggersAttr, kWithAttr, kWithoutAttr, kAnyAttr,
+                            kCascadeAttr, kLeavesFirstAttr, kTraversalAttr,
+                            kByAttr, kTurnAttr, kSliceAttr, kListedAttr});
   printBody(p, getBody());
 }
 
@@ -2185,7 +2197,7 @@ LogicalResult QueryOp::verify() {
     bool sliced = llvm::any_of(parts, [](Attribute part) {
       return !cast<StringAttr>(part).getValue().starts_with("equals");
     });
-    if (sliced && !hasBy())
+    if (sliced && !hasByField())
       return emitOpError("has a slice (from, to, first, last) but does not "
                          "go by a field");
     if (getSlicePart("equals") && !(*this)->getAttr(kKeyEqualsAttr))
@@ -2260,9 +2272,17 @@ LogicalResult QueryOp::verify() {
     if (!isa<FlatSymbolRefAttr>(attr))
       return emitOpError("'cascade' must name a relation");
   if (isTurn() && !hasBy())
-    return emitOpError("is 'turn' without a 'by': its entities take their "
-                       "turns in the order of a field");
-  if (hasBy()) {
+    return emitOpError("is 'turn' without a 'by' or 'listed': its entities "
+                       "take their turns in the order of a field or of a "
+                       "buffer's rows");
+  if (isListed()) {
+    if (!getListedBuffer() || !getListedField())
+      return emitOpError("'listed' must name a buffer and a field of it");
+    if (hasByField() || getCascade() || (*this)->hasAttr(kTriggersAttr))
+      return emitOpError("visits the entities a buffer lists, in its order: "
+                         "not by a field, along a tree or by what changed");
+  }
+  if (hasByField()) {
     if (!getByComponent() || !getByField())
       return emitOpError("'by' must name a component and a field of it");
     if (getCascade())
@@ -2416,6 +2436,10 @@ LogicalResult QueryOp::verify() {
             component = set.getRef().getType().getComponent();
             field = set.getField();
           } else if (auto lookup = dyn_cast<LookupOp>(other)) {
+            // (One that only asks whether the entity has the component, as
+            // a loop over edges to `v: mut C` does, reads nothing of it.)
+            if (lookup.getValue().use_empty())
+              return;
             component = lookup.getComponentAttr();
             field = lookup.getField();
           } else if (isa<AddOp>(other)) {
@@ -2516,7 +2540,30 @@ LogicalResult QueryOp::verify() {
 
 LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   auto system = (*this)->getParentOfType<SystemOp>();
-  if (hasBy()) {
+  if (isListed()) {
+    auto buffer =
+        symbolTable.lookupNearestSymbolFrom<BufferOp>(*this, getListedBuffer());
+    if (!buffer)
+      return emitOpError("visits the entities of unknown buffer ")
+             << getListedBuffer();
+    bool entity = false;
+    for (auto [name, type] :
+         llvm::zip(buffer.getFieldNames(), buffer.getFieldTypes()))
+      entity |= cast<StringAttr>(name) == getListedField() &&
+                isa<EntityType>(cast<TypeAttr>(type).getValue());
+    if (!entity)
+      return emitOpError("visits the entities ")
+             << getListedBuffer() << " lists, by its field '"
+             << getListedField().getValue() << "', which is no entity";
+    if (system && !system.canRead(getListedBuffer()))
+      return emitOpError("reads the rows of ")
+             << getListedBuffer() << " but system @" << system.getSymName()
+             << " does not declare it in 'reads' or 'writes'";
+    if (system && system.getGpu())
+      return emitOpError("visits the entities a buffer lists in a 'gpu' "
+                         "system: not on the GPU yet");
+  }
+  if (hasByField()) {
     ComponentOp component =
         lookupComponent(symbolTable, *this, getByComponent());
     if (!component)

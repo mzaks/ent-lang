@@ -202,7 +202,7 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
       module.walk([&](QueryOp query) {
         auto system = query->getParentOfType<SystemOp>();
         if (!system || making.contains(system.getSymNameAttr()) ||
-            !query.hasBy() || query.getByIndex() ||
+            !query.hasByField() || query.getByIndex() ||
             query.getByComponent().getAttr() != key[0] ||
             query.getByField() != key[1])
           return;

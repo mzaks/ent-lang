@@ -528,7 +528,11 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
         followTree(query, cascade);
       // One that goes by a field reads it, of every entity it visits; and
       // the index it takes that order from, where it does.
-      if (query.hasBy())
+      // (The buffer whose rows it visits the entities of.)
+      if (FlatSymbolRefAttr listed = query.getListedBuffer())
+        access.reads.insert(
+            {StringAttr(), listed.getAttr(), StringAttr::get(context, "rows")});
+      if (query.hasByField())
         for (ArchetypeOp archetype : matchedArchetypes(query))
           access.reads.insert({archetype.getSymNameAttr(),
                                query.getByComponent().getAttr(),

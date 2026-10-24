@@ -1,0 +1,15 @@
+// `break` leaves the loop it is in, a counted `for`, a `while` or a loop
+// over edges, and what comes after it in the loop's body is not done: the
+// rest after an `if` that may break, and the next turns. In a loop inside
+// a loop it leaves the inner one. The same built with threads.
+// RUN: %ent run %S/Inputs/break.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/break.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// 0 + .. + 6; 1 + .. + 9 and then 1000, at k of 10; 0 + 1 + .. + 4.
+// CHECK:      counted 21 while 1045 10 nested 10
+// Each page links to five with weights 10 i + 0, .. + 4: the loop stops
+// at the third, which it adds before it breaks, and counts the two before.
+// CHECK-NEXT: 0: first 2 sum 3 seen 2
+// CHECK-NEXT: 1: first 12 sum 33 seen 2
+// CHECK:      7: first 72 sum 213 seen 2

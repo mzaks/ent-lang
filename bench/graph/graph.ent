@@ -29,7 +29,12 @@ import web
 // looked at going top down, how many pages were reached last and before,
 // and what was reached in all.
 unique B { level: i32, mode: i32, scout: i64, left: i64, awake: i64, prev: i64,
-           reached: i64, depths: i64 }
+           reached: i64, depths: i64, fill: bool }
+
+// The pages reached last, which a step top down goes on from, and those
+// it reaches: GAP's queue.
+buffer Frontier { who: entity } capacity 1048576
+buffer Reached { who: entity } capacity 1048576
 
 system start() { G.started = now() }
 
@@ -75,6 +80,8 @@ system bfs_start() {
   B.left = G.edges
   B.awake = 1
   B.prev = 1
+  Frontier = []
+  Frontier += { who: Ids[source].who }
 }
 
 // Top down or bottom up, as GAP decides: bottom up where the links out of
@@ -90,11 +97,26 @@ system plan() {
   }
 }
 
+// Each page of the frontier in turn, which gives the pages it reaches
+// first their depth at once.
 system down() {
-  let level = B.level
-  for e, n: Node, d: Depth where d.d == level {
-    for (e)-[Link]->(v: mut Next) { v.at min= level + 1 }
+  let level = B.level + 1
+  B.awake = 0
+  B.scout = 0
+  for e, n: Node in Frontier in turn {
+    for (e)-[Link]->(v: mut Depth) {
+      if v.d < 0 {
+        v.d = level
+        B.awake += 1
+        if let k = Node(v).degree { B.scout += k as i64 }
+        Reached += { who: v }
+      }
+    }
   }
+  Frontier = []
+  for i in 0..len(Reached) { Frontier += { who: Reached[i].who } }
+  Reached = []
+  B.level = level
 }
 
 system up() {
@@ -102,13 +124,18 @@ system up() {
   for e, d: Depth, x: mut Next where d.d < 0 {
     var found = false
     for (u)-[Link]->(e) {
-      if !found {
-        if let du = Depth(u).d { if du == level { found = true } }
+      if let du = Depth(u).d {
+        if du == level {
+          found = true
+          break
+        }
       }
     }
     if found { x.at = level + 1 }
   }
 }
+
+// After a step bottom up: the depths of the pages it reached.
 
 system settle() {
   let level = B.level + 1
@@ -129,8 +156,17 @@ system after() {
     if !stay {
       B.mode = 0
       B.scout = 1
+      B.fill = true
     }
   }
+}
+
+// Back top down: the frontier, from the depths.
+system fill() {
+  let level = B.level
+  B.fill = false
+  Frontier = []
+  for e, d: Depth where d.d == level { Frontier += { who: e } }
 }
 
 system bfs_done() {
@@ -156,8 +192,9 @@ schedule bfs_step() {
   plan()
   down() run_if B.mode == 0
   up() run_if B.mode == 1
-  settle()
+  settle() run_if B.mode == 1
   after()
+  fill() run_if B.fill
 }
 schedule bfs_end() { bfs_done() again() }
 schedule reset() { zero() }

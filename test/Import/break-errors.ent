@@ -1,0 +1,29 @@
+// RUN: ent-translate --import-ent %s -split-input-file -verify-diagnostics
+
+component Thing { hp: i32 }
+system s() {
+  // expected-error @+1 {{'break' leaves a loop: a counted 'for', a 'while' or a loop over edges ('for (e)-[R]->(v)'), not a 'for' over entities}}
+  break
+}
+
+// -----
+
+component Thing { hp: i32 }
+system s() {
+  for t: mut Thing {
+    // expected-error @+1 {{'break' leaves a loop: a counted 'for', a 'while' or a loop over edges}}
+    if t.hp > 3 { break }
+  }
+}
+
+// -----
+
+component Thing { hp: i32 }
+system s() {
+  for i in 0..3 {
+    for t: mut Thing {
+      // expected-error @+1 {{'break' leaves a loop: a counted 'for', a 'while' or a loop over edges}}
+      break
+    }
+  }
+}

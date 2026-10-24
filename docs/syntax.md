@@ -487,6 +487,31 @@ after the filters, where `top down` stands for a tree:
   body itself, under no `if` or loop) and read, the entities are visited
   on many threads too, each writing its rows where they go in the order.
   A million by numbers at random so: 5.9 ms where 11.1 on one core.
+- `in Name` in place of `by`: the entities the rows of buffer `Name`
+  name, by its field of entities (`in Name.field` where it has more than
+  one), in the order of the rows, once for each row (an entity named
+  twice is visited twice). Those the `for` does not match, by what it
+  binds and its `with`, `without` and `where`, it passes over; so does a
+  row whose entity is gone. Otherwise as `by`: one `for` with one end, or
+  with `in Name in turn` a `for` for each row. The rows are taken when
+  the `for` starts, so it may give the buffer rows or empty it. So a
+  queue, of the entities a step must look at where the others have
+  nothing to do: a breadth-first search goes from the pages it reached
+  last only (`bench/graph/graph.ent`):
+
+  ```
+  for e, n: Node in Frontier in turn {
+    for (e)-[Link]->(v: mut Depth) {
+      if v.d < 0 {
+        v.d = level
+        Reached += { who: v }
+      }
+    }
+  }
+  ```
+
+  It costs copying the rows' entities and finding each by its id, no
+  sort. Not on the GPU, nor with `by` or along a tree.
 - A `var` from outside is still not assigned in it: a unique does that.
   It does not react (`on`) or go along a tree, and binds what its own
   entities have, no arrows.
@@ -932,6 +957,24 @@ of a depth.
   rounds until one changes nothing.
 - `while cond { ... }` runs its statements for as long as the condition
   holds before them (not at all, if it does not at first).
+- `break` leaves the loop it stands in, a counted `for`, a `while` or a
+  `for` over edges (`for (e)-[R]->(v)`), there and then: nothing after
+  it in the body is done, nor any turn after. In a loop inside a loop it
+  leaves the inner one; a var keeps what it had come to. Not in a `for`
+  over entities (which has no order to stop in) nor in `loop .. until`,
+  and there is no `continue` (an `if` around the rest says it).
+
+  ```
+  var found = false
+  for (u)-[Link]->(e) {
+    if let du = Depth(u).d {
+      if du == level {
+        found = true
+        break
+      }
+    }
+  }
+  ```
 - All three loops can stand in the body of a `for` over entities, and
   run there for the entity it is at (`for i in 0..c.n { c.sum += i }`).
   Such a body runs only for the entities that have what the `for`

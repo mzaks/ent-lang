@@ -1,0 +1,49 @@
+// RUN: ent-translate --import-ent %s -split-input-file -verify-diagnostics
+
+component Thing { hp: i32 }
+unique U { n: i32 }
+system s() {
+  // expected-error @+1 {{a 'for' visits the entities the rows of a buffer name: 'U' is no buffer}}
+  for t: Thing in U {
+  }
+}
+
+// -----
+
+component Thing { hp: i32 }
+buffer B { n: i32 } capacity 4
+system s() {
+  // expected-error @+1 {{buffer 'B' has no field of entities to name the entities by}}
+  for t: Thing in B {
+  }
+}
+
+// -----
+
+component Thing { hp: i32 }
+buffer B { a: entity, b: entity } capacity 4
+system s() {
+  // expected-error @+1 {{buffer 'B' has more than one field of entities: say which, 'B.a'}}
+  for t: Thing in B {
+  }
+}
+
+// -----
+
+component Thing { hp: i32 }
+buffer B { a: entity, n: i32 } capacity 4
+system s() {
+  // expected-error @+1 {{buffer 'B' has no field 'n' of entities}}
+  for t: Thing in B.n {
+  }
+}
+
+// -----
+
+component Thing { hp: i32 }
+buffer B { a: entity } capacity 4
+system s() {
+  // expected-error @+1 {{a 'for' over the entities a buffer lists goes in the order of its rows}}
+  for t: Thing in B by t.hp {
+  }
+}

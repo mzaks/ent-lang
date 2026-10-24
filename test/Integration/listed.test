@@ -1,0 +1,22 @@
+// A `for` over the entities the rows of a buffer name (`in Name`, by its
+// field of entities, or `in Name.field`): once for each row, in the rows'
+// order, with what it sends landing as in any `for`; in turn (`in Name
+// in turn`) each a `for` of its own, which sets other entities' fields
+// and gives buffers rows from a loop over edges. A breadth-first search
+// with its frontier in a buffer. The same built with threads.
+// RUN: %ent run %S/Inputs/listed.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/listed.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// Page i links to i + 1 (weight i) and to 3 i (weight 100 + i), all
+// modulo 8. The queue names 5, 2 and 5 again: 5 sends to 6 and 7 twice,
+// 2 to 3 and 6. The pairs' `to` are 7 and 6. Depths from page 0.
+// CHECK:      0: hits 0 out 0 depth 0
+// CHECK-NEXT: 1: hits 0 out 0 depth 1
+// CHECK-NEXT: 2: hits 1 out 0 depth 2
+// CHECK-NEXT: 3: hits 0 out 12 depth 2
+// CHECK-NEXT: 4: hits 0 out 0 depth 3
+// CHECK-NEXT: 5: hits 2 out 0 depth 4
+// CHECK-NEXT: 6: hits 100 out 142 depth 3
+// CHECK-NEXT: 7: hits 100 out 230 depth 4
+// CHECK-NEXT: order 525 reached 7

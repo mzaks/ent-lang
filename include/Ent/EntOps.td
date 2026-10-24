@@ -878,7 +878,27 @@ def Ent_QueryOp : Ent_Op<"query", [
     /// The field the query's entities are visited by, smallest first: a
     /// component the entity must have and a whole-number field of it.
     static constexpr ::llvm::StringLiteral kByAttr = "by";
-    bool hasBy() { return (*this)->hasAttr(kByAttr); }
+    /// Whether it visits a list of its entities, one after another, rather
+    /// than all of them as they are stored: in the order of a field
+    /// (`by`), or those the rows of a buffer name (`listed`).
+    bool hasBy() { return hasByField() || isListed(); }
+    bool hasByField() { return (*this)->hasAttr(kByAttr); }
+    /// The buffer whose rows name the entities it visits, in the rows'
+    /// order, and its field (of entities) that names them.
+    static constexpr ::llvm::StringLiteral kListedAttr = "listed";
+    bool isListed() { return (*this)->hasAttr(kListedAttr); }
+    ::mlir::FlatSymbolRefAttr getListedBuffer() {
+      auto listed = (*this)->getAttrOfType<::mlir::ArrayAttr>(kListedAttr);
+      return listed && listed.size() == 2
+                 ? ::llvm::dyn_cast<::mlir::FlatSymbolRefAttr>(listed[0])
+                 : ::mlir::FlatSymbolRefAttr();
+    }
+    ::mlir::StringAttr getListedField() {
+      auto listed = (*this)->getAttrOfType<::mlir::ArrayAttr>(kListedAttr);
+      return listed && listed.size() == 2
+                 ? ::llvm::dyn_cast<::mlir::StringAttr>(listed[1])
+                 : ::mlir::StringAttr();
+    }
     ::mlir::FlatSymbolRefAttr getByComponent() {
       auto by = (*this)->getAttrOfType<::mlir::ArrayAttr>(kByAttr);
       return by && by.size() == 2

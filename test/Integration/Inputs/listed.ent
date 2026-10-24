@@ -1,0 +1,81 @@
+import console
+
+component N { id: i32, hits: i32, out: i32, depth: i32 } capacity 64
+relation (N)-[L { w: i32 }]->(N) capacity 512
+buffer Ids { who: entity } capacity 64
+buffer Queue { who: entity, why: i32 } capacity 64
+buffer Pairs { from: entity, to: entity } capacity 64
+buffer Front { who: entity } capacity 64
+buffer Found { who: entity } capacity 64
+unique S { order: i32, reached: i32 }
+
+world {
+  for i in 0..8 {
+    let e = spawn { N { id: i, hits: 0, out: 0, depth: -1 } }
+    Ids += { who: e }
+  }
+  for i in 0..8 {
+    let a = Ids[i].who
+    connect (a)-[L { w: i }]->(Ids[(i + 1) % 8].who)
+    connect (a)-[L { w: i + 100 }]->(Ids[(i * 3) % 8].who)
+  }
+  Queue += { who: Ids[5].who, why: 1 }
+  Queue += { who: Ids[2].who, why: 2 }
+  Queue += { who: Ids[5].who, why: 3 }
+  Pairs += { from: Ids[0].who, to: Ids[7].who }
+  Pairs += { from: Ids[1].who, to: Ids[6].who }
+}
+
+// The entities the rows name, once for each row, in the rows' order: what
+// they send lands as it does in any `for`.
+system visit() {
+  for e, n: mut N in Queue {
+    n.hits += 1
+    for (e)-[l: L]->(v: mut N) { v.out += 10 + l.w }
+  }
+}
+
+// In turn, a unique is read and written as it is.
+system order() {
+  for n: N in Queue in turn { S.order = S.order * 10 + n.id }
+}
+
+// Of a buffer with two fields of entities, the one named.
+system pairs() {
+  for n: mut N in Pairs.to { n.hits += 100 }
+}
+
+// Breadth first from page 0, the frontier a buffer: each page of it in
+// turn gives those it reaches first their depth at once, and the next
+// frontier.
+system search() {
+  let source = Ids[0].who
+  Front = []
+  Front += { who: source }
+  for n: mut N in Front { n.depth = 0 }
+  var level = 0
+  while len(Front) > 0 {
+    level += 1
+    let at = level
+    for e, n: N in Front in turn {
+      for (e)-[L]->(v: mut N) {
+        if v.depth < 0 {
+          v.depth = at
+          S.reached += 1
+          Found += { who: v }
+        }
+      }
+    }
+    Front = []
+    for i in 0..len(Found) { Front += { who: Found[i].who } }
+    Found = []
+  }
+}
+
+system report() {
+  for n: N { put("{n.id}: hits {n.hits} out {n.out} depth {n.depth}") }
+  put("order {S.order} reached {S.reached}")
+}
+
+schedule all() { visit() order() pairs() search() report() }
+main { all() }
