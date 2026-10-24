@@ -497,7 +497,7 @@ after the filters, where `top down` stands for a tree:
   the `for` starts, so it may give the buffer rows or empty it. So a
   queue, of the entities a step must look at where the others have
   nothing to do: a breadth-first search goes from the pages it reached
-  last only (`bench/graph/graph.ent`):
+  last only:
 
   ```
   for e, n: Node in Frontier in turn {
@@ -511,7 +511,8 @@ after the filters, where `top down` stands for a tree:
   ```
 
   It costs copying the rows' entities and finding each by its id, no
-  sort. Not on the GPU, nor with `by` or along a tree.
+  sort. Not on the GPU, nor with `by` or along a tree. (Where the order
+  does not matter, a set is that queue on all cores: see Sets.)
 - A `var` from outside is still not assigned in it: a unique does that.
   It does not react (`on`) or go along a tree, and binds what its own
   entities have, no arrows.
@@ -961,8 +962,10 @@ of a depth.
   `for` over edges (`for (e)-[R]->(v)`), there and then: nothing after
   it in the body is done, nor any turn after. In a loop inside a loop it
   leaves the inner one; a var keeps what it had come to. Not in a `for`
-  over entities (which has no order to stop in) nor in `loop .. until`,
-  and there is no `continue` (an `if` around the rest says it).
+  over entities (which has no order to stop in) nor in `loop .. until`.
+- `continue` goes on with the next turn of the loop it stands in (the
+  same loops): nothing after it in this turn is done
+  (`for (e)-[l: Link]->(v) { if l.w < 0.5 { continue } ... }`).
 
   ```
   var found = false
@@ -1774,8 +1777,12 @@ to a device at once (all there is to draw), in place of a call for each.
   `n` is below nought; more than it holds stops the program).
   `Name = Name[..n]` keeps its first `n` rows as they are, and none after
   them: all it has where it has no more, none where `n` is below nought.
-  Rows given after that come after those, as after `Name = []`. Only the
-  buffer's own name stands on the right; there are no slices besides.
+  Rows given after that come after those, as after `Name = []`. There
+  are no slices besides.
+- `Name = Other` gives it the rows of buffer `Other`, in their order, in
+  place of those it had: a buffer of the same fields, of the same types,
+  in the same order. More than it holds stops the program. Outside a
+  `for` (or in one that takes turns).
 - `Name[i].field = value` gives a row it has another value in a field,
   and so `+=`, `|=` and the other assignments; where it has no row `i`,
   nothing happens. Outside a `for` over entities, or in one whose
@@ -2368,6 +2375,69 @@ proc push(grid: Grid, stones: mut Stone, cell: i32) {
 The window (`devices/window.ent`) has one, `Shapes`, and a system
 `shapes` that draws its rows with one call: `examples/swarm` draws all
 that moves so.
+
+## Sets
+
+```
+set Front
+set Next
+
+system down() {
+  for e, n: Node in Front {
+    for (e)-[Link]->(v) {
+      if let d = Depth(v).d {
+        if d < 0 { Next += v }
+      }
+    }
+  }
+}
+
+system up() {
+  for e, d: mut Depth where d.d < 0 {
+    var found = false
+    for (u)-[Link]->(e) {
+      if u in Front {
+        found = true
+        break
+      }
+    }
+    if found {
+      d.d = B.level + 1
+      Next += e
+    }
+  }
+}
+```
+
+A set holds entities, each once, and no order of them: a bit for each
+entity the program may have (`bench/graph/graph.ent`, a breadth-first
+search as GAP's, keeps the pages reached last in one).
+
+- `set Name`, at the top level. It holds nothing at first, and is not
+  part of a saved world.
+- `Name += e` puts the entity in, `Name -= e` takes it out. Anywhere in
+  a system: in a `for` over entities too, also in a loop of its body or
+  a loop over edges, where it is there at once, from any thread. What
+  the set holds when the `for` ends does not depend on the order, so the
+  `for` runs on all the cores still; it does not both put entities into
+  a set and take them out, nor read the set it changes (but in turn).
+- `e in Name` is true where the set holds the entity, a comparison like
+  `==` (`if u in Front`, `for e, n: Node where e in Seen`): a load and a
+  test.
+- `len(Name)` is how many it holds (a count of the bits). `Name = []`
+  empties it and `Name = Other` gives it the entities of another set,
+  outside a `for`.
+- `for e, n: Node in Name` visits those of its entities the set holds,
+  as a `for` does any: on all the cores, what it sends combined as it
+  is anyway. Not in turn, by a field or along a tree, and not yet where
+  it gives buffers rows, sums as it goes (`let x = U.f += ..`), takes
+  windows or spawns. Of row ids (no entity is ever destroyed or moved),
+  a word of the set's bits is read for 64 rows, and a word of noughts
+  costs no more: a frontier of 3 pages of 262,143 is 4,096 words looked
+  at. Otherwise each row's bit is asked.
+- Not on the GPU, nor where entities are destroyed (an entity's place
+  is given again) or live on many ranks, yet; and a fn or proc does not
+  read or change a set.
 
 ## Prefabs
 

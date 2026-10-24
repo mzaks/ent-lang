@@ -1,0 +1,116 @@
+import console
+
+component N { id: i32, d: i32, got: i32 } capacity 300
+relation (N)-[L]->(N) capacity 2000
+buffer Ids { who: entity } capacity 300
+buffer A { who: entity, k: i32 } capacity 300
+buffer B { who: entity, k: i32 } capacity 300
+set Front
+set Next
+unique U { awake: i32, hits: i32, sum: i32, reached: i32, half: f64 }
+
+world {
+  for i in 0..200 {
+    let e = spawn { N { id: i, d: -1, got: 0 } }
+    Ids += { who: e }
+  }
+  for i in 0..200 {
+    connect (Ids[i].who)-[L]->(Ids[(i * 7 + 1) % 200].who)
+    connect (Ids[i].who)-[L]->(Ids[(i * 13 + 5) % 200].who)
+  }
+}
+
+system basics() {
+  Front += Ids[3].who
+  Front += Ids[150].who
+  Front += Ids[3].who
+  Front += Ids[64].who
+  Front -= Ids[150].who
+  put("len {len(Front)} has3 {Ids[3].who in Front} has150 {Ids[150].who in Front}")
+  for n: mut N in Front { n.got += 1 }
+  for n: N where n.got > 0 { put("got {n.id}") }
+  Next = Front
+  put("copied {len(Next)}")
+  Front = []
+  Next = []
+  A += { who: Ids[1].who, k: 5 }
+  A += { who: Ids[2].who, k: 6 }
+  B = A
+  put("B {len(B)} {B[1].k}")
+}
+
+system start() {
+  let s = Ids[0].who
+  Front += s
+  for n: mut N in Front { n.d = 0 }
+}
+
+// top down, all at once (on many threads too)
+system down() {
+  for e, n: N in Front {
+    for (e)-[L]->(v) {
+      if let d = N(v).d { if d < 0 { Next += v } }
+    }
+  }
+}
+
+// bottom up
+system up() {
+  for e, n: N where n.d < 0 {
+    var found = false
+    for (u)-[L]->(e) {
+      if u in Front {
+        found = true
+        break
+      }
+    }
+    if found { Next += e }
+  }
+}
+
+system settle() {
+  U.awake = 0
+  for n: mut N in Next {
+    n.d = U.hits
+    U.awake += 1
+  }
+  Front = Next
+  Next = []
+}
+
+system level() { U.hits += 1 }
+
+system report() {
+  for n: N where n.d >= 0 {
+    U.sum += n.d
+    U.reached += 1
+  }
+  put("reached {U.reached} depths {U.sum}")
+}
+
+// What a `for` over a set's entities sends to others, and a fraction it
+// adds up: combined in the order of the entities.
+system sends() {
+  Front = []
+  Front += Ids[10].who
+  Front += Ids[20].who
+  Front += Ids[199].who
+  for e, n: N in Front {
+    for (e)-[L]->(v: mut N) { v.got += 100 }
+    U.half += 0.5
+  }
+  for n: N where n.got >= 100 { put("sent {n.id}: {n.got}") }
+  put("half {U.half}")
+}
+
+schedule a() { basics() start() }
+schedule td() { level() down() settle() }
+schedule bu() { level() up() settle() }
+schedule z() { report() sends() }
+main {
+  a()
+  td()
+  td()
+  loop { bu() } until U.awake == 0
+  z()
+}

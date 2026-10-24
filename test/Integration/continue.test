@@ -1,0 +1,17 @@
+// `continue` goes on with the next turn of the loop it is in, a counted
+// `for`, a `while` or a loop over edges: what comes after it in the turn
+// is not done; with `break` in the same loop too. The same built with
+// threads.
+// RUN: %ent run %S/Inputs/continue.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/continue.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// 1 + 3 + 5 + 7, the even ones gone on from, and three counted before the
+// break at 7; 1 + 2 + 4 + 5 + 7 + 8 + 10 and 100 for each of 3, 6 and 9;
+// three of four for each i, and 10 for each but 2.
+// CHECK:      counted 16 3 while 337 10 nested 42
+// The odd weights of each page's links, 10 i + 1 and 10 i + 3.
+// CHECK-NEXT: 0: odd 4
+// CHECK-NEXT: 1: odd 24
+// CHECK-NEXT: 2: odd 44
+// CHECK-NEXT: 3: odd 64

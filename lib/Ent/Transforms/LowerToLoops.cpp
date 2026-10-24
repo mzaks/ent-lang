@@ -1285,9 +1285,11 @@ static bool isEntityLocal(QueryOp query) {
     // them.
     if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, HasOp, LookupOp,
             ApplyOp, AccumulateOp, RunningOp, YieldOp, EdgesOp, ConnectOp,
-            DisconnectOp, AppendOp, BufferSetOp, RowsCheckOp,
-            BufferClaimOp, BufferRowsOp>(op) ||
-        !hasOwnEffects(op))
+            DisconnectOp, AppendOp, BufferSetOp, RowsCheckOp, BufferClaimOp,
+            BufferRowsOp>(op) ||
+        // (An entity into a set, or out: its bit, atomically where the
+        // loop runs on many threads; and reading another set's bits.)
+        isa<SetAddOp, SetHasOp>(op) || !hasOwnEffects(op))
       return WalkResult::advance();
     // A buffer is read like a resource: no query changes one while it
     // runs (the rows it gives one are there when it ends), so its rows
@@ -1454,6 +1456,126 @@ static LoopOptions sitedOptions(IRRewriter &rewriter, Location loc,
   return sited;
 }
 
+/// The set whose entities the loops about to be made visit (`for .. in
+/// Set`, see emitEntityLoops), or none.
+static const WorldBuffer *scanSet = nullptr;
+
+/// The word of a set's bits that holds `key` (an index), and the bit.
+static std::pair<Value, Value> setPlace(IRRewriter &rewriter, Location loc,
+                                        Value key) {
+  Value word = arith::ShRUIOp::create(
+      rewriter, loc, key, arith::ConstantIndexOp::create(rewriter, loc, 6));
+  Value bit = arith::ShLIOp::create(
+      rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 64),
+      arith::IndexCastUIOp::create(
+          rewriter, loc, rewriter.getI64Type(),
+          arith::AndIOp::create(
+              rewriter, loc, key,
+              arith::ConstantIndexOp::create(rewriter, loc, 63))));
+  return {word, bit};
+}
+
+/// Of the rows from `first` up to `end` of `archetype`, those whose
+/// entities `set` holds: `emitRow` for each, in the order of the rows.
+/// Where an archetype's keys are its rows (row ids, of at least 64 rows
+/// each), a word at a time, and a word of nought costs a load; else a
+/// test of each row's bit.
+static void emitSetRows(IRRewriter &rewriter, Location loc,
+                        const WorldArchetype &archetype, WorldAccess &world,
+                        const WorldBuffer &set, Value first, Value end,
+                        function_ref<void(Value row)> emitRow) {
+  const EntityScheme &scheme = world.getLayout().entities;
+  Value words = world.bufferField(set, set.fields.front());
+  Type i64 = rewriter.getI64Type();
+  Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+  if (scheme.kind != EntityScheme::Rows || scheme.rowBits < 6) {
+    auto rows = scf::ForOp::create(rewriter, loc, first, end, one);
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(rows.getBody()->getTerminator());
+    Value row = rows.getInductionVar();
+    auto [word, bit] =
+        setPlace(rewriter, loc,
+                 world.entityKey(loc, world.entityId(loc, archetype, row)));
+    Value bits = memref::LoadOp::create(rewriter, loc, words, ValueRange{word});
+    auto held = scf::IfOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::ne,
+            arith::AndIOp::create(rewriter, loc, bits, bit),
+            arith::ConstantIntOp::create(rewriter, loc, 0, 64)));
+    rewriter.setInsertionPointToStart(held.thenBlock());
+    emitRow(row);
+    return;
+  }
+  // (The archetype's keys start at a word: its index above the row's bits.)
+  Value base = arith::ConstantIndexOp::create(
+      rewriter, loc, int64_t(archetype.index) << scheme.rowBits);
+  Value sixtyFour = arith::ConstantIndexOp::create(rewriter, loc, 64);
+  Value six = arith::ConstantIndexOp::create(rewriter, loc, 6);
+  Value fromWord = arith::ShRUIOp::create(
+      rewriter, loc, arith::AddIOp::create(rewriter, loc, base, first), six);
+  Value toWord = arith::ShRUIOp::create(
+      rewriter, loc,
+      arith::AddIOp::create(rewriter, loc,
+                            arith::AddIOp::create(rewriter, loc, base, end),
+                            arith::ConstantIndexOp::create(rewriter, loc, 63)),
+      six);
+  auto wordsLoop = scf::ForOp::create(rewriter, loc, fromWord, toWord, one);
+  OpBuilder::InsertionGuard guard(rewriter);
+  rewriter.setInsertionPoint(wordsLoop.getBody()->getTerminator());
+  Value word = wordsLoop.getInductionVar();
+  Value bits = memref::LoadOp::create(rewriter, loc, words, ValueRange{word});
+  Value zero64 = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
+  // (Its regions made once it is in place: the body is lowered there,
+  // which looks for the module around it.)
+  auto walk =
+      scf::WhileOp::create(rewriter, loc, TypeRange{i64}, ValueRange{bits});
+  {
+    Block *before = rewriter.createBlock(&walk.getBefore(), {}, {i64}, {loc});
+    Value left = before->getArgument(0);
+    scf::ConditionOp::create(rewriter, loc,
+                             arith::CmpIOp::create(rewriter, loc,
+                                                   arith::CmpIPredicate::ne,
+                                                   left, zero64),
+                             ValueRange{left});
+  }
+  {
+    Block *after = rewriter.createBlock(&walk.getAfter(), {}, {i64}, {loc});
+    ValueRange left = after->getArguments();
+    {
+      Value lowest = LLVM::CountTrailingZerosOp::create(
+          rewriter, loc, i64, left[0], /*is_zero_poison=*/true);
+      Value rest = arith::AndIOp::create(
+          rewriter, loc, left[0],
+          arith::SubIOp::create(
+              rewriter, loc, left[0],
+              arith::ConstantIntOp::create(rewriter, loc, 1, 64)));
+      Value row = arith::SubIOp::create(
+          rewriter, loc,
+          arith::AddIOp::create(
+              rewriter, loc,
+              arith::MulIOp::create(rewriter, loc, word, sixtyFour),
+              arith::IndexCastUIOp::create(rewriter, loc,
+                                           rewriter.getIndexType(), lowest)),
+          base);
+      // (The first and the last word hold other rows' bits too.)
+      Value inside = arith::AndIOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::uge, row,
+                                first),
+          arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult, row,
+                                end));
+      auto held = scf::IfOp::create(rewriter, loc, inside);
+      {
+        OpBuilder::InsertionGuard inner(rewriter);
+        rewriter.setInsertionPointToStart(held.thenBlock());
+        emitRow(row);
+      }
+      scf::YieldOp::create(rewriter, loc, rest);
+    }
+  }
+}
+
 /// Emit the loop over the entities of `archetype` at the insertion point
 /// and call `emitBody` with the entity index, positioned inside the loop,
 /// the number of entities the loop runs over, and whether it runs its
@@ -1478,7 +1600,10 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
                 Value rows = Value(), bool sliced = false,
                 Value from = Value()) {
   // The entities to visit: `rows` if given (counted when the query
-  // started), or as many as the archetype holds now.
+  // started), or as many as the archetype holds now. (Of a set's, those
+  // it holds; not of loops made inside these.)
+  const WorldBuffer *set = scanSet;
+  llvm::SaveAndRestore<const WorldBuffer *> scanning(scanSet, nullptr);
   Value count = rows ? rows : world.count(loc, archetype);
   Value zero = from ? from : arith::ConstantIndexOp::create(rewriter, loc, 0);
 
@@ -1487,7 +1612,11 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
         rewriter, loc, arith::CmpIPredicate::sgt, count, zero);
     auto guard = scf::IfOp::create(rewriter, loc, present);
     rewriter.setInsertionPointToStart(guard.thenBlock());
-    emitBody(zero, count, /*parallel=*/false);
+    if (set)
+      emitSetRows(rewriter, loc, archetype, world, *set, zero, count,
+                  [&](Value row) { emitBody(row, count, /*parallel=*/false); });
+    else
+      emitBody(zero, count, /*parallel=*/false);
     return guard;
   }
 
@@ -1509,7 +1638,20 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
   Location sited =
       FusedLoc::get(rewriter.getContext(), {loc},
                     rewriter.getDictionaryAttr(marks));
+  // (Of a set's entities: only those it holds, see emitSetRows.)
+  bool byWords = set && world.getLayout().entities.kind == EntityScheme::Rows &&
+                 world.getLayout().entities.rowBits >= 6;
   auto emitSequential = [&]() -> Operation * {
+    if (set) {
+      auto once = scf::ExecuteRegionOp::create(rewriter, sited, TypeRange{});
+      Block *block = rewriter.createBlock(&once.getRegion());
+      rewriter.setInsertionPointToStart(block);
+      auto end = scf::YieldOp::create(rewriter, loc);
+      rewriter.setInsertionPoint(end);
+      emitSetRows(rewriter, loc, archetype, world, *set, zero, count,
+                  [&](Value row) { emitBody(row, count, /*parallel=*/false); });
+      return once;
+    }
     auto loop = scf::ForOp::create(rewriter, sited, zero, count, one);
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
     emitBody(loop.getInductionVar(), count, /*parallel=*/false);
@@ -1538,12 +1680,49 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
                        slices))
             .getResult();
       };
+      llvm::SaveAndRestore current(sendSegment, slice);
+      if (set) {
+        emitSetRows(
+            rewriter, loc, archetype, world, *set, startOf(slice),
+            startOf(arith::AddIOp::create(rewriter, loc, slice, one)),
+            [&](Value row) { emitBody(row, count, /*parallel=*/true); });
+        return loop;
+      }
       auto rowsOf = scf::ForOp::create(
           rewriter, loc, startOf(slice),
           startOf(arith::AddIOp::create(rewriter, loc, slice, one)), one);
       rewriter.setInsertionPoint(rowsOf.getBody()->getTerminator());
-      llvm::SaveAndRestore current(sendSegment, slice);
       emitBody(rowsOf.getInductionVar(), count, /*parallel=*/true);
+      return loop;
+    }
+    // (Of a set's entities: a word of its bits each turn, 64 rows.)
+    if (byWords) {
+      Value sixtyFour = arith::ConstantIndexOp::create(rewriter, loc, 64);
+      Value wordsOf =
+          arith::CeilDivUIOp::create(rewriter, loc, count, sixtyFour);
+      auto loop = scf::ParallelOp::create(
+          rewriter, sited,
+          ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)},
+          ValueRange{wordsOf}, ValueRange{one});
+      rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+      Value first = arith::MulIOp::create(
+          rewriter, loc, loop.getInductionVars().front(), sixtyFour);
+      Value end = arith::MinUIOp::create(
+          rewriter, loc, count,
+          arith::AddIOp::create(rewriter, loc, first, sixtyFour));
+      emitSetRows(rewriter, loc, archetype, world, *set, first, end,
+                  [&](Value row) { emitBody(row, count, /*parallel=*/true); });
+      return loop;
+    }
+    if (set) {
+      auto loop = scf::ParallelOp::create(rewriter, sited, ValueRange{zero},
+                                          ValueRange{count}, ValueRange{one});
+      rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+      emitSetRows(rewriter, loc, archetype, world, *set,
+                  loop.getInductionVars().front(),
+                  arith::AddIOp::create(rewriter, loc,
+                                        loop.getInductionVars().front(), one),
+                  [&](Value row) { emitBody(row, count, /*parallel=*/true); });
       return loop;
     }
     auto loop = scf::ParallelOp::create(rewriter, sited, ValueRange{zero},
@@ -1571,11 +1750,48 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
 
   Value threshold = arith::ConstantIndexOp::create(
       rewriter, loc, options.parallelMinEntities);
-  Value work = options.innerRows
-                   ? arith::MulIOp::create(rewriter, loc, count,
-                                           options.innerRows)
-                         .getResult()
-                   : count;
+  Value measured = count;
+  // (Of a set's entities, by words: as many as it holds of them, each
+  // about what 32 rows in a row cost, as it is found by its bit and its
+  // row is read apart from the others': 2.8 ns where a plain loop takes
+  // 0.1 a row, bench/graph's search.)
+  if (byWords) {
+    const EntityScheme &scheme = world.getLayout().entities;
+    Value words = world.bufferField(*set, set->fields.front());
+    Value six = arith::ConstantIndexOp::create(rewriter, loc, 6);
+    Value base = arith::ConstantIndexOp::create(
+        rewriter, loc, int64_t(archetype.index) << scheme.rowBits);
+    Value first = arith::ShRUIOp::create(rewriter, loc, base, six);
+    Value last = arith::ShRUIOp::create(
+        rewriter, loc,
+        arith::AddIOp::create(
+            rewriter, loc, arith::AddIOp::create(rewriter, loc, base, count),
+            arith::ConstantIndexOp::create(rewriter, loc, 63)),
+        six);
+    Type i64 = rewriter.getI64Type();
+    auto held = scf::ForOp::create(
+        rewriter, loc, first, last, one,
+        ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 64)},
+        [&](OpBuilder &, Location, Value at, ValueRange sum) {
+          Value bits =
+              memref::LoadOp::create(rewriter, loc, words, ValueRange{at});
+          scf::YieldOp::create(
+              rewriter, loc,
+              ValueRange{arith::AddIOp::create(
+                  rewriter, loc, sum[0],
+                  LLVM::CtPopOp::create(rewriter, loc, i64, bits))});
+        });
+    measured = arith::MulIOp::create(
+        rewriter, loc,
+        arith::IndexCastUIOp::create(rewriter, loc, rewriter.getIndexType(),
+                                     held.getResult(0)),
+        arith::ConstantIndexOp::create(rewriter, loc, 32));
+  }
+  Value work =
+      options.innerRows
+          ? arith::MulIOp::create(rewriter, loc, measured, options.innerRows)
+                .getResult()
+          : measured;
   if (options.edgeRows)
     work = arith::MaxUIOp::create(rewriter, loc, work, options.edgeRows);
   if (options.bodyWeight > 1)
@@ -8060,6 +8276,85 @@ static void carryCellsThrough(IRRewriter &rewriter, Block &block,
       state.written[index] =
           arith::ConstantIntOp::create(rewriter, store.getLoc(), 1, 1);
       rewriter.eraseOp(store);
+      continue;
+    }
+    // (A loop inside, as a `for` over a set's entities has: each cell and
+    // whether it was written go round with it, see emitSetRows.)
+    if (auto loop = dyn_cast<scf::ForOp>(op); loop && touches(loop)) {
+      Location loc = loop.getLoc();
+      SmallVector<Value> inits(loop.getInitArgs());
+      unsigned had = inits.size();
+      llvm::append_range(inits, state.values);
+      llvm::append_range(inits, state.written);
+      rewriter.setInsertionPoint(loop);
+      auto carrying =
+          scf::ForOp::create(rewriter, loc, loop.getLowerBound(),
+                             loop.getUpperBound(), loop.getStep(), inits);
+      Block *body = carrying.getBody();
+      while (!body->empty())
+        rewriter.eraseOp(&body->back());
+      body->getOperations().splice(body->end(),
+                                   loop.getBody()->getOperations());
+      rewriter.replaceAllUsesWith(loop.getInductionVar(),
+                                  carrying.getInductionVar());
+      for (auto [old, now] :
+           llvm::zip(loop.getRegionIterArgs(), carrying.getRegionIterArgs()))
+        rewriter.replaceAllUsesWith(old, now);
+      CarriedState inner;
+      for (unsigned i = 0; i < cells.size(); ++i) {
+        inner.values.push_back(carrying.getRegionIterArgs()[had + i]);
+        inner.written.push_back(
+            carrying.getRegionIterArgs()[had + cells.size() + i]);
+      }
+      carryCellsThrough(rewriter, *body, cells, inner);
+      auto yield = cast<scf::YieldOp>(body->getTerminator());
+      SmallVector<Value> yielded(yield.getOperands());
+      llvm::append_range(yielded, inner.values);
+      llvm::append_range(yielded, inner.written);
+      rewriter.setInsertionPoint(yield);
+      rewriter.replaceOpWithNewOp<scf::YieldOp>(yield, yielded);
+      rewriter.replaceOp(loop, carrying.getResults().take_front(had));
+      for (unsigned i = 0; i < cells.size(); ++i) {
+        state.values[i] = carrying.getResult(had + i);
+        state.written[i] = carrying.getResult(had + cells.size() + i);
+      }
+      continue;
+    }
+    if (auto loop = dyn_cast<scf::WhileOp>(op); loop && touches(loop)) {
+      Location loc = loop.getLoc();
+      SmallVector<Value> inits(loop.getInits());
+      unsigned had = inits.size();
+      llvm::append_range(inits, state.values);
+      llvm::append_range(inits, state.written);
+      SmallVector<Type> types(loop.getResultTypes());
+      for (Value value : state.values)
+        types.push_back(value.getType());
+      for (Value value : state.written)
+        types.push_back(value.getType());
+      rewriter.setInsertionPoint(loop);
+      auto carrying = scf::WhileOp::create(rewriter, loc, types, inits);
+      carrying.getBefore().takeBody(loop.getBefore());
+      carrying.getAfter().takeBody(loop.getAfter());
+      auto extend = [&](Block &block) {
+        CarriedState inner;
+        for (Value value : state.values)
+          inner.values.push_back(block.addArgument(value.getType(), loc));
+        for (Value value : state.written)
+          inner.written.push_back(block.addArgument(value.getType(), loc));
+        carryCellsThrough(rewriter, block, cells, inner);
+        Operation *end = block.getTerminator();
+        SmallVector<Value> passed(end->getOperands());
+        llvm::append_range(passed, inner.values);
+        llvm::append_range(passed, inner.written);
+        rewriter.modifyOpInPlace(end, [&] { end->setOperands(passed); });
+      };
+      extend(carrying.getBefore().front());
+      extend(carrying.getAfter().front());
+      rewriter.replaceOp(loop, carrying.getResults().take_front(had));
+      for (unsigned i = 0; i < cells.size(); ++i) {
+        state.values[i] = carrying.getResult(had + i);
+        state.written[i] = carrying.getResult(had + cells.size() + i);
+      }
       continue;
     }
     auto branch = dyn_cast<scf::IfOp>(op);
@@ -20358,6 +20653,10 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     // sends values to be combined, which the loop around it carries.)
     bool asPart = !triggers.empty() && applies.empty() &&
                   accumulates.empty() && connects.empty();
+    llvm::SaveAndRestore scanning(
+        scanSet, query.getInSet()
+                     ? &layout.getBuffer(query.getInSet().getAttr())
+                     : nullptr);
     Operation *loops = emitEntityLoops(
         rewriter, loc, archetype, world, here, entityLocal,
         [&](Value entity, Value rows, bool parallel) {
@@ -21208,7 +21507,8 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
                 return isa<SpawnOp, DespawnOp, EachOp, EdgesOp, ConnectOp,
                            AppendOp, ClearOp, BufferLenOp, BufferAtOp,
                            IndexGetOp, BufferOfOp, BufferSetOp, BufferFillOp,
-                           BufferKeepOp, RunningOp, BufferClaimOp>(op)
+                           BufferKeepOp, RunningOp, BufferClaimOp, BufferCopyOp,
+                           SetAddOp, SetHasOp>(op)
                            ? WalkResult::interrupt()
                            : WalkResult::advance();
               })
@@ -21796,8 +22096,8 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
   SmallVector<Operation *> uses;
   func.walk([&](Operation *op) {
     if (isa<AppendOp, ClearOp, BufferLenOp, BufferAtOp, BufferSetOp,
-            BufferFillOp, BufferKeepOp, RowsCheckOp, BufferClaimOp, IndexGetOp>(
-            op))
+            BufferFillOp, BufferKeepOp, RowsCheckOp, BufferClaimOp, IndexGetOp,
+            BufferCopyOp, SetAddOp, SetHasOp>(op))
       uses.push_back(op);
     else if (auto invoke = dyn_cast<InvokeOp>(op);
              invoke && takesBuffer(invoke))
@@ -21982,7 +22282,159 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
       rewriter.eraseOp(op);
       continue;
     }
+    // A set: its words of bits, a bit for each entity key (see kSetAttr).
+    if (buffer.set) {
+      Type i64 = rewriter.getI64Type();
+      Value words = world.bufferField(buffer, buffer.fields.front());
+      Value wordCount =
+          arith::ConstantIndexOp::create(rewriter, loc, buffer.capacity);
+      Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+      Value nought = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
+      // (Its word and bit, where it has one: an entity's key is below the
+      // keys there are, so a value that names none, all ones, is in no
+      // set.)
+      auto placeOf = [&](Value entity) {
+        Value key = world.entityKey(loc, world.toStorage(loc, entity));
+        Value known =
+            arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult, key,
+                                  arith::ConstantIndexOp::create(
+                                      rewriter, loc, buffer.capacity * 64));
+        auto [word, bit] = setPlace(rewriter, loc, key);
+        return std::make_tuple(known, word, bit);
+      };
+      if (auto has = dyn_cast<SetHasOp>(op)) {
+        // (Without a branch: the last word read where there is none, and
+        // not held.)
+        auto [known, word, bit] = placeOf(has.getEntity());
+        Value read = memref::LoadOp::create(
+            rewriter, loc, words,
+            ValueRange{arith::MinUIOp::create(
+                rewriter, loc, word,
+                arith::ConstantIndexOp::create(rewriter, loc,
+                                               buffer.capacity - 1))});
+        rewriter.replaceOp(
+            op,
+            arith::AndIOp::create(
+                rewriter, loc, known,
+                arith::CmpIOp::create(
+                    rewriter, loc, arith::CmpIPredicate::ne,
+                    arith::AndIOp::create(rewriter, loc, read, bit), nought)));
+        continue;
+      }
+      if (auto add = dyn_cast<SetAddOp>(op)) {
+        auto [known, word, bit] = placeOf(add.getEntity());
+        auto guard = scf::IfOp::create(rewriter, loc, known);
+        rewriter.setInsertionPointToStart(guard.thenBlock());
+        // (On many threads: atomically, where the bit is not as it is to
+        // be yet, which most of the time of a set filled from many places
+        // it is.)
+        bool threads = op->getParentOfType<scf::ParallelOp>() != nullptr;
+        Value old =
+            memref::LoadOp::create(rewriter, loc, words, ValueRange{word});
+        Value mask = add.getRemove()
+                         ? arith::XOrIOp::create(rewriter, loc, bit,
+                                                 arith::ConstantIntOp::create(
+                                                     rewriter, loc, -1, 64))
+                               .getResult()
+                         : bit;
+        Value changes = arith::CmpIOp::create(
+            rewriter, loc,
+            add.getRemove() ? arith::CmpIPredicate::ne
+                            : arith::CmpIPredicate::eq,
+            arith::AndIOp::create(rewriter, loc, old, bit), nought);
+        auto change = scf::IfOp::create(rewriter, loc, changes);
+        rewriter.setInsertionPointToStart(change.thenBlock());
+        if (threads)
+          memref::AtomicRMWOp::create(rewriter, loc,
+                                      add.getRemove()
+                                          ? arith::AtomicRMWKind::andi
+                                          : arith::AtomicRMWKind::ori,
+                                      mask, words, ValueRange{word});
+        else
+          memref::StoreOp::create(
+              rewriter, loc,
+              add.getRemove()
+                  ? arith::AndIOp::create(rewriter, loc, old, mask).getResult()
+                  : arith::OrIOp::create(rewriter, loc, old, mask).getResult(),
+              words, ValueRange{word});
+        rewriter.eraseOp(op);
+        continue;
+      }
+      if (isa<ClearOp>(op)) {
+        auto each = scf::ForOp::create(rewriter, loc, zero, wordCount, one);
+        rewriter.setInsertionPoint(each.getBody()->getTerminator());
+        memref::StoreOp::create(rewriter, loc, nought, words,
+                                ValueRange{each.getInductionVar()});
+        rewriter.eraseOp(op);
+        continue;
+      }
+      if (isa<BufferLenOp>(op)) {
+        auto each = scf::ForOp::create(
+            rewriter, loc, zero, wordCount, one, ValueRange{nought},
+            [&](OpBuilder &, Location, Value at, ValueRange held) {
+              Value bits =
+                  memref::LoadOp::create(rewriter, loc, words, ValueRange{at});
+              scf::YieldOp::create(
+                  rewriter, loc,
+                  ValueRange{arith::AddIOp::create(
+                      rewriter, loc, held[0],
+                      LLVM::CtPopOp::create(rewriter, loc, i64, bits))});
+            });
+        rewriter.setInsertionPointAfter(each);
+        rewriter.replaceOp(op, arith::TruncIOp::create(rewriter, loc,
+                                                       rewriter.getI32Type(),
+                                                       each.getResult(0)));
+        continue;
+      }
+      if (auto copy = dyn_cast<BufferCopyOp>(op)) {
+        const WorldBuffer &from =
+            layout.getBuffer(copy.getFromAttr().getAttr());
+        Value source = world.bufferField(from, from.fields.front());
+        auto each = scf::ForOp::create(rewriter, loc, zero, wordCount, one);
+        rewriter.setInsertionPoint(each.getBody()->getTerminator());
+        memref::StoreOp::create(
+            rewriter, loc,
+            memref::LoadOp::create(rewriter, loc, source,
+                                   ValueRange{each.getInductionVar()}),
+            words, ValueRange{each.getInductionVar()});
+        rewriter.eraseOp(op);
+        continue;
+      }
+    }
     Value counter = world.bufferCount(buffer);
+    // Another buffer's rows, of the same fields: each column copied, and
+    // how many there are.
+    if (auto copy = dyn_cast<BufferCopyOp>(op)) {
+      const WorldBuffer &from = layout.getBuffer(copy.getFromAttr().getAttr());
+      Value rows = memref::LoadOp::create(
+          rewriter, loc, world.bufferCount(from), ValueRange{zero});
+      Value fits = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::ule, rows,
+          arith::ConstantIntOp::create(rewriter, loc, buffer.capacity, 64));
+      cf::AssertOp::create(
+          rewriter, loc, fits,
+          rewriter.getStringAttr("no room for so many rows: the buffer @" +
+                                 BufferOp(buffer.op).getSymName() + " holds " +
+                                 Twine(buffer.capacity) +
+                                 "; 'capacity' gives more"));
+      Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+      auto each = scf::ForOp::create(rewriter, loc, zero,
+                                     world.toIndex(loc, rows), one);
+      {
+        OpBuilder::InsertionGuard inner(rewriter);
+        rewriter.setInsertionPoint(each.getBody()->getTerminator());
+        Value row = each.getInductionVar();
+        for (auto [to, of] : llvm::zip(buffer.fields, from.fields))
+          memref::StoreOp::create(
+              rewriter, loc,
+              memref::LoadOp::create(rewriter, loc, world.bufferField(from, of),
+                                     ValueRange{row}),
+              world.bufferField(buffer, to), ValueRange{row});
+      }
+      memref::StoreOp::create(rewriter, loc, rows, counter, ValueRange{zero});
+      rewriter.eraseOp(op);
+      continue;
+    }
     if (isa<ClearOp>(op)) {
       alsoAsked([&] {
         callGpu(rewriter, loc, program, "ent_ranks_buffer_kept",
@@ -24673,6 +25125,11 @@ struct EntLowerToLoops
       bool listed = parallelEntities && !gpu && !ranksMode &&
                     !query.getCascade() && !query.hasBy() &&
                     getTriggers(query).empty();
+      // (A `for` over a set's entities visits only those, in loops over its
+      // words, see emitSetRows: what is sent goes on the lists, as the
+      // places of the others are not visited to say they sent nothing.)
+      bool overSet = bool(query.getInSet());
+      listed |= overSet;
       for (Operation *parent = op->getParentOp(); parent != query;
            parent = parent->getParentOp()) {
         // (An apply in a loop over edges has a place for each edge; an
@@ -24682,7 +25139,15 @@ struct EntLowerToLoops
           return;
         inLoop |= isa<LoopLikeOpInterface, EdgesOp>(parent);
       }
-      if (!inLoop)
+      // (But a whole number added into a unique, which each thread sums
+      // for itself, see markReduced: carried through the loops over the
+      // set's words, see carryCellsThrough.)
+      if (overSet && !inLoop && isa<AccumulateOp>(op) &&
+          op->hasAttr(kUnobservedAttr) && !op->hasAttr(kInEachAttr) &&
+          cast<AccumulateOp>(op).getRule() != "set" &&
+          isa<IntegerType>(cast<AccumulateOp>(op).getValue().getType()))
+        return;
+      if (!inLoop && !overSet)
         return;
       if (query.getCascade() || !getTriggers(query).empty()) {
         op->emitError("is in a loop of the body of a 'for' that goes along a "
@@ -24921,7 +25386,7 @@ struct EntLowerToLoops
       auto query = connect->getParentOfType<QueryOp>();
       if (!query || query.isTurn() || connect->hasAttr(kAtOnceAttr))
         return;
-      bool inLoop = false;
+      bool inLoop = bool(query.getInSet());
       for (Operation *parent = connect->getParentOp(); parent != query;
            parent = parent->getParentOp())
         inLoop |= isa<LoopLikeOpInterface, EdgesOp>(parent);

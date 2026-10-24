@@ -532,6 +532,97 @@ LogicalResult ClusterOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return success();
 }
 
+/// What marks a buffer a set (WorldLayout::kSetAttr).
+static constexpr StringLiteral kSetMark = "ent.set";
+
+/// A set (a buffer marked ent.set) that `op` reads or changes; null, said,
+/// where `name` is none.
+static BufferOp verifySetUse(SymbolTableCollection &symbolTable, Operation *op,
+                             FlatSymbolRefAttr name, bool writes,
+                             StringRef what) {
+  BufferOp set = verifyBufferUse(symbolTable, op, name, writes,
+                                 /*outside=*/false, what);
+  if (!set)
+    return {};
+  if (!set->hasAttr(kSetMark)) {
+    op->emitOpError("asks for a set, and ") << name << " is a buffer";
+    return {};
+  }
+  if (!op->getParentOfType<SystemOp>()) {
+    op->emitOpError("must be inside an 'ent.system': a set is a system's");
+    return {};
+  }
+  return set;
+}
+
+LogicalResult
+BufferCopyOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  BufferOp target =
+      verifyBufferUse(symbolTable, *this, getBufferAttr(),
+                      /*writes=*/true, /*outside=*/true, "gives rows to ");
+  BufferOp source = verifyBufferUse(symbolTable, *this, getFromAttr(),
+                                    /*writes=*/false, /*outside=*/true);
+  if (!target || !source)
+    return failure();
+  if (target->hasAttr(kSetMark) != source->hasAttr(kSetMark))
+    return emitOpError("copies between a set and a buffer");
+  if (target.getFieldTypes() != source.getFieldTypes())
+    return emitOpError("copies the rows of ")
+           << getFromAttr() << ", whose fields are not those of "
+           << getBufferAttr();
+  return success();
+}
+
+LogicalResult SetAddOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  return verifySetUse(symbolTable, *this, getBufferAttr(), /*writes=*/true,
+                      getRemove() ? "takes an entity out of "
+                                  : "puts an entity into ")
+             ? success()
+             : failure();
+}
+
+LogicalResult SetHasOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  return verifySetUse(symbolTable, *this, getBufferAttr(), /*writes=*/false,
+                      "reads ")
+             ? success()
+             : failure();
+}
+
+LogicalResult SetAddOp::verify() {
+  // In a query that does not take turns its entities run in any order,
+  // and on many threads: what one puts into the set another must not see,
+  // nor take out.
+  auto query = (*this)->getParentOfType<QueryOp>();
+  if (!query || query.isTurn())
+    return success();
+  if (query.getInSet() == getBufferAttr())
+    return emitOpError("changes the set its query visits the entities of");
+  Operation *other = nullptr;
+  query.getBody().walk([&](Operation *op) {
+    if (other)
+      return;
+    if (auto add = dyn_cast<SetAddOp>(op))
+      if (add.getBufferAttr() == getBufferAttr() &&
+          add.getRemove() != getRemove())
+        other = op;
+    if (isa<SetHasOp, BufferLenOp>(op) &&
+        cast<FlatSymbolRefAttr>(op->getAttr("buffer")) == getBufferAttr())
+      other = op;
+  });
+  if (!other)
+    return success();
+  InFlightDiagnostic diag =
+      emitOpError("changes ")
+      << getBufferAttr()
+      << (isa<SetAddOp>(other)
+              ? ", which its query also changes the other way: what it "
+                "holds after would depend on the order"
+              : ", which its query also reads: what an entity finds would "
+                "depend on the order");
+  diag.attachNote(other->getLoc()) << "here";
+  return diag;
+}
+
 LogicalResult ClearOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return verifyBufferUse(symbolTable, *this, getBufferAttr(), /*writes=*/true,
                          /*outside=*/true)
@@ -1348,6 +1439,8 @@ notForGpu(SymbolTableCollection &symbolTable, Operation *op) {
   if (isa<SpawnOp, DespawnOp>(op))
     return std::string("changes which entities there are: that is done "
                        "on the CPU");
+  if (isa<SetAddOp, SetHasOp>(op))
+    return std::string("reads or changes a set: not on the GPU yet");
   FlatSymbolRefAttr changed;
   if (auto add = dyn_cast<AddOp>(op))
     changed = add.getComponentAttr();
@@ -1386,9 +1479,10 @@ static LogicalResult verifyGpuQueries(SymbolTableCollection &symbolTable,
       [&](Operation *op) {
         if (isa<QueryOp>(op))
           return WalkResult::skip();
-        if (isa<SpawnOp, DespawnOp, LookupOp, ApplyOp, ConnectOp,
-                DisconnectOp, AppendOp, ClearOp, BufferSetOp, BufferFillOp,
-                BufferAtOp, BufferLenOp, BufferOfOp, TableAtOp>(op)) {
+        if (isa<SpawnOp, DespawnOp, LookupOp, ApplyOp, ConnectOp, DisconnectOp,
+                AppendOp, ClearOp, BufferSetOp, BufferFillOp, BufferAtOp,
+                BufferLenOp, BufferOfOp, TableAtOp, BufferCopyOp, SetAddOp,
+                SetHasOp>(op)) {
           op->emitOpError("is in a 'gpu' system, outside its 'for's, where "
                           "its code only reads and writes uniques: what it "
                           "does to entities and buffers goes in a system of "
@@ -2540,6 +2634,32 @@ LogicalResult QueryOp::verify() {
 
 LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   auto system = (*this)->getParentOfType<SystemOp>();
+  if (FlatSymbolRefAttr set = getInSet()) {
+    auto buffer = symbolTable.lookupNearestSymbolFrom<BufferOp>(*this, set);
+    if (!buffer || !buffer->hasAttr(kSetMark))
+      return emitOpError("visits the entities of unknown set ") << set;
+    if (system && !system.canRead(set))
+      return emitOpError("visits the entities of ")
+             << set << " but system @" << system.getSymName()
+             << " does not declare it in 'reads' or 'writes'";
+    if (system && system.getGpu())
+      return emitOpError("visits the entities of a set in a 'gpu' system: "
+                         "not on the GPU yet");
+    if (hasBy() || getCascade() || isTurn() || (*this)->hasAttr(kTriggersAttr))
+      return emitOpError("visits the entities of a set: not by a field, "
+                         "along a tree, in turn or by what changed");
+    // (It visits only those, so what waits in a place of each entity of
+    // the `for` until it ends, for all at once, is not there yet.)
+    Operation *refused = nullptr;
+    getBody().walk([&](Operation *op) {
+      if (!refused && isa<AppendOp, RunningOp, BufferClaimOp, SpawnOp>(op))
+        refused = op;
+    });
+    if (refused)
+      return refused->emitOpError("in a 'for' over the entities of a set: "
+                                  "not yet (rows given to a buffer, a "
+                                  "running sum, a window, a spawn)");
+  }
   if (isListed()) {
     auto buffer =
         symbolTable.lookupNearestSymbolFrom<BufferOp>(*this, getListedBuffer());

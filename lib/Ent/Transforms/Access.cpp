@@ -529,6 +529,9 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
       // One that goes by a field reads it, of every entity it visits; and
       // the index it takes that order from, where it does.
       // (The buffer whose rows it visits the entities of.)
+      if (FlatSymbolRefAttr set = query.getInSet())
+        access.reads.insert(
+            {StringAttr(), set.getAttr(), StringAttr::get(context, "rows")});
       if (FlatSymbolRefAttr listed = query.getListedBuffer())
         access.reads.insert(
             {StringAttr(), listed.getAttr(), StringAttr::get(context, "rows")});
@@ -637,6 +640,25 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
             {StringAttr(),
              StringAttr::get(context, get.getBufferAttr().getValue() + part),
              StringAttr::get(context, "rows")});
+      return;
+    }
+    // (A copy: the one written, the other read.)
+    if (auto copy = dyn_cast<BufferCopyOp>(op)) {
+      StringAttr rows = StringAttr::get(context, "rows");
+      access.writes.insert(
+          {StringAttr(), copy.getBufferAttr().getAttr(), rows});
+      access.reads.insert({StringAttr(), copy.getFromAttr().getAttr(), rows});
+      return;
+    }
+    // (A set is one thing too: its bits.)
+    if (isa<SetAddOp, SetHasOp>(op)) {
+      Column set{StringAttr(),
+                 cast<FlatSymbolRefAttr>(op->getAttr("buffer")).getAttr(),
+                 StringAttr::get(context, "rows")};
+      if (isa<SetAddOp>(op))
+        access.writes.insert(set);
+      else
+        access.reads.insert(set);
       return;
     }
     if (isa<AppendOp, ClearOp, BufferLenOp, BufferAtOp, BufferOfOp,

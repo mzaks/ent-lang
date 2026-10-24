@@ -1,0 +1,63 @@
+import console
+
+component N { id: i32, odd: i32 } capacity 64
+relation (N)-[L { w: i32 }]->(N) capacity 512
+buffer Ids { who: entity } capacity 64
+
+world {
+  for i in 0..4 {
+    let e = spawn { N { id: i, odd: 0 } }
+    Ids += { who: e }
+  }
+  for i in 0..4 {
+    for j in 0..5 {
+      connect (Ids[i].who)-[L { w: i * 10 + j }]->(Ids[(i + j + 1) % 4].who)
+    }
+  }
+}
+
+system run() {
+  var a = 0
+  var n = 0
+  for i in 0..10 {
+    if i % 2 == 0 { continue }
+    a += i
+    if i > 6 { break }
+    n += 1
+  }
+  var b = 0
+  var k = 0
+  while k < 10 {
+    k += 1
+    if k % 3 == 0 {
+      b += 100
+      continue
+    }
+    b += k
+  }
+  var c = 0
+  for i in 0..4 {
+    for j in 0..4 {
+      if j == i { continue }
+      c += 1
+    }
+    if i == 2 { continue }
+    c += 10
+  }
+  put("counted {a} {n} while {b} {k} nested {c}")
+}
+
+system edges() {
+  for e, n: mut N {
+    var sum = 0
+    for (e)-[l: L]->(v) {
+      if l.w % 2 == 0 { continue }
+      sum += l.w
+    }
+    n.odd = sum
+  }
+  for n: N { put("{n.id}: odd {n.odd}") }
+}
+
+schedule all() { run() edges() }
+main { all() }

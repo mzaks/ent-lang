@@ -254,8 +254,9 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
       module.walk([&](QueryOp query) {
         auto equals = query->getAttrOfType<ArrayAttr>(QueryOp::kKeyEqualsAttr);
         auto system = query->getParentOfType<SystemOp>();
-        if (!equals || query.getViaHash() || !system || system.getGpu() ||
-            making.contains(system.getSymNameAttr()))
+        // (Nor one over a set's entities, which it finds by the set.)
+        if (!equals || query.getViaHash() || query.getInSet() || !system ||
+            system.getGpu() || making.contains(system.getSymNameAttr()))
           return;
         auto component = cast<FlatSymbolRefAttr>(equals[0]);
         auto field = cast<StringAttr>(equals[1]);

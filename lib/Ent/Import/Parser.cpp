@@ -205,6 +205,7 @@ struct Expr {
     If,     // if c { a } else { b }
     Spawn,  // spawn { A { .. }, B { .. } }
     Has,    // e.has(C): name is the entity, field the component
+    InSet,  // e in Name: name is the set, the operand the entity
     String, // "text": name holds its bytes
     Index,  // text[i]
     Format, // {value} inside a string: the value as text
@@ -398,10 +399,9 @@ class Parser {
 public:
   Parser(llvm::SourceMgr &sourceMgr, MLIRContext *context,
          ArrayRef<std::string> directories)
-      : sourceMgr(sourceMgr), context(context),
-        directories(directories),
-        lexer(sourceMgr.getMemoryBuffer(sourceMgr.getMainFileID())
-                  ->getBuffer()),
+      : sourceMgr(sourceMgr), context(context), directories(directories),
+        lexer(
+            sourceMgr.getMemoryBuffer(sourceMgr.getMainFileID())->getBuffer()),
         builder(context),
         components([this](StringRef name) { return resolve(name); }),
         uniques([this](StringRef name) { return resolve(name); }),
@@ -413,6 +413,7 @@ public:
         enums([this](StringRef name) { return resolve(name); }),
         tables([this](StringRef name) { return resolve(name); }),
         buffers([this](StringRef name) { return resolve(name); }),
+        sets([this](StringRef name) { return resolve(name); }),
         assetFiles([this](StringRef name) { return resolve(name); }),
         constants([this](StringRef name) { return resolve(name); }),
         prefabs([this](StringRef name) { return resolve(name); }) {
@@ -595,6 +596,8 @@ private:
   }
   LogicalResult parseComponent(bool tag);
   LogicalResult parseBuffer();
+  LogicalResult parseSet();
+  LogicalResult parseSetStatement(const std::string &name, llvm::SMLoc at);
   LogicalResult parseIndex();
   LogicalResult finishIndexOrders();
   FailureOr<mlir::Value> emitIndexCall(const Expr &expr, StringRef symbol,
@@ -709,6 +712,8 @@ private:
   LogicalResult parseStatements();
   std::string openBreak(Location where);
   mlir::Value breakFlag();
+  mlir::Value continueFlag();
+  LogicalResult parseLoopBody();
   void setVar(StringRef name, mlir::Value value);
   LogicalResult parseStatement();
   LogicalResult parseFor();
@@ -1011,6 +1016,8 @@ private:
   Declared<Record> tables;
   /// The buffers, by their fields.
   Declared<Record> buffers;
+  /// The sets (`set Name`): entities, each once, a bit for each.
+  Declared<bool> sets;
   /// The indexes (`index Name of Component by field`), by the symbol of
   /// the buffer that holds their rows: the component that keeps each
   /// entity's row, the field it keeps it in, the type of the key, and the
@@ -1100,6 +1107,12 @@ private:
   SmallVector<std::string> breakFlags;
   size_t breakFloor = 0;
   unsigned breaks = 0;
+  /// And the flag `continue` sets, of the body each turn of them runs
+  /// (see parseLoopBody); as many as of `break` inside a body.
+  SmallVector<std::string> continueFlags;
+  /// The false each loop's `break` flag starts as, which its turns'
+  /// `continue` flags start as too: by the name of the `break` flag.
+  llvm::StringMap<mlir::Value> breakStarts;
   /// The number of scopes outside the `for` over entities (and the edge
   /// loop) being parsed: a `var` of one of them is not the loop's own.
   unsigned queryScopes = 0, edgesScopes = 0;
@@ -1262,12 +1275,13 @@ LogicalResult Parser::parseDeclarations() {
     else if (token.isKeyword("buffer") && peek().is(Token::Identifier)) {
       advance();
       result = parseBuffer();
-    }
-    else if (token.isKeyword("index") && peek().is(Token::Identifier)) {
+    } else if (token.isKeyword("set") && peek().is(Token::Identifier)) {
+      advance();
+      result = parseSet();
+    } else if (token.isKeyword("index") && peek().is(Token::Identifier)) {
       advance();
       result = parseIndex();
-    }
-    else if (consumeKeyword("relation"))
+    } else if (consumeKeyword("relation"))
       result = parseRelation();
     else if (consumeKeyword("archetype"))
       result = parseArchetype();
@@ -3111,6 +3125,82 @@ LogicalResult Parser::parseBuffer() {
   return success();
 }
 
+// set Name: entities, each once: a bit for each entity key, in a buffer
+// of words (marked ent.set) as many as the layout says.
+LogicalResult Parser::parseSet() {
+  llvm::SMLoc at = token.loc;
+  FailureOr<std::string> name = identifier("a set name");
+  if (failed(name))
+    return failure();
+  BufferOp declared = BufferOp::create(
+      builder, loc(at), declareSymbol(at, *name),
+      builder.getArrayAttr({builder.getStringAttr("bits")}),
+      builder.getArrayAttr({TypeAttr::get(builder.getI64Type())}),
+      builder.getI64IntegerAttr(1));
+  declared->setAttr(WorldLayout::kSetAttr, builder.getUnitAttr());
+  declared->setAttr(WorldLayout::kTransientAttr, builder.getUnitAttr());
+  sets[*name] = true;
+  consumeIf(Token::Semicolon);
+  return success();
+}
+
+// Name += e, Name -= e: an entity into the set, or out of it, at once (in
+// a `for`, from any thread; see ent.set.add). Name = [], none; Name =
+// Other, the entities of another set.
+LogicalResult Parser::parseSetStatement(const std::string &name,
+                                        llvm::SMLoc at) {
+  FlatSymbolRefAttr target = symbol(name);
+  if (inFunction)
+    return error(at, "'" + name +
+                         "' is a set, which a system changes; a "
+                         "fn or proc does not");
+  if (token.is(Token::PlusAssign) || token.is(Token::MinusAssign)) {
+    bool remove = token.is(Token::MinusAssign);
+    advance();
+    FailureOr<ExprPtr> value = parseExpr();
+    if (failed(value))
+      return failure();
+    FailureOr<mlir::Value> entity = emit(**value, EntityType::get(context));
+    if (failed(entity))
+      return failure();
+    if (!isa<EntityType>(entity->getType()))
+      return mismatch((*value)->loc, entity->getType(),
+                      EntityType::get(context));
+    SetAddOp::create(builder, loc(at), target, *entity,
+                     remove ? builder.getUnitAttr() : UnitAttr());
+    return success();
+  }
+  if (!consumeIf(Token::Assign))
+    return error(at, "'" + name + "' is a set: '" + name +
+                         " += e' puts an "
+                         "entity into it, '" +
+                         name + " -= e' takes one out, '" + name +
+                         " = []' empties it, '" + name +
+                         " = Other' "
+                         "gives it the entities of another");
+  if (inQuery && !inTurn)
+    return error(at, "a set is emptied or given another's entities outside "
+                     "a 'for': every entity would");
+  if (consumeIf(Token::LBracket)) {
+    if (failed(expect(Token::RBracket, "']': '" + name +
+                                           " = []' empties "
+                                           "the set")))
+      return failure();
+    ClearOp::create(builder, loc(at), target);
+    return success();
+  }
+  llvm::SMLoc fromAt = token.loc;
+  FailureOr<std::string> from = identifier("a set");
+  if (failed(from))
+    return failure();
+  if (!sets.count(*from))
+    return error(fromAt, "a set is given the entities of another set: '" +
+                             *from + "' is none");
+  if (*from != name)
+    BufferCopyOp::create(builder, loc(at), target, symbol(*from));
+  return success();
+}
+
 // In what an index of a grid declares for itself: the most cells it may
 // have, until the capacity of its first component is known
 // (finishIndexOrders).
@@ -4763,6 +4853,31 @@ LogicalResult Parser::parseBufferStatement(const std::string &name,
   }
   if (consumeIf(Token::Assign)) {
     // Name = Name[..n]: its first n rows, and none after them.
+    // Name = Other: the rows of another buffer of the same fields.
+    if (token.is(Token::Identifier) && token.spelling != name &&
+        !peek().is(Token::LBracket)) {
+      llvm::SMLoc fromAt = token.loc;
+      std::string from = token.spelling.str();
+      advance();
+      std::optional<BufferUse> source = bufferNamed(from);
+      if (!source || source->given || held.given)
+        return error(fromAt, "a buffer is given the rows of another buffer "
+                             "of the program: '" +
+                                 from + "' is none");
+      const Record &mine = buffers.ofSymbol(held.symbol);
+      const Record &theirs = buffers.ofSymbol(source->symbol);
+      if (mine.fields != theirs.fields)
+        return error(fromAt, "'" + from + "' has other fields than '" + name +
+                                 "': a buffer is given the rows of "
+                                 "one with the same fields, of the same "
+                                 "types, in the same order");
+      if (inQuery && !inTurn)
+        return error(at, "a buffer is given another's rows outside a 'for': "
+                         "every entity would");
+      BufferCopyOp::create(builder, loc(at), target,
+                           FlatSymbolRefAttr::get(context, source->symbol));
+      return success();
+    }
     if (token.is(Token::Identifier)) {
       llvm::SMLoc keptAt = token.loc;
       if (token.spelling != name)
@@ -5841,17 +5956,20 @@ LogicalResult Parser::parseStatements() {
   while (!token.is(Token::RBrace)) {
     if (token.is(Token::Eof))
       return error("expected '}'");
-    mlir::Value flag = breakFlag();
+    mlir::Value flag = breakFlag(), skip = continueFlag();
     llvm::SMLoc at = token.loc;
     if (failed(parseStatement()))
       return failure();
     consumeIf(Token::Semicolon);
-    mlir::Value now = breakFlag();
-    if (!flag || now == flag || token.is(Token::RBrace))
+    mlir::Value now = breakFlag(), skipped = continueFlag();
+    if (!flag || (now == flag && skipped == skip) || token.is(Token::RBrace))
       continue;
     // (What the rest leaves in a var where it runs, or the var as it was.)
+    mlir::Value stops = now;
+    if (skipped)
+      stops = arith::OrIOp::create(builder, loc(at), now, skipped);
     mlir::Value goesOn = arith::XOrIOp::create(
-        builder, loc(at), now,
+        builder, loc(at), stops,
         arith::ConstantIntOp::create(builder, loc(at), 1, 1));
     auto branch = scf::IfOp::create(builder, loc(at), goesOn,
                                     /*withElseRegion=*/true);
@@ -5880,10 +5998,33 @@ LogicalResult Parser::parseStatements() {
 /// the loop; the innermost from here on.
 std::string Parser::openBreak(Location where) {
   std::string name = " break " + std::to_string(breaks++);
-  bind(name,
-       Variable::ofVar(arith::ConstantIntOp::create(builder, where, 0, 1)));
+  mlir::Value start = arith::ConstantIntOp::create(builder, where, 0, 1);
+  breakStarts[name] = start;
+  bind(name, Variable::ofVar(start));
   breakFlags.push_back(name);
   return name;
+}
+
+/// The body of a loop `break` may leave, a turn of it: with a flag that
+/// `continue` sets, false where the turn starts, after which the rest of
+/// the turn is not run (see parseStatements).
+LogicalResult Parser::parseLoopBody() {
+  ScopeGuard scope(*this);
+  std::string name = " continue " + std::to_string(breaks++);
+  bind(name, Variable::ofVar(breakStarts.lookup(breakFlags.back())));
+  continueFlags.push_back(name);
+  llvm::scope_exit pop([&] { continueFlags.pop_back(); });
+  return parseBlock();
+}
+
+/// What the `continue` flag of the innermost loop's turn holds here; none
+/// outside one (or before its body).
+mlir::Value Parser::continueFlag() {
+  if (breakFlags.size() <= breakFloor ||
+      continueFlags.size() != breakFlags.size())
+    return mlir::Value();
+  const Variable *flag = lookup(continueFlags.back());
+  return flag ? flag->value : mlir::Value();
 }
 
 /// What the flag of the innermost loop `break` may leave holds here; none
@@ -6033,6 +6174,19 @@ LogicalResult Parser::parseStatement() {
                        "a loop over edges ('for (e)-[R]->(v)'), not a 'for' "
                        "over entities");
     setVar(breakFlags.back(),
+           arith::ConstantIntOp::create(builder, loc(at), 1, 1));
+    return success();
+  }
+  // continue: on with the next turn of the innermost counted `for`,
+  // `while` or loop over edges; the statements after it in this one are
+  // not run.
+  if (consumeKeyword("continue")) {
+    if (breakFlags.size() <= breakFloor ||
+        continueFlags.size() != breakFlags.size())
+      return error(at, "'continue' goes on with the next turn of a loop: a "
+                       "counted 'for', a 'while' or a loop over edges ('for "
+                       "(e)-[R]->(v)'), not a 'for' over entities");
+    setVar(continueFlags.back(),
            arith::ConstantIntOp::create(builder, loc(at), 1, 1));
     return success();
   }
@@ -7932,7 +8086,7 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
   // var as it was.)
   auto parseWhere = [&]() -> LogicalResult {
     if (!where)
-      return parseBlock();
+      return parseLoopBody();
     FailureOr<mlir::Value> holds = emit(*where, builder.getI1Type());
     if (failed(holds))
       return failure();
@@ -7944,7 +8098,7 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
     {
       OpBuilder::InsertionGuard inner(builder);
       builder.setInsertionPoint(branch.thenBlock()->getTerminator());
-      if (failed(parseBlock()))
+      if (failed(parseLoopBody()))
         return failure();
     }
     SmallVector<VarState> thenVars = captureVars();
@@ -7987,6 +8141,13 @@ LogicalResult Parser::parseEdges(llvm::SMLoc at) {
     if (var.name == flag && ends[k] == block->getArgument(2 + k)) {
       Operation *yield = block->getTerminator();
       yield->eraseOperand(k);
+      // (Read where a `continue` may end a turn: false all along.)
+      {
+        OpBuilder::InsertionGuard start(builder);
+        builder.setInsertionPointToStart(block);
+        block->getArgument(2 + k).replaceAllUsesWith(
+            arith::ConstantIntOp::create(builder, loc(at), 0, 1));
+      }
       block->eraseArgument(2 + k);
       OperationState again(edges->getLoc(), EdgesOp::getOperationName());
       again.addAttributes(edges->getAttrs());
@@ -8320,7 +8481,7 @@ LogicalResult Parser::parseCountedFor(llvm::SMLoc at) {
       state.value = placeholder.getResult(0);
     }
     restoreVars(inside);
-    if (failed(parseBlock()))
+    if (failed(parseLoopBody()))
       return failure();
     after = captureVars();
   }
@@ -8434,7 +8595,7 @@ LogicalResult Parser::parseWhile(llvm::SMLoc at) {
         bindTo(arguments);
         SmallVector<mlir::Value> ends(arguments.begin(), arguments.end());
         if (succeeded(parsed)) {
-          if (failed(parseBlock())) {
+          if (failed(parseLoopBody())) {
             parsed = failure();
           } else {
             ends.clear();
@@ -9163,7 +9324,21 @@ LogicalResult Parser::parseFor() {
   // in Buffer[.field]: the entities the buffer's rows name (by its field
   // of entities, the one it has or the one named), in the rows' order.
   Attribute listed;
-  if (token.isKeyword("in") && !peek().isKeyword("turn")) {
+  FlatSymbolRefAttr inSet;
+  llvm::SMLoc inSetAt;
+  if (token.isKeyword("in") && !peek().isKeyword("turn") &&
+      peek().is(Token::Identifier) && sets.count(peek().spelling)) {
+    // in Set: those of its entities the set holds, in no order the
+    // program sees (a query like any other).
+    inSetAt = token.loc;
+    advance();
+    inSet = symbol(token.spelling);
+    advance();
+    if (cascade)
+      return error(inSetAt, "a 'for' goes along a tree or over the "
+                            "entities of a set: not both");
+  }
+  if (!inSet && token.isKeyword("in") && !peek().isKeyword("turn")) {
     llvm::SMLoc inAt = token.loc;
     advance();
     llvm::SMLoc bufferAt = token.loc;
@@ -9219,6 +9394,10 @@ LogicalResult Parser::parseFor() {
     advance();
     advance();
     turn = true;
+    if (inSet)
+      return error(inSetAt, "the entities of a set take no turns: they "
+                            "have no order to take them in (a buffer of "
+                            "them does, 'in Name in turn')");
     if (!listed && !token.isKeyword("by"))
       return error("'in turn' needs an order: 'in turn by name.field', a "
                    "whole number the entities have, or the rows of a "
@@ -9231,6 +9410,9 @@ LogicalResult Parser::parseFor() {
     if (listed)
       return error(byAt, "a 'for' over the entities a buffer lists goes in "
                          "the order of its rows");
+    if (inSet)
+      return error(byAt, "a 'for' over the entities of a set goes by a "
+                         "field: not yet");
     llvm::SMLoc componentAt = token.loc;
     FailureOr<std::string> name = identifier("a component or a binding");
     if (failed(name))
@@ -9547,6 +9729,8 @@ LogicalResult Parser::parseFor() {
     state.addAttribute(QueryOp::kByAttr, by);
   if (listed)
     state.addAttribute(QueryOp::kListedAttr, listed);
+  if (inSet)
+    state.addAttribute(QueryOp::kInSetAttr, inSet);
   if (turn)
     state.addAttribute(QueryOp::kTurnAttr, builder.getUnitAttr());
   if (!keyEquals.empty())
@@ -9926,6 +10110,8 @@ LogicalResult Parser::parseNameStatement() {
     return parseWindowStatement(name, *window, at);
   if (bufferNamed(name) && !token.is(Token::LParen) && !token.is(Token::Dot))
     return parseBufferStatement(name, at);
+  if (sets.count(name) && !lookup(name))
+    return parseSetStatement(name, at);
   if (componentGiven(name) && token.is(Token::LBracket))
     return parseGivenStatement(name, at);
 
@@ -10415,6 +10601,20 @@ FailureOr<ExprPtr> Parser::parseBinary(int minPrecedence) {
   if (failed(lhs))
     return failure();
   while (true) {
+    // e in Name: whether a set holds the entity (as a comparison).
+    if (token.isKeyword("in") && peek().is(Token::Identifier) &&
+        sets.count(peek().spelling) && minPrecedence <= 4) {
+      llvm::SMLoc inAt = token.loc;
+      advance();
+      auto node = std::make_unique<Expr>();
+      node->kind = Expr::InSet;
+      node->loc = inAt;
+      node->name = token.spelling.str();
+      advance();
+      node->operands.push_back(std::move(*lhs));
+      lhs = std::move(node);
+      continue;
+    }
     int precedence = precedenceOf(token.kind);
     if (precedence < 0 || precedence < minPrecedence)
       return lhs;
@@ -11305,6 +11505,7 @@ Type Parser::typeOf(const Expr &expr) {
   case Expr::Spawn:
     return EntityType::get(context);
   case Expr::Has:
+  case Expr::InSet:
     return builder.getI1Type();
   case Expr::Given:
     return expr.given.getType();
@@ -12193,6 +12394,19 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
                                  FlatSymbolRefAttr::get(context, held.symbol))
           .getResult();
     }
+    // (Of a set: how many entities it holds now.)
+    if (expr.name == "len" && expr.operands.size() == 1 &&
+        expr.operands[0]->kind == Expr::Name &&
+        !lookup(expr.operands[0]->name) && sets.count(expr.operands[0]->name)) {
+      if (inFunction)
+        return error(expr.loc,
+                     "'" + expr.operands[0]->name +
+                         "' is a set, "
+                         "which a system reads; a fn or proc does not");
+      return BufferLenOp::create(builder, at, builder.getI32Type(),
+                                 symbol(expr.operands[0]->name))
+          .getResult();
+    }
     // (Of a table: how many rows it has, which is known.)
     if (expr.name == "len" && expr.operands.size() == 1 &&
         expr.operands[0]->kind == Expr::Name &&
@@ -12611,6 +12825,22 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       return error(expr.loc, "'has' tests the entity a 'for' visits; '" +
                                  expr.name + "' is not that entity");
     return HasOp::create(builder, at, builder.getI1Type(), symbol(expr.field))
+        .getResult();
+  }
+  case Expr::InSet: {
+    if (inFunction)
+      return error(expr.loc, "'" + expr.name +
+                                 "' is a set, which a system "
+                                 "reads; a fn or proc does not");
+    FailureOr<mlir::Value> entity =
+        emit(*expr.operands[0], EntityType::get(context));
+    if (failed(entity))
+      return failure();
+    if (!isa<EntityType>(entity->getType()))
+      return mismatch(expr.operands[0]->loc, entity->getType(),
+                      EntityType::get(context));
+    return SetHasOp::create(builder, at, builder.getI1Type(), symbol(expr.name),
+                            *entity)
         .getResult();
   }
   }

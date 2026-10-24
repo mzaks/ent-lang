@@ -512,6 +512,21 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
   for (BufferOp buffer : module.getOps<BufferOp>()) {
     WorldBuffer entry;
     entry.op = buffer;
+    // A set: a bit for each entity key, so many words. (Keys are slots or
+    // row ids, which a destroyed entity's slot would be given again: not
+    // yet in a program that destroys entities; nor on many ranks.)
+    if (buffer->hasAttr(kSetAttr)) {
+      if (scheme.kind == EntityScheme::Generational)
+        return buffer.emitError("a set in a program that destroys "
+                                "entities: not yet");
+      if (llvm::any_of(layout.archetypes, [](const WorldArchetype &a) {
+            return bool(a.distributeField);
+          }))
+        return buffer.emitError("a set in a program whose entities live on "
+                                "many ranks: not yet");
+      entry.set = true;
+      buffer.setCapacity(std::max<int64_t>(1, (layout.entityKeys + 63) / 64));
+    }
     entry.capacity = buffer.getCapacity();
     entry.rows = buffer->hasAttr(kIndexedAttr)
                      ? int64_t(llvm::PowerOf2Ceil(entry.capacity))

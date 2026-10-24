@@ -1,0 +1,123 @@
+// RUN: ent-translate --import-ent %s -split-input-file -verify-diagnostics
+
+component N { id: i32 }
+set S
+system s() {
+  for e, n: N {
+    // expected-error @+1 {{changes @S, which its query also reads: what an entity finds would depend on the order}}
+    S += e
+    // expected-note @+1 {{here}}
+    if e in S { }
+  }
+}
+
+// -----
+
+component N { id: i32 }
+set S
+system s() {
+  for e, n: N where n.id > 2 {
+    // expected-error @+1 {{changes @S, which its query also changes the other way}}
+    S += e
+    // expected-note @+1 {{here}}
+    S -= e
+  }
+}
+
+// -----
+
+component N { id: i32 }
+set S
+system s() {
+  for e, n: N in S {
+    // expected-error @+1 {{changes the set its query visits the entities of}}
+    S -= e
+  }
+}
+
+// -----
+
+component N { id: i32 }
+set S
+system s() {
+  // expected-error @+1 {{the entities of a set take no turns}}
+  for n: N in S in turn {
+  }
+}
+
+// -----
+
+component N { id: i32 }
+set S
+system s() {
+  // expected-error @+1 {{a 'for' over the entities of a set goes by a field: not yet}}
+  for n: N in S by n.id {
+  }
+}
+
+// -----
+
+component N { id: i32 }
+set S
+buffer B { n: i32 } capacity 4
+system s() {
+  for n: N in S {
+    // expected-error @+1 {{in a 'for' over the entities of a set: not yet}}
+    B += { n: n.id }
+  }
+}
+
+// -----
+
+component N { id: i32 }
+set S
+system s() {
+  for e, n: N {
+    // expected-error @+1 {{a set is emptied or given another's entities outside a 'for'}}
+    S = []
+  }
+}
+
+// -----
+
+set S
+fn f(e: entity) -> bool {
+  // expected-error @+1 {{'S' is a set, which a system reads; a fn or proc does not}}
+  e in S
+}
+
+// -----
+
+set S
+buffer B { who: entity } capacity 4
+system s() {
+  // expected-error @+1 {{a set is given the entities of another set: 'B' is none}}
+  S = B
+}
+
+// -----
+
+buffer A { who: entity } capacity 4
+buffer B { who: entity, n: i32 } capacity 4
+system s() {
+  // expected-error @+1 {{'B' has other fields than 'A'}}
+  A = B
+}
+
+// -----
+
+component N { id: i32 }
+system s() {
+  // expected-error @+1 {{'continue' goes on with the next turn of a loop}}
+  continue
+}
+
+// -----
+
+component N { id: i32 }
+system s() {
+  for n: N {
+    // expected-error @+1 {{'continue' goes on with the next turn of a loop}}
+    if n.id > 2 { continue }
+  }
+}

@@ -251,6 +251,61 @@ def Ent_BufferKeepOp : Ent_Op<"buffer.keep", [
   let assemblyFormat = "$buffer $count attr-dict";
 }
 
+def Ent_BufferCopyOp
+    : Ent_Op<
+          "buffer.copy", [DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Give a buffer the rows of another, or a set its entities";
+  let description = [{
+    ```mlir
+    ent.buffer.copy @Frontier from @Reached
+    ```
+    `@Frontier` has the rows `@Reached` has, in their order, in place of
+    its own: buffers of the same fields, of the same types, in the same
+    order. More rows than it holds stops the program. Of two sets
+    (buffers marked `ent.set`): the entities of the one, in place of the
+    other's. Outside queries.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$buffer, FlatSymbolRefAttr:$from);
+  let assemblyFormat = "$buffer `from` $from attr-dict";
+}
+
+def Ent_SetAddOp
+    : Ent_Op<"set.add", [DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Put an entity into a set, or take it out";
+  let description = [{
+    ```mlir
+    ent.set.add @Next %e
+    ent.set.add @Next %e remove
+    ```
+    A set (a buffer marked `ent.set`) holds entities, each once, by their
+    keys (the slot, or the row id): a bit for each. In a query it is there
+    at once, from any thread (atomically where the query runs on many),
+    also from a loop of the body or a loop over edges; what the query
+    holds in the end does not depend on the order. A query does not both
+    put entities into a set and take them out, nor read the set it
+    changes, but in turn.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$buffer, Ent_EntityType:$entity,
+      UnitAttr:$remove);
+  let assemblyFormat = "$buffer $entity (`remove` $remove^)? attr-dict";
+  let hasVerifier = 1;
+}
+
+def Ent_SetHasOp
+    : Ent_Op<"set.has", [DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Whether a set holds an entity";
+  let description = [{
+    ```mlir
+    %in = ent.set.has @Front %u
+    ```
+    Its bit: true where the entity was put into the set and not taken out
+    since.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$buffer, Ent_EntityType:$entity);
+  let results = (outs I1:$result);
+  let assemblyFormat = "$buffer $entity attr-dict";
+}
+
 def Ent_BufferClaimOp : Ent_Op<"buffer.claim", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "Take rows of a buffer as the visited entity's own";
@@ -885,6 +940,12 @@ def Ent_QueryOp : Ent_Op<"query", [
     bool hasByField() { return (*this)->hasAttr(kByAttr); }
     /// The buffer whose rows name the entities it visits, in the rows'
     /// order, and its field (of entities) that names them.
+    /// The entities of a set (a buffer marked `ent.set`): a query like
+    /// any other, of those of its entities the set holds.
+    static constexpr ::llvm::StringLiteral kInSetAttr = "in_set";
+    ::mlir::FlatSymbolRefAttr getInSet() {
+      return (*this)->getAttrOfType<::mlir::FlatSymbolRefAttr>(kInSetAttr);
+    }
     static constexpr ::llvm::StringLiteral kListedAttr = "listed";
     bool isListed() { return (*this)->hasAttr(kListedAttr); }
     ::mlir::FlatSymbolRefAttr getListedBuffer() {

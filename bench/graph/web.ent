@@ -18,8 +18,6 @@ component Node { id: i32, degree: i32 } capacity 1048576
 component Rank { score: f32 } capacity 1048576
 component Out { contrib: f32 } capacity 1048576
 component Depth { d: i32 } capacity 1048576
-// The least depth sent to it in a step.
-component Next { at: i32 } capacity 1048576
 
 // A link, and a weight of it from 0 up to below 1 that its ends make
 // (`weight`), which bench/graph/pick.ent goes by.
@@ -62,7 +60,7 @@ system load() {
   G.edges = edges
   for k in 0..most + 1 {
     let e = spawn { Node { id: k, degree: Degree[k].n }, Rank { score: 0.0 },
-                    Out { contrib: 0.0 }, Depth { d: -1 }, Next { at: 1000000000 } }
+                    Out { contrib: 0.0 }, Depth { d: -1 } }
     Ids += { who: e }
   }
   i = 0

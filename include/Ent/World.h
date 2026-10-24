@@ -484,6 +484,8 @@ struct WorldBuffer {
   int64_t capacity;
   int64_t rows;
   uint64_t countOffset = 0;
+  /// A set (see kSetAttr): its rows are the words of its bits.
+  bool set = false;
   /// One column per field; `component` is the buffer's name.
   SmallVector<WorldColumn> fields;
   /// Of a buffer whose rows a `for` writes, or reads through a window (0
@@ -758,6 +760,10 @@ struct WorldLayout {
   /// What a declaration is marked with that is not part of a saved world
   /// (`transient unique`, `transient buffer`).
   static constexpr llvm::StringLiteral kTransientAttr = "ent.transient";
+  /// On a buffer: it is a set (`set Name`), a bit for each entity key
+  /// (see `entityKeys`) in its field `bits` of u64 words; its capacity
+  /// the words, whatever it was declared with. Transient.
+  static constexpr llvm::StringLiteral kSetAttr = "ent.set";
   /// On a component: the field its entities are placed by on many ranks
   /// (`distribute Colony by number`), a whole number (ranges of it) or an
   /// entity (with that one). Its archetypes are distributed.

@@ -4001,3 +4001,37 @@ run on one core, where GAP's take every core and set a depth by
 compare-and-swap; that is the gap left. PageRank is as before (48.2 ms,
 GAP 42.4; 8.54 and 6.68 on all cores). Churn as in the last section
 (rewire 0.54, 0.68, 13.3 ms; anew 83).
+
+### The search on sets, on all cores
+
+A set (`set Front`) holds entities, each once, a bit for each; `Next +=
+v` puts one in from any thread (atomically where the loop runs on many),
+`u in Front` asks for its bit, and a `for` over a set's entities reads a
+word of its bits for 64 rows. The search now keeps the pages reached last
+in one set and those it reaches in another, as GAP keeps its queue and
+bitmaps: top down, a step goes from the pages of `Front` (on all cores:
+nothing it does depends on the order) and puts those not reached yet into
+`Next`, whose pages are then given their depth; bottom up, a page not
+reached yet asks `u in Front` of the pages linking to it, breaks off at
+the first, and gives itself its depth. `Front = Next` between steps (two
+sets of 4,096 words). Also `continue` and `A = B` of buffers. The same
+graph, ms, the median of 5 processes of each one's best of 3 runs:
+
+| variant | search |
+|---|---|
+| ent, one core, before | 3.50 |
+| ent, one core | 3.52 |
+| GAP, one core | 3.31 |
+| ent, all cores, before | 1.27 |
+| ent, all cores | 0.68 |
+| GAP, all cores | 0.67 |
+
+On all cores the search costs what GAP's does: of a search, the big step
+top down 0.28 ms (GAP 0.40) and giving its 68,519 pages their depth 0.05,
+the two steps bottom up 0.15 and 0.06 (GAP 0.18 and 0.07). A `for` over a
+set's entities runs on many threads where the set holds 1/32 of what a
+plain loop needs (a million): each entity costs about 2.8 ns found by its
+bit, where a row of a plain loop costs 0.1. On one core GAP varies from
+3.31 to 3.51 between runs, ent from 3.37 to 3.52; bottom up is 1.73 ms
+where GAP's is 1.53. PageRank is as before (47.7 ms, GAP 40.8; 8.45 and
+6.55 on all cores).

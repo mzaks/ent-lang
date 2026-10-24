@@ -1,0 +1,27 @@
+// A set holds entities, each once: put in (`+=`), taken out (`-=`),
+// asked (`e in Set`), counted (`len`), emptied and given another's. A
+// `for` over its entities visits those it holds, on many threads too,
+// where entities go into another set from a loop over edges. A
+// breadth-first search, top down and bottom up, on two of them; and a
+// buffer given another's rows. The same built with threads.
+// RUN: %ent run %S/Inputs/sets.ent 2>/dev/null > %t.out
+// RUN: %ent run --parallel %S/Inputs/sets.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// 3 twice and 150 taken out again: 3 and 64.
+// CHECK:      len 2 has3 true has150 false
+// CHECK-NEXT: got 3
+// CHECK-NEXT: got 64
+// CHECK-NEXT: copied 2
+// CHECK-NEXT: B 2 6
+// Page i links to 7 i + 1 and 13 i + 5, modulo 200: from page 0 all are
+// reached, at depths adding to 1274 (as a queue finds them).
+// CHECK-NEXT: reached 200 depths 1274
+// Pages 10, 20 and 199 send along their links; each adds a half.
+// CHECK-NEXT: sent 65: 100
+// CHECK-NEXT: sent 71: 100
+// CHECK-NEXT: sent 135: 100
+// CHECK-NEXT: sent 141: 100
+// CHECK-NEXT: sent 192: 100
+// CHECK-NEXT: sent 194: 100
+// CHECK-NEXT: half 1.5
