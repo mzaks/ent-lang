@@ -70,7 +70,10 @@ starts, with a copy of the world on the GPU, the copies between the two
 placed by the compiler where a run needs what the other side wrote. It needs
 the CUDA driver (libcuda) where the program is built and where it runs,
 and cuda.h (CUDA_PATH, else /opt/cuda) where it is built. Without --gpu
-those systems run on the CPU, with the same results.
+those systems run on the CPU, with the same results. An index that only
+gpu systems read and whose key only they write is made on the GPU too
+(docs/indexes.md); ENT_INDEXES_ON_CPU=1, where it is built, makes every
+one on the CPU instead (to compare).
 
 With --ranks N the program is built for many ranks (docs/ranks.md): N
 processes started by MPI's mpirun (`run`), each with a world of its own,
@@ -298,7 +301,8 @@ def cache_key(arguments):
             note_file(path)
     if arguments.gpu:
         note("gpu", gpu_chip(), os.environ.get("ENT_GPU_FEATURES", ""),
-             os.environ.get("CUDA_PATH", ""))
+             os.environ.get("CUDA_PATH", ""),
+             os.environ.get("ENT_INDEXES_ON_CPU", ""))
         note_file(os.path.join(ROOT, "devices", "gpu.c"))
     if arguments.ranks:
         note("ranks", mpi_flags(),
@@ -703,7 +707,9 @@ def build(arguments, output, directory):
     # (Each index made again before what reads it, where what it is made
     # of changed: before the systems are staged and lowered.)
     # (Where built for a GPU, an index may be made there: EntIndexes.)
-    indexes = "--ent-indexes" + ("=gpu=1" if arguments.gpu else "")
+    indexes = "--ent-indexes" + (
+        "=gpu=1" if arguments.gpu and not os.environ.get("ENT_INDEXES_ON_CPU")
+        else "")
     passes = [indexes,
               lowering + "=fuse-systems=1" + gpu + ranks + tuning,
               "--symbol-dce"]

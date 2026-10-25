@@ -1,0 +1,58 @@
+// The k nearest of every dot, in a grid and in a Morton index, in a
+// `gpu system` (test/Integration/gpu.test): each dot's list a part of an
+// array in the GPU's memory (scratchForAllocations), the indexes made
+// on the GPU as the dots move. The same as on the CPU.
+import console
+import wyhash
+
+component Dot { x: f64, y: f64, id: i32, a: i64, b: i64 } capacity 8192
+unique Check { frame: i64, k: i32, differ: i64, sum: i64 }
+
+index Grid of Dot grid (x, y) cell 0.03
+index Tree of Dot morton (x, y) leaf 8
+
+world {
+  Check.k = 6
+  for i in 0..5000 {
+    spawn { Dot { x: wyrand_unit(5, i as i64 * 2), y: wyrand_unit(5, i as i64 * 2 + 1), id: i, a: 0, b: 0 } }
+  }
+}
+
+gpu system count() {
+  let k = Check.k
+  for me, d: mut Dot {
+    var a: i64 = 0
+    var b: i64 = 0
+    var j: i64 = 1
+    for o, p: Dot nearest k to (d.x, d.y) in Grid where o != me {
+      a += (p.id as i64) * j
+      j += 1
+    }
+    j = 1
+    for o, p: Dot nearest k to (d.x, d.y) in Tree where o != me {
+      b += (p.id as i64) * j
+      j += 1
+    }
+    d.a = a
+    d.b = b
+    if a != b { Check.differ += 1 }
+    Check.sum += a
+  }
+}
+
+gpu system move() {
+  for d: mut Dot {
+    d.x = d.x + 0.2 * d.y * d.y
+    if d.x >= 1.0 { d.x = d.x - 1.0 }
+  }
+}
+
+system report() {
+  put("frame {Check.frame}: {Check.differ} differ, sum {Check.sum}")
+  Check.frame += 1
+  Check.differ = 0
+  Check.sum = 0
+}
+
+schedule frame() { count() report() move() }
+main { loop { frame() } until Check.frame >= 4 }

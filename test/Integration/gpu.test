@@ -317,3 +317,23 @@
 // RUN: %ent run %t.m3.ent --gpu | diff %t.m3.cpu -
 // RUN: %ent run %t.mwhole.ent --gpu | diff %t.mwhole.cpu -
 // RUN: %ent run %t.mwrap.ent --gpu --parallel | diff %t.mwrap.cpu -
+
+// The k nearest of every dot in a grid and a Morton index, in a `gpu`
+// system, k a unique's: each dot's list a part of an array made before
+// the kernel, not of the GPU's heap; both indexes made on the GPU.
+// RUN: %ent run %S/Inputs/gpu_nearest.ent > %t.nearest.cpu
+// RUN: %ent build %S/Inputs/gpu_nearest.ent --gpu -o %t.nearest
+// RUN: %t.nearest | diff %t.nearest.cpu -
+// RUN: %ent run %S/Inputs/gpu_nearest.ent --gpu --parallel | diff %t.nearest.cpu -
+// RUN: env ENT_GPU_PROTECT=1 %t.nearest | diff %t.nearest.cpu -
+// RUN: FileCheck %s --check-prefix=NEAREST --input-file=%t.nearest.cpu
+// RUN: strings %t.nearest | not grep -q "func_retval0) malloc"
+// NEAREST: frame 0: 0 differ, sum 262073433
+// NEAREST: frame 3: 0 differ, sum 261969676
+
+// A `for ... by` on the GPU whose keys' range (0x100) has a lowest byte
+// of nought: a pass for every byte up to its highest, in order.
+// RUN: %ent run %S/Inputs/gpu_by_carry.ent > %t.carry.cpu
+// RUN: %ent run %S/Inputs/gpu_by_carry.ent --gpu | diff %t.carry.cpu -
+// RUN: FileCheck %s --check-prefix=CARRY --input-file=%t.carry.cpu
+// CARRY: rows 3000 unsorted 0 sum 6761301124

@@ -1,0 +1,35 @@
+// A `for ... by` in a `gpu system` whose keys go from 0 to 256: their
+// range, 0x100, has a lowest byte of nought, and yet the keys differ in
+// it. Every byte up to the range's highest is a pass of the sort
+// (test/Integration/gpu.test): in order, as on the CPU.
+import console
+
+component Item { key: i64, id: i32 } capacity 4096
+buffer Sorted { key: i64, id: i32 } capacity 4096
+unique Check { unsorted: i64, sum: i64 }
+
+world {
+  for i in 0..3000 {
+    spawn { Item { key: ((i * 37) % 257) as i64, id: i } }
+  }
+}
+
+gpu system sort() {
+  Sorted = []
+  for e, it: Item by it.key {
+    Sorted += { key: it.key, id: it.id }
+  }
+}
+
+system check() {
+  Check.unsorted = 0
+  Check.sum = 0
+  for r in 1..len(Sorted) {
+    if Sorted[r].key < Sorted[r - 1].key { Check.unsorted += 1 }
+    Check.sum += (r as i64) * (Sorted[r].id as i64)
+  }
+  put("rows {len(Sorted)} unsorted {Check.unsorted} sum {Check.sum}")
+}
+
+schedule go() { sort() check() }
+main { go() }

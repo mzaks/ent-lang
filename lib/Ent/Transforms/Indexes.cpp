@@ -130,9 +130,9 @@ bool changesOrderOutside(SystemOp system, QueryOp query,
 
 /// Whether `system` writes the key of the index `kept` or a field it
 /// copies (of entities that are there: not in spawning them), or hands
-/// a proc one of their components, or writes a unique it is made of.
-bool writesValues(SystemOp system, const Kept &kept,
-                  ArrayRef<ArchetypeOp> archetypes) {
+/// a proc one of their components. (Not a unique it is made of, such as
+/// a grid's cell: the GPU is given those as it runs.)
+bool writesValues(SystemOp system, const Kept &kept) {
   auto held = [&](Attribute component, StringAttr field) {
     return llvm::any_of(kept.values, [&](const Column &column) {
       return std::get<0>(column) && std::get<1>(column) == component &&
@@ -160,12 +160,7 @@ bool writesValues(SystemOp system, const Kept &kept,
           return WalkResult::interrupt();
     return WalkResult::advance();
   });
-  if (result.wasInterrupted())
-    return true;
-  SystemAccess access = computeAccess(system, archetypes);
-  return llvm::any_of(kept.values, [&](const Column &column) {
-    return !std::get<0>(column) && access.writes.contains(column);
-  });
+  return result.wasInterrupted();
 }
 
 bool touches(const llvm::SetVector<Column> &accessed,
@@ -233,8 +228,7 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
             read = true;
             chosen &= system && system.getGpu();
           }
-          if (system && !system.getGpu() &&
-              writesValues(system, kept, archetypes))
+          if (system && !system.getGpu() && writesValues(system, kept))
             chosen = false;
         });
       Operation *unused = symbols.lookup(chosen && read ? kept.update : onGpu);

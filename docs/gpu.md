@@ -828,8 +828,10 @@ or in a loop: the form the CPU runs on many threads, docs/indexes.md step
   needs no entity table);
 - a radix sort of the GPU's puts them in order: the least key and the
   most found first (a kernel, each piece's put in at once with atomic
-  `min` and `max`, read back), a pass for each byte of the most less the
-  least (keys of both signs differ in every byte as they are), each a
+  `min` and `max`, read back), a pass for each byte up to the highest of
+  the most less the least (keys of both signs differ in every byte as
+  they are; 2026-10-25: it was each byte of it that is not nought, which
+  left keys out of order where they carry across one that is), each a
   kernel that counts each piece's keys by their byte, a running sum over
   all the counts byte value by byte value and piece by piece (the
   running sums' own scan, `emitRunningScan`), and a kernel that puts each
@@ -871,3 +873,19 @@ the GPU's copy, for the `for`s after in the same system.
 archetypes, every one and those under an `if`, two `for`s into one
 buffer, and a `gpu` system after that reads the rows and how many
 there are: the same as the CPU, 40 runs, and with `ENT_GPU_PROTECT`.
+
+## Memory a turn allocates, and `nearest k` (2026-10-25)
+
+`nearest k` keeps the k nearest so far in a list the body of the `for`
+allocates (`memref.alloc`, let go of at its end). In a kernel that was
+an allocation from the GPU's heap in every turn: a million points' one
+nearest each took 354 ms there, against 24 on the CPU's cores. Before a
+loop for the GPU is made a kernel (`scratchForAllocations`), each such
+allocation whose size is the same for every turn (worked out before the
+loop, or in the turn of what is: `max(k, 0)`, moved before it) and that
+is only read and written by its place becomes the turn's part of an
+array in the GPU's memory made before the loop, as many places for each
+turn (scratch slots from 32, kept from run to run as the running sums'
+are). The same million points: 11.8 ms. `Inputs/gpu_nearest.ent`
+(`gpu.test`): the k nearest in a grid and in a Morton index, k a
+unique's, the same as on the CPU, with no `malloc` in the kernels.

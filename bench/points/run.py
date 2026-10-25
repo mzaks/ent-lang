@@ -29,9 +29,15 @@ octTree's makes its tree and asks every point. Reports the median over
 --rounds of each process's best run, in ms, and of ent's the making of
 the index.
 
+--gpu adds a third: `knn` a `gpu system` (built --gpu --parallel), the
+index made on the GPU (EntIndexes chooses so: only gpu systems read it),
+its making timed by a `gpu system` that reads it before the CPU takes
+the time; the Morton index not clustered (a clustered one is made on the
+CPU). Held against octTree on all cores.
+
 Usage: bench/points/run.py [--size 1000000] [--clustered 100000]
                            [--rounds 3] [--samples 200]
-                           [--indexes grid,morton]
+                           [--indexes grid,morton] [--gpu]
 """
 
 import argparse
@@ -97,9 +103,19 @@ GRID = "grid ({sides}) cell G.cell"
 INDEXES = {"grid": GRID, "morton": "morton ({sides}) leaf 32 clustered"}
 
 
-def build_ent(size):
-    """knn2.ent and knn3.ent for each k and index, on one core and all,
-    with room for `size` points."""
+# What makes knn2.ent and knn3.ent run on the GPU (see --gpu).
+ON_GPU = [
+    ("system made() { G.made = now() - G.started + 0.0 * len(Cells) as f64 }",
+     "gpu system touch() { G.made = 0.0 * len(Cells) as f64 }\n"
+     "system made() { G.made = now() - G.started }"),
+    ("  Cells_moved()\n  made()", "  Cells_moved()\n  touch()\n  made()"),
+    ("system knn() {", "gpu system knn() {"),
+]
+
+
+def build_ent(size, modes):
+    """knn2.ent and knn3.ent for each k and index, on one core and all
+    (and on the GPU, mode "gpu"), with room for `size` points."""
     env = dict(os.environ, ENT_CFLAGS="-march=native")
     room = 1 << max(20, (size - 1).bit_length())
     binaries = {}
@@ -117,10 +133,20 @@ def build_ent(size):
             grid = GRID.format(sides=sides)
             assert grid in text
             open(program, "w").write(text.replace(grid, line.format(sides=sides)))
-            for par in (False, True):
-                out = os.path.join(OUT, name + ("-par" if par else ""))
-                run([ENT, "build", "-I", OUT] + (["--parallel"] if par else []) +
-                    [program, "-o", out], env=env)
+            for par in modes:
+                source, flags = program, (["--parallel"] if par else [])
+                if par == "gpu":
+                    gpu_text = text.replace(
+                        grid, line.format(sides=sides).replace(" clustered", ""))
+                    for old, new in ON_GPU:
+                        assert old in gpu_text
+                        gpu_text = gpu_text.replace(old, new)
+                    source = os.path.join(OUT, name + "_gpu.ent")
+                    open(source, "w").write(gpu_text)
+                    flags = ["--gpu", "--parallel"]
+                suffix = {False: "", True: "-par", "gpu": "-gpu"}[par]
+                out = os.path.join(OUT, name + suffix)
+                run([ENT, "build", "-I", OUT] + flags + [source, "-o", out], env=env)
                 binaries[(dims, k, index, par)] = out
     return binaries
 
@@ -142,13 +168,15 @@ def main():
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--samples", type=int, default=200)
     parser.add_argument("--indexes", default=",".join(INDEXES))
+    parser.add_argument("--gpu", action="store_true")
     args = parser.parse_args()
+    modes = [False, True] + (["gpu"] if args.gpu else [])
     for index in set(INDEXES) - set(args.indexes.split(",")):
         del INDEXES[index]
 
     check = fetch_pbbs()
     octtree = os.path.join(NN, "octTree", "neighbors")
-    binaries = build_ent(max(args.size, args.clustered))
+    binaries = build_ent(max(args.size, args.clustered), modes)
     one = ["taskset", "-c", "2"]
     tests = []
     for name, flags, dims, k, clustered in TESTS:
@@ -159,7 +187,7 @@ def main():
     for round_ in range(args.rounds):
         for name, dims, k, n, folder in tests:
             key = (name, k)
-            for par in (False, True):
+            for par in modes:
                 for index in INDEXES:
                     out = run(([] if par else one) + [binaries[(dims, k, index, par)]],
                               cwd=folder)
@@ -170,6 +198,8 @@ def main():
                                               capture_output=True, text=True)
                         if said.returncode:
                             raise SystemExit(f"{index} {name} k {k}: {said.stdout}")
+                if par == "gpu":
+                    continue
                 env = dict(os.environ)
                 if not par:
                     env["PARLAY_NUM_THREADS"] = "1"
@@ -185,8 +215,9 @@ def main():
                     if said.returncode:
                         raise SystemExit(f"octTree {name} k {k}: {said.stdout}")
 
-    for par in (False, True):
-        print("all cores" if par else "one core")
+    for par in modes:
+        print({False: "one core", True: "all cores",
+               "gpu": "GPU (octTree on all cores)"}[par])
         print(f"{'points':<12} {'n':>9} {'k':>3} | {'grid':>9} {'(made)':>8} "
               f"| {'morton':>9} {'(made)':>8} | {'octTree':>9}")
         for name, dims, k, n, folder in tests:
@@ -195,7 +226,7 @@ def main():
                 ent = results.get((name, k, index, par), [(0.0, 0.0)])
                 row += [statistics.median(t for t, _ in ent),
                         statistics.median(m for _, m in ent)]
-            row.append(statistics.median(results[(name, k, "oct", par)]))
+            row.append(statistics.median(results[(name, k, "oct", bool(par))]))
             print(f"{name:<12} {n:>9} {k:>3} | {row[0]:9.2f} {row[1]:8.2f} "
                   f"| {row[2]:9.2f} {row[3]:8.2f} | {row[4]:9.2f}")
 

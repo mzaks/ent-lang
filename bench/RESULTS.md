@@ -4442,3 +4442,67 @@ ms to make the index (the whole query in brackets):
   not `min`). The whole queries are within 3% of where they were.
 - treecode (65536 bodies) the same errors as treecode's and the same
   times as before.
+
+## 2026-10-25: indexes made on the GPU
+
+A grid or a Morton index that only `gpu system`s read, and whose key
+only they write, is made on the GPU in an `ent build --gpu` (docs/
+indexes.md, "Made on the GPU"; `ENT_INDEXES_ON_CPU=1` makes it on the
+CPU, to compare). RTX 4050 laptop GPU, on mains power, native builds.
+
+**Moving dots** (`bench/moving/run.py`, new): a million dots in a square
+that wraps, each moving and counting those within 0.002, ms a frame,
+median of 3; every build the same sum of the counts.
+
+| index | all cores | GPU, index made on the CPU | GPU, made there |
+|---|---|---|---|
+| grid, cells 0.004 | 23.1 | 28.0 | 11.5 |
+| Morton, leaves of 16 | 68.5 | 38.7 | 31.1 |
+
+The grid is made in about 6 ms on the GPU (16.6 on all cores, and its
+rows copied over): the sort of a cell's number takes two or three
+passes. The Morton index's 62-bit keys take eight, about 1.6 ms each
+(most of it putting each piece's keys in place: one thread a piece of
+256 keys), some 13 of its 23 ms.
+
+**The k nearest** (`bench/points/run.py --gpu`): `knn` in a `gpu
+system`, the index made there, the Morton one not clustered (a
+clustered one is made on the CPU); ms of a run (of it the making),
+median of 3, against octTree on all cores.
+
+| points | n | k | grid, GPU | all cores | Morton, GPU | all cores | octTree |
+|---|---|---|---|---|---|---|---|
+| 2DinCube | 1M | 1 | 21.6 (9.8) | 36.7 (12.4) | 41.3 (23.6) | 26.3 (7.1) | 24.2 |
+| 2Dkuzmin | 100k | 1 | 957 (27.0) | 1297 (1.2) | 9.9 (6.0) | 2.9 (0.6) | 2.8 |
+| 3DinCube | 1M | 1 | 45.8 (9.1) | 69.5 (13.9) | 96.9 (24.8) | 46.5 (9.5) | 39.0 |
+| 3DonSphere | 1M | 1 | 132.0 (10.5) | 156.4 (11.4) | 61.2 (24.2) | 34.8 (8.5) | 29.1 |
+| 3DinCube | 1M | 10 | 99.4 (9.1) | 166.8 (15.0) | 185.6 (25.0) | 102.0 (10.1) | 99.9 |
+| 3Dplummer | 100k | 10 | 3840 (24.2) | 1405 (4.6) | 23.1 (5.0) | 10.8 (0.9) | 22.3 |
+
+- On points spread evenly the grid on the GPU is the fastest ent has,
+  and on 2DinCube and 3DinCube k 10 as fast as octTree on all cores or
+  faster. Where points crowd (Kuzmin, Plummer) a grid is the wrong
+  index anyway.
+- The Morton index on the GPU is twice the time of the CPU's: its
+  making (the sort) and its walks without the clustered order (each
+  query's cells are not the one's before; the CPU's form is clustered).
+- `nearest k` on the GPU had allocated its list from the GPU's heap in
+  every thread: 354 ms on 2DinCube, now 11.8 for the queries (docs/
+  gpu.md, "Memory a turn allocates").
+- On the way: the GPU's `for ... by` skipped the passes of the bytes of
+  the keys' range that were nought, which left keys out of order where
+  they carry across such a byte (moving dots: a frame in 11 out of
+  order, its rows found by searches 2 s long); now a pass for every byte
+  up to the range's highest (`Inputs/gpu_by_carry.ent`).
+
+**The LJ melt** (32,000 atoms, full lists, its step's systems made
+`gpu system`s): the same numbers as on the CPU to the digit, the grid
+made on the GPU (about 0.3 ms a making), but 1.22 s against 0.18 on all
+cores: the forces alone take 1.7 ms a step on the GPU, in f64, which
+this GPU does at a 64th of its f32 rate, of 32,000 threads; filling the
+lists 63 ms a making. Not a workload for this GPU.
+
+**The epidemic** has no index declared: its `Order` and `Index` are
+made by hand with running sums for the last eight days of stubs (a
+stub's owner found by them), which a declared index (of the entities
+as they are now) does not keep. Not measured.

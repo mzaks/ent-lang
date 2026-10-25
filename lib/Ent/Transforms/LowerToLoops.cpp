@@ -17872,9 +17872,9 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
 
   // A radix sort of their bytes, the lowest first, on the GPU (as the
   // CPU's, emitRadixSort, with a thread for each piece of the
-  // keys), of each key less the least, a pass for each byte of the most
-  // less the least (keys that differ in sign differ in every byte as they
-  // are; the order is the same): each piece of
+  // keys), of each key less the least, a pass for each byte up to the
+  // highest of the most less the least (keys that differ in sign differ
+  // in every byte as they are; the order is the same): each piece of
   // at least 64 keys (at most 4096 pieces) counts its keys by their byte;
   // a running sum over the counts, byte value by byte value and piece by
   // piece, says where each piece's keys of a value go; and each piece
@@ -17960,12 +17960,13 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
     return arith::SelectOp::create(rewriter, loc, which, b, a);
   };
   for (int pass = 0; pass < 8; ++pass) {
+    // A pass for each byte up to the highest the range has: a byte of
+    // the range that is nought is no sign the keys' are the same (from
+    // 0x00ff to 0x0100 they differ in both).
     Value shift = whole(8 * pass, i64);
-    Value byte = arith::AndIOp::create(
-        rewriter, loc, arith::ShRUIOp::create(rewriter, loc, differing, shift),
-        whole(255, i64));
     Value differ = arith::CmpIOp::create(
-        rewriter, loc, arith::CmpIPredicate::ne, byte, whole(0, i64));
+        rewriter, loc, arith::CmpIPredicate::ne,
+        arith::ShRUIOp::create(rewriter, loc, differing, shift), whole(0, i64));
     auto ifDiffer = scf::IfOp::create(rewriter, loc, differ);
     {
       OpBuilder::InsertionGuard guard(rewriter);
@@ -25460,12 +25461,116 @@ static void compactGpuLoops(ModuleOp module) {
     compactGpuLoop(rewriter, module, loop);
 }
 
+/// Memory the body of a loop for the GPU allocates itself (`nearest k`'s
+/// list), of a size known before the loop: a turn's part of an array in
+/// the GPU's memory made before it (scratch slots from 32, kept from run
+/// to run), in place of an allocation from the GPU's heap in every turn,
+/// which made `nearest` there ten times as slow as on the CPU. Only where
+/// it is only read and written by its place (and let go of).
+static void scratchForAllocations(IRRewriter &rewriter, scf::ParallelOp loop) {
+  if (loop.getNumLoops() != 1)
+    return;
+  ModuleOp program = loop->getParentOfType<ModuleOp>();
+  Location loc = loop.getLoc();
+  int64_t slot = 32;
+  // (A size worked out in the turn of what is the same for all of them,
+  // `max(k, 0)`: worked out before the loop.)
+  std::function<bool(Value)> before = [&](Value value) {
+    Operation *made = value.getDefiningOp();
+    if (!loop->isAncestor(value.getParentBlock()->getParentOp()))
+      return true;
+    return made && made->getNumRegions() == 0 && isMemoryEffectFree(made) &&
+           llvm::all_of(made->getOperands(), before);
+  };
+  IRMapping hoisted;
+  std::function<Value(Value)> hoist = [&](Value value) -> Value {
+    Operation *made = value.getDefiningOp();
+    if (!made || !loop->isAncestor(made))
+      return value;
+    if (Value done = hoisted.lookupOrNull(value))
+      return done;
+    for (Value operand : made->getOperands())
+      hoisted.map(operand, hoist(operand));
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(loop);
+    rewriter.clone(*made, hoisted);
+    return hoisted.lookup(value);
+  };
+  SmallVector<memref::AllocOp> allocations;
+  loop.getBody()->walk([&](memref::AllocOp alloc) {
+    auto type = alloc.getType();
+    if (type.getRank() != 1 || !type.getLayout().isIdentity() ||
+        !type.getElementType().isIntOrFloat())
+      return;
+    if (!llvm::all_of(alloc.getDynamicSizes(), before))
+      return;
+    for (Operation *user : alloc->getUsers()) {
+      if (auto load = dyn_cast<memref::LoadOp>(user);
+          load && load.getMemref() == alloc.getResult())
+        continue;
+      if (auto store = dyn_cast<memref::StoreOp>(user);
+          store && store.getMemref() == alloc.getResult())
+        continue;
+      if (isa<memref::DeallocOp>(user))
+        continue;
+      return;
+    }
+    allocations.push_back(alloc);
+  });
+  for (memref::AllocOp alloc : allocations) {
+    if (slot >= 40)
+      return;
+    rewriter.setInsertionPoint(loop);
+    Value lower = loop.getLowerBound()[0], step = loop.getStep()[0];
+    Value turns = arith::CeilDivUIOp::create(
+        rewriter, loc,
+        arith::SubIOp::create(rewriter, loc, loop.getUpperBound()[0], lower),
+        step);
+    Value size = alloc.getType().isDynamicDim(0)
+                     ? hoist(alloc.getDynamicSizes()[0])
+                     : arith::ConstantIndexOp::create(
+                           rewriter, loc, alloc.getType().getDimSize(0))
+                           .getResult();
+    Value whole = gpuScratch(
+        rewriter, loc, program, slot++, alloc.getType().getElementType(),
+        arith::MaxUIOp::create(
+            rewriter, loc, arith::MulIOp::create(rewriter, loc, turns, size),
+            arith::ConstantIndexOp::create(rewriter, loc, 1)));
+    rewriter.setInsertionPoint(alloc);
+    Value turn = arith::DivUIOp::create(
+        rewriter, loc,
+        arith::SubIOp::create(rewriter, loc, loop.getInductionVars()[0], lower),
+        step);
+    Value first = arith::MulIOp::create(rewriter, loc, turn, size);
+    for (Operation *user : llvm::make_early_inc_range(alloc->getUsers())) {
+      rewriter.setInsertionPoint(user);
+      if (auto load = dyn_cast<memref::LoadOp>(user)) {
+        Value at =
+            arith::AddIOp::create(rewriter, loc, first, load.getIndices()[0]);
+        rewriter.replaceOpWithNewOp<memref::LoadOp>(load, whole,
+                                                    ValueRange{at});
+      } else if (auto store = dyn_cast<memref::StoreOp>(user)) {
+        Value at =
+            arith::AddIOp::create(rewriter, loc, first, store.getIndices()[0]);
+        rewriter.replaceOpWithNewOp<memref::StoreOp>(
+            store, store.getValueToStore(), whole, ValueRange{at});
+      } else {
+        rewriter.eraseOp(user);
+      }
+    }
+    rewriter.eraseOp(alloc);
+  }
+}
+
 static void mapGpuLoops(ModuleOp module) {
   SmallVector<scf::ParallelOp> loops;
   module.walk([&](scf::ParallelOp loop) {
     if (loop->hasAttr(kGpuLoopAttr))
       loops.push_back(loop);
   });
+  IRRewriter rewriter(module.getContext());
+  for (scf::ParallelOp loop : loops)
+    scratchForAllocations(rewriter, loop);
   MLIRContext *context = module.getContext();
   AffineMap identity = AffineMap::getMultiDimIdentityMap(1, context);
   auto to = [&](gpu::Processor processor) {

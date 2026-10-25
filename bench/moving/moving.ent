@@ -1,0 +1,69 @@
+// A million dots in a square that wraps, moving every frame, and every
+// dot counting those within a distance of it through an index (`Dots`,
+// a grid; bench/moving/run.py makes a Morton one too). Built --gpu, the
+// moving and the counting are the GPU's (`gpu system`s), and so is the
+// making of the index (only gpu systems read it and write its key:
+// docs/indexes.md), unless built with ENT_INDEXES_ON_CPU=1. Prints the
+// ms of the frames after the first few, each, and a sum of the counts
+// (the same however it is built).
+import console
+import clock
+import wyhash
+
+component Dot { x: f32, y: f32, vx: f32, vy: f32, n: i32 } capacity 1048576
+unique Frame { t: i64, started: f64, sum: i64 }
+unique Setup { dots: i32, frames: i64, warm: i64 }
+
+index Dots of Dot grid (x, y) cell 0.004
+
+proc now() -> f64 { wait_until(0.0) }
+
+world {
+  Setup.dots = 1000000
+  Setup.frames = 50
+  Setup.warm = 5
+  for i in 0..Setup.dots {
+    let s = i as i64
+    spawn { Dot { x: wyrand_unit(1, s) as f32, y: wyrand_unit(2, s) as f32,
+                  vx: (wyrand_unit(3, s) as f32 - 0.5) * 0.002,
+                  vy: (wyrand_unit(4, s) as f32 - 0.5) * 0.002, n: 0 } }
+  }
+}
+
+gpu system count() {
+  for a: mut Dot {
+    var c = 0
+    for o, b: Dot near (a.x, a.y) within 0.002 in Dots { c += 1 }
+    a.n = c
+  }
+}
+
+gpu system move() {
+  for d: mut Dot {
+    d.x = d.x + d.vx
+    d.y = d.y + d.vy
+    if d.x >= 1.0 { d.x = d.x - 1.0 }
+    if d.x < 0.0 { d.x = d.x + 1.0 }
+    if d.y >= 1.0 { d.y = d.y - 1.0 }
+    if d.y < 0.0 { d.y = d.y + 1.0 }
+  }
+}
+
+system clock() {
+  if Frame.t == Setup.warm { Frame.started = now() }
+  Frame.t += 1
+}
+
+system sum() {
+  Frame.sum = 0
+  for d: Dot { Frame.sum += d.n as i64 }
+  let frames = (Setup.frames - Setup.warm) as f64
+  put("moving {(now() - Frame.started) * 1000.0 / frames} ms a frame, sum {Frame.sum}")
+}
+
+schedule frame() { move() count() clock() }
+schedule finish() { sum() }
+main {
+  loop { frame() } until Frame.t >= Setup.frames
+  finish()
+}

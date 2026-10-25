@@ -866,9 +866,9 @@ Steps:
    **Built**: `--ent-indexes=gpu=1` (`ent build --gpu`) runs the GPU's
    form where the index is not clustered, every run that reads it is of
    a `gpu system`, and no system on the CPU writes its key or what it
-   copies (`set`, `apply`, sends; a proc given its component; a unique
-   it is made of) nor is an extern one that declares nothing; spawns
-   do not count. The other form is erased. `gpu.test` runs
+   copies (`set`, `apply`, sends; a proc given its component) nor is an
+   extern one that declares nothing; spawns do not count, nor uniques it
+   is made of (a grid's cell), which the GPU is given as it runs. The other form is erased. `gpu.test` runs
    `morton_moving.ent` with its systems on the GPU: the same pairs as
    on the CPU, frame by frame, also with `ENT_GPU_PROTECT`.
    A million dots in two sides (`near` within 0.002, leaf 16, the dots
@@ -901,7 +901,15 @@ Steps:
    fast. (Found on the way: the kernels' math from CUDA's libdevice
    needs `CUDA_PATH`, which `ent` now takes to be `/opt/cuda` where it
    is not said, as for CUDA's header.)
-6. The benchmarks.
+6. The benchmarks. **Done** (bench/RESULTS.md, 2026-10-25, "indexes
+   made on the GPU"): a million moving dots a frame in 11.5 ms with the
+   grid made on the GPU (23.1 on all cores, 28.0 with it made on the
+   CPU), 31.1 with a Morton index (68.5, 38.7); the k nearest of a
+   million points in a grid on the GPU 21.6 ms where all cores take
+   36.7 and octTree 24.2; a Morton index there twice the CPU's (its
+   sort, and no clustered order). The LJ melt the same on the GPU but
+   slower (f64, 32,000 atoms); the epidemic declares no index.
+   `bench/moving/run.py`, `bench/points/run.py --gpu`.
 
 ## 9. When it is done
 
