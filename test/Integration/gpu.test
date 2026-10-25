@@ -288,9 +288,10 @@
 // GIVENREAD: frame 0: rows 20000 sum 199990000 wrong 0 odd 9921 seen 198420000
 // GIVENREAD: frame 2: rows 20000 sum 199990000 wrong 0 odd 10018 seen 200360000
 
-// A Morton index whose readers are all `gpu` systems and whose key only
-// they write is made on the GPU (EntIndexes, `N_update_gpu`): the same
-// pairs as on the CPU, frame by frame as the dots move.
+// A Morton index and a grid whose readers are all `gpu` systems and
+// whose keys only they write are made on the GPU (EntIndexes,
+// `N_update_gpu`): the same pairs as on the CPU, frame by frame as the
+// dots move.
 // RUN: sed -e 's/^system count()/gpu system count()/' -e 's/^system move()/gpu system move()/' %S/Inputs/morton_moving.ent > %t.mgpu.ent
 // RUN: %ent run %S/Inputs/morton_moving.ent > %t.mgpu.cpu
 // RUN: %ent build %t.mgpu.ent --gpu -o %t.mgpu
@@ -299,6 +300,20 @@
 // RUN: diff %t.mgpu.cpu %t.mgpu.gpu
 // RUN: diff %t.mgpu.cpu %t.mgpu.gpupar
 // RUN: env ENT_GPU_PROTECT=1 %t.mgpu | diff %t.mgpu.cpu -
-// RUN: nm %t.mgpu | FileCheck %s --check-prefix=MGPU
-// MGPU: Tree_update_gpu
-// MGPU-NOT: Tree_update{{$}}
+// RUN: nm %t.mgpu > %t.mgpu.nm
+// RUN: FileCheck %s --check-prefix=MGPU --input-file=%t.mgpu.nm
+// RUN: not grep -q "_update$" %t.mgpu.nm
+// MGPU-DAG: Tree_update_gpu
+// MGPU-DAG: Grid_update_gpu
+
+// The same in three sides, of whole numbers, and wrapping: grids and
+// Morton indexes made on the GPU.
+// RUN: sed -e 's/^system count()/gpu system count()/' %S/Inputs/morton.ent > %t.m3.ent
+// RUN: sed -e 's/^system count()/gpu system count()/' %S/Inputs/morton_whole.ent > %t.mwhole.ent
+// RUN: sed -e 's/^system count()/gpu system count()/' %S/Inputs/morton_wrap.ent > %t.mwrap.ent
+// RUN: %ent run %S/Inputs/morton.ent > %t.m3.cpu
+// RUN: %ent run %S/Inputs/morton_whole.ent > %t.mwhole.cpu
+// RUN: %ent run %S/Inputs/morton_wrap.ent > %t.mwrap.cpu
+// RUN: %ent run %t.m3.ent --gpu | diff %t.m3.cpu -
+// RUN: %ent run %t.mwhole.ent --gpu | diff %t.mwhole.cpu -
+// RUN: %ent run %t.mwrap.ent --gpu --parallel | diff %t.mwrap.cpu -

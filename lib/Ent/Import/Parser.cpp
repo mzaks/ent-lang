@@ -4766,6 +4766,9 @@ LogicalResult Parser::parseIndex() {
     // (A Morton index's making on the GPU, put after the rest.)
     std::string gpuForm;
     out << "system " << n << "_update() {\n";
+    // (The box and the keys, which the GPU's form makes the same way.)
+    out.flush();
+    size_t keysFrom = text.size();
     if (grid && !morton) {
       // The grid as the entities are now: its cells at least `cell` wide,
       // round the box where it wraps (`size` on every side), else over
@@ -4854,9 +4857,6 @@ LogicalResult Parser::parseIndex() {
       out << "  for c0: mut " << of.front() << " {\n    c0." << *key << " = "
           << number << "\n  }\n";
     }
-    // (The box and the keys, which the GPU's form makes the same way.)
-    out.flush();
-    size_t keysFrom = text.size();
     if (morton) {
       // The box as the entities are now: the box that wraps, else from the
       // lowest of them on each side, as wide as they are on the widest (so
@@ -4998,9 +4998,55 @@ LogicalResult Parser::parseIndex() {
       anew("    ", /*counted=*/true);
       out << "    " << n << "_whole = true\n  }\n";
     }
-    if (grid && !morton)
+    // Each entity's row in the rows made anew (for the GPU's forms):
+    // the first of its key, then on to its own.
+    auto rowFinder = [&] {
+      out << "fn " << n << "_row(order: " << n << ", key: " << spelled
+          << ", e: entity) -> i32 {\n"
+          << "  var low = " << n << "_find(order, key)\n"
+          << "  while low < len(order) && order[low].who != e { low += 1 }\n"
+          << "  low\n}\n";
+    };
+    if (grid && !morton) {
       out << "  " << n << "_bounds(" << n << ", " << n << "_cells, " << n
           << "_grid.cells)\n";
+      // The same made on the GPU, where the compiler chooses so (see
+      // EntIndexes): always anew; each entity finds its row; and the
+      // first row of each cell from its key on is written by the entity
+      // at that row, the cells after the previous row's key up to its own
+      // (those after the last key by the last, the rows' count).
+      out.flush();
+      size_t gpuFrom = text.size();
+      std::string row = "c0." + rowField;
+      std::string keyAt = n + "[" + row + "].key";
+      std::string before = "(if " + row + " > 0 { " + n + "[" + row +
+                           " - 1].key } else { 0 - 1 })";
+      std::string last = "(if " + row + " == len(" + n + ") - 1 { " + n +
+                         "_grid.cells } else { " + keyAt + " })";
+      rowFinder();
+      out << "gpu system " << n << "_update_gpu() {\n" << keysText;
+      anew("  ", /*counted=*/true, /*numbered=*/false);
+      out << "  " << n << "_whole = true\n"
+          << "  for e, c0: mut " << of.front() << " {\n"
+          << "    " << row << " = " << n << "_row(" << n << ", c0." << *key
+          << ", e)\n  }\n"
+          << "  " << n << "_cells = [{ first: 0 }; (" << n
+          << "_grid.cells + 1) as i32]\n"
+          << "  for c0: " << of.front() << ", w: mut " << n << "_cells[("
+          << before << " + 1) as i32, (" << last << " - " << before
+          << ") as i32] {\n"
+          << "    let k = " << keyAt << "\n"
+          << "    let start = " << before << " + 1\n"
+          << "    for j in 0..len(w) {\n"
+          << "      w[j].first = if start + (j as i64) <= k { " << row
+          << " } else { " << row << " + 1 }\n"
+          << "    }\n  }\n"
+          << "  " << n << "_fresh = true\n}\n";
+      out.flush();
+      gpuForm = text.substr(gpuFrom);
+      text.resize(gpuFrom);
+      gpuMade = true;
+    }
     if (morton) {
       std::string lead = n + "_lead[c0." + rowField + "]";
       std::string most = ts == "i32"   ? "2147483647"
@@ -5222,13 +5268,8 @@ LogicalResult Parser::parseIndex() {
       // others' from the deepest level up, each entity a few cells. The
       // last cell's `next` is -1 (the walks end there as past the cells).
       std::string from = n + "_from", count = n + "_count";
-      out << "fn " << n << "_row(order: " << n << ", key: " << spelled
-          << ", e: entity) -> i32 {\n"
-          << "  var low = " << n << "_find(order, key)\n"
-          << "  while low < len(order) && order[low].who != e { low += 1 }\n"
-          << "  low\n}\n"
-          << "gpu system " << n << "_update_gpu() {\n"
-          << keysText;
+      rowFinder();
+      out << "gpu system " << n << "_update_gpu() {\n" << keysText;
       anew("  ", /*counted=*/true, /*numbered=*/false);
       out << "  " << n << "_whole = true\n"
           << "  for e, c0: mut " << of.front() << " {\n"
@@ -5598,8 +5639,10 @@ LogicalResult Parser::finishIndexOrders() {
       auto value = dyn_cast<IntegerAttr>(constant.getValue());
       if (!value || value.getInt() != kCellsPlaceholder)
         return;
+      // (And in its form for the GPU.)
       auto system = constant->getParentOfType<SystemOp>();
-      if (system && system.getSymName() == update)
+      if (system && (system.getSymName() == update ||
+                     system.getSymName() == update + "_gpu"))
         constant.setValueAttr(
             IntegerAttr::get(value.getType(), capacity.getInt()));
     });

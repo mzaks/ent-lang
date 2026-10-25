@@ -885,6 +885,22 @@ Steps:
    a time in the GPU's shared memory.
 5. The grid the same way: keys, the rows by `for ... by`, each cell's
    first row by the entity at it.
+   **Built**: the box and the keys as the CPU's (their text is the
+   same), the rows anew by `for ... by` (a cell's number has few bits:
+   two or three passes of the sort), each entity's row found in them;
+   then the cells' first rows each written by the entity at the row
+   where their key starts, in a window from the previous row's key on
+   to its own (the last entity's to the end, the rows' count). The most
+   cells there may be is put in the GPU's form too. `gpu.test` runs
+   `morton_moving.ent`, `morton.ent` (three sides), `morton_whole.ent`
+   and `morton_wrap.ent` with their `count` on the GPU, each with a grid
+   and a Morton index, both made there: the same as on the CPU.
+   The same million dots, `near` within 0.002 in a grid of cells 0.004:
+   made on the GPU in 6.1 ms a frame (16.6 on all cores before, and its
+   buffers copied over); a frame 11.5 ms against 25.7, 2.2 times as
+   fast. (Found on the way: the kernels' math from CUDA's libdevice
+   needs `CUDA_PATH`, which `ent` now takes to be `/opt/cuda` where it
+   is not said, as for CUDA's header.)
 6. The benchmarks.
 
 ## 9. When it is done

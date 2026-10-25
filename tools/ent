@@ -711,6 +711,12 @@ def build(arguments, output, directory):
     # the CPU's; and the columns are read by their addresses before, so
     # that a kernel is given those.)
     before, after, finish = gpu_passes(gpu_chip()) if gpu else ([], [], [])
+    # (The kernels' math, from CUDA's libdevice, which the passes making
+    # them into PTX find by CUDA_PATH: where it is not said, where CUDA's
+    # header is looked for too. Without it a kernel that calls one fails
+    # to load.)
+    if gpu:
+        os.environ.setdefault("CUDA_PATH", "/opt/cuda")
     views = ["--cse", "--ent-lower-views"]
     if gpu:
         passes += views + before
