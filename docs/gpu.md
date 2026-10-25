@@ -92,6 +92,12 @@ entity and values every entity reads alike:
   sets it to where the rule starts before the loop, and combines what the
   loop made of it into the unique after (`ent_gpu_cell_set`,
   `ent_gpu_cell_get`, one wait for the GPU);
+- accumulating fractions into uniques with `min=` and `max=` (`Box.lo
+  min= d.x`, 2026-10-25): the same in any order too. The cell holds the
+  fraction's bits in their order (the bits but the sign turned over where
+  the sign is set: as whole numbers with a sign they order as the
+  fractions do, -0.0 below 0.0), combined by whole numbers' atomics,
+  starting at the infinity on the other side; the CPU turns them back;
 - going along a relation's edges from either end (`for (p)-[w: R]->(o:
   mut C)`, `for (o)-[w: R]->(p)`): the edges' fields, written too
   (`mut w`), the other end's components, and what is sent to it (G2: the
@@ -129,7 +135,7 @@ Errors, each naming the construct and what it waits for:
 
 | In a `for` of a `gpu system` | Why not yet | When |
 |---|---|---|
-| sending or accumulating a fraction (`f32`, `f64`), or sending with `=` | combined at the commit point in the order of the rows, which the GPU does not keep: needs the sends sorted by target and combined in that order on the GPU (keep such a system on the CPU) | later |
+| sending a fraction (`f32`, `f64`), accumulating one but by `min=`, `max=`, or sending with `=` | combined at the commit point in the order of the rows, which the GPU does not keep: needs the sends sorted by target and combined in that order on the GPU (keep such a system on the CPU) | later |
 | sending to a field the query also reads or writes | what is sent lands when the query ends; on the GPU it lands as it is sent | never |
 | `extern fn` | the C runs on the CPU; the GPU's own functions round differently from the machine's library, which breaks the same-results rule (`math` is written in ent and runs on both, see below) | G2 |
 | a `for` over other entities inside the `for` | fine on a GPU (it is its best case), but needs the `old` copy and the inner loop's order kept | G2 |

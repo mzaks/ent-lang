@@ -556,6 +556,13 @@ public:
         layout.getResource(resource).find(field);
     return view(entry->offset, 1, storageType(entry->type));
   }
+  /// The same as whole numbers of its width (a fraction's cell on the GPU
+  /// holds its bits in their order, see orderedBits).
+  Value ownResourceBits(StringAttr resource, StringAttr field) {
+    const WorldResourceField *entry = layout.getResource(resource).find(field);
+    return view(entry->offset, 1,
+                rewriter.getIntegerType(entry->type.getIntOrFloatBitWidth()));
+  }
   Value resourceField(StringAttr resource, StringAttr field) {
     if (host)
       return host->resourceField(resource, field);
@@ -2299,6 +2306,25 @@ static int64_t sendListsTaken = 0;
 /// where it is sent by an atomic operation: the same in any order (see
 /// markGpuSends).
 static constexpr llvm::StringLiteral kAtomicAttr = "ent.atomic";
+
+/// The bits of a fraction (or back) as a whole number of its width whose
+/// order, as numbers with a sign, is the fraction's: the bits but for the
+/// sign turned over where the sign is set (-0.0 below 0.0, NaN beyond the
+/// infinities). So `min=` and `max=` of fractions are whole numbers' on
+/// the GPU: the same in any order. The same both ways.
+static Value orderedBits(OpBuilder &builder, Location loc, Value bits) {
+  auto type = cast<IntegerType>(bits.getType());
+  unsigned width = type.getWidth();
+  Value sign = arith::ShRSIOp::create(
+      builder, loc, bits,
+      arith::ConstantIntOp::create(builder, loc, type, width - 1));
+  Value rest = arith::AndIOp::create(
+      builder, loc, sign,
+      arith::ConstantOp::create(
+          builder, loc, type,
+          builder.getIntegerAttr(type, APInt::getSignedMaxValue(width))));
+  return arith::XOrIOp::create(builder, loc, bits, rest);
+}
 
 /// The atomic operation of a rule, for whole numbers.
 static arith::AtomicRMWKind atomicKind(StringRef rule, bool noSign) {
@@ -14607,12 +14633,24 @@ static void lowerStateAccess(IRRewriter &rewriter, SaAccumulateOp accumulate,
     StringAttr resource = accumulate.getResourceAttr().getAttr();
     if (resolution == "atomic") {
       // (On the GPU: into the cell of the GPU's copy, see
-      // gpuAccumulateCells.)
-      memref::AtomicRMWOp::create(
-          rewriter, loc, atomicKind(accumulate.getRule(), noSign),
-          world.toStorage(loc, given),
-          world.ownResourceField(resource, accumulate.getFieldAttr()),
-          ValueRange{zero});
+      // gpuAccumulateCells. A fraction's `min=`, `max=`: its bits in their
+      // order, see orderedBits.)
+      Value stored = world.toStorage(loc, given);
+      if (auto fraction = dyn_cast<FloatType>(stored.getType())) {
+        Value bits = arith::BitcastOp::create(
+            rewriter, loc, rewriter.getIntegerType(fraction.getWidth()),
+            stored);
+        memref::AtomicRMWOp::create(
+            rewriter, loc, atomicKind(accumulate.getRule(), false),
+            orderedBits(rewriter, loc, bits),
+            world.ownResourceBits(resource, accumulate.getFieldAttr()),
+            ValueRange{zero});
+      } else {
+        memref::AtomicRMWOp::create(
+            rewriter, loc, atomicKind(accumulate.getRule(), noSign), stored,
+            world.ownResourceField(resource, accumulate.getFieldAttr()),
+            ValueRange{zero});
+      }
     } else {
       // (Reduced or kept in a register when the loops are made, see
       // keepCells.)
@@ -14746,8 +14784,16 @@ static void foldCell(IRRewriter &rewriter, SaFoldOp fold,
                                                       (bits + 7) / 8, 64)},
               TypeRange{rewriter.getI64Type()})
           .getResult(0);
-  if (bits < 64)
+  if (auto fraction = dyn_cast<FloatType>(stored)) {
+    // (Its bits in their order, see orderedBits.)
+    Type whole = rewriter.getIntegerType(bits);
+    if (bits < 64)
+      got = arith::TruncIOp::create(rewriter, loc, whole, got);
+    got = arith::BitcastOp::create(rewriter, loc, fraction,
+                                   orderedBits(rewriter, loc, got));
+  } else if (bits < 64) {
     got = arith::TruncIOp::create(rewriter, loc, stored, got);
+  }
   Value unique = world.resourceField(resource, fold.getFieldAttr());
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value old = memref::LoadOp::create(rewriter, loc, unique, ValueRange{zero});
@@ -21582,15 +21628,24 @@ struct GpuCells {
 
   void start(IRRewriter &rewriter, Location loc, ModuleOp module) {
     for (const Cell &cell : cells) {
-      auto type = cast<IntegerType>(cell.field->type);
-      unsigned bits = type.getWidth();
+      unsigned bits = cell.field->type.getIntOrFloatBitWidth();
       APInt from = APInt::getZero(bits);
-      if (cell.rule == "min")
-        from = type.isUnsigned() ? APInt::getMaxValue(bits)
-                                 : APInt::getSignedMaxValue(bits);
-      else if (cell.rule == "max")
-        from = type.isUnsigned() ? APInt::getMinValue(bits)
-                                 : APInt::getSignedMinValue(bits);
+      if (auto fraction = dyn_cast<FloatType>(cell.field->type)) {
+        // (The infinity on the other side, its bits in their order: what
+        // no fraction changes, which the fold gives back as itself.)
+        APInt inf = APFloat::getInf(fraction.getFloatSemantics(),
+                                    /*Negative=*/cell.rule == "max")
+                        .bitcastToAPInt();
+        from = inf.isNegative() ? inf ^ APInt::getSignedMaxValue(bits) : inf;
+      } else {
+        auto type = cast<IntegerType>(cell.field->type);
+        if (cell.rule == "min")
+          from = type.isUnsigned() ? APInt::getMaxValue(bits)
+                                   : APInt::getSignedMaxValue(bits);
+        else if (cell.rule == "max")
+          from = type.isUnsigned() ? APInt::getMinValue(bits)
+                                   : APInt::getSignedMinValue(bits);
+      }
       auto constant = [&](int64_t value) -> Value {
         return arith::ConstantIntOp::create(rewriter, loc, value, 64);
       };
@@ -21607,7 +21662,7 @@ struct GpuCells {
   void finish(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
               WorldAccess &cpu) {
     for (const Cell &cell : cells) {
-      auto type = cast<IntegerType>(cell.field->type);
+      Type type = cell.field->type;
       SaOpState state(rewriter);
       state.set("apply", int64_t(-1));
       state.set("archetype", int64_t(-1));
@@ -21616,7 +21671,7 @@ struct GpuCells {
       state.set("rule", cell.rule);
       state.set("stored", TypeAttr::get(cpu.storageType(type)));
       state.set("staged", "cell");
-      state.fact("no_sign", type.isUnsigned());
+      state.fact("no_sign", type.isUnsignedInteger());
       state.operand(cpu.getArena());
       state.optional(Value());
       state.optional(Value());

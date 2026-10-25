@@ -1396,8 +1396,9 @@ static bool isText(Type type) { return isa<TextType, StringType>(type); }
 static std::optional<std::string>
 notForGpu(SymbolTableCollection &symbolTable, Operation *op) {
   // What is sent to another entity or accumulated into a unique: whole
-  // numbers by `+=`, `-=`, `min=`, `max=`, which give the same in any
-  // order, so the GPU combines them as they are sent (atomically).
+  // numbers by `+=`, `-=`, `min=`, `max=`, and fractions into a unique by
+  // `min=`, `max=`, which give the same in any order, so the GPU combines
+  // them as they are sent (atomically).
   // What is combined into a parent (along a tree of one level: the
   // lowering sees to that) is combined so too.
   if (auto combine = dyn_cast<CombineOp>(op)) {
@@ -1412,7 +1413,11 @@ notForGpu(SymbolTableCollection &symbolTable, Operation *op) {
     Value value = apply ? apply.getValue() : cast<AccumulateOp>(op).getValue();
     StringRef rule = apply ? apply.getRule() : cast<AccumulateOp>(op).getRule();
     auto whole = dyn_cast<IntegerType>(value.getType());
-    if (!whole || whole.getWidth() == 1)
+    // (A fraction's least or greatest into a unique is the same in any
+    // order too: its bits in their order are a whole number's.)
+    bool extreme = !apply && isa<FloatType>(value.getType()) &&
+                   (rule == "min" || rule == "max");
+    if ((!whole || whole.getWidth() == 1) && !extreme)
       return std::string("sends or accumulates a value that is not a whole "
                          "number: the CPU combines those in the order of the "
                          "rows, which the GPU does not keep (keep this "

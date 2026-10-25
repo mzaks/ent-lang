@@ -819,6 +819,44 @@ whole numbers), on one core and on all; a walk that opens every cell
 against a scan (the sums of every cell, the leaves' entities); a walk
 that stops at a level; the errors (in a `test/Import` test).
 
+**Made on the GPU, as planned** (2026-10-25, the user's choices). An
+index is read in a `gpu system` already (`near`, `between`, `nearest`,
+a walk over its cells: buffers and loops), but made on the CPU, its
+buffers copied to the GPU after. A million dots in two sides moving on
+the GPU, `near` in both indexes each frame (`--gpu --parallel`): the
+Morton index made in 22.5 ms on all cores, the grid in 16.6, their
+buffers copied in 7.1; the two `near`s 13.6 and 5.1 on the GPU.
+
+- Morton first, then the grid.
+- Where: chosen by the compiler, no word for it. An index is made on
+  the GPU where the fields of its key are written only in `gpu system`s
+  and every system that reads it is a `gpu system`; else on the CPU, as
+  now.
+- Measured on: moving dots (a bench of its own), the points' `nearest
+  k` in a `gpu system` against octTree on all cores, the LJ melt and the
+  epidemic.
+
+Steps:
+
+1. Fractions' `min=`, `max=` into uniques on the GPU (the box): their
+   bits in their order are whole numbers', combined atomically.
+   **Built** (docs/gpu.md).
+2. A buffer emptied, kept to its first rows or given rows alike
+   (`Name = []`, `Name = Name[..n]`, `Name += [{ .. }; n]`) in a `gpu
+   system` outside its `for`s: its count is the CPU's anyway; the rows
+   given are filled on the GPU.
+3. The Morton index's making in a form for the GPU, beside the CPU's:
+   the box, the keys, the rows by a `for ... by` (always anew); the
+   cells split level by level, each by the entity at its first row
+   (counted, room made, built in windows, its cells marked in `lead` as
+   the next level's), a `while` around them; the boxes level by level
+   from the deepest up.
+4. The choice: a pass that keeps the GPU's form where the rule above
+   holds, the CPU's elsewhere.
+5. The grid the same way: keys, the rows by `for ... by`, each cell's
+   first row by the entity at it.
+6. The benchmarks.
+
 ## 9. When it is done
 
 - Every query gives the same with an index as without (an index changes

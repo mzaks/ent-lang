@@ -1,0 +1,51 @@
+// Fractions' least and greatest into uniques in a `gpu system`
+// (test/Integration/gpu.test): combined on the GPU by their bits in their
+// order, the same as on one core. f32 and f64, below nought and above,
+// -0.0 against 0.0, and a unique no entity changes.
+import console
+import wyhash
+
+component Dot { x: f32, y: f64 } capacity 100000
+archetype Plain { Dot } capacity 100000
+unique U { frame: i64, lo: f32, hi: f32, ylo: f64, yhi: f64, none: f32, zero: f32, top: f64 }
+
+world {
+  for i in 0..100000 {
+    spawn { Dot { x: (wyrand_unit(1, i as i64) * 200.0 - 100.0) as f32, y: wyrand_unit(2, i as i64) * 3.0 - 2.0 } }
+  }
+}
+
+gpu system box() {
+  U.lo = 1.0 / 0.0
+  U.hi = 0.0 - 1.0 / 0.0
+  U.ylo = 7.0
+  U.yhi = 0.0 - 1.0 / 0.0
+  U.none = 5.0
+  U.zero = 1.0
+  U.top = 0.0 - 1.0 / 0.0
+  for d: Dot {
+    U.lo min= d.x
+    U.hi max= d.x
+    U.ylo min= d.y
+    U.yhi max= d.y
+    if d.x > 1000.0 { U.none min= d.x }
+    // (-0.0 from those below nought, 0.0 from the others: -0.0 is less.)
+    U.zero min= if d.x < 0.0 { 0.0 * (0.0 - 1.0) } else { 0.0 }
+    U.top max= d.y * 0.0
+  }
+}
+
+gpu system shift() {
+  for d: mut Dot {
+    d.x = d.x * 0.5 + 3.0
+    d.y = d.y * 1.5 - 0.25
+  }
+}
+
+system show() {
+  put("frame {U.frame}: {U.lo} {U.hi} {U.ylo} {U.yhi} {U.none} bits {bits_of(U.zero)} {bits_of(U.top)}")
+  U.frame += 1
+}
+
+schedule frame() { box() show() shift() }
+main { loop { frame() } until U.frame >= 3 }
