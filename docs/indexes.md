@@ -460,7 +460,7 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 | 2 | Uniform grid and `near ... within` (a Lennard-Jones melt as its example) | `rebuild`, scheduling of makes | built (see below), and `after me` (2b); grids of whole numbers, `between .. and ..`, `nearest k to` (2026-10-23) |
 | 3 | Hash index and `unique` | `incremental`, change tracking | built: `by key hash [unique]`, `get`, `where x.key == value` through it, every way of section 4 (2026-10-23) |
 | 4 | Sorted index (secondary), then clustered | Ordered iteration, ranges, top-k | built: secondary (5.2); ties, float keys, query forms (`by` with `from`, `to`, `first`, `last`) and `clustered` (2026-10-23) |
-| 5 | Morton linear quadtree and octree | Keys made of fields, ranges of prefixes | reference: PBBS `nearestNeighbors` and its `octTree` (`bench/points`, 2026-10-24); the grid there for now |
+| 5 | Morton linear quadtree and octree | Keys made of fields, ranges of prefixes | designed (2026-10-25, below): `morton`, `bits`, `leaf`, `cells { }` sums, `for c in Name.cells` with `open`; references PBBS `octTree` (`bench/points`) and Barnes's treecode |
 | 6 | Relation indexes by source and target everywhere, indexes on edge fields | | built: copies in the index's order, kept in order in place, `by` and `where` on edge loops and `index .. of Relation` (2026-10-24, see 5.6) |
 | 7 | Partitions by value | | |
 | 8 | k-d tree and `nearest k` | | `nearest k` built on grids (2026-10-23); k-d tree to do |
@@ -613,6 +613,124 @@ Not chosen:
 
 Decided (2026-10-22): `after me`; a program that chooses between a half
 and a full list by a value of the world keeps two loops.
+
+**Step 5, as designed** (2026-10-25, the user's choices). A Morton
+index: the grid's queries over cells that split where the entities are
+many, and a walk over those cells with sums each keeps (Barnes–Hut,
+levels of detail).
+
+```
+component Star { x: f64, y: f64, z: f64, m: f64 } capacity 1048576
+component Force { ax: f64, ay: f64, az: f64 } capacity 1048576
+unique Sim { theta2: f64, eps2: f64 }
+
+index Stars of Star morton (x, y, z) leaf 16 { m: Star.m }
+  cells { m: sum Star.m, mx: sum Star.m * Star.x, my: sum Star.m * Star.y,
+          mz: sum Star.m * Star.z }
+
+system gravity() {
+  for me, a: Star, f: mut Force {
+    var ax: f64 = 0.0
+    for c in Stars.cells {
+      let dx = c.mx / c.m - a.x
+      let dy = c.my / c.m - a.y
+      let dz = c.mz / c.m - a.z
+      let d2 = dx * dx + dy * dy + dz * dz
+      if !c.leaf && c.size * c.size > Sim.theta2 * d2 { open }
+      if c.leaf {
+        for o, b: Star in c where o != me { .. each pair .. }
+      } else {
+        .. the cell as one body of mass c.m at its centre of mass ..
+      }
+    }
+    f.ax = ax
+  }
+}
+```
+
+The declaration:
+
+- `index Name of C morton (x, y)` or `(x, y, z)`: fields of the first
+  component, of one type (f32, f64, i32 or i64), as a grid's. After it,
+  in any order:
+  - `bits N`: how finely each side is cut, 2^N steps. At most 32 a side
+    in 2D and 21 in 3D (a key of 64 bits), which is the default.
+  - `leaf N`: a cell of at most N entities is not split. The default is
+    16. A cell at the finest level, 2^-bits of the box, is a leaf
+    however many it holds.
+  - `wrap size`: a box from 0 to `size` on every side that wraps, as a
+    grid's.
+  - `{ name: C.field, .. }`: what each row copies, as other indexes.
+  - `cells { name: sum e | min e | max e, .. }`: what each cell keeps.
+    `e` is an expression of the components of the index's entities
+    (`Star.m * Star.x`), and the value is of its type.
+  - `lazy`/`eager`, `clustered`: as other indexes. Not `incremental`
+    (the keys are worked out for every entity each time, as a grid's).
+- The key: each place quantized over the box (the lowest corner where
+  the entities are, the widest side of them, so the cells are cubes; or
+  the wrapping box), the bits interleaved, x the lowest of each level.
+  The rows are in the order of the keys, ties by the order the program
+  keeps the entities in.
+- A cell is a run of rows whose keys share their first `level` digits of
+  `dims` bits, the root holding all of them. Its cells are those of the
+  next level that have rows. A cell with one cell inside is kept as it
+  is (the levels go one by one, as Barnes's tree).
+- Each cell has, besides what `cells { }` says: `count`, `size` (the
+  side of its cube), `x`, `y` and `z` (its cube's centre, by the names
+  of the index's fields), `level` (the root's is 0), `leaf`, and `first`
+  (the first row; `count` rows from it). Sums are added in the order of
+  the rows, so they are the same on one core and on many.
+
+The queries:
+
+- `near .. within r in Name`, `between .. and .. in Name`, `nearest k to
+  .. in Name`, `after me`: as of a grid, the same entities, nearest
+  first where `nearest`. `near` and `between` visit in the order of the
+  rows (the Morton order). A program changes from a grid to a Morton
+  index by its declaration.
+
+The walk:
+
+- `for c in Name.cells { .. }` visits the cells depth first from the
+  root, those inside a cell in the order of their keys. `open` (a
+  statement, as `continue`) skips the rest of the body and visits the
+  cells inside `c` next. A cell that is not opened has none of its
+  cells visited. Opening a leaf visits nothing more.
+- `continue` skips the rest of the body without opening, and `break`
+  ends the walk.
+- `for o, b: C in c where ..` visits the entities of cell `c`, any cell,
+  in the order of their rows: what the index copies is read from the row
+  and the rest is looked up, as `near`.
+- It may be inside a `for` over entities, one walk each (on many
+  threads, across the entities), and outside one. The fields of `c` are
+  read only, and `c` is not handed on.
+
+Upkeep, as a grid's: made anew where entities came or went; where only
+places changed, each entity writes its key into its row and the rows
+out of order go down to their place, or are sorted anew where many
+moved. The cells and their sums are made again each time, from the rows,
+in a pass from the leaves up (on many threads by subtree).
+
+Not in this step: the GPU; an `incremental` index; a cell with one cell
+inside skipped (a compressed tree); Hilbert order.
+
+The references:
+
+- The queries: PBBS `nearestNeighbors` and its `octTree`
+  (`bench/points`). The aim is to be within octTree's time on the
+  clustered points too, where the grid is 82 to 450 times it.
+- The walk: Barnes's treecode 1.4 (NEMO's copy, `src/nbody/evolve/
+  hackcode/treecode1`), its Plummer model, `theta` and `usequad`, ported
+  as an example. Forces against a direct sum: the same error as
+  treecode's at the same `theta`, and with `leaf 1` and treecode's root
+  cube, the same cells and the same forces as treecode's, to the bit if
+  the sums go in its order.
+
+Tests: the queries of a Morton index against those of a grid on the same
+entities (`near`, `between`, `nearest`, `after me`, a box that wraps,
+whole numbers), on one core and on all; a walk that opens every cell
+against a scan (the sums of every cell, the leaves' entities); a walk
+that stops at a level; the errors (in a `test/Import` test).
 
 ## 9. When it is done
 
