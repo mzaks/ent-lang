@@ -4323,3 +4323,19 @@ of three round-robin, ms:
 | 0.5 | yes | 1523.9 | 1468.4 (0.964) | 253.9 | 250.2 (0.985) |
 
 - The same interactions and errors, every theta (run.py).
+
+Then reads by the name of rows the windows take too: each row is copied
+as it is taken (into a column of the fields so read), and such a read
+gives the copy, so all of the buffer reads as it was before the `for`
+(test/Integration/window_reads.test: a smoothing in place equal to one
+from a copy). The group walk copies its lists and sinks as it takes
+them; old (Fresh) against new, the same compiler, ms:
+
+| theta | quad | old, 1 core | new | all cores | new |
+|---|---|---|---|---|---|
+| 1.0 | no | 339.1 | 332.8 (0.981) | 61.9 | 63.2 (1.021) |
+| 0.5 | yes | 1451.2 | 1421.7 (0.980) | 252.0 | 251.4 (0.998) |
+
+- The copy costs about 1.5% of the walk; windows also work now along a
+  tree, by a field and in a `for` that reacts to changes
+  (test/Integration/window_kinds.test).

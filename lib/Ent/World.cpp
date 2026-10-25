@@ -92,6 +92,13 @@ const WorldColumn *WorldBuffer::find(StringRef field) const {
   return nullptr;
 }
 
+const WorldColumn *WorldBuffer::findBefore(StringRef field) const {
+  for (const WorldColumn &column : before)
+    if (column.field.getValue() == field)
+      return &column;
+  return nullptr;
+}
+
 const WorldAppend::Slots &WorldAppend::find(unsigned archetype) const {
   for (const Slots &entry : slots)
     if (entry.archetype == archetype)
@@ -1333,6 +1340,23 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
       claimed.insert(claim.getBufferAttr().getAttr());
     }
   });
+  // (Of the fields read by the name in a `for` that takes windows of the
+  // buffer, as its entities' bindings: the rows before it took them.)
+  llvm::DenseMap<StringAttr, llvm::SmallSetVector<StringAttr, 4>> readBefore;
+  module.walk([&](QueryOp query) {
+    if (query.isTurn() || query.getBody().empty())
+      return;
+    llvm::SmallDenseSet<StringAttr> taken;
+    for (auto claim : query.getBody().front().getOps<BufferClaimOp>())
+      taken.insert(claim.getBufferAttr().getAttr());
+    if (taken.empty())
+      return;
+    query.getBody().walk([&](BufferAtOp at) {
+      StringAttr name = at.getBufferAttr().getAttr();
+      if (!at->hasAttr(kWindowAttr) && taken.contains(name))
+        readBefore[name].insert(at.getFieldAttr());
+    });
+  });
   // (Each rank's stretch of an archetype's rows: of every one where any
   // is distributed, as one may be by its rows, see distributedByRows.)
   bool anyDistributed = llvm::any_of(
@@ -1369,6 +1393,15 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     // (A run is never 0, so a row no run took is no run's.)
     layout.zeroed.push_back({buffer.runOffset, 8});
     layout.zeroed.push_back({buffer.ownerOffset, 8 * uint64_t(buffer.rows)});
+    auto read = readBefore.find(name);
+    if (read == readBefore.end())
+      continue;
+    for (StringAttr field : read->second) {
+      const WorldColumn *column = buffer.find(field.getValue());
+      uint64_t offset = llvm::alignTo(end, kColumnAlignment) + kStagger;
+      end = offset + storageBytes(column->type) * buffer.rows;
+      buffer.before.push_back({name, field, column->type, offset});
+    }
   }
   layout.totalBytes = llvm::alignTo(end, kArenaAlignment);
   return layout;

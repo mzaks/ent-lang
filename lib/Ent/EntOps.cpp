@@ -966,20 +966,21 @@ BufferClaimOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
            << getBufferAttr()
            << " outside a query whose entities run at once: a window is "
               "a binding of a 'for' over entities";
-  if (query.getCascade() || query.hasBy() ||
-      query->hasAttr(QueryOp::kTriggersAttr))
-    return emitOpError("takes rows of ")
-           << getBufferAttr()
-           << " in a query that goes along a tree, by a field or reacts to "
-              "changes: not yet";
+  // (A 'for' inside a 'for' reads its entities: what is to change is sent.)
   if ((*this)->getParentOfType<EachOp>() ||
       (*this)->getParentOfType<EdgesOp>())
     return emitOpError("takes rows of ")
-           << getBufferAttr() << " in a 'for' inside a 'for': not yet";
-  // (Read by its name too, where the window is a binding of the query, so
-  // taken before any entity's body runs: the rows as they were before the
-  // query, those taken stopping the program; see lowerQuery.)
-  bool binding = (*this)->getBlock() == &query.getBody().front();
+           << getBufferAttr()
+           << " in a 'for' inside a 'for', which reads its entities";
+  // (Read by its name too, where the window is a binding of a query whose
+  // entities run at once, in no order (not along a tree, by a field, nor
+  // as events come), so taken before any entity's body runs: the rows as
+  // they were before the query, those taken read as they were kept; see
+  // lowerQuery. Along a tree or by a field each entity's rows are its
+  // own, taken where it gets to them.)
+  bool binding = (*this)->getBlock() == &query.getBody().front() &&
+                 !query.getCascade() && !query.hasBy() &&
+                 !query->hasAttr(QueryOp::kTriggersAttr);
   Operation *other = nullptr;
   query.walk([&](Operation *op) {
     if (other || op == getOperation())

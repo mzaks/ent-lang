@@ -1,0 +1,54 @@
+// Windows of a buffer (docs/syntax.md) in each kind of `for` that runs
+// its entities at once: along a tree, by a field and as changes come. Each hive writes rows of `Cells` of its own;
+// built for one core and for all of them, it prints the same.
+import console
+
+component Hive { number: i32, start: i32, size: i32 } capacity 4000
+relation (Hive)-[Under]->(Hive) tree capacity 4000
+buffer Cells { bees: i32 } capacity 40000
+buffer Ids { who: entity } capacity 4000
+unique Check: i64
+unique Days: i32
+
+system tree() {
+  for h: Hive, w: mut Cells[h.start, h.size] top down Under {
+    for i in 0..len(w) { w[i].bees = (w[i].bees * 3 + h.number + i) % 1000 }
+  }
+}
+system ordered() {
+  for h: Hive, w: mut Cells[h.start, h.size] by h.number {
+    for i in 0..len(w) { w[i].bees = (w[i].bees * 5 + h.number + Days) % 1000 }
+  }
+}
+system grown() {
+  for h: Hive, w: mut Cells[h.start, h.size] on changed h.number {
+    w[0].bees += 1
+  }
+}
+system change() {
+  for h: mut Hive { if h.number % 3 == Days % 3 { h.number += 0 } }
+}
+system check() {
+  Check = 0
+  for i in 0..len(Cells) { Check += Cells[i].bees as i64 * (i % 97 + 1) as i64 }
+  spawn { Print { line: "day {Days}: check {Check}" } }
+}
+system count() { Days += 1 }
+schedule day() { count()  tree()  ordered()  change()  grown()  check()  write()  clear() }
+
+world {
+  var at = 0
+  for n in 0..2000 {
+    let size = n % 7 + 3
+    let h = spawn { Hive { number: n, start: at, size: size } }
+    Ids += { who: h }
+    // (A tree: each hive under the one of half its number.)
+    if n > 0 { connect (h)-[Under]->(Ids[n / 2].who) }
+    at += size
+  }
+  for i in 0..at { Cells += { bees: i % 13 } }
+}
+
+main {
+  loop { day() } until Days == 3
+}

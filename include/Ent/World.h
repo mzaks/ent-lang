@@ -499,6 +499,11 @@ struct WorldBuffer {
   /// GPU's has its own). Zero at first; not saved.
   uint64_t runOffset = 0;
   uint64_t ownerOffset = 0;
+  /// Of a buffer that a `for` takes windows of and also reads by its
+  /// name: of each field it reads so, the rows as they were before the
+  /// `for` took them (copied as they are taken), which those reads give of
+  /// a row taken in the run. Not saved.
+  SmallVector<WorldColumn> before;
   /// Of a buffer whose rows a `for` writes or takes as windows: on many
   /// ranks, the least and the most row this rank's entities wrote in the
   /// last such `for` (i64 each; none: the least above the most), which it
@@ -507,8 +512,10 @@ struct WorldBuffer {
   uint64_t rankLowOffset = 0;
   uint64_t rankHighOffset = 0;
 
-  /// The column of `field`, or null.
+  /// The column of `field`, or null; of `field` as it was before (see
+  /// `before`), or null.
   const WorldColumn *find(StringRef field) const;
+  const WorldColumn *findBefore(StringRef field) const;
 };
 
 /// The rows one `ent.append` inside a query adds, from the entities of

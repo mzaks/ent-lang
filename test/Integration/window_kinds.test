@@ -1,0 +1,20 @@
+// Windows of a buffer in a `for` along a tree, by a field and as changes
+// come: for one core and for all of them the same; windows that overlap
+// stop the program in each.
+// RUN: %ent build %S/Inputs/window_kinds.ent -o %t.one
+// RUN: %ent build %S/Inputs/window_kinds.ent --parallel -o %t.all
+// RUN: %t.one > %t.one.out
+// RUN: %t.all > %t.all.out
+// RUN: diff %t.one.out %t.all.out
+// RUN: FileCheck %s --input-file=%t.one.out
+// CHECK: day 1: check 294105543
+// CHECK: day 3: check 291952754
+// RUN: sed -e 's/h.size\] top down/h.size + 1] top down/' %S/Inputs/window_kinds.ent > %t.tree.ent
+// RUN: %ent build %t.tree.ent -o %t.tree
+// RUN: not --crash %t.tree
+// RUN: sed -e 's/h.size\] by h.number/h.size + 1] by h.number/' %S/Inputs/window_kinds.ent > %t.by.ent
+// RUN: %ent build %t.by.ent -o %t.by
+// RUN: not --crash %t.by
+// RUN: sed -e 's/h.size\] on changed/h.size + 1] on changed/' %S/Inputs/window_kinds.ent > %t.on.ent
+// RUN: %ent build %t.on.ent -o %t.on
+// RUN: not --crash %t.on

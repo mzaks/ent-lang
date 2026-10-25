@@ -67,3 +67,17 @@ system g() {
   // expected-error @+1 {{a window is a binding of the entity a 'for' visits, without a pattern}}
   for (h: Hive, w: mut Cells[h.start, h.size]) { }
 }
+
+// -----
+
+// (By a field each entity takes its rows where it gets to them: the
+// buffer is read through the window only.)
+component Hive { start: i32, size: i32 }
+buffer Cells { bees: i32 } capacity 64
+system h() {
+  // expected-error @+1 {{which its query also uses outside the window}}
+  for h: Hive, w: mut Cells[h.start, h.size] by h.start {
+    // expected-note @+1 {{it does here}}
+    w[0].bees = Cells[3].bees
+  }
+}

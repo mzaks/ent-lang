@@ -1,46 +1,67 @@
 // A `for` that writes a buffer through windows and reads it by its name
-// (docs/syntax.md): each hive writes rows of `Cells` of its own, from
-// rows of the other half that it reads by the name, and the next day the
-// halves change places. Built for one core and for all of them, it
-// prints the same. On the third day one hive reads by the name a row of
-// its own window, and the program stops.
+// (docs/syntax.md): each hive smooths its rows of `Cells`, a ring, by the
+// rows either side of each, read by the name, its own and its
+// neighbours' too, which their windows are taking. What is read is the
+// buffer as it was before the `for`: the same as `Twin`, smoothed the
+// same way from a copy made first (`Prev`). Built for one core and for
+// all of them, it prints the same.
 import console
 
-component Hive { number: i32, start: i32, size: i32, from: i32 } capacity 4000
-buffer Cells { bees: i32 } capacity 80000
+component Hive { number: i32, start: i32, size: i32 } capacity 4000
+buffer Cells { bees: i32 } capacity 40000
+buffer Twin { bees: i32 } capacity 40000
+buffer Prev { bees: i32 } capacity 40000
 unique Check: i64
+unique Same: bool
 unique Days: i32
 
-system grow() {
-  for h: mut Hive, w: mut Cells[h.start, h.size] {
+system smooth() {
+  let n = len(Cells)
+  for h: Hive, w: mut Cells[h.start, h.size] {
     for i in 0..len(w) {
-      w[i].bees = (Cells[h.from + i].bees * 3 + h.number + i) % 1000
+      let r = h.start + i
+      let left = Cells[(r + n - 1) % n].bees
+      let right = Cells[(r + 1) % n].bees
+      w[i].bees = (left + 2 * Cells[r].bees + right + h.number) % 1000
     }
-    let start = h.start
-    h.start = h.from
-    h.from = start
+  }
+}
+system twin() {
+  let n = len(Twin)
+  for r in 0..n { Prev[r].bees = Twin[r].bees }
+  for h: Hive, w: mut Twin[h.start, h.size] {
+    for i in 0..len(w) {
+      let r = h.start + i
+      let left = Prev[(r + n - 1) % n].bees
+      let right = Prev[(r + 1) % n].bees
+      w[i].bees = (left + 2 * Prev[r].bees + right + h.number) % 1000
+    }
   }
 }
 system check() {
   Check = 0
-  for i in 0..len(Cells) { Check += Cells[i].bees as i64 * (i % 97 + 1) as i64 }
-  spawn { Print { line: "day {Days}: check {Check}" } }
+  Same = true
+  for i in 0..len(Cells) {
+    Check += Cells[i].bees as i64 * (i % 97 + 1) as i64
+    if Cells[i].bees != Twin[i].bees { Same = false }
+  }
+  spawn { Print { line: "day {Days}: check {Check} same {Same}" } }
 }
 system count() { Days += 1 }
-system own() {
-  for h: mut Hive { if Days == 3 && h.number == 5 { h.from = h.start } }
-}
-schedule day() { count()  own()  grow()  check()  write()  clear() }
+schedule day() { count()  smooth()  twin()  check()  write()  clear() }
 
 world {
   var at = 0
   for n in 0..2000 {
     let size = n % 7 + 3
-    spawn { Hive { number: n, start: at, size: size, from: 0 } }
+    spawn { Hive { number: n, start: at, size: size } }
     at += size
   }
-  for h: mut Hive { h.from = h.start + at }
-  for i in 0..2 * at { Cells += { bees: i % 13 } }
+  for i in 0..at {
+    Cells += { bees: i % 13 }
+    Twin += { bees: i % 13 }
+    Prev += { bees: 0 }
+  }
 }
 
 main {

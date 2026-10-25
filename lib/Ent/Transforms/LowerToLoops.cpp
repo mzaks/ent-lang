@@ -2550,11 +2550,14 @@ static llvm::DenseMap<Operation *, Value> ownerTags;
 /// A query whose windows of a buffer are taken before its entities' bodies
 /// run, by a pass of their own (`ent.takes`: that pass, a copy of the query
 /// with only the windows), since it also reads the buffer by its name
-/// (`ent.read_taken` on each such read). Each read, where it is lowered,
-/// says this run's number: a row of it taken in this run stops the
-/// program after the query, so what is read is the row as it was before.
+/// (`ent.read_taken` on each such read), the windows copying their rows
+/// as they were into the buffer's `before` columns (`ent.keep_before`).
+/// Each read, where it is lowered, says this run's number: a row of it
+/// taken in this run is read from those columns, so what is read is the
+/// row as it was before the query.
 static constexpr llvm::StringLiteral kTakesAttr = "ent.takes";
 static constexpr llvm::StringLiteral kReadTakenAttr = "ent.read_taken";
+static constexpr llvm::StringLiteral kKeepBeforeAttr = "ent.keep_before";
 static llvm::DenseMap<Operation *, Value> readRuns;
 /// Whether the program is built for many ranks (the pass's `ranks`): a
 /// device is rank 0's (see lowerInvoke), and MPI starts and ends around
@@ -20330,12 +20333,86 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
   return true;
 }
 
+/// What stops the program where an entity of a `for` went outside its
+/// window of `buffer`, or took rows another took too.
+static std::string windowClash(const WorldBuffer &buffer) {
+  return ("an entity of a 'for' went outside its window of the buffer @" +
+          BufferOp(buffer.op).getSymName() +
+          ", or took rows another of it took too, or rows the buffer has "
+          "not: in a 'for' each entity has rows of its own")
+      .str();
+}
+
+/// `lower` a query that goes along a tree or by a field, whose entities
+/// may take windows of buffers: before it each such buffer's run
+/// numbered and no clash yet, after it a clash stopping the program (as
+/// lowerQuery does for the others).
+static void lowerWithWindows(IRRewriter &rewriter, QueryOp query,
+                             const WorldLayout &layout, WorldAccess &world,
+                             const LoopOptions &options,
+                             llvm::function_ref<void()> lower) {
+  SmallVector<const WorldBuffer *> claimed;
+  query.getBody().walk([&](BufferClaimOp claim) {
+    const WorldBuffer &buffer =
+        layout.getBuffer(claim.getBufferAttr().getAttr());
+    if (!llvm::is_contained(claimed, &buffer))
+      claimed.push_back(&buffer);
+  });
+  if (claimed.empty())
+    return lower();
+  Location loc = query.getLoc();
+  ModuleOp module = query->getParentOfType<ModuleOp>();
+  llvm::SaveAndRestore keepRuns(ownerRuns);
+  rewriter.setInsertionPoint(query);
+  Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+  auto constant = [&](int64_t v) {
+    return arith::ConstantIntOp::create(rewriter, loc, v, 64);
+  };
+  for (const WorldBuffer *buffer : claimed) {
+    Value counter = world.bufferRun(*buffer);
+    Value run = arith::AddIOp::create(
+        rewriter, loc,
+        memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero}),
+        constant(1));
+    memref::StoreOp::create(rewriter, loc, run, counter, ValueRange{zero});
+    ownerRuns[buffer->ownerOffset] =
+        arith::ShLIOp::create(rewriter, loc, run, constant(32));
+    if (options.gpu)
+      callGpu(
+          rewriter, loc, module, "ent_gpu_cell_set",
+          ValueRange{constant(buffer->clashOffset), constant(0), constant(8)});
+    else
+      memref::StoreOp::create(rewriter, loc, constant(0),
+                              world.bufferClash(*buffer), ValueRange{zero});
+  }
+  Operation *after = query->getNextNode();
+  lower();
+  rewriter.setInsertionPoint(after);
+  for (const WorldBuffer *buffer : claimed) {
+    Value clash =
+        options.gpu
+            ? callGpu(rewriter, loc, module, "ent_gpu_cell_get",
+                      ValueRange{constant(buffer->clashOffset), constant(8)},
+                      TypeRange{rewriter.getI64Type()})
+                  .getResult(0)
+            : memref::LoadOp::create(rewriter, loc, world.bufferClash(*buffer),
+                                     ValueRange{zero})
+                  .getResult();
+    cf::AssertOp::create(rewriter, loc,
+                         arith::CmpIOp::create(rewriter, loc,
+                                               arith::CmpIPredicate::eq, clash,
+                                               constant(0)),
+                         rewriter.getStringAttr(windowClash(*buffer)));
+  }
+}
+
 /// Where `query` takes windows of a buffer and also reads it by its name:
 /// the windows taken first, by a copy of the query with only them and what
 /// says where they are, before the query (whose own windows are then gone);
 /// and each read by the name marked (kReadTakenAttr), so that a row taken
-/// in this run stops the program. So what the entities read is as it was
-/// before the query, on one core and on many, whichever entities run first.
+/// in this run is read as the copy kept it when it was taken. So what the
+/// entities read is as it was before the query, on one core and on many,
+/// whichever entities run first.
 static void takeWindowsFirst(IRRewriter &rewriter, QueryOp query,
                              const WorldLayout &layout, WorldAccess &world,
                              const LoopOptions &given) {
@@ -20370,8 +20447,10 @@ static void takeWindowsFirst(IRRewriter &rewriter, QueryOp query,
   llvm::SmallPtrSet<Operation *, 16> keep;
   SmallVector<Operation *> work;
   for (BufferClaimOp claim : copy.getOps<BufferClaimOp>())
-    if (taken.contains(claim.getBufferAttr().getAttr()))
+    if (taken.contains(claim.getBufferAttr().getAttr())) {
+      claim->setAttr(kKeepBeforeAttr, rewriter.getUnitAttr());
       work.push_back(claim);
+    }
   while (!work.empty()) {
     Operation *op = work.pop_back_val();
     if (!keep.insert(op).second)
@@ -20545,7 +20624,9 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     lowerEach(rewriter, each, layout, world);
   }
   if (query.getCascade())
-    return lowerCascade(rewriter, query, layout, world, given);
+    return lowerWithWindows(rewriter, query, layout, world, given, [&] {
+      lowerCascade(rewriter, query, layout, world, given);
+    });
   // A `for` a hash index answers: where many have the key (one in 64 of
   // the entities the index holds, or more), the entities themselves
   // looked at as without the index, in a loop over them all, which costs
@@ -20582,7 +20663,9 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     return lowerQuery(rewriter, query, layout, world, given);
   }
   if (query.hasBy())
-    return lowerOrdered(rewriter, query, layout, world, options);
+    return lowerWithWindows(rewriter, query, layout, world, options, [&] {
+      lowerOrdered(rewriter, query, layout, world, options);
+    });
   checkOwnRows(rewriter, query);
   if (lowerRunning(rewriter, query, layout, world, options))
     return;
@@ -21022,13 +21105,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
             arith::ConstantIntOp::create(rewriter, loc, 0, 64)),
         rewriter.getStringAttr(
             llvm::is_contained(windowed, buffer)
-                ? "an entity of a 'for' went outside its window of the "
-                  "buffer @" +
-                      BufferOp(buffer->op).getSymName() +
-                      ", or took rows another of it took too, or rows the "
-                      "buffer has not, or read by the buffer's name rows "
-                      "one of it took: in a 'for' each entity has rows of "
-                      "its own"
+                ? windowClash(*buffer)
                 : "an entity of a 'for' wrote a row of the buffer @" +
                       BufferOp(buffer->op).getSymName() +
                       " that is not its own: outside the rows its running "
@@ -22730,6 +22807,18 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
                                           ValueRange{row});
           memref::StoreOp::create(rewriter, loc, tag, owners, ValueRange{row});
         }
+        // (Of a `for` that reads the buffer by its name too: the row as it
+        // was, which those reads give.)
+        if (op->hasAttr(kKeepBeforeAttr))
+          for (const WorldColumn &kept : buffer.before)
+            memref::StoreOp::create(
+                rewriter, loc,
+                memref::LoadOp::create(
+                    rewriter, loc,
+                    world.bufferField(buffer,
+                                      *buffer.find(kept.field.getValue())),
+                    ValueRange{row}),
+                world.bufferField(buffer, kept), ValueRange{row});
         Value thirtyTwo = arith::ConstantIntOp::create(rewriter, loc, 32, 64);
         Value sameRun = arith::CmpIOp::create(
             rewriter, loc, arith::CmpIPredicate::eq,
@@ -22922,11 +23011,37 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
       // room for whatever it holds, and nought is given.
       auto at = cast<BufferAtOp>(op);
       const WorldColumn *field = buffer.find(at.getField());
+      // (Read by the name in a `for` whose entities' windows took rows of
+      // the buffer: a row taken in this run as it was before, kept when it
+      // was taken.)
+      Value run = readRuns.lookup(op);
+      readRuns.erase(op);
+      auto load = [&](Value row, Value there) -> Value {
+        Value stored = memref::LoadOp::create(
+            rewriter, loc, world.bufferField(buffer, *field), ValueRange{row});
+        const WorldColumn *kept = buffer.findBefore(at.getField());
+        if (!run || !kept)
+          return stored;
+        Value thirtyTwo = arith::ConstantIntOp::create(rewriter, loc, 32, 64);
+        Value owner = memref::LoadOp::create(
+            rewriter, loc, world.bufferOwners(buffer), ValueRange{row});
+        Value taken = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::eq,
+            arith::ShRUIOp::create(rewriter, loc, owner, thirtyTwo),
+            arith::ShRUIOp::create(rewriter, loc, run, thirtyTwo));
+        if (there)
+          taken = arith::AndIOp::create(rewriter, loc, there, taken);
+        return arith::SelectOp::create(
+            rewriter, loc, taken,
+            memref::LoadOp::create(rewriter, loc,
+                                   world.bufferField(buffer, *kept),
+                                   ValueRange{row}),
+            stored);
+      };
       if (isa<IndexOfType>(at.getIndex().getType())) {
         // (By a row number of the buffer: the row in its room, as it is.)
-        Value stored = memref::LoadOp::create(
-            rewriter, loc, world.bufferField(buffer, *field),
-            ValueRange{inRoom(rewriter, loc, world, buffer, at.getIndex())});
+        Value stored =
+            load(inRoom(rewriter, loc, world, buffer, at.getIndex()), Value());
         rewriter.replaceOp(op, world.fromStorage(loc, stored,
                                                  at.getResult().getType()));
         continue;
@@ -22938,28 +23053,8 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
       Value there = arith::CmpIOp::create(rewriter, loc,
                                           arith::CmpIPredicate::ult, index,
                                           count);
-      Value row = arith::SelectOp::create(
-          rewriter, loc, there, world.toIndex(loc, index), zero);
-      // (A row an entity's window took in this run, read by the name: the
-      // program stops after the query.)
-      if (Value run = readRuns.lookup(op)) {
-        readRuns.erase(op);
-        Value thirtyTwo = arith::ConstantIntOp::create(rewriter, loc, 32, 64);
-        Value owner = memref::LoadOp::create(
-            rewriter, loc, world.bufferOwners(buffer), ValueRange{row});
-        Value taken = arith::AndIOp::create(
-            rewriter, loc, there,
-            arith::CmpIOp::create(
-                rewriter, loc, arith::CmpIPredicate::eq,
-                arith::ShRUIOp::create(rewriter, loc, owner, thirtyTwo),
-                arith::ShRUIOp::create(rewriter, loc, run, thirtyTwo)));
-        OpBuilder::InsertionGuard guard(rewriter);
-        auto clash = scf::IfOp::create(rewriter, loc, taken);
-        rewriter.setInsertionPointToStart(clash.thenBlock());
-        memref::StoreOp::create(
-            rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 64),
-            world.bufferClash(buffer), ValueRange{zero});
-      }
+      Value row = arith::SelectOp::create(rewriter, loc, there,
+                                          world.toIndex(loc, index), zero);
       Value stored;
       if (split) {
         // (Asked: by the runtime, which has the row or asks for it.)
@@ -22992,15 +23087,10 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
                     .getResult(0),
                 type)});
         rewriter.setInsertionPointToStart(how.elseBlock());
-        scf::YieldOp::create(
-            rewriter, loc,
-            ValueRange{memref::LoadOp::create(
-                rewriter, loc, world.bufferField(buffer, *field),
-                ValueRange{row})});
+        scf::YieldOp::create(rewriter, loc, ValueRange{load(row, there)});
         stored = how.getResult(0);
       } else {
-        stored = memref::LoadOp::create(
-            rewriter, loc, world.bufferField(buffer, *field), ValueRange{row});
+        stored = load(row, there);
       }
       Value nought;
       if (isa<FloatType>(stored.getType()))

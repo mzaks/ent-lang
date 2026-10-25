@@ -1,17 +1,18 @@
 // A `for` that writes a buffer through windows and also reads it by its
-// name reads it as it was before the `for`: for one core and for all of
-// them the same; a row of a window read by the name stops the program.
+// name reads it as it was before the `for`, rows the windows take too:
+// as a copy made first would give, for one core and for all of them.
 // RUN: %ent build %S/Inputs/window_reads.ent -o %t.one
 // RUN: %ent build %S/Inputs/window_reads.ent --parallel -o %t.all
-// RUN: not --crash %t.one > %t.one.out
-// RUN: not --crash %t.all > %t.all.out
+// RUN: %t.one > %t.one.out
+// RUN: %t.all > %t.all.out
 // RUN: diff %t.one.out %t.all.out
 // RUN: FileCheck %s --input-file=%t.one.out
-// CHECK: day 1: check
-// CHECK: day 2: check
-// CHECK-NOT: day 3
-// Without that read the third day is as the others.
-// RUN: sed -e 's/h.from = h.start }/h.from = h.from }/' %S/Inputs/window_reads.ent > %t.fine.ent
-// RUN: %ent build %t.fine.ent --parallel -o %t.fine
-// RUN: %t.fine | FileCheck %s --check-prefix=FINE
-// FINE: day 3: check
+// CHECK: day 1: check {{[0-9]+}} same true
+// CHECK: day 2: check {{[0-9]+}} same true
+// CHECK: day 3: check {{[0-9]+}} same true
+// Windows that overlap still stop the program.
+// RUN: sed -e 's/w: mut Cells\[h.start, h.size\]/w: mut Cells[h.start, h.size + 1]/' %S/Inputs/window_reads.ent > %t.over.ent
+// RUN: %ent build %t.over.ent -o %t.over
+// RUN: not --crash %t.over > %t.over.out
+// RUN: FileCheck %s --check-prefix=OVER --allow-empty --input-file=%t.over.out
+// OVER-NOT: day 1

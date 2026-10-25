@@ -1847,16 +1847,21 @@ to a device at once (all there is to draw), in place of a call for each.
   else to it but read its `len` and read rows by the buffer's name
   (`Cohorts[k].bees`); where it reads so, the windows of all its
   entities are taken first, by a pass of their own before the `for`
-  (reading what says where they are), and a row read by the name that
-  one of them took, the entity's own too, stops the program after the
-  `for`. So what is read by the name is as it was before the `for`: the
-  rows of earlier levels of a tree, say, while each sink writes its own
-  lists after them (`bench/treecode/groups.ent`). One window of a buffer each, of the
-  visited entity's own bindings (not in a pattern, nor in a `for` that
-  takes turns, where the buffer is read and written as it is; not yet
-  in one that goes along a tree, by a field or reacts to changes, nor in
-  a `for` inside a `for`). Taking is a write for each row of each window
-  every run, about what reading them costs.
+  (reading what says where they are), each row copied as it is taken,
+  and a row read by the name that one of them took, the entity's own
+  too, is read from that copy. So what is read by the name is as it was
+  before the `for`, wherever it is: neighbours' rows for a smoothing, as
+  a copy of the buffer made first would give, or the rows of earlier
+  levels of a tree while each sink writes its own lists after them
+  (`bench/treecode/groups.ent`). The copy costs a write of each field so
+  read for each row taken, and as much room as the buffer's fields read
+  so. One window of a buffer each, of the visited entity's own bindings
+  (not in a pattern, nor in a `for` that takes turns, where the buffer is
+  read and written as it is, nor in a `for` inside a `for`, which reads
+  its entities). In a `for` that goes along a tree, by a field or reacts
+  to changes each entity takes its window where it gets to it, and the
+  buffer is used through the windows only. Taking is a write for each
+  row of each window every run, about what reading them costs.
 - A fn or proc of the program may take **rows** of a buffer, a window or
   all the buffer has, as a window of its own: `cohorts: Cohorts[]` to
   read, `cohorts: mut Cohorts[]` (a proc's) to change too. It reads and
