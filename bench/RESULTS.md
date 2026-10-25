@@ -4079,3 +4079,49 @@ best run, and of ent's the making of the index.
   between entities. Memory a query's body allocates is now its entity's
   own (`isEntityLocal`; `test/Transforms/parallel-entities.mlir`): 3DinCube
   k 10 on all cores 190 ms where it was 1,760.
+
+## 2026-10-25: a Morton index against PBBS
+
+`bench/points/run.py` as on 2026-10-24, now with a Morton index beside
+the grid: `index Cells of Point morton (x, y[, z]) leaf 32 clustered`
+(docs/indexes.md, step 5 part 1), the same `nearest k`. Clustered, the
+points are kept in the order of the index, so they are asked in it, as
+octTree asks its points in the order of its tree; a run's "made" is the
+index made again, the points put in its order (from the second run on
+they are in it already). Every point check.cc draws has all k
+neighbours, of every variant. Same machine, mains power, one core CPU 2;
+ms, the median of 3 processes of each one's best run.
+
+One core:
+
+| points | n | k | grid | (made) | morton | (made) | octTree |
+|---|---|---|---|---|---|---|---|
+| 2DinCube | 1M | 1 | 292.5 | 23.8 | 202.6 | 17.5 | 238.2 |
+| 2Dkuzmin | 100k | 1 | 9224 | 0.6 | 24.1 | 1.2 | 20.4 |
+| 3DinCube | 1M | 1 | 643.7 | 26.9 | 374.5 | 32.2 | 366.9 |
+| 3DonSphere | 1M | 1 | 1640 | 24.6 | 264.6 | 23.2 | 279.9 |
+| 3DinCube | 1M | 10 | 1728 | 26.8 | 988.2 | 32.9 | 1103 |
+| 3Dplummer | 100k | 10 | 11268 | 2.4 | 101.8 | 1.6 | 135.5 |
+
+All cores:
+
+| points | n | k | grid | (made) | morton | (made) | octTree |
+|---|---|---|---|---|---|---|---|
+| 2DinCube | 1M | 1 | 52.9 | 30.1 | 52.6 | 32.9 | 25.8 |
+| 2Dkuzmin | 100k | 1 | 1296 | 2.6 | 5.6 | 2.8 | 2.9 |
+| 3DinCube | 1M | 1 | 94.8 | 41.2 | 92.5 | 56.8 | 37.2 |
+| 3DonSphere | 1M | 1 | 191.3 | 39.2 | 73.2 | 47.8 | 28.9 |
+| 3DinCube | 1M | 10 | 194.2 | 45.1 | 148.8 | 57.0 | 97.5 |
+| 3Dplummer | 100k | 10 | 1417 | 3.9 | 14.2 | 3.9 | 20.7 |
+
+- One core: 0.75 to 1.18 times octTree, under it on four of six (over
+  on the cube k 1, 1.02, and Kuzmin, 1.18); the clustered sets that took the grid 450 and 82 times
+  octTree now 1.18 (Kuzmin) and 0.75 (Plummer).
+- All cores: Plummer under octTree (0.69), the rest 1.5 to 2.5 times
+  it. The making is most of it: 33 to 57 ms of 53 to 149, slower than on
+  one core. The keys, the sort and the cells (N_tree, one thread) are
+  where to go next; the queries themselves are near octTree's.
+- Without `clustered` the cube (k 10) is 2.5 s on one core: the queries
+  come in no order, so each one's cells and rows are misses.
+- Walking the cells without a stack (in key order, the bound the list's
+  k-th) was 1.5 times as slow as the stack nearest first.
