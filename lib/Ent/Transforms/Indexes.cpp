@@ -128,6 +128,46 @@ bool changesOrderOutside(SystemOp system, QueryOp query,
   return result.wasInterrupted();
 }
 
+/// Whether `system` writes the key of the index `kept` or a field it
+/// copies (of entities that are there: not in spawning them), or hands
+/// a proc one of their components, or writes a unique it is made of.
+bool writesValues(SystemOp system, const Kept &kept,
+                  ArrayRef<ArchetypeOp> archetypes) {
+  auto held = [&](Attribute component, StringAttr field) {
+    return llvm::any_of(kept.values, [&](const Column &column) {
+      return std::get<0>(column) && std::get<1>(column) == component &&
+             (!field || std::get<2>(column) == field);
+    });
+  };
+  WalkResult result = system.walk([&](Operation *op) {
+    if (auto set = dyn_cast<SetOp>(op))
+      if (held(cast<RefType>(set.getRef().getType()).getComponent().getAttr(),
+               set.getFieldAttr()))
+        return WalkResult::interrupt();
+    if (auto apply = dyn_cast<ApplyOp>(op))
+      if (held(apply.getComponentAttr().getAttr(), apply.getFieldAttr()))
+        return WalkResult::interrupt();
+    if (auto combine = dyn_cast<CombineOp>(op))
+      if (held(cast<RefType>(combine.getRef().getType())
+                   .getComponent()
+                   .getAttr(),
+               combine.getFieldAttr()))
+        return WalkResult::interrupt();
+    if (auto invoke = dyn_cast<InvokeOp>(op); invoke && invoke.getProc())
+      for (Value operand : invoke->getOperands())
+        if (auto ref = dyn_cast<RefType>(operand.getType());
+            ref && held(ref.getComponent().getAttr(), StringAttr()))
+          return WalkResult::interrupt();
+    return WalkResult::advance();
+  });
+  if (result.wasInterrupted())
+    return true;
+  SystemAccess access = computeAccess(system, archetypes);
+  return llvm::any_of(kept.values, [&](const Column &column) {
+    return !std::get<0>(column) && access.writes.contains(column);
+  });
+}
+
 bool touches(const llvm::SetVector<Column> &accessed,
              const llvm::SetVector<Column> &columns) {
   return llvm::any_of(columns,
@@ -162,6 +202,50 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
         it->second = computeAccess(system, archetypes);
       return it->second;
     };
+
+    // An index with a form made on the GPU (a Morton index's) is made so
+    // where the program is built for one, all the runs that read it are of
+    // gpu systems, and no system on the CPU writes its key or what it
+    // copies (spawns do not: those are new entities, which the GPU's form
+    // makes anew anyway): its rows are then never wanted on the CPU, nor
+    // copied there and back. The other form is left out.
+    for (auto &[buffer, info] : indexes) {
+      auto onGpu = info.getAs<StringAttr>("gpu_update");
+      if (!onGpu)
+        continue;
+      Kept kept = keptOf(buffer, info, archetypes, symbols);
+      bool chosen = gpu && !info.get("clustered");
+      bool read = false;
+      if (chosen)
+        module.walk([&](RunOp run) {
+          StringAttr name = run.getSystemAttr().getAttr();
+          if (name == kept.update || name == kept.stale || name == kept.moved ||
+              name == onGpu)
+            return;
+          Operation *declared = symbols.lookup(run.getSystem());
+          const SystemAccess &access = accessOf(run);
+          if (isa<ExternOp>(declared) && access.isOpaque()) {
+            chosen = false;
+            return;
+          }
+          auto system = dyn_cast<SystemOp>(declared);
+          if (touches(access.reads, kept.readBy)) {
+            read = true;
+            chosen &= system && system.getGpu();
+          }
+          if (system && !system.getGpu() &&
+              writesValues(system, kept, archetypes))
+            chosen = false;
+        });
+      Operation *unused = symbols.lookup(chosen && read ? kept.update : onGpu);
+      if (chosen && read) {
+        NamedAttrList changed(info);
+        changed.set("update", onGpu);
+        info = changed.getDictionary(module.getContext());
+        buffer->setAttr("ent.index", info);
+      }
+      symbols.erase(unused);
+    }
 
     // A `for` that goes by the field an index is by, over the entities it
     // holds, takes its order from it (QueryOp::kByIndexAttr): the same

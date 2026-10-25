@@ -1,0 +1,65 @@
+// Rows given to buffers in a `gpu` system (in the order of a key, and
+// in the order of the entities), read by the next `for` of the same
+// system: how many there are and what they hold, on the GPU as on the
+// CPU (test/Integration/gpu.test).
+import console
+import wyhash
+
+component Dot { key: i64, row: i32, seen: i32 } capacity 20000
+archetype Plain { Dot } capacity 20000
+buffer Order { key: i64, who: entity } capacity 20000
+buffer Odd { key: i64 } capacity 20000
+unique Frame { t: i64, sum: i64, wrong: i64, seen: i64 }
+
+world {
+  for i in 0..20000 {
+    spawn { Dot { key: wyrand_below(1, i as i64, 1000000000) as i64, row: 0, seen: 0 } }
+  }
+}
+
+fn find(order: Order, key: i64) -> i32 {
+  var low = 0
+  var high = len(order)
+  while low < high {
+    let mid = (low + high) >> 1
+    if order[mid].key < key { low = mid + 1 } else { high = mid }
+  }
+  low
+}
+
+gpu system make() {
+  Order = []
+  for e, d: Dot by d.key {
+    Order += { key: d.key, who: e }
+  }
+  Odd = []
+  for d: Dot {
+    if d.key % 2 == 1 { Odd += { key: d.key } }
+  }
+  for e, d: mut Dot {
+    var low = find(Order, d.key)
+    while low < len(Order) && Order[low].who != e { low += 1 }
+    d.row = low
+    d.seen = len(Odd)
+  }
+}
+
+system check() {
+  Frame.sum = 0
+  Frame.wrong = 0
+  Frame.seen = 0
+  for e, d: Dot {
+    Frame.sum += d.row as i64
+    Frame.seen += d.seen as i64
+    if d.row >= len(Order) { Frame.wrong += 1 } else { if Order[d.row].who != e { Frame.wrong += 1 } }
+  }
+  put("frame {Frame.t}: rows {len(Order)} sum {Frame.sum} wrong {Frame.wrong} odd {len(Odd)} seen {Frame.seen}")
+  Frame.t += 1
+}
+
+gpu system shift() {
+  for d: mut Dot { d.key = (d.key * 7 + 3) % 1000000007 }
+}
+
+schedule frame() { make() check() shift() }
+main { loop { frame() } until Frame.t >= 3 }

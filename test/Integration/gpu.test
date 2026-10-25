@@ -275,3 +275,30 @@
 // RUN: %ent run %S/Inputs/clustered.ent > %t.cl.cpu
 // RUN: %ent run %t.cl.ent --gpu > %t.cl.gpu
 // RUN: diff %t.cl.cpu %t.cl.gpu
+
+// Rows given to buffers in a `gpu` system, by a `for ... by` and by a
+// plain `for`, read by the next `for` of the same system: the GPU's copy
+// of how many there are is given them as they change.
+// RUN: %ent run %S/Inputs/gpu_given_read.ent > %t.givenread.cpu
+// RUN: %ent run %S/Inputs/gpu_given_read.ent --gpu > %t.givenread.gpu
+// RUN: %ent run %S/Inputs/gpu_given_read.ent --gpu --parallel > %t.givenread.gpupar
+// RUN: diff %t.givenread.cpu %t.givenread.gpu
+// RUN: diff %t.givenread.cpu %t.givenread.gpupar
+// RUN: FileCheck %s --check-prefix=GIVENREAD --input-file=%t.givenread.gpu
+// GIVENREAD: frame 0: rows 20000 sum 199990000 wrong 0 odd 9921 seen 198420000
+// GIVENREAD: frame 2: rows 20000 sum 199990000 wrong 0 odd 10018 seen 200360000
+
+// A Morton index whose readers are all `gpu` systems and whose key only
+// they write is made on the GPU (EntIndexes, `N_update_gpu`): the same
+// pairs as on the CPU, frame by frame as the dots move.
+// RUN: sed -e 's/^system count()/gpu system count()/' -e 's/^system move()/gpu system move()/' %S/Inputs/morton_moving.ent > %t.mgpu.ent
+// RUN: %ent run %S/Inputs/morton_moving.ent > %t.mgpu.cpu
+// RUN: %ent build %t.mgpu.ent --gpu -o %t.mgpu
+// RUN: %ent run %t.mgpu.ent --gpu --parallel > %t.mgpu.gpupar
+// RUN: %t.mgpu > %t.mgpu.gpu
+// RUN: diff %t.mgpu.cpu %t.mgpu.gpu
+// RUN: diff %t.mgpu.cpu %t.mgpu.gpupar
+// RUN: env ENT_GPU_PROTECT=1 %t.mgpu | diff %t.mgpu.cpu -
+// RUN: nm %t.mgpu | FileCheck %s --check-prefix=MGPU
+// MGPU: Tree_update_gpu
+// MGPU-NOT: Tree_update{{$}}

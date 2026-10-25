@@ -3500,6 +3500,7 @@ LogicalResult Parser::parseIndex() {
   // `clustered`: the archetype's rows themselves kept in its order.
   llvm::SMLoc clusteredAt = token.loc;
   bool clustered = consumeKeyword("clustered");
+  bool gpuMade = false;
   if (clustered && hashed)
     return error(clusteredAt, "a hash index has no order to keep the rows "
                               "in: it is not 'clustered'");
@@ -4537,6 +4538,15 @@ LogicalResult Parser::parseIndex() {
           // in `lead` (see `N_tree`).
           << "transient unique " << n
           << "_made: i32\n"
+          // Made on the GPU, level by level: the first cell of the level,
+          // how many it has, how many levels there are (see N_update_gpu).
+          << "transient unique " << n << "_from: i32\n"
+          << "transient unique " << n << "_count: i32\n"
+          << "transient unique " << n
+          << "_level: i32\n"
+          // And each level's first cell and how many it has.
+          << "transient buffer " << n
+          << "_levels { from: i32, count: i32 } capacity 64\n"
           // A side's steps, their bits spread `dims` apart.
           << "fn " << n << "_spread(q: u64) -> u64 {\n";
       if (dims == 3)
@@ -4753,6 +4763,8 @@ LogicalResult Parser::parseIndex() {
           << "    }\n"
           << "  }\n}\n";
     }
+    // (A Morton index's making on the GPU, put after the rest.)
+    std::string gpuForm;
     out << "system " << n << "_update() {\n";
     if (grid && !morton) {
       // The grid as the entities are now: its cells at least `cell` wide,
@@ -4842,6 +4854,9 @@ LogicalResult Parser::parseIndex() {
       out << "  for c0: mut " << of.front() << " {\n    c0." << *key << " = "
           << number << "\n  }\n";
     }
+    // (The box and the keys, which the GPU's form makes the same way.)
+    out.flush();
+    size_t keysFrom = text.size();
     if (morton) {
       // The box as the entities are now: the box that wraps, else from the
       // lowest of them on each side, as wide as they are on the widest (so
@@ -4890,6 +4905,8 @@ LogicalResult Parser::parseIndex() {
         out << ", " << side("lo_", d);
       out << ", scale_)\n  }\n";
     }
+    out.flush();
+    std::string keysText = text.substr(keysFrom);
     // Made anew by `by`: every entity in order by its key, those of a key
     // in the order they are stored (the order insertion by their places
     // gives).
@@ -4897,7 +4914,8 @@ LogicalResult Parser::parseIndex() {
     // have moved there (entities came, went or moved: no other change moves
     // one, so made again in place the places are as they were, in the rows
     // too, which keep theirs as they move).
-    auto anew = [&](const std::string &indent, bool counted) {
+    auto anew = [&](const std::string &indent, bool counted,
+                    bool numbered = true) {
       if (counted)
         out << indent << n << "_places = 0\n"
             << indent << "for c0: mut " << of.front() << " {\n"
@@ -4913,7 +4931,7 @@ LogicalResult Parser::parseIndex() {
       out << " }\n" << indent << "}\n";
       // (Clustered, the rows themselves move into the order, and each
       // entity is told its row as it does: see ClusterOp.)
-      if (!clustered)
+      if (!clustered && numbered)
         out << indent << n << "_number(" << n << ", " << of.front() << ")\n";
     };
     if (how == "rebuild") {
@@ -5193,6 +5211,152 @@ LogicalResult Parser::parseIndex() {
       out << "    }\n"
           << "    c_ -= 1\n"
           << "  }\n";
+      out.flush();
+      size_t gpuFrom = text.size();
+      // The same made on the GPU, where the compiler chooses so (see
+      // EntIndexes): always anew; each entity finds its row; the cells
+      // level by level, the entities workers by their rows (the k-th row's
+      // entity the level's k-th cell): how many cells each splits into,
+      // where they go (a running sum), room for them, then the cells
+      // themselves, a leaf's box and values as it is made; then the
+      // others' from the deepest level up, each entity a few cells. The
+      // last cell's `next` is -1 (the walks end there as past the cells).
+      std::string from = n + "_from", count = n + "_count";
+      out << "fn " << n << "_row(order: " << n << ", key: " << spelled
+          << ", e: entity) -> i32 {\n"
+          << "  var low = " << n << "_find(order, key)\n"
+          << "  while low < len(order) && order[low].who != e { low += 1 }\n"
+          << "  low\n}\n"
+          << "gpu system " << n << "_update_gpu() {\n"
+          << keysText;
+      anew("  ", /*counted=*/true, /*numbered=*/false);
+      out << "  " << n << "_whole = true\n"
+          << "  for e, c0: mut " << of.front() << " {\n"
+          << "    " << row << " = " << n << "_row(" << n << ", c0." << *key
+          << ", e)\n  }\n"
+          << "  " << n << "_cells = []\n"
+          << "  if len(" << n << ") > 0 {\n"
+          << "    " << n << "_cells += [{ first: 0, count: len(" << n
+          << "), level: 0, child: 0 - 1, kids: 0, next: 0 - 1, inside: 0"
+          << ", size: " << n << "_box.side";
+      std::string none = whole ? "0" : "0.0";
+      for (unsigned d = 0; d < dims; ++d)
+        out << ", " << side("lo", d) << ": " << none << ", " << side("hi", d)
+            << ": " << none << ", " << side("mid", d) << ": (" << n << "_box."
+            << side("lo", d) << " as f64) + " << n << "_box.side * 0.5";
+      for (const CellValue &value : cellValues)
+        out << ", " << value.name << ": "
+            << (isa<FloatType>(value.type) ? "0.0" : "0");
+      out << " }; 1]\n  }\n"
+          << "  " << from << " = 0\n"
+          << "  " << count << " = len(" << n << "_cells)\n"
+          << "  " << n << "_level = 0\n"
+          << "  " << n << "_levels = []\n"
+          << "  while " << count << " > 0 {\n"
+          << "    " << n << "_levels += [{ from: " << from
+          << ", count: " << count << " }; 1]\n"
+          << "    " << n << "_more = 0\n"
+          << "    let base_ = " << from << " + " << count << "\n"
+          << "    for c0: " << of.front() << ", t: mut " << n << "_cells[if "
+          << row << " < " << count << " { " << from << " + " << row
+          << " } else { 0 }, if " << row << " < " << count
+          << " { 1 } else { 0 }] {\n"
+          << "      var kids = 0\n"
+          << "      if len(t) > 0 {\n"
+          << "        if " << n << "_splits(t[0].count, t[0].level) {\n"
+          << "          let end = t[0].first + t[0].count\n"
+          << "          var s = t[0].first\n"
+          << "          while s < end {\n"
+          << "            s = " << n << "_upper(" << n
+          << ", s, end, t[0].level + 1)\n"
+          << "            kids += 1\n"
+          << "          }\n"
+          << "        }\n"
+          << "      }\n"
+          << "      let at = " << n << "_more += kids\n"
+          << "      if kids > 0 {\n"
+          << "        t[0].child = base_ + at\n"
+          << "        t[0].kids = kids\n"
+          << "      }\n"
+          << "    }\n"
+          << "    " << n
+          << "_cells += [{ first: 0, count: 0, level: 0, child: "
+             "0 - 1, kids: 0, next: 0 - 1, inside: 0, size: 0.0";
+      for (unsigned d = 0; d < dims; ++d)
+        out << ", " << side("lo", d) << ": " << none << ", " << side("hi", d)
+            << ": " << none << ", " << side("mid", d) << ": 0.0";
+      for (const CellValue &value : cellValues)
+        out << ", " << value.name << ": "
+            << (isa<FloatType>(value.type) ? "0.0" : "0");
+      std::string parent = n + "_cells[" + from + " + " + row + "]";
+      std::string splitting =
+          "if " + row + " < " + count + " && " + parent + ".kids > 0";
+      out << " }; " << n << "_more]\n"
+          << "    for c0: " << of.front() << ", w: mut " << n << "_cells["
+          << splitting << " { " << parent << ".child } else { 0 }, "
+          << splitting << " { " << parent << ".kids } else { 0 }] {\n"
+          << "      if len(w) > 0 {\n"
+          << "        let p = " << from << " + " << row << "\n"
+          << "        let pf = " << n << "_cells[p].first\n"
+          << "        let pc = " << n << "_cells[p].count\n"
+          << "        let pl = " << n << "_cells[p].level\n"
+          << "        let psize = " << n << "_cells[p].size\n"
+          << "        let pnext = " << n << "_cells[p].next\n"
+          << "        let child = " << n << "_cells[p].child\n";
+      for (unsigned d = 0; d < dims; ++d)
+        out << "        let pm" << d << " = " << n << "_cells[p]."
+            << side("mid", d) << "\n";
+      out << "        var m = 0\n"
+          << "        var s = pf\n"
+          << "        let end = pf + pc\n"
+          << "        while s < end {\n"
+          << "          let e = " << n << "_upper(" << n
+          << ", s, end, pl + 1)\n"
+          << "          let digit = ((" << n << "[s].key >> " << shiftOf
+          << ") & " << ((1 << dims) - 1) << ") as i32\n"
+          << "          w[m].first = s\n"
+          << "          w[m].count = e - s\n"
+          << "          w[m].level = pl + 1\n"
+          << "          w[m].next = child + m + 1\n"
+          << "          w[m].size = psize * 0.5\n";
+      for (unsigned d = 0; d < dims; ++d)
+        out << "          w[m]." << side("mid", d) << " = pm" << d
+            << " + (if ((digit >> " << d
+            << ") & 1) == 1 { 0.25 } else { 0.0 - 0.25 }) * psize\n";
+      out << "          if !" << n << "_splits(e - s, pl + 1) {\n";
+      leafBox("            ", "w[m]", "s", "e");
+      out << "          }\n"
+          << "          m += 1\n"
+          << "          s = e\n"
+          << "        }\n"
+          << "        w[m - 1].next = pnext\n"
+          << "      }\n"
+          << "    }\n"
+          << "    " << from << " = base_\n"
+          << "    " << count << " = " << n << "_more\n"
+          << "    " << n << "_level += 1\n"
+          << "  }\n"
+          // (A level has no more cells than entities: each has one.)
+          << "  " << n << "_level -= 1\n"
+          << "  while " << n << "_level >= 0 {\n";
+      std::string level = n + "_levels[" + n + "_level]";
+      std::string has = "if " + row + " < " + level + ".count";
+      out << "    for c0: " << of.front() << ", w: mut " << n << "_cells["
+          << has << " { " << level << ".from + " << row << " } else { 0 }, "
+          << has << " { 1 } else { 0 }] {\n"
+          << "      for j in 0..len(w) {\n"
+          << "        if w[j].child >= 0 {\n";
+      innerBox("          ", "w[j]", "w[j].child", n + "_cells[k]");
+      out << "        }\n"
+          << "      }\n"
+          << "    }\n"
+          << "    " << n << "_level -= 1\n"
+          << "  }\n"
+          << "  " << n << "_fresh = true\n}\n";
+      out.flush();
+      gpuForm = text.substr(gpuFrom);
+      text.resize(gpuFrom);
+      gpuMade = true;
     }
     out << "  " << n
         << "_fresh = true\n}\n"
@@ -5209,7 +5373,8 @@ LogicalResult Parser::parseIndex() {
         << "      let mid = (low + high) >> 1\n"
         << "      if order[mid].key < key { low = mid + 1 } else { high = mid "
            "}\n"
-        << "    }\n  }\n  low\n}\n";
+        << "    }\n  }\n  low\n}\n"
+        << gpuForm;
   }
   auto source = llvm::MemoryBuffer::getMemBufferCopy(text, "index " + n);
   StringRef bytes = source->getBuffer();
@@ -5301,6 +5466,9 @@ LogicalResult Parser::parseIndex() {
       info.set("hash", builder.getUnitAttr());
     if (unique)
       info.set("unique", builder.getUnitAttr());
+    // (Its making on the GPU, which EntIndexes runs instead where so.)
+    if (gpuMade)
+      info.set("gpu_update", builder.getStringAttr(resolve(n + "_update_gpu")));
     declared->setAttr("ent.index", info.getDictionary(context));
   }
   Index &kept = indexes[bufferName.getValue()];
@@ -8440,8 +8608,10 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
     return whileWithVars(
         where,
         [&]() -> mlir::Value {
+          // (Unsigned: the last cell's `next` is past the cells, or -1 where
+          // the cells were made level by level on the GPU.)
           return arith::CmpIOp::create(
-              builder, where, arith::CmpIPredicate::slt, lookup(cursor)->value,
+              builder, where, arith::CmpIPredicate::ult, lookup(cursor)->value,
               BufferLenOp::create(builder, where, i32, cells));
         },
         [&]() -> LogicalResult {
@@ -9916,8 +10086,9 @@ LogicalResult Parser::parseCellWalk(llvm::SMLoc at, const std::string &name,
       [&]() -> mlir::Value {
         return arith::AndIOp::create(
             builder, where,
+            // (Unsigned, as the walk of `near`: the last `next` may be -1.)
             arith::CmpIOp::create(
-                builder, where, arith::CmpIPredicate::slt,
+                builder, where, arith::CmpIPredicate::ult,
                 lookup(cursor)->value,
                 BufferLenOp::create(builder, where, i32, cells)),
             arith::XOrIOp::create(

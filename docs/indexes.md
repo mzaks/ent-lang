@@ -846,14 +846,43 @@ Steps:
    system` outside its `for`s: its count is the CPU's anyway; the rows
    given are filled on the GPU.
    **Built**, with `len(Name)` (docs/gpu.md).
-3. The Morton index's making in a form for the GPU, beside the CPU's:
-   the box, the keys, the rows by a `for ... by` (always anew); the
-   cells split level by level, each by the entity at its first row
-   (counted, room made, built in windows, its cells marked in `lead` as
-   the next level's), a `while` around them; the boxes level by level
-   from the deepest up.
+3. The Morton index's making in a form for the GPU, beside the CPU's
+   (`gpu system N_update_gpu`): the box, the keys, the rows by a `for
+   ... by` (always anew), each entity's row found in them (`N_row`); the
+   cells split level by level, the entities workers by their rows (the
+   k-th row's entity the level's k-th cell): how many cells each splits
+   into, where they go (a running sum), room for them, then the cells
+   themselves in a window over them, a leaf's box as it is made; each
+   level's first cell and how many kept (`N_levels`); then the inner
+   boxes level by level from the deepest up, each by the worker of a
+   cell of that level. The last cell's `next` is -1, which the walks
+   take, compared unsigned, for past the cells.
+   **Built**. On the way: rows given in a `gpu system` (by a `for ...
+   by` or a plain `for`) were not counted in the GPU's copy of the
+   count until the next system; now as they are given
+   (`Inputs/gpu_given_read.ent`).
 4. The choice: a pass that keeps the GPU's form where the rule above
    holds, the CPU's elsewhere.
+   **Built**: `--ent-indexes=gpu=1` (`ent build --gpu`) runs the GPU's
+   form where the index is not clustered, every run that reads it is of
+   a `gpu system`, and no system on the CPU writes its key or what it
+   copies (`set`, `apply`, sends; a proc given its component; a unique
+   it is made of) nor is an extern one that declares nothing; spawns
+   do not count. The other form is erased. `gpu.test` runs
+   `morton_moving.ent` with its systems on the GPU: the same pairs as
+   on the CPU, frame by frame, also with `ENT_GPU_PROTECT`.
+   A million dots in two sides (`near` within 0.002, leaf 16, the dots
+   moving on the GPU, `--gpu --parallel`, RTX 4050): made on the GPU in
+   23.4 ms a frame, of which the `for ... by`'s sort of the 62-bit keys
+   is about 13 (eight passes, each about 1.6 ms, most of it putting keys
+   in place), the visit giving the rows 1.2, finding each entity's row
+   0.6, the levels about 6, the boxes up less than 1. Against the CPU's
+   making (22.5 ms on all cores, and its buffers copied over) a frame
+   comes to 35 ms against 37. With each entity looking at its share of
+   all cells at every level on the way up (before `N_levels`) it was
+   31 ms. The sort with 1024 or 16,384 pieces in place of 4096 is slower
+   (26.5, 32.5 ms): what would pay is a sort that ranks keys a block at
+   a time in the GPU's shared memory.
 5. The grid the same way: keys, the rows by `for ... by`, each cell's
    first row by the entity at it.
 6. The benchmarks.

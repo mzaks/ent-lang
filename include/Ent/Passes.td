@@ -291,7 +291,17 @@ def EntIndexes : Pass<"ent-indexes", "ModuleOp"> {
     system that declares no access reads it and moves. So the index is made again, once, before the first
     read after a change, and between systems: what reads it sees it as it
     is when its system starts.
+
+    With `gpu`, an index that has a form made on the GPU (`gpu_update`,
+    a Morton index's) is made so where all that reads it are gpu systems
+    and no system on the CPU writes its key or what it copies: then its
+    rows are not copied over.
   }];
+  let options = [
+    Option<"gpu", "gpu", "bool", /*default=*/"false",
+           "Make an index on the GPU where only gpu systems read it and "
+           "write what it is made of">,
+  ];
 }
 
 #endif // ENT_PASSES

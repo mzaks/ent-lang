@@ -840,7 +840,9 @@ or in a loop: the form the CPU runs on many threads, docs/indexes.md step
   had. The buffers' counts are the CPU's, as archetypes' are: the system
   reads them and writes them on the CPU, and asks whether there is room
   (`placeGpuCopies` copies such a count to the CPU before the run and
-  marks it the CPU's after; the rows are the GPU's).
+  marks it the CPU's after; the rows are the GPU's). The GPU's copy of
+  the count is given the new one too, for the `for`s after it in the
+  same system (`Inputs/gpu_given_read.ent`, 2026-10-25).
 
 Checked in `test/Integration/gpu.test` (`Inputs/gpu_by.ent`, 301,000
 entities of two archetypes, keys with many the same and below nought):
@@ -863,7 +865,8 @@ marks into ones and noughts, the running sums' scan makes each row's
 place among those given, its whole read back, and a kernel puts each
 row given at its place after those the buffer had. The buffer's count
 is the CPU's, as with `for ... by` (above): copied to the CPU before the
-run, asked whether there is room, marked the CPU's after.
+run, asked whether there is room, marked the CPU's after; and given to
+the GPU's copy, for the `for`s after in the same system.
 `Inputs/gpu_given.ent` (`gpu.test`): 201,000 entities of two
 archetypes, every one and those under an `if`, two `for`s into one
 buffer, and a `gpu` system after that reads the rows and how many

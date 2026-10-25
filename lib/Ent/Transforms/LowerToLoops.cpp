@@ -13734,6 +13734,11 @@ static void placeAppendedOnGpu(IRRewriter &rewriter, AppendOp append,
                              Twine(buffer.capacity) +
                              "; 'capacity' gives more"));
   memref::StoreOp::create(rewriter, loc, end, counter, ValueRange{zero});
+  // (And the GPU's copy of it, for the loops after in the same system.)
+  callGpu(rewriter, loc, program, "ent_gpu_cell_set",
+          ValueRange{arith::ConstantIntOp::create(rewriter, loc,
+                                                  buffer.countOffset, 64),
+                     end, arith::ConstantIntOp::create(rewriter, loc, 8, 64)});
   {
     OpBuilder::InsertionGuard inner(rewriter);
     Value row = parallelTurns(rewriter, loc, count, /*gpu=*/true);
@@ -18102,6 +18107,10 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
                                Twine(buffer.capacity) +
                                "; 'capacity' gives more"));
     store(end, counter, zero);
+    // (And the GPU's copy of it, for the loops after in the same system.)
+    callGpu(rewriter, loc, query->getParentOfType<ModuleOp>(),
+            "ent_gpu_cell_set",
+            ValueRange{whole(buffer.countOffset, i64), end, whole(8, i64)});
     bases[name] = base;
   }
 
