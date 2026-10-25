@@ -1,0 +1,23 @@
+// The cells of a Morton index: what they keep (`cells { m: sum C.m }`)
+// against a scan; a walk over them (`for c in N.cells`, `open`,
+// `continue`, `break`), in a system and in a `for` over entities; and
+// gravity by such a walk, `for o, b: C in c` at the leaves, against the
+// direct sum. The same on one core and on all.
+// RUN: %ent run %S/Inputs/morton_sums.ent 2>/dev/null > %t.sums
+// RUN: %ent run --parallel %S/Inputs/morton_sums.ent 2>/dev/null > %t.sums.all
+// RUN: cmp %t.sums %t.sums.all
+// RUN: FileCheck %s --check-prefix=SUMS --input-file=%t.sums
+// RUN: %ent run %S/Inputs/morton_walk.ent 2>/dev/null > %t.walk
+// RUN: %ent run --parallel %S/Inputs/morton_walk.ent 2>/dev/null > %t.walk.all
+// RUN: cmp %t.walk %t.walk.all
+// RUN: FileCheck %s --check-prefix=WALK --input-file=%t.walk
+// RUN: %ent run %S/Inputs/morton_forces.ent 2>/dev/null > %t.forces
+// RUN: %ent run --parallel %S/Inputs/morton_forces.ent 2>/dev/null > %t.forces.all
+// RUN: cmp %t.forces %t.forces.all
+// RUN: FileCheck %s --check-prefix=FORCES --input-file=%t.forces
+
+// SUMS:       2119 cells, 0 bad sums, 0 outside their cube; root size 0.984082 m 1465.797615
+// WALK:       cells 2119 leaves 1708 rows 3000 mass 1465.797615 root 1465.797615
+// WALK-NEXT:  level 2 rows 3000 top 0 broke at 10 past level 1 1
+// WALK-NEXT:  each: leaf rows 3116601 far mass 2884694.257717
+// FORCES:     mean error 0.002285 worst 0.009415; opened 136316, interactions 2222040 of 3998000

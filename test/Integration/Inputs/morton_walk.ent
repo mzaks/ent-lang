@@ -1,0 +1,94 @@
+// A walk over the cells of a Morton index (test/Integration/morton_walk.test):
+// every cell opened, the statements after `open` not run; opened down
+// to a level; `break`; `continue` (not opened); and a walk for every
+// entity, opening the cells near it.
+import console
+import wyhash
+component Dot { x: f64, y: f64, z: f64, m: f64 } capacity 4096
+component Got { n: i64, m: f64 } capacity 4096
+unique T { n: i64, m: f64 }
+unique W { cells: i64, leaves: i64, rows: i64, top: i64, mass: f64, upto: i64, broke: i64, skipped: i64 }
+index Tree of Dot morton (x, y, z) leaf 4 cells { m: sum Dot.m }
+
+world {
+  for i in 0..3000 {
+    let r = wyrand_unit(7, i as i64 * 4)
+    let s = r * r * r
+    spawn { Dot { x: (wyrand_unit(7, i as i64 * 4 + 1) - 0.5) * s, y: (wyrand_unit(7, i as i64 * 4 + 2) - 0.5) * s,
+                  z: (wyrand_unit(7, i as i64 * 4 + 3) - 0.5) * s, m: wyrand_unit(8, i as i64) },
+            Got { n: 0, m: 0.0 } }
+  }
+}
+
+system walk() {
+  var cells: i64 = 0
+  var leaves: i64 = 0
+  var rows: i64 = 0
+  var mass: f64 = 0.0
+  for c in Tree.cells {
+    cells += 1
+    if c.leaf {
+      leaves += 1
+      rows += c.count as i64
+      mass = mass + c.m
+    }
+    open
+    cells += 1000000
+  }
+  W.cells = cells
+  W.leaves = leaves
+  W.rows = rows
+  W.mass = mass
+  var upto: i64 = 0
+  var top: i64 = 0
+  for c in Tree.cells {
+    if c.level == 2 { upto += c.count as i64 }
+    if c.level < 2 { open }
+    if c.level == 0 { top += 1 }
+  }
+  W.upto = upto
+  W.top = top
+  var seen: i64 = 0
+  for c in Tree.cells {
+    seen += 1
+    if seen == 10 { break }
+    open
+  }
+  W.broke = seen
+  var skipped: i64 = 0
+  for c in Tree.cells {
+    if c.level == 1 { continue }
+    skipped += 1
+    open
+  }
+  W.skipped = skipped
+}
+
+system each() {
+  for me, a: Dot, g: mut Got {
+    var n: i64 = 0
+    var m: f64 = 0.0
+    for c in Tree.cells {
+      let dx = c.x - a.x
+      let dy = c.y - a.y
+      let dz = c.z - a.z
+      if c.leaf { n += c.count as i64 }
+      if dx * dx + dy * dy + dz * dz < 4.0 * c.size * c.size { open }
+      if !c.leaf { m = m + c.m }
+    }
+    g.n = n
+    g.m = m
+  }
+}
+
+system show() {
+  for g: Got {
+    T.n += g.n
+    T.m += g.m
+  }
+  put("cells {W.cells} leaves {W.leaves} rows {W.rows} mass {W.mass} root {Tree_cells[0].m}")
+  put("level 2 rows {W.upto} top {W.top} broke at {W.broke} past level 1 {W.skipped}")
+  put("each: leaf rows {T.n} far mass {T.m}")
+}
+schedule go() { walk() each() show() }
+main { go() }

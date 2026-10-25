@@ -1,0 +1,112 @@
+// RUN: ent-translate --import-ent %s -split-input-file -verify-diagnostics
+
+// What a Morton index's cells keep (`cells { m: sum C.m }`), a walk over
+// them (`for c in N.cells`, `open`) and the entities of one (`for o, b: C
+// in c`; docs/syntax.md): what cannot be.
+
+component Dot { x: f64, y: f64, m: f64 } capacity 8
+// expected-error @+1 {{only a Morton index has cells that keep values of their entities ('index N of C morton (x, y) cells { m: sum C.m }')}}
+index Cells of Dot grid (x, y) cell 1.0 cells { m: sum Dot.m }
+
+// -----
+
+component Dot { x: f64, y: f64, m: f64 } capacity 8
+// expected-error @+1 {{expected 'sum', 'min' or 'max' and what of each entity: 'm: sum Dot.field'}}
+index Tree of Dot morton (x, y) cells { m: mean Dot.m }
+
+// -----
+
+component Dot { x: f64, y: f64, m: f64 } capacity 8
+// expected-error @+1 {{a cell has 'count' already}}
+index Tree of Dot morton (x, y) cells { count: sum Dot.m }
+
+// -----
+
+component Dot { x: f64, y: f64, m: f64 } capacity 8
+// expected-error @+1 {{what a cell keeps is of its entities' fields: 'm: sum Dot.field'}}
+index Tree of Dot morton (x, y) cells { m: sum 1.0 }
+
+// -----
+
+component Dot { x: f64, y: f64, m: f64, n: i32 } capacity 8
+// expected-error @+1 {{what a cell keeps is of one type: 'Dot.n' is an i32, not an f64}}
+index Tree of Dot morton (x, y) cells { m: sum Dot.m * Dot.n }
+
+// -----
+
+component Dot { x: f64, y: f64, on: bool } capacity 8
+// expected-error @+1 {{a cell keeps numbers: 'Dot.on' is a bool}}
+index Tree of Dot morton (x, y) cells { m: sum Dot.on }
+
+// -----
+
+component Dot { x: f64, y: f64, m: f64 } capacity 8
+index Tree of Dot morton (x, y) cells { m: sum Dot.m }
+system look() {
+  var n: f64 = 0.0
+  for c in Tree.cells {
+    // expected-error @+1 {{a cell has no 'mass': it has count, first, level, leaf, size, x, y, m}}
+    n = n + c.mass
+  }
+}
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+index Tree of Dot morton (x, y)
+system look() {
+  for c in Tree.cells {
+    for i in 0..3 {
+      // expected-error @+1 {{'open' opens the cell a walk is at, in the walk's own statements: not in a loop inside them}}
+      open
+    }
+  }
+}
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+index Tree of Dot morton (x, y)
+system look() {
+  for me, a: Dot {
+    for c in Tree.cells {
+      // expected-error @+1 {{'in c' visits a cell's entities: no 'after'}}
+      for o, b: Dot in c after me { }
+    }
+  }
+}
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+index Tree of Dot morton (x, y)
+system look() {
+  var n: i32 = 0
+  for c in Tree.cells {
+    // expected-error @+1 {{'c' is a cell of an index; read what it has: 'c.count'}}
+    let k = c
+  }
+}
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+index Tree of Dot morton (x, y)
+system look() {
+  for c in Tree.cells {
+    // expected-error @+1 {{'c' is a cell of an index, which is worked out when the index is made: read only}}
+    c.count = 3
+  }
+}
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+unique U { n: i64 }
+index Tree of Dot morton (x, y)
+system look() {
+  for c in Tree.cells {
+    // expected-error @+1 {{'in c' visits a cell's entities in a 'for' over entities ('for me, a: C { for c in N.cells { for o, b: C in c { .. } } }')}}
+    for o, b: Dot in c { U.n += 1 }
+  }
+}

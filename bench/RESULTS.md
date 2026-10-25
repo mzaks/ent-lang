@@ -4173,3 +4173,61 @@ All cores:
   the cells and numbering the rows (`N_number`, by every row's entity).
   The rest is the rows filled in order and the entities moved into it
   (clustered), on all threads, about as fast as memory goes.
+
+## 2026-10-25: gravity by a walk over the cells against treecode
+
+`bench/treecode/run.py`: Barnes's treecode 1.4 (NEMO's
+`src/nbody/evolve/hackcode/treecode1`, commit 8588424, built on its own
+with `-O3 -march=native`) against `bench/treecode/forces.ent`, its port:
+a walk over the cells of a Morton index (`for c in Bodies.cells`,
+`open`, `for o, b: Body in c`), with treecode's criterion (a cell
+against the cube of its level the body is in) and its quadrupoles from
+the cells' sums of the second moments. On treecode's Plummer model
+(seed 123), at three `theta`, with and without `usequad`. Errors: how
+far each acceleration is from the direct sum's (ent's), over how big
+that is, the mean and the worst over the bodies. Per body: the forces
+of cells and bodies on a body, treecode's (nbbtot + nbctot) and the
+walk's, which are the same: ent's index has `leaf 1` and treecode's root
+cube (`wrap` over the places moved by half of it), so the same cells,
+opened for the same bodies. `apart`: the most a body's acceleration by
+the walk is from treecode's, over how big that is (the same terms, added
+in another order). Times: treecode's force calculation on one core (its
+CPUfc), the walk's best of 5 on one core and on all 24 (the index made
+anew each time, not in it). AMD Ryzen AI 9 HX 370, on mains power.
+
+4096 bodies:
+
+| theta | quad | mean error | worst | per body | treecode | ent, 1 core | all | apart |
+|---|---|---|---|---|---|---|---|---|
+| 1.0 | no | 0.003749 | 0.051544 | 602.9 | 11.0 | 39.5 | 4.4 | 7.0e-15 |
+| 1.0 | yes | 0.001258 | 0.027898 | 602.9 | 12.0 | 44.8 | 5.1 | 1.4e-14 |
+| 0.75 | no | 0.002879 | 0.041337 | 841.4 | 16.0 | 56.7 | 6.1 | 7.8e-15 |
+| 0.75 | yes | 0.000890 | 0.013320 | 841.4 | 17.0 | 63.1 | 6.8 | 1.2e-14 |
+| 0.5 | no | 0.001070 | 0.011435 | 1250.3 | 26.0 | 84.6 | 8.7 | 1.4e-14 |
+| 0.5 | yes | 0.000224 | 0.002281 | 1250.3 | 27.0 | 93.2 | 9.9 | 1.2e-14 |
+
+65536 bodies:
+
+| theta | quad | mean error | worst | per body | treecode | ent, 1 core | all | apart |
+|---|---|---|---|---|---|---|---|---|
+| 1.0 | no | 0.001818 | 0.060703 | 1210.8 | 315 | 1306 | 144.6 | 3.2e-14 |
+| 1.0 | yes | 0.001048 | 0.035480 | 1210.8 | 343 | 1680 | 181.2 | 4.2e-14 |
+| 0.75 | no | 0.001428 | 0.061311 | 1990.4 | 507 | 2239 | 234.5 | 3.6e-14 |
+| 0.75 | yes | 0.000786 | 0.031976 | 1990.4 | 540 | 2806 | 292.0 | 6.6e-14 |
+| 0.5 | no | 0.000541 | 0.030618 | 3545.3 | 931 | 4117 | 424.9 | 4.1e-14 |
+| 0.5 | yes | 0.000230 | 0.009452 | 3545.3 | 1001 | 5114 | 527.5 | 9.8e-14 |
+
+- The errors are treecode's to every digit printed, at every theta: the
+  same interactions, the same terms.
+- On one core the walk is 3.6 to 5.1 times treecode. treecode tests a
+  cell once for all the bodies of a cube at that level (its interaction
+  lists, built level by level), the walk once for each body: the time is
+  the test of each cell visited (about 15 ns, a floor, a root, divisions),
+  not the walk's own steps or the reads of the cells.
+- On all cores 2 to 2.5 times as fast as treecode on one. Before, the
+  `for` with the walk in it ran on one thread below a million bodies;
+  it is now shared out as a `for` over others is (the cells it may
+  visit, multiplied by its own).
+- With the index's own cube (the box of the bodies, not a power of 2
+  around the origin) the cells are others and the errors close to these
+  (0.000957 against 0.000890 at 0.75 with quadrupoles, 4096).

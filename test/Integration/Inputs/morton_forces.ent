@@ -1,0 +1,106 @@
+// Gravity by a walk over the cells of a Morton index (Barnes-Hut, theta
+// 0.5): each cell's mass and centre of mass from what it keeps, a cell
+// far enough taken as one body, a leaf's entities one by one (`for o,
+// b: Star in c`); against the direct sum (test/Integration/morton_walk.test).
+import console
+import wyhash
+import math
+component Star { x: f64, y: f64, z: f64, m: f64 } capacity 4096
+component Force { ax: f64, ay: f64, az: f64, bx: f64, by: f64, bz: f64, opened: i64, pairs: i64 } capacity 4096
+unique Sim { theta2: f64, eps2: f64 }
+unique Err { worst: f64, sum: f64, opened: i64, pairs: i64 }
+index Stars of Star morton (x, y, z) leaf 8 cells { m: sum Star.m, mx: sum Star.m * Star.x, my: sum Star.m * Star.y, mz: sum Star.m * Star.z }
+
+world {
+  Sim.theta2 = 0.5 * 0.5
+  Sim.eps2 = 0.0001
+  for i in 0..2000 {
+    let r = wyrand_unit(3, i as i64 * 4)
+    let s = r * r
+    spawn { Star { x: (wyrand_unit(3, i as i64 * 4 + 1) - 0.5) * s, y: (wyrand_unit(3, i as i64 * 4 + 2) - 0.5) * s,
+                   z: (wyrand_unit(3, i as i64 * 4 + 3) - 0.5) * s, m: 1.0 / 2000.0 },
+            Force { ax: 0.0, ay: 0.0, az: 0.0, bx: 0.0, by: 0.0, bz: 0.0, opened: 0, pairs: 0 } }
+  }
+}
+
+system tree() {
+  for me, a: Star, f: mut Force {
+    var ax: f64 = 0.0
+    var ay: f64 = 0.0
+    var az: f64 = 0.0
+    var opened: i64 = 0
+    var pairs: i64 = 0
+    for c in Stars.cells {
+      let dx = c.mx / c.m - a.x
+      let dy = c.my / c.m - a.y
+      let dz = c.mz / c.m - a.z
+      let d2 = dx * dx + dy * dy + dz * dz
+      if !c.leaf && c.size * c.size > Sim.theta2 * d2 {
+        opened += 1
+        open
+      }
+      if c.leaf {
+        for o, b: Star in c where o != me {
+          let ex = b.x - a.x
+          let ey = b.y - a.y
+          let ez = b.z - a.z
+          let q = ex * ex + ey * ey + ez * ez + Sim.eps2
+          let w = b.m / (q * sqrt(q))
+          ax = ax + w * ex
+          ay = ay + w * ey
+          az = az + w * ez
+          pairs += 1
+        }
+      } else {
+        let q = d2 + Sim.eps2
+        let w = c.m / (q * sqrt(q))
+        ax = ax + w * dx
+        ay = ay + w * dy
+        az = az + w * dz
+        pairs += 1
+      }
+    }
+    f.ax = ax
+    f.ay = ay
+    f.az = az
+    f.opened = opened
+    f.pairs = pairs
+  }
+}
+
+system direct() {
+  for me, a: Star, f: mut Force {
+    var ax: f64 = 0.0
+    var ay: f64 = 0.0
+    var az: f64 = 0.0
+    for o, b: Star where o != me {
+      let ex = b.x - a.x
+      let ey = b.y - a.y
+      let ez = b.z - a.z
+      let q = ex * ex + ey * ey + ez * ez + Sim.eps2
+      let w = b.m / (q * sqrt(q))
+      ax = ax + w * ex
+      ay = ay + w * ey
+      az = az + w * ez
+    }
+    f.bx = ax
+    f.by = ay
+    f.bz = az
+  }
+}
+
+system compare() {
+  for f: Force {
+    let dx = f.ax - f.bx
+    let dy = f.ay - f.by
+    let dz = f.az - f.bz
+    let e = sqrt((dx * dx + dy * dy + dz * dz) / (f.bx * f.bx + f.by * f.by + f.bz * f.bz))
+    Err.worst max= e
+    Err.sum += e
+    Err.opened += f.opened
+    Err.pairs += f.pairs
+  }
+}
+system show() { put("mean error {Err.sum / 2000.0} worst {Err.worst}; opened {Err.opened}, interactions {Err.pairs} of {2000 * 1999}") }
+schedule go() { tree() direct() compare() show() }
+main { go() }

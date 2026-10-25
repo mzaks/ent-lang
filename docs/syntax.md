@@ -2281,6 +2281,56 @@ It is made as a grid is (lazy or eager, `clustered`), not `incremental`.
 - What it pays, against a grid and PBBS's octTree: `bench/points/run.py`
   (bench/RESULTS.md).
 
+The cells can keep values of their entities, and a program can walk
+them, deciding for each whether to look inside (Barnes–Hut, levels of
+detail):
+
+```
+index Stars of Star morton (x, y, z) leaf 8
+  cells { m: sum Star.m, mx: sum Star.m * Star.x, my: sum Star.m * Star.y,
+          mz: sum Star.m * Star.z }
+
+system gravity() {
+  for me, a: Star, f: mut Force {
+    var ax: f64 = 0.0
+    for c in Stars.cells {
+      let dx = c.mx / c.m - a.x
+      ..
+      if !c.leaf && c.size * c.size > Sim.theta2 * d2 { open }
+      if c.leaf {
+        for o, b: Star in c where o != me { .. each pair .. }
+      } else {
+        .. the cell as one body of mass c.m at its centre of mass ..
+      }
+    }
+    f.ax = ax
+  }
+}
+```
+
+- `cells { name: sum e | min e | max e, .. }`, after the rest of the
+  declaration: what each cell keeps, `e` an expression of the fields of
+  the index's component (`Star.m * Star.x`), all of one type, a number;
+  so of a Morton index only. The leaves' are worked out from their rows,
+  in the order of the rows, the others' from their cells, when the
+  index is made: the same on one core and on many.
+- `for c in Name.cells { .. }` visits the cells depth first from the
+  root, those of a cell in the order of their keys; the cells inside one
+  only where the body says `open` (which skips the rest of it, as
+  `continue`; a leaf has none). `continue` goes on to the next cell
+  without opening, `break` ends the walk. `open` is of the walk the
+  body is in, not of a loop in it.
+- A cell has `count` and `first` (its rows), `level` (the root's 0),
+  `leaf`, `size` (the side of its cube) and its cube's middle by the
+  names of the places (`c.x`, `c.y`, `c.z`), besides what `cells { }`
+  keeps; read only, and not handed on (no `let k = c`).
+- `for o, b: C in c where ..`, in a `for` over entities, visits the
+  entities of cell `c`, in the order of their rows.
+- A `for` with a walk in it is worth sharing out from as many entities
+  as a `for` over others: as many as `Name_cells` has cells, each.
+- Gravity against Barnes's treecode 1.4: `bench/treecode/run.py`
+  (bench/RESULTS.md).
+
 #### Indexes of a relation
 
 ```

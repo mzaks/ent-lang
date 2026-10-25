@@ -20416,6 +20416,42 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     }
     lowerEach(rewriter, each, layout, world);
   }
+  // (Loops in it over the rows of a buffer: a walk over the cells of an
+  // index, `for r in 0..len(B)`; as many as the buffer has, for each
+  // entity, as of a `for` over other entities.)
+  query.walk([&](Operation *op) {
+    BufferLenOp len;
+    if (auto loop = dyn_cast<scf::WhileOp>(op))
+      loop.getBefore().walk([&](BufferLenOp found) {
+        len = found;
+        return WalkResult::interrupt();
+      });
+    else if (auto loop = dyn_cast<scf::ForOp>(op)) {
+      Value bound = loop.getUpperBound();
+      while (Operation *from = bound.getDefiningOp()) {
+        if ((len = dyn_cast<BufferLenOp>(from)) ||
+            !isa<arith::IndexCastOp, arith::IndexCastUIOp, arith::ExtSIOp,
+                 arith::ExtUIOp>(from))
+          break;
+        bound = from->getOperand(0);
+      }
+    }
+    if (!len)
+      return;
+    const WorldBuffer &buffer = layout.getBuffer(len.getBufferAttr().getAttr());
+    options.innerCapacity += buffer.capacity;
+    rewriter.setInsertionPoint(query);
+    Value rows = world.toIndex(
+        query.getLoc(), memref::LoadOp::create(
+                            rewriter, query.getLoc(), world.bufferCount(buffer),
+                            ValueRange{arith::ConstantIndexOp::create(
+                                rewriter, query.getLoc(), 0)}));
+    options.innerRows = options.innerRows
+                            ? arith::AddIOp::create(rewriter, query.getLoc(),
+                                                    options.innerRows, rows)
+                                  .getResult()
+                            : rows;
+  });
   if (query.getCascade())
     return lowerCascade(rewriter, query, layout, world, given);
   // A `for` a hash index answers: where many have the key (one in 64 of

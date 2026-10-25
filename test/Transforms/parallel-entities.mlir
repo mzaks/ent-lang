@@ -9,6 +9,7 @@ ent.component @S (x: f32)
 ent.component @L (x: f32)
 ent.archetype @Small (@S) capacity 1000
 ent.archetype @Large (@L) capacity 2000000
+ent.buffer @Cells (next: i32) capacity 4096
 
 func.func private @log()
 
@@ -105,10 +106,42 @@ ent.system @sharedScratch() writes [@L] {
   memref.dealloc %m : memref<1xf32>
 }
 
+// A loop in the body over the rows of a buffer (a walk over the cells of
+// an index): as much work for each entity as the buffer has rows, so 1000
+// entities with 4096 rows reach the threshold, the two counts multiplied.
+// DEFAULT-LABEL: func.func private @walkSmall(
+// DEFAULT:       %[[ROWS:.*]] = arith.index_cast
+// DEFAULT:       %[[N:.*]] = arith.index_cast
+// DEFAULT:       %[[T:.*]] = arith.constant 1000000 : index
+// DEFAULT:       %[[W:.*]] = arith.muli %[[N]], %[[ROWS]] : index
+// DEFAULT:       %[[BIG:.*]] = arith.cmpi sge, %[[W]], %[[T]] : index
+// DEFAULT:       scf.if %[[BIG]] {
+// DEFAULT:         scf.parallel
+// DEFAULT:           scf.while
+// DEFAULT:       } else {
+// DEFAULT:         scf.for
+ent.system @walkSmall() reads [@Cells] writes [@S] {
+  ent.query (%s: !ent.ref<@S, mut>) {
+    %c0 = arith.constant 0 : i32
+    %end = scf.while (%at = %c0) : (i32) -> i32 {
+      %n = ent.buffer.len @Cells
+      %more = arith.cmpi slt, %at, %n : i32
+      scf.condition(%more) %at : i32
+    } do {
+    ^bb0(%at: i32):
+      %next = ent.buffer.at @Cells "next"[%at : i32] : i32
+      scf.yield %next : i32
+    }
+    %f = arith.sitofp %end : i32 to f32
+    ent.set %s "x", %f : !ent.ref<@S, mut>, f32
+  }
+}
+
 ent.schedule @frame(%d: f32) {
   ent.run @shiftSmall(%d) : f32
   ent.run @shiftLarge(%d) : f32
   ent.run @shiftAndLog()
   ent.run @ownScratch()
   ent.run @sharedScratch()
+  ent.run @walkSmall()
 }

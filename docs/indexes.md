@@ -744,6 +744,36 @@ cells, their sums and the walk are part 2. How it is laid out and asked:
   as its own (`w: mut N_cells[..]`), and the others' from the last back.
   A million points: 12 to 15 ms on all cores, where 33 to 57 before.
 
+**Part 2, as built** (2026-10-25): `cells { }`, the walk, `open` and
+`in c`, as designed. How:
+
+- `cells { }` is written out as fields of `Name_cells`, besides each
+  cell's cube (`size`, `mid0`, ..: worked out as the cells are split,
+  the root's the box's). An expression's fields are copied into the rows
+  (`cells_C_field`, where the index does not copy them already); the
+  leaves add up their rows (each leaf by the entity at its first row, on
+  many threads, as their boxes), the others their cells, from the last
+  back.
+- The walk is a loop with the cell it is at, without a stack: `open`
+  goes on to the cell's first cell (`child`), anything else to `next`.
+- `in c` is the rows from `first`, `count` of them, as a leaf's of
+  `near`.
+- A `for` over entities with a loop in it over a buffer's rows (a walk
+  over the cells, `for r in 0..len(B)`) is shared out on many threads
+  from as many entities as one with a `for` over others: the rows of
+  the buffer multiplied by its own. Without it, 4096 bodies of a walk
+  each ran on one thread.
+
+The walk against treecode (`bench/treecode`): with `leaf 1` and
+treecode's root cube (`wrap` over the places moved by half of it), the
+same cells, each opened for the same bodies (treecode's own counts of
+body–cell and body–body forces), and every force within 1e-13 of
+treecode's (the same terms, added in another order); so the same error
+against the direct sum. A walk for each body is 3.6 to 5 times
+treecode's time on one core: treecode tests a cell once for all the
+bodies of a cube (an interaction list), a walk once for each body. On
+all cores 2 to 2.5 times as fast as treecode on one.
+
 The references:
 
 - The queries: PBBS `nearestNeighbors` and its `octTree`

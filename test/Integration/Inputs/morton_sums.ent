@@ -1,0 +1,45 @@
+// What each cell of a Morton index keeps (`cells { .. }`: sums of f64
+// and of i32, a product of fields, a min and a max) against a scan of
+// its rows, and its cube against where its entities are
+// (test/Integration/morton_walk.test).
+import console
+import wyhash
+fn mag(a: f64) -> f64 { if a < 0.0 { 0.0 - a } else { a } }
+component Dot { x: f64, y: f64, z: f64, m: f64, n: i32 } capacity 4096
+index Tree of Dot morton (x, y, z) leaf 4 cells { m: sum Dot.m, mx: sum Dot.m * Dot.x, top: max Dot.m, few: min Dot.n, all: sum Dot.n }
+
+world {
+  for i in 0..3000 {
+    let r = wyrand_unit(7, i as i64 * 4)
+    let s = r * r * r
+    spawn { Dot { x: (wyrand_unit(7, i as i64 * 4 + 1) - 0.5) * s, y: (wyrand_unit(7, i as i64 * 4 + 2) - 0.5) * s,
+                  z: (wyrand_unit(7, i as i64 * 4 + 3) - 0.5) * s, m: wyrand_unit(8, i as i64), n: i % 97 } }
+  }
+}
+
+system check() {
+  var bad = 0
+  var outside = 0
+  for c in 0..len(Tree_cells) {
+    var m: f64 = 0.0
+    var mx: f64 = 0.0
+    var top: f64 = 0.0 - 1.0 / 0.0
+    var few: i32 = 1000000
+    var all: i32 = 0
+    let f = Tree_cells[c].first
+    for r in f..f + Tree_cells[c].count {
+      m = m + Tree[r].cells_Dot_m
+      mx = mx + Tree[r].cells_Dot_m * Tree[r].x
+      top = max(top, Tree[r].cells_Dot_m)
+      few = min(few, Tree[r].cells_Dot_n)
+      all = all + Tree[r].cells_Dot_n
+      let h = Tree_cells[c].size * 0.5 * 1.000001
+      if mag(Tree[r].x - Tree_cells[c].mid0) > h || mag(Tree[r].y - Tree_cells[c].mid1) > h || mag(Tree[r].z - Tree_cells[c].mid2) > h { outside += 1 }
+    }
+    if mag(m - Tree_cells[c].m) > 1.0e-9 * (1.0 + m) || mag(mx - Tree_cells[c].mx) > 1.0e-9 * (1.0 + mag(mx)) { bad += 1 }
+    if top != Tree_cells[c].top || few != Tree_cells[c].few || all != Tree_cells[c].all { bad += 1 }
+  }
+  put("{len(Tree_cells)} cells, {bad} bad sums, {outside} outside their cube; root size {Tree_cells[0].size} m {Tree_cells[0].m}")
+}
+schedule go() { check() }
+main { go() }

@@ -29,6 +29,7 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
+#include "llvm/Support/Regex.h"
 #include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/SourceMgr.h"
 
@@ -363,7 +364,9 @@ struct Variable {
   /// of a grid index; `value` is the entity, `which` its row (an i32),
   /// and a field is read from the row, as seen from the place, or looked
   /// up: see Parser::nearRows.)
-  enum Kind { Value, Ref, Entity, Other, Row, Window, Near };
+  /// (Cell: a cell of a Morton index a walk is at (`for c in N.cells`);
+  /// `value` is its number (an i32), `component` the index's buffer.)
+  enum Kind { Value, Ref, Entity, Other, Row, Window, Near, Cell };
   Kind kind;
   mlir::Value value;
   std::string component; // for Ref; for a Row, the table
@@ -718,6 +721,21 @@ private:
   LogicalResult parseStatement();
   LogicalResult parseFor();
   LogicalResult parseCountedFor(llvm::SMLoc at);
+  LogicalResult parseCellWalk(llvm::SMLoc at, const std::string &name,
+                              const std::string &symbolName);
+  /// What a cell a walk is at has (`c.count`, `c.x`, `c.m`), and its type
+  /// (none where it has no such thing).
+  Type cellFieldType(const Variable &cell, StringRef field);
+  FailureOr<mlir::Value> cellField(const Variable &cell, StringRef field,
+                                   llvm::SMLoc at);
+  /// The walks over cells the parser is in (`for c in N.cells`): the var
+  /// `open` sets, and how many loops `break` may leave there were where
+  /// its turn starts (an `open` stands in its own turn).
+  struct CellWalk {
+    std::string opened;
+    size_t loops;
+  };
+  SmallVector<CellWalk> cellWalks;
   LogicalResult parseLoop(llvm::SMLoc at);
   LogicalResult parseWhile(llvm::SMLoc at);
   FailureOr<ExprPtr> parseStatementValue();
@@ -1044,6 +1062,9 @@ private:
     /// `cells` its cells in preorder (`N_box` its box, as `gridUnique`).
     bool morton = false;
     int bits = 0, leaf = 0;
+    /// What each of its cells keeps of its entities (`cells { m: sum
+    /// Star.m }`): by name, of what type (fields of `N_cells`).
+    SmallVector<std::pair<std::string, Type>> cellValues;
     SmallVector<std::tuple<std::string, std::string, std::string>> copied;
     /// The components of the entities it holds, by their symbols.
     SmallVector<std::string> of;
@@ -3564,6 +3585,110 @@ LogicalResult Parser::parseIndex() {
                   Copy{field, of.front(), field, positionType});
   }
 
+  // `cells { name: sum e, .. }` (of a Morton index): what each cell keeps
+  // of its entities, `sum`, `min` or `max` of `e` over them, `e` of their
+  // components' fields (`Star.m * Star.x`), which every row copies so the
+  // cells are worked out from the rows. Of the fields' type (all of one).
+  struct CellValue {
+    std::string name, rule, text;
+    Type type;
+  };
+  SmallVector<CellValue> cellValues;
+  if (token.isKeyword("cells") && peek().is(Token::LBrace)) {
+    llvm::SMLoc cellsAt = token.loc;
+    if (!morton)
+      return error(cellsAt, "only a Morton index has cells that keep "
+                            "values of their entities ('index N of C "
+                            "morton (x, y) cells { m: sum C.m }')");
+    advance();
+    advance(); // {
+    SmallVector<std::string> taken{"count", "first", "level", "leaf",
+                                   "size",  "child", "kids",  "next"};
+    for (unsigned d = 0; d < positions.size(); ++d) {
+      taken.push_back(positions[d]);
+      for (const char *prefix : {"lo", "hi", "mid"})
+        taken.push_back(prefix + std::to_string(d));
+    }
+    while (!token.is(Token::RBrace)) {
+      llvm::SMLoc nameAt = token.loc;
+      FailureOr<std::string> named = identifier("a name");
+      if (failed(named) || failed(expect(Token::Colon, "':'")))
+        return failure();
+      if (llvm::is_contained(taken, *named))
+        return error(nameAt, "a cell has '" + *named + "' already");
+      taken.push_back(*named);
+      std::string rule = token.spelling.str();
+      if (!token.isKeyword("sum") && !token.isKeyword("min") &&
+          !token.isKeyword("max"))
+        return error("expected 'sum', 'min' or 'max' and what of each "
+                     "entity: '" +
+                     *named + ": sum " + of.front() + ".field'");
+      advance();
+      llvm::SMLoc valueAt = token.loc;
+      std::string written_;
+      if (failed(written(written_)))
+        return failure();
+      // Each `Component.field` read from the entity's row: a copy of it.
+      static const llvm::Regex reference("([A-Za-z_][A-Za-z0-9_]*)[ \t]*"
+                                         "\\.[ \t]*([A-Za-z_][A-Za-z0-9_]*)");
+      std::string rest = written_, text;
+      Type type;
+      SmallVector<StringRef> parts;
+      while (reference.match(rest, &parts)) {
+        size_t at_ = parts[0].data() - rest.data();
+        std::string component = parts[1].str(), field = parts[2].str();
+        std::string before = rest.substr(0, at_);
+        std::string after = rest.substr(at_ + parts[0].size());
+        // (A field of a field, `a.b.c`, or a unique's: as it is written.)
+        bool afterDot = !before.empty() && before.back() == '.';
+        if (afterDot || !components.count(component)) {
+          text += before + parts[0].str();
+          rest = after;
+          continue;
+        }
+        Type fieldType = components[component].fieldType(field);
+        if (!fieldType)
+          return error(valueAt, "component '" + component + "' has no field '" +
+                                    field + "'");
+        if (!isa<IntegerType, FloatType>(fieldType) || fieldType.isInteger(1))
+          return error(valueAt, "a cell keeps numbers: '" + component + "." +
+                                    field + "' is " + typeWords(fieldType));
+        if (type && fieldType != type)
+          return error(valueAt, "what a cell keeps is of one type: '" +
+                                    component + "." + field + "' is " +
+                                    typeWords(fieldType) + ", not " +
+                                    typeWords(type));
+        type = fieldType;
+        std::string copyName;
+        for (const Copy &copy : copies)
+          if (copy.component == component && copy.field == field)
+            copyName = copy.name;
+        if (copyName.empty()) {
+          copyName = "cells_" + component + "_" + field;
+          if (!llvm::is_contained(of, component))
+            of.push_back(component);
+          copies.push_back({copyName, component, field, fieldType});
+        }
+        text += before + *name + "[r]." + copyName;
+        rest = after;
+      }
+      text += rest;
+      if (!type)
+        return error(valueAt, "what a cell keeps is of its entities' fields: "
+                              "'" +
+                                  *named + ": " + rule + " " + of.front() +
+                                  ".field'");
+      cellValues.push_back({*named, rule, text, type});
+      if (!consumeIf(Token::Comma))
+        break;
+    }
+    if (failed(expect(Token::RBrace, "'}'")))
+      return failure();
+    if (failed(ways()))
+      return failure();
+    consumeIf(Token::Semicolon);
+  }
+
   // Where each entity's row is: a field of the first component, which
   // the spawns and adds of it that were read already are given (0), as
   // those after will be; where it is among the entities as they are
@@ -3753,6 +3878,45 @@ LogicalResult Parser::parseIndex() {
              : isUnsigned(keyType)   ? "u"
                                      : "i") +
                 std::to_string(keyType.getIntOrFloatBitWidth());
+  // (A number's type as the source writes it.)
+  auto numberSpelling = [&](Type type) -> std::string {
+    return (isa<FloatType>(type) ? "f"
+            : isUnsigned(type)   ? "u"
+                                 : "i") +
+           std::to_string(type.getIntOrFloatBitWidth());
+  };
+  // What a cell keeps starts from (`var v: T = ..`), and comes to with
+  // `next` (of a row, or of a cell inside it), by its rule.
+  auto valueStart = [&](const CellValue &value) -> std::string {
+    std::string type = numberSpelling(value.type);
+    if (value.rule == "sum")
+      return "var v_" + value.name + ": " + type + " = " +
+             (isa<FloatType>(value.type) ? "0.0" : "0");
+    bool most = value.rule == "min";
+    if (isa<FloatType>(value.type))
+      return "var v_" + value.name + ": " + type + " = " +
+             (most ? "1.0 / 0.0" : "0.0 - 1.0 / 0.0");
+    unsigned width = value.type.getIntOrFloatBitWidth();
+    bool noSign = isUnsigned(value.type);
+    APInt bound = most ? (noSign ? APInt::getMaxValue(width)
+                                 : APInt::getSignedMaxValue(width))
+                       : (noSign ? APInt::getMinValue(width)
+                                 : APInt::getSignedMinValue(width));
+    // (The least signed one written as a difference: a literal is not
+    // negative.)
+    std::string written_ =
+        bound.isNegative() && !noSign
+            ? "0 - " + llvm::toString(-(bound + 1), 10, true) + " - 1"
+            : llvm::toString(bound, 10, !noSign);
+    return "var v_" + value.name + ": " + type + " = " + written_;
+  };
+  auto valueStep = [&](const CellValue &value,
+                       const std::string &next) -> std::string {
+    std::string v = "v_" + value.name;
+    if (value.rule == "sum")
+      return v + " = " + v + " + (" + next + ")";
+    return v + " = " + value.rule + "(" + v + ", " + next + ")";
+  };
   std::string n = *name;
   std::string text;
   llvm::raw_string_ostream out(text);
@@ -4349,10 +4513,12 @@ LogicalResult Parser::parseIndex() {
             << ": " << ts;
       out << " }\n"
           << "transient buffer " << n << "_cells { first: i32, count: i32, "
-          << "level: i32, child: i32, kids: i32, next: i32";
+          << "level: i32, child: i32, kids: i32, next: i32, size: f64";
       for (unsigned d = 0; d < dims; ++d)
         out << ", " << side("lo", d) << ": " << ts << ", " << side("hi", d)
-            << ": " << ts;
+            << ": " << ts << ", " << side("mid", d) << ": f64";
+      for (const CellValue &value : cellValues)
+        out << ", " << value.name << ": " << numberSpelling(value.type);
       out << " } capacity 1\n"
           // For each row, the leaf whose first row it is (`count` 1; else
           // 0): which cell an entity works out the box of.
@@ -4416,17 +4582,31 @@ LogicalResult Parser::parseIndex() {
       // in `lead`. The leaves' boxes are then worked out by the entities
       // (in the update, on many threads), and the others' (`N_up`) from
       // the last cell back.
+      // (Each cell's cube too: its side, `size`, and its middle, `mid0`..;
+      // the root's the box's, a cell's inside it a half as wide, on the
+      // side of its middle each bit of its digit says.)
       std::string none = whole ? "0" : "0.0";
-      std::string boxes;
-      for (unsigned d = 0; d < dims; ++d)
-        boxes += ", " + side("lo", d) + ": " + none + ", " + side("hi", d) +
-                 ": " + none;
+      auto rest = [&](const std::string &size, auto mid) {
+        std::string fields = ", size: " + size;
+        for (unsigned d = 0; d < dims; ++d)
+          fields += ", " + side("lo", d) + ": " + none + ", " + side("hi", d) +
+                    ": " + none + ", " + side("mid", d) + ": " + mid(d);
+        for (const CellValue &value : cellValues)
+          fields += ", " + value.name + ": " +
+                    (isa<FloatType>(value.type) ? "0.0" : "0");
+        return fields;
+      };
       out << "proc " << n << "_tree(order: " << n << ", cells: mut " << n
-          << "_cells, lead: mut " << n << "_lead) {\n"
+          << "_cells, lead: mut " << n << "_lead, side: f64";
+      for (unsigned d = 0; d < dims; ++d)
+        out << ", " << side("lo", d) << ": f64";
+      out << ") {\n"
           << "  cells = []\n"
           << "  if len(order) > 0 { cells += { first: 0, count: len(order), "
              "level: 0, child: 0 - 1, kids: 0, next: 1"
-          << boxes << " } }\n"
+          << rest("side",
+                  [&](unsigned d) { return side("lo", d) + " + side * 0.5"; })
+          << " } }\n"
           << "  var i = 0\n"
           << "  while i < len(cells) {\n"
           << "    let first = cells[i].first\n"
@@ -4449,7 +4629,14 @@ LogicalResult Parser::parseIndex() {
           << "        }\n"
           << "        if low > start { cells += { first: start, count: low - "
              "start, level: level + 1, child: 0 - 1, kids: 0, next: 0"
-          << boxes << " } }\n"
+          << rest("cells[i].size * 0.5",
+                  [&](unsigned d) {
+                    return "cells[i]." + side("mid", d) + " + (if ((digit >> " +
+                           std::to_string(d) +
+                           ") & 1) == 1 { 0.25 } else { 0.0 - 0.25 }) * "
+                           "cells[i].size";
+                  })
+          << " } }\n"
           << "        start = low\n"
           << "      }\n"
           << "      cells[i].child = child\n"
@@ -4482,7 +4669,11 @@ LogicalResult Parser::parseIndex() {
         out << "      var " << side("lo", d) << ": " << ts << " = " << most
             << "\n      var " << side("hi", d) << ": " << ts << " = " << least
             << "\n";
+      for (const CellValue &value : cellValues)
+        out << "      " << valueStart(value) << "\n";
       out << "      for k in child..child + cells[c].kids {\n";
+      for (const CellValue &value : cellValues)
+        out << "        " << valueStep(value, "cells[k]." + value.name) << "\n";
       for (unsigned d = 0; d < dims; ++d)
         out << "        " << side("lo", d) << " = min(" << side("lo", d)
             << ", cells[k]." << side("lo", d) << ")\n        " << side("hi", d)
@@ -4493,6 +4684,8 @@ LogicalResult Parser::parseIndex() {
         out << "      cells[c]." << side("lo", d) << " = " << side("lo", d)
             << "\n      cells[c]." << side("hi", d) << " = " << side("hi", d)
             << "\n";
+      for (const CellValue &value : cellValues)
+        out << "      cells[c]." << value.name << " = v_" << value.name << "\n";
       out << "    }\n"
           << "    c -= 1\n"
           << "  }\n}\n";
@@ -4735,7 +4928,10 @@ LogicalResult Parser::parseIndex() {
       std::string least =
           whole ? "0 - " + most + " - 1" : std::string("0.0 - 1.0 / 0.0");
       out << "  " << n << "_tree(" << n << ", " << n << "_cells, " << n
-          << "_lead)\n"
+          << "_lead, " << n << "_box.side";
+      for (unsigned d = 0; d < dims; ++d)
+        out << ", " << n << "_box." << side("lo", d) << " as f64";
+      out << ")\n"
           << "  for c0: " << of.front() << ", w: mut " << n << "_cells[" << lead
           << ".cell, " << lead << ".count] {\n"
           << "    if len(w) > 0 {\n";
@@ -4743,7 +4939,11 @@ LogicalResult Parser::parseIndex() {
         out << "      var " << side("lo", d) << ": " << ts << " = " << most
             << "\n      var " << side("hi", d) << ": " << ts << " = " << least
             << "\n";
+      for (const CellValue &value : cellValues)
+        out << "      " << valueStart(value) << "\n";
       out << "      for r in w[0].first..w[0].first + w[0].count {\n";
+      for (const CellValue &value : cellValues)
+        out << "        " << valueStep(value, value.text) << "\n";
       for (unsigned d = 0; d < dims; ++d)
         out << "        " << side("lo", d) << " = min(" << side("lo", d) << ", "
             << n << "[r]." << positions[d] << ")\n        " << side("hi", d)
@@ -4754,6 +4954,8 @@ LogicalResult Parser::parseIndex() {
         out << "      w[0]." << side("lo", d) << " = " << side("lo", d)
             << "\n      w[0]." << side("hi", d) << " = " << side("hi", d)
             << "\n";
+      for (const CellValue &value : cellValues)
+        out << "      w[0]." << value.name << " = v_" << value.name << "\n";
       out << "    }\n  }\n"
           << "  " << n << "_up(" << n << "_cells)\n";
     }
@@ -4884,6 +5086,8 @@ LogicalResult Parser::parseIndex() {
     kept.morton = morton;
     kept.bits = mortonBits;
     kept.leaf = mortonLeaf;
+    for (const CellValue &value : cellValues)
+      kept.cellValues.push_back({value.name, value.type});
   }
   // Where it holds the same entities, each writes its own row: a loop
   // worth running on many threads from far fewer entities than a loop
@@ -6531,6 +6735,26 @@ LogicalResult Parser::parseStatement() {
            arith::ConstantIntOp::create(builder, loc(at), 1, 1));
     return success();
   }
+  // open: on into the cell a walk is at (`for c in N.cells`), after this
+  // turn, whose statements after it are not run.
+  if (token.isKeyword("open") && !cellWalks.empty() &&
+      !llvm::any_of(
+          std::initializer_list<Token::Kind>{
+              Token::Assign, Token::Dot, Token::LParen, Token::LBracket,
+              Token::PlusAssign, Token::MinusAssign, Token::StarAssign,
+              Token::SlashAssign},
+          [&](Token::Kind kind) { return peek().is(kind); })) {
+    advance();
+    if (breakFlags.size() != cellWalks.back().loops ||
+        breakFlags.size() <= breakFloor)
+      return error(at, "'open' opens the cell a walk is at, in the walk's "
+                       "own statements: not in a loop inside them");
+    setVar(cellWalks.back().opened,
+           arith::ConstantIntOp::create(builder, loc(at), 1, 1));
+    setVar(continueFlags.back(),
+           arith::ConstantIntOp::create(builder, loc(at), 1, 1));
+    return success();
+  }
   if (token.isKeyword("return"))
     return error("'" + token.spelling + "' is not supported yet");
   // binding.field(args), where the field holds a proc: a call of that
@@ -6846,8 +7070,16 @@ LogicalResult Parser::parseEach(llvm::SMLoc at) {
   // `near (x, y) within r in Index`, `between (..) and (..) in Index`,
   // `nearest k to (x, y) in Index`: the entities of a grid index near a
   // place, in a box, or nearest it.
+  // `in c`: the entities of a cell a walk is at.
+  bool inCell = false;
+  if (token.isKeyword("in") && peek().is(Token::Identifier)) {
+    Lexer ahead = lexer;
+    Token named = ahead.next();
+    const Variable *cell = lookup(named.spelling);
+    inCell = cell && cell->kind == Variable::Cell;
+  }
   if (token.isKeyword("near") || token.isKeyword("between") ||
-      token.isKeyword("nearest")) {
+      token.isKeyword("nearest") || inCell) {
     std::string form = "'for ... " + token.spelling.str() + "'";
     if (inFunction)
       return error("a fn or proc has no index: a " + form +
@@ -7125,15 +7357,27 @@ LogicalResult
 Parser::parseNear(llvm::SMLoc at, const std::string &entity,
                   ArrayRef<std::pair<std::string, std::string>> bound) {
   Location where = loc(at);
-  enum class Kind { Near, Between, Nearest };
+  enum class Kind { Near, Between, Nearest, InCell };
   Kind kind = token.isKeyword("between")   ? Kind::Between
               : token.isKeyword("nearest") ? Kind::Nearest
+              : token.isKeyword("in")      ? Kind::InCell
                                            : Kind::Near;
   std::string form = kind == Kind::Near ? "'near (x, y) within r in Index'"
                      : kind == Kind::Between
                          ? "'between (x0, y0) and (x1, y1) in Index'"
-                         : "'nearest k to (x, y) in Index'";
-  advance(); // near, between or nearest
+                     : kind == Kind::InCell ? "'in c'"
+                                            : "'nearest k to (x, y) in Index'";
+  // (Of a cell a walk is at: `in c`, its number.)
+  mlir::Value cellNumber;
+  std::string cellIndex;
+  if (kind == Kind::InCell) {
+    advance(); // in
+    const Variable *cell = lookup(token.spelling);
+    cellNumber = cell->value;
+    cellIndex = cell->component;
+  } else {
+    advance(); // near, between or nearest
+  }
   auto places = [&](SmallVector<ExprPtr> &into,
                     StringRef what) -> LogicalResult {
     if (failed(expect(Token::LParen, "'(' and " + what.str() + ": " + form)))
@@ -7148,7 +7392,8 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
   };
   SmallVector<ExprPtr> place, high;
   ExprPtr radius, count;
-  if (kind == Kind::Near) {
+  if (kind == Kind::InCell) {
+  } else if (kind == Kind::Near) {
     if (failed(places(place, "the place")))
       return failure();
     if (!consumeKeyword("within"))
@@ -7180,13 +7425,16 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
       radius = std::move(*farthest);
     }
   }
-  if (!consumeKeyword("in"))
+  if (kind != Kind::InCell && !consumeKeyword("in"))
     return error("expected 'in' and the grid index: " + form);
   llvm::SMLoc indexAt = token.loc;
   FailureOr<std::string> named = identifier("an index");
   if (failed(named))
     return failure();
-  std::optional<BufferUse> held = bufferNamed(*named);
+  std::optional<BufferUse> held =
+      kind == Kind::InCell
+          ? std::optional<BufferUse>(BufferUse{cellIndex, false, {}})
+          : bufferNamed(*named);
   if (!held || !indexes.count(held->symbol) ||
       indexes[held->symbol].positions.empty())
     return error(indexAt, "'" + *named +
@@ -7199,7 +7447,8 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
   std::string symbolName = held->symbol;
   Index &index = indexes[symbolName];
   unsigned dims = index.positions.size();
-  if (place.size() != dims || (kind == Kind::Between && high.size() != dims))
+  if (kind != Kind::InCell &&
+      (place.size() != dims || (kind == Kind::Between && high.size() != dims)))
     return error(at,
                  "'" + *named + "' is a grid of " + Twine(dims) +
                      " places; the place is given " +
@@ -7215,6 +7464,8 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
   if (token.isKeyword("after") && kind == Kind::Nearest)
     return error("'nearest' visits the nearest first, not by rows: no "
                  "'after'");
+  if (token.isKeyword("after") && kind == Kind::InCell)
+    return error("'in c' visits a cell's entities: no 'after'");
   if (consumeKeyword("after")) {
     llvm::SMLoc meAt = token.loc;
     FailureOr<std::string> me =
@@ -7462,6 +7713,10 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
       mlir::Value stored =
           BufferAtOp::create(builder, where, t, rows,
                              builder.getStringAttr(index.positions[d]), row);
+      if (kind == Kind::InCell) {
+        near.seen.push_back({index.component, index.positions[d], stored});
+        continue;
+      }
       if (kind == Kind::Between) {
         mlir::Value seen = stored;
         if (index.wrap) {
@@ -7501,6 +7756,8 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
     }
     if (distanceOut)
       *distanceOut = distance;
+    if (kind == Kind::InCell)
+      return arith::ConstantIntOp::create(builder, where, 1, 1).getResult();
     if (kind == Kind::Between)
       return inside;
     return far ? atMost(distance, far) : mlir::Value();
@@ -7967,6 +8224,14 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
     return dims == 1 ? visitRuns(mlir::Value(), found)
                      : sideLoop(dims - 1, mlir::Value(), found);
   };
+  // `in c`: the rows of the cell, from its first.
+  if (kind == Kind::InCell) {
+    mlir::Value first = cellAt(cellNumber, "first", i32);
+    mortonRun = {first,
+                 arith::AddIOp::create(builder, where, first,
+                                       cellAt(cellNumber, "count", i32))};
+    return visitRuns(mlir::Value(), nullptr);
+  }
   if (kind != Kind::Nearest)
     return walk(nullptr);
 
@@ -9140,6 +9405,22 @@ LogicalResult Parser::parseCountedFor(llvm::SMLoc at) {
   }
   if (failed(expectKeyword("in")))
     return failure();
+  // for c in Name.cells { }: the cells of a Morton index, a walk.
+  if (token.is(Token::Identifier) && peek().is(Token::Dot) &&
+      !lookup(token.spelling)) {
+    Lexer ahead = lexer;
+    ahead.next();
+    Token field = ahead.next();
+    if (field.is(Token::Identifier) && field.spelling == "cells")
+      if (std::optional<BufferUse> held = bufferNamed(token.spelling);
+          held && indexes.count(held->symbol) && indexes[held->symbol].morton) {
+        if (!numbered.empty())
+          return error(numberedAt, "a walk over cells has one name, the "
+                                   "cell's: 'for c in " +
+                                       token.spelling.str() + ".cells'");
+        return parseCellWalk(at, *name, held->symbol);
+      }
+  }
   Location where = loc(at);
   // for case in Enum { }: every case of it, in their order.
   EnumType cases;
@@ -9330,6 +9611,128 @@ LogicalResult Parser::parseCountedFor(llvm::SMLoc at) {
     placeholder->erase();
   }
   return success();
+}
+
+// for c in Name.cells { statements }: the cells of a Morton index, depth
+// first from the root, those inside a cell in the order of their keys;
+// `open` in the statements goes on into the cell's cells (a leaf has
+// none), else the walk goes on past all of them. `continue` and `break`
+// as in a loop.
+LogicalResult Parser::parseCellWalk(llvm::SMLoc at, const std::string &name,
+                                    const std::string &symbolName) {
+  Location where = loc(at);
+  if (inFunction)
+    return error(at, "a fn or proc has no index: a walk over cells is in a "
+                     "system");
+  advance(); // the index
+  advance(); // .
+  advance(); // cells
+  if (!token.is(Token::LBrace))
+    return error("expected '{' and the statements to run for each cell");
+  Index &index = indexes[symbolName];
+  auto cells = FlatSymbolRefAttr::get(context, index.cells);
+  Type i32 = builder.getI32Type();
+  auto cellAt = [&](mlir::Value number, StringRef field) -> mlir::Value {
+    return BufferAtOp::create(
+        builder, where, i32, cells, builder.getStringAttr(field),
+        asIndex(where, number, IndexOfType::get(context, cells)));
+  };
+  // (A `break` in it sets its flag; where it is goes round as a var of a
+  // name no program can write.)
+  ScopeGuard breakScope(*this);
+  std::string flag = openBreak(where);
+  llvm::scope_exit closeBreak([&] { breakFlags.pop_back(); });
+  std::string cursor = " cell walk " + std::to_string(breaks++);
+  bind(cursor, Variable::ofVar(integer(where, i32, 0)));
+  return whileWithVars(
+      where,
+      [&]() -> mlir::Value {
+        return arith::AndIOp::create(
+            builder, where,
+            arith::CmpIOp::create(
+                builder, where, arith::CmpIPredicate::slt,
+                lookup(cursor)->value,
+                BufferLenOp::create(builder, where, i32, cells)),
+            arith::XOrIOp::create(
+                builder, where, lookup(flag)->value,
+                arith::ConstantIntOp::create(builder, where, 1, 1)));
+      },
+      [&]() -> LogicalResult {
+        mlir::Value number = lookup(cursor)->value;
+        ScopeGuard scope(*this);
+        std::string opened = " open " + std::to_string(breaks++);
+        bind(opened, Variable::ofVar(
+                         arith::ConstantIntOp::create(builder, where, 0, 1)));
+        cellWalks.push_back({opened, breakFlags.size()});
+        llvm::scope_exit pop([&] { cellWalks.pop_back(); });
+        bind(name, Variable{Variable::Cell, number, symbolName, false});
+        if (failed(parseLoopBody()))
+          return failure();
+        mlir::Value child = cellAt(number, "child");
+        mlir::Value into = arith::AndIOp::create(
+            builder, where, lookup(opened)->value,
+            arith::CmpIOp::create(builder, where, arith::CmpIPredicate::sge,
+                                  child, integer(where, i32, 0)));
+        setVar(cursor, arith::SelectOp::create(builder, where, into, child,
+                                               cellAt(number, "next")));
+        return success();
+      });
+}
+
+Type Parser::cellFieldType(const Variable &cell, StringRef field) {
+  const Index &index = indexes[cell.component];
+  if (field == "count" || field == "first" || field == "level")
+    return builder.getI32Type();
+  if (field == "leaf")
+    return builder.getI1Type();
+  if (field == "size" || llvm::is_contained(index.positions, field))
+    return index.positionType;
+  for (auto &[name, type] : index.cellValues)
+    if (name == field)
+      return type;
+  return {};
+}
+
+// What a cell has: its rows (`first`, `count`), its `level`, whether it
+// is a `leaf`; its cube's side (`size`) and middle (by the names of the
+// index's places), of the places' type; what `cells { }` keeps.
+FailureOr<mlir::Value> Parser::cellField(const Variable &cell, StringRef field,
+                                         llvm::SMLoc at) {
+  Location where = loc(at);
+  const Index &index = indexes[cell.component];
+  Type type = cellFieldType(cell, field);
+  if (!type) {
+    std::string has = "count, first, level, leaf, size";
+    for (const std::string &position : index.positions)
+      has += ", " + position;
+    for (auto &[name, valueType] : index.cellValues)
+      has += ", " + name;
+    return error(at, "a cell has no '" + field.str() + "': it has " + has);
+  }
+  auto cells = FlatSymbolRefAttr::get(context, index.cells);
+  auto read = [&](StringRef stored, Type storedType) -> mlir::Value {
+    return BufferAtOp::create(
+        builder, where, storedType, cells, builder.getStringAttr(stored),
+        asIndex(where, cell.value, IndexOfType::get(context, cells)));
+  };
+  Type i32 = builder.getI32Type();
+  if (field == "leaf")
+    return mlir::Value(
+        arith::CmpIOp::create(builder, where, arith::CmpIPredicate::slt,
+                              read("child", i32), integer(where, i32, 0)));
+  std::string stored = field.str();
+  for (auto [d, position] : llvm::enumerate(index.positions))
+    if (position == field)
+      stored = "mid" + std::to_string(d);
+  if (field != "size" && stored == field.str())
+    return read(stored, type);
+  // (The cube is kept in f64s.)
+  mlir::Value value = read(stored, builder.getF64Type());
+  if (type.isF64())
+    return value;
+  if (isa<FloatType>(type))
+    return mlir::Value(arith::TruncFOp::create(builder, where, type, value));
+  return mlir::Value(arith::FPToSIOp::create(builder, where, type, value));
 }
 
 // while condition { statements }: the statements, for as long as the
@@ -10139,6 +10542,13 @@ LogicalResult Parser::parseFor() {
     FailureOr<std::string> buffer = identifier("a buffer");
     if (failed(buffer))
       return failure();
+    if (const Variable *cell = lookup(*buffer);
+        cell && cell->kind == Variable::Cell)
+      return error(bufferAt, "'in " + *buffer +
+                                 "' visits a cell's entities in a 'for' "
+                                 "over entities ('for me, a: C { for c in "
+                                 "N.cells { for o, b: C in " +
+                                 *buffer + " { .. } } }')");
     if (!buffers.count(*buffer))
       return error(bufferAt, "a 'for' visits the entities the rows of a "
                              "buffer name: '" +
@@ -11284,6 +11694,11 @@ LogicalResult Parser::parseNameStatement() {
   if (variable && variable->kind == Variable::Row)
     return error(at, "'" + name + "' is a row of a table, and a table "
                                   "never changes");
+  if (variable && variable->kind == Variable::Cell)
+    return error(at, "'" + name +
+                         "' is a cell of an index, which is "
+                         "worked out when the index is made: "
+                         "read only");
   if (variable)
     return error(at, "'" + name + "' is a value and cannot be assigned: "
                                   "declare it with 'var' instead of 'let'");
@@ -12154,7 +12569,9 @@ Type Parser::typeOf(const Expr &expr) {
         return {};
       if (variable->kind == Variable::Entity)
         return EntityType::get(context);
-      if (variable->kind == Variable::Row || variable->kind == Variable::Window)
+      if (variable->kind == Variable::Row ||
+          variable->kind == Variable::Window ||
+          variable->kind == Variable::Cell)
         return {};
       return variable->value.getType();
     }
@@ -12167,6 +12584,8 @@ Type Parser::typeOf(const Expr &expr) {
     if (const Variable *variable = lookup(expr.name)) {
       if (variable->kind == Variable::Ref || variable->kind == Variable::Near)
         return recordOf(*variable).fieldType(expr.field);
+      if (variable->kind == Variable::Cell)
+        return cellFieldType(*variable, expr.field);
       if (variable->kind == Variable::Row)
         return typeOf(fieldOfRow(*variable, expr.field, expr.loc));
       if (variable->kind == Variable::Value && variable->value)
@@ -12939,6 +13358,11 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
         return error(expr.loc, "'" + expr.name + "' is a window of a "
                                "buffer; read a row of it: '" + expr.name +
                                    "[i].field'");
+      if (variable->kind == Variable::Cell)
+        return error(expr.loc, "'" + expr.name +
+                                   "' is a cell of an index; "
+                                   "read what it has: '" +
+                                   expr.name + ".count'");
       return variable->value;
     }
     auto unique = uniques.find(expr.name);
@@ -12989,6 +13413,8 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
   }
   case Expr::Field: {
     if (const Variable *variable = lookup(expr.name)) {
+      if (variable->kind == Variable::Cell)
+        return cellField(*variable, expr.field, expr.loc);
       if (variable->kind == Variable::Row)
         return emit(fieldOfRow(*variable, expr.field, expr.loc), expected);
       if (variable->kind == Variable::Value && variable->value &&
