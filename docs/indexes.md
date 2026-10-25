@@ -743,6 +743,20 @@ cells, their sums and the walk are part 2. How it is laid out and asked:
   each leaf by the entity at its first row, which takes the leaf's cell
   as its own (`w: mut N_cells[..]`), and the others' from the last back.
   A million points: 12 to 15 ms on all cores, where 33 to 57 before.
+- Since 2026-10-25 (`ent build --parallel` only, which tells the
+  translator so): only the cells near the root split on one thread,
+  those of more than a 512th of the rows. Each cell below that is split
+  by the entity at its first row, in two passes: how many cells are
+  inside it (depth first), and so where its cells go (a running sum,
+  after the cells near the root, `N_cells += [{ .. }; n]`); then its
+  cells themselves, in a window over them (`w: mut N_cells[child,
+  inside]`), level by level, each leaf's box as it is made, the others'
+  from the last back. On one thread that costs more than it gives (each
+  cell is searched twice, the first time to count it), so a program
+  built without `--parallel` splits them all on one thread as before.
+  The leaves near the root are boxed in the order of their rows (`lead`
+  says each with the making's number negated), ahead in memory. A
+  million points: 7 to 10 ms on all cores, where 8 to 10.6.
 
 **Part 2, as built** (2026-10-25): `cells { }`, the walk, `open` and
 `in c`, as designed. How:

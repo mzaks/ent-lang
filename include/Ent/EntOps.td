@@ -227,11 +227,12 @@ def Ent_BufferFillOp : Ent_Op<"buffer.fill", [
     ```
     The buffer has `%n` rows after it (none where `%n` is below nought),
     each with these values, in the order of the fields; what it had is
-    gone. More rows than it holds is an error at run time. Outside
-    queries, like `ent.buffer.set`.
+    gone. With `append` (`Name += [{ .. }; n]`) the rows come after those
+    it has, which stay. More rows than it holds is an error at run time.
+    Outside queries, like `ent.buffer.set`.
   }];
   let arguments = (ins FlatSymbolRefAttr:$buffer, Variadic<AnyType>:$values,
-                       I32:$count);
+                       I32:$count, UnitAttr:$append);
   let assemblyFormat = [{
     $buffer `(` $values `)` `times` $count attr-dict (`:` type($values)^)?
   }];

@@ -2460,14 +2460,17 @@ void ent_ranks_buffer_given(int32_t buffer) {
   }
   ent_rows_set(split, row, row + 1, ENT_ROWS_RUN, 0, split->pending);
 }
-// Outside a `for`: `n` rows all alike (values given as above), in place of
-// those it had.
-void ent_ranks_buffer_filled(int32_t buffer, int64_t n) {
+// Outside a `for`: rows `from` to `n` all alike (values given as above),
+// in place of those it had (`from` 0) or after them.
+void ent_ranks_buffer_filled(int32_t buffer, int64_t from, int64_t n) {
   ent_split *split = ent_split_of(buffer);
-  for (int64_t i = 0; i < split->count; ++i)
-    free(split->rows[i].run);
-  split->count = 0;
-  ent_rows_set(split, 0, n, ENT_ROWS_RUN, 0, split->pending);
+  if (from == 0) {
+    for (int64_t i = 0; i < split->count; ++i)
+      free(split->rows[i].run);
+    split->count = 0;
+  }
+  if (n > from)
+    ent_rows_set(split, from, n, ENT_ROWS_RUN, 0, split->pending);
 }
 // Outside a `for`: only the first `n` rows kept (0: none).
 void ent_ranks_buffer_kept(int32_t buffer, int64_t n) {

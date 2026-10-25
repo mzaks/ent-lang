@@ -22993,11 +22993,16 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
           counter, ValueRange{zero});
       rewriter.eraseOp(op);
     } else if (auto fill = dyn_cast<BufferFillOp>(op)) {
-      Value rows = arith::MaxSIOp::create(
+      Value more = arith::MaxSIOp::create(
           rewriter, loc, fill.getCount(),
           arith::ConstantIntOp::create(rewriter, loc, 0, 32));
-      rows = arith::ExtUIOp::create(rewriter, loc, rewriter.getI64Type(),
-                                    rows);
+      more = arith::ExtUIOp::create(rewriter, loc, rewriter.getI64Type(), more);
+      // (Appended: after the rows it has.)
+      Value from =
+          fill.getAppend()
+              ? count
+              : arith::ConstantIntOp::create(rewriter, loc, 0, 64).getResult();
+      Value rows = arith::AddIOp::create(rewriter, loc, from, more);
       Value fits = arith::CmpIOp::create(
           rewriter, loc, arith::CmpIPredicate::ule, rows,
           arith::ConstantIntOp::create(rewriter, loc, buffer.capacity, 64));
@@ -23024,15 +23029,19 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
                                                             field, 32),
                                toSendBits(rewriter, loc, value)});
           callGpu(rewriter, loc, program, "ent_ranks_buffer_filled",
-                  ValueRange{bufferNumber(), rows});
+                  ValueRange{bufferNumber(), from, rows});
         });
-        auto loop = scf::ForOp::create(
-            rewriter, loc, zero, world.toIndex(loc, rows),
-            arith::ConstantIndexOp::create(rewriter, loc, 1));
-        rewriter.setInsertionPointToStart(loop.getBody());
-        for (auto [value, column] : llvm::zip(values, columns))
+        // (A loop a column: one run of stores each, which is made of
+        // vectors, where stores to many columns of the world are not.)
+        for (auto [value, column] : llvm::zip(values, columns)) {
+          OpBuilder::InsertionGuard each(rewriter);
+          auto loop = scf::ForOp::create(
+              rewriter, loc, world.toIndex(loc, from), world.toIndex(loc, rows),
+              arith::ConstantIndexOp::create(rewriter, loc, 1));
+          rewriter.setInsertionPointToStart(loop.getBody());
           memref::StoreOp::create(rewriter, loc, value, column,
                                   ValueRange{loop.getInductionVar()});
+        }
       }
       memref::StoreOp::create(rewriter, loc, rows, counter, ValueRange{zero});
       rewriter.eraseOp(op);

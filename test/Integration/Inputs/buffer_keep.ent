@@ -1,11 +1,16 @@
 // A buffer that keeps its first rows (`Name = Name[..n]`), in a system
-// and in a proc that was given it `mut`.
+// and in a proc that was given it `mut`; and rows alike after those it has
+// (`Name += [{ .. }; n]`), in a proc too.
 import console
 
 buffer Rows { x: i32, y: f32 } capacity 8
 
 proc halve(rows: mut Rows) {
   rows = rows[..len(rows) / 2]
+}
+
+proc more(rows: mut Rows, n: i32) {
+  rows += [{ x: 7, y: 0.5 }; n]
 }
 
 proc show(rows: Rows, what: text[30]) {
@@ -29,6 +34,10 @@ system run() {
   show(Rows, "appended")
   Rows = Rows[..-1]
   show(Rows, "kept -1")
+  Rows += [{ x: 9, y: 9.0 }; 2]
+  more(Rows, 3)
+  Rows += [{ x: 1, y: 1.0 }; 0 - 4]
+  show(Rows, "alike")
   flush()
 }
 

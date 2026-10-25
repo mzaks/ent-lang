@@ -674,8 +674,10 @@ def build(arguments, output, directory):
     module = os.path.join(directory, stem + ".mlir")
     # (With where each op comes from in the .ent, which the lines of the
     # program's machine code are then of.)
+    # (On many threads its indexes are made so.)
     run([translate, "--import-ent", program, "--mlir-print-debuginfo",
-         "-o", module] + includes)
+         "-o", module] + (["--parallel"] if arguments.parallel else [])
+        + includes)
     header = os.path.join(directory, "ent_world.h")
     run([translate, "--ent-to-c-header", module, "-o", header])
     # What the C of extern fns and procs gets: their declarations, without

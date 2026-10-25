@@ -4387,3 +4387,58 @@ All cores:
   + k]`) instead of a column each: 18% slower, so not the cause; the
   difference is the arithmetic of cells gathered by id, where treecode
   copies each cell into its list and goes along it.
+
+## 2026-10-25: the Morton index split on many threads; moments copied into lists
+
+Two leftovers of the section above: the cells split on one thread, and
+treecode's quadrupoles at 1.5 times treecode on one core.
+
+**Moments copied into the group lists** (bench/treecode, groups.ent):
+each far cell's moments copied into the sink's list as it is found, so
+that the forces go along the list as treecode's do, instead of
+gathering the cells by id. Slower, so not kept:
+
+| theta | quad | one core | (with copies) | all cores | (with copies) |
+|---|---|---|---|---|---|
+| 1.0 | no | 331 | 404 | 63 | 82 |
+| 0.5 | yes | 1427 | 1672 | 251 | 305 |
+
+The lists hold 12.4 million far cells a run at 65536 bodies: copying
+them costs more than reading each cell's moments where they are.
+
+**The cells split on many threads** (`ent build --parallel` only): the
+cells near the root, those of more than a 512th of the rows, split on
+one thread; each cell below by the entity at its first row, in two
+passes, how many cells inside it (so where they go, a running sum) and
+then the cells themselves in a window over them, each leaf's box as it
+is made. With it:
+
+- `Name += [{ .. }; n]`: n rows alike after those a buffer has (the
+  room for the cells), and fills lowered one loop per column (stores
+  in vectors; 0.5 ms less on one thread of a million points).
+- Each cell's end searched for galloping from its start (steps 1, 2, 4,
+  .., then halves), not halving all the rows left.
+
+bench/points/run.py, Morton only, the same machine and points as above,
+ms to make the index (the whole query in brackets):
+
+| points | n | k | all cores before | now | one core before | now |
+|---|---|---|---|---|---|---|
+| 2DinCube | 1M | 1 | 8.0 (26.5) | 7.1 (26.2) | 15.2 (204.5) | 13.4 (203.4) |
+| 2Dkuzmin | 100k | 1 | 0.6 (3.2) | 0.6 (3.1) | 1.0 (24.2) | 0.8 (24.3) |
+| 3DinCube | 1M | 1 | 10.5 (46.2) | 10.0 (46.9) | 18.7 (369.7) | 18.3 (370.0) |
+| 3DonSphere | 1M | 1 | 10.6 (35.9) | 9.0 (35.7) | 19.1 (267.8) | 18.6 (266.2) |
+| 3DinCube | 1M | 10 | 10.6 (101.6) | 10.2 (104.9) | 18.9 (991.8) | 20.3 (1002.5) |
+| 3Dplummer | 100k | 10 | 0.7 (10.5) | 1.1 (11.1) | 1.4 (104.2) | 1.1 (105.6) |
+
+- On all cores 5 to 15% less on a million points; Plummer's 100k (few
+  rows below each cell near the root, very uneven) 0.4 ms more.
+- On one thread the split costs more than it gives (a million points,
+  3DinCube: 27.5 ms where 18.7): each cell is searched twice, the first
+  time to count it, and boxing leaves in the order they are made, last
+  first, was 14 ms of it (`min` in a long chain, memory read backwards).
+  So a program built without `--parallel` splits on one thread as
+  before; the leaves are boxed in the order of their rows (by compares,
+  not `min`). The whole queries are within 3% of where they were.
+- treecode (65536 bodies) the same errors as treecode's and the same
+  times as before.

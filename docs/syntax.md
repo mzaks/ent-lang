@@ -1776,7 +1776,8 @@ to a device at once (all there is to draw), in place of a call for each.
   Such a `for` only computes: `--parallel` runs it on all the cores.
 - `Name = []` empties it, outside a `for`. `Name = [{ field: value, .. };
   n]` gives it `n` rows, all alike, in place of those it had (none where
-  `n` is below nought; more than it holds stops the program).
+  `n` is below nought; more than it holds stops the program); `Name +=
+  [{ field: value, .. }; n]` gives it them after those it has.
   `Name = Name[..n]` keeps its first `n` rows as they are, and none after
   them: all it has where it has no more, none where `n` is below nought.
   Rows given after that come after those, as after `Name = []`. There

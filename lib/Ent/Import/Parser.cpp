@@ -47,6 +47,12 @@ static llvm::cl::list<std::string> importDirs(
                         "after the importing file's own"),
     llvm::cl::value_desc("dir"), llvm::cl::Prefix);
 
+static llvm::cl::opt<bool> parallelProgram(
+    "parallel",
+    llvm::cl::desc("The program runs on many threads (`ent build "
+                   "--parallel`): its indexes are made so"),
+    llvm::cl::init(false));
+
 namespace {
 
 /// One `.ent` file of a program. The file the compiler is given is the
@@ -4513,7 +4519,8 @@ LogicalResult Parser::parseIndex() {
             << ": " << ts;
       out << " }\n"
           << "transient buffer " << n << "_cells { first: i32, count: i32, "
-          << "level: i32, child: i32, kids: i32, next: i32, size: f64";
+          << "level: i32, child: i32, kids: i32, next: i32, inside: i32, "
+          << "size: f64";
       for (unsigned d = 0; d < dims; ++d)
         out << ", " << side("lo", d) << ": " << ts << ", " << side("hi", d)
             << ": " << ts << ", " << side("mid", d) << ": f64";
@@ -4524,6 +4531,12 @@ LogicalResult Parser::parseIndex() {
           // 0): which cell an entity works out the box of.
           << "transient buffer " << n
           << "_lead { cell: i32, count: i32 } capacity 1\n"
+          << "transient unique " << n
+          << "_more: i32\n"
+          // The number of the making, which marks the cells left to split
+          // in `lead` (see `N_tree`).
+          << "transient unique " << n
+          << "_made: i32\n"
           // A side's steps, their bits spread `dims` apart.
           << "fn " << n << "_spread(q: u64) -> u64 {\n";
       if (dims == 3)
@@ -4575,16 +4588,83 @@ LogicalResult Parser::parseIndex() {
                         "size * 0.5 { x + size } else { x }\n}\n");
       else
         out << "  x\n}\n";
-      // The cells: the root, then those inside each cell (a cell of more
-      // rows than `leaf` is split, unless it is at the finest level), in
-      // the order of their digits, after all the cells before them; each
-      // cell's `next`, from the root down; and each leaf at its first row
-      // in `lead`. The leaves' boxes are then worked out by the entities
-      // (in the update, on many threads), and the others' (`N_up`) from
-      // the last cell back.
+      std::string bitsText = std::to_string(mortonBits);
+      std::string dimsText = std::to_string(dims);
+      std::string leafText = std::to_string(mortonLeaf);
+      out << "fn " << n << "_splits(count: i32, level: i32) -> bool {\n"
+          << "  count > " << leafText << " && level < " << bitsText
+          << "\n}\n"
+          // The end of the cell of `level` that row `lo` starts, before `hi`
+          // at most: the first row after it whose key differs above its
+          // level's digits.
+          << "fn " << n << "_upper(order: " << n
+          << ", lo: i32, hi: i32, level: i32) -> i32 {\n"
+          << "  let shift = ((" << bitsText << " - level) * " << dimsText
+          << ") as i64\n"
+          << "  let target = order[lo].key >> shift\n"
+          // Galloping from `lo`: a cell's rows are mostly few of its
+          // parent's, so steps 1, 2, 4, .. past them first, near in memory,
+          // then halves of the last step.
+          << "  var low = lo + 1\n  var step = 1\n"
+          << "  while low < hi && (order[low].key >> shift) <= target {\n"
+          << "    low += step\n    step *= 2\n"
+          << "  }\n"
+          << "  var high = min(low, hi)\n"
+          << "  low = max(lo + 1, low - step / 2)\n"
+          << "  while low < high {\n"
+          << "    let mid = (low + high) >> 1\n"
+          << "    if (order[mid].key >> shift) <= target { low = mid + 1 } "
+             "else { high = mid }\n"
+          << "  }\n  low\n}\n"
+          // How many cells are inside a cell, all its levels: depth first,
+          // each cell's end by its key, up again by its parent's.
+          << "fn " << n << "_inside(order: " << n
+          << ", first: i32, count: i32, level: i32) -> i32 {\n"
+          << "  let end = first + count\n"
+          << "  var lv = level + 1\n"
+          << "  var s = first\n"
+          << "  var e = " << n << "_upper(order, s, end, lv)\n"
+          << "  var cells = 1\n"
+          << "  var going = true\n"
+          << "  while going {\n"
+          << "    if " << n << "_splits(e - s, lv) {\n"
+          << "      lv += 1\n"
+          << "      e = " << n << "_upper(order, s, e, lv)\n"
+          << "      cells += 1\n"
+          << "    } else {\n"
+          << "      var up = true\n"
+          << "      while up {\n"
+          << "        let pe = if lv - 1 == level { end } else { " << n
+          << "_upper(order, s, end, lv - 1) }\n"
+          << "        if e < pe {\n"
+          << "          s = e\n"
+          << "          e = " << n << "_upper(order, s, pe, lv)\n"
+          << "          cells += 1\n"
+          << "          up = false\n"
+          << "        } else if lv - 1 == level {\n"
+          << "          up = false\n"
+          << "          going = false\n"
+          << "        } else {\n"
+          << "          lv -= 1\n"
+          << "          e = pe\n"
+          << "        }\n"
+          << "      }\n"
+          << "    }\n"
+          << "  }\n"
+          << "  cells\n}\n";
+      // The cells near the root, on one thread: the root, then those inside
+      // each cell of more rows than `big` (a cell of more rows than `leaf`
+      // is split, unless it is at the finest level), in the order of their
+      // digits, after all the cells before them. Each cell left to split
+      // at its first row in `lead`, with the number of the making (so
+      // `lead` is never cleared: rows of makings before do not say it),
+      // whose cells the entity at that row works out (see the update);
+      // each leaf so, with the number negated.
       // (Each cell's cube too: its side, `size`, and its middle, `mid0`..;
       // the root's the box's, a cell's inside it a half as wide, on the
-      // side of its middle each bit of its digit says.)
+      // side of its middle each bit of its digit says. The leaves' boxes
+      // are then worked out by the entities, in the update, and the
+      // others' (`N_up`) from the last cell back.)
       std::string none = whole ? "0" : "0.0";
       auto rest = [&](const std::string &size, auto mid) {
         std::string fields = ", size: " + size;
@@ -4600,10 +4680,10 @@ LogicalResult Parser::parseIndex() {
           << "_cells, lead: mut " << n << "_lead, side: f64";
       for (unsigned d = 0; d < dims; ++d)
         out << ", " << side("lo", d) << ": f64";
-      out << ") {\n"
+      out << ", big: i32, made: i32) {\n"
           << "  cells = []\n"
           << "  if len(order) > 0 { cells += { first: 0, count: len(order), "
-             "level: 0, child: 0 - 1, kids: 0, next: 1"
+             "level: 0, child: 0 - 1, kids: 0, next: 1, inside: 0"
           << rest("side",
                   [&](unsigned d) { return side("lo", d) + " + side * 0.5"; })
           << " } }\n"
@@ -4612,8 +4692,7 @@ LogicalResult Parser::parseIndex() {
           << "    let first = cells[i].first\n"
           << "    let count = cells[i].count\n"
           << "    let level = cells[i].level\n"
-          << "    if count > " << mortonLeaf << " && level < " << mortonBits
-          << " {\n"
+          << "    if count > big && " << n << "_splits(count, level) {\n"
           << "      let shift = ((" << mortonBits << " - level - 1) * " << dims
           << ") as i64\n"
           << "      let child = len(cells)\n"
@@ -4628,7 +4707,8 @@ LogicalResult Parser::parseIndex() {
           << ") <= digit as i64 { low = mid + 1 } else { high = mid }\n"
           << "        }\n"
           << "        if low > start { cells += { first: start, count: low - "
-             "start, level: level + 1, child: 0 - 1, kids: 0, next: 0"
+             "start, level: level + 1, child: 0 - 1, kids: 0, next: 0, inside: "
+             "0"
           << rest("cells[i].size * 0.5",
                   [&](unsigned d) {
                     return "cells[i]." + side("mid", d) + " + (if ((digit >> " +
@@ -4644,50 +4724,33 @@ LogicalResult Parser::parseIndex() {
           << "    }\n"
           << "    i += 1\n"
           << "  }\n"
+          << "  if len(lead) < len(order) { lead += [{ cell: 0, count: 0 }; "
+             "len(order) - len(lead)] }\n"
+          << "  for c in 0..len(cells) {\n"
+          << "    if cells[c].child < 0 {\n"
+          << "      lead[cells[c].first].cell = c\n"
+          << "      lead[cells[c].first].count = if " << n
+          << "_splits(cells[c].count, cells[c].level) { made } else { 0 - "
+             "made }\n"
+          << "    }\n"
+          << "  }\n}\n"
+          // Room for the cells the entities work out.
+          << "proc " << n << "_grow(cells: mut " << n
+          << "_cells, more: i32) {\n"
+          << "  cells += [{ first: 0, count: 0, level: 0, child: 0 - 1, "
+             "kids: 0, next: 0, inside: 0"
+          << rest("0.0", [&](unsigned) { return "0.0"; })
+          << " }; more]\n}\n"
+          // Each cell's `next` of those near the root, from the root down.
+          << "proc " << n << "_link(cells: mut " << n << "_cells, top: i32) {\n"
           << "  if len(cells) > 0 { cells[0].next = len(cells) }\n"
-          << "  for p in 0..len(cells) {\n"
+          << "  for p in 0..top {\n"
           << "    let child = cells[p].child\n"
-          << "    if child >= 0 {\n"
+          << "    if child >= 0 && child < top {\n"
           << "      let last = child + cells[p].kids - 1\n"
           << "      for c in child..last { cells[c].next = c + 1 }\n"
           << "      cells[last].next = cells[p].next\n"
           << "    }\n"
-          << "  }\n"
-          << "  lead = [{ cell: 0, count: 0 }; len(order)]\n"
-          << "  for c in 0..len(cells) {\n"
-          << "    if cells[c].child < 0 {\n"
-          << "      lead[cells[c].first].cell = c\n"
-          << "      lead[cells[c].first].count = 1\n"
-          << "    }\n"
-          << "  }\n}\n"
-          << "proc " << n << "_up(cells: mut " << n << "_cells) {\n"
-          << "  var c = len(cells) - 1\n"
-          << "  while c >= 0 {\n"
-          << "    let child = cells[c].child\n"
-          << "    if child >= 0 {\n";
-      for (unsigned d = 0; d < dims; ++d)
-        out << "      var " << side("lo", d) << ": " << ts << " = " << most
-            << "\n      var " << side("hi", d) << ": " << ts << " = " << least
-            << "\n";
-      for (const CellValue &value : cellValues)
-        out << "      " << valueStart(value) << "\n";
-      out << "      for k in child..child + cells[c].kids {\n";
-      for (const CellValue &value : cellValues)
-        out << "        " << valueStep(value, "cells[k]." + value.name) << "\n";
-      for (unsigned d = 0; d < dims; ++d)
-        out << "        " << side("lo", d) << " = min(" << side("lo", d)
-            << ", cells[k]." << side("lo", d) << ")\n        " << side("hi", d)
-            << " = max(" << side("hi", d) << ", cells[k]." << side("hi", d)
-            << ")\n";
-      out << "      }\n";
-      for (unsigned d = 0; d < dims; ++d)
-        out << "      cells[c]." << side("lo", d) << " = " << side("lo", d)
-            << "\n      cells[c]." << side("hi", d) << " = " << side("hi", d)
-            << "\n";
-      for (const CellValue &value : cellValues)
-        out << "      cells[c]." << value.name << " = v_" << value.name << "\n";
-      out << "    }\n"
-          << "    c -= 1\n"
           << "  }\n}\n";
     }
     out << "system " << n << "_update() {\n";
@@ -4921,45 +4984,211 @@ LogicalResult Parser::parseIndex() {
       out << "  " << n << "_bounds(" << n << ", " << n << "_cells, " << n
           << "_grid.cells)\n";
     if (morton) {
-      // (The box of each leaf by the entity at its first row, the leaf's
-      // cell its own: on many threads.)
       std::string lead = n + "_lead[c0." + rowField + "]";
       std::string most = ts == "i32"   ? "2147483647"
                          : ts == "i64" ? "9223372036854775807"
                                        : "1.0 / 0.0";
       std::string least =
           whole ? "0 - " + most + " - 1" : std::string("0.0 - 1.0 / 0.0");
-      out << "  " << n << "_tree(" << n << ", " << n << "_cells, " << n
+      std::string row = "c0." + rowField;
+      std::string splits = "if " + lead + ".count == " + n + "_made";
+      std::string shiftOf = "((" + std::to_string(mortonBits) +
+                            " - pl - 1) * " + std::to_string(dims) + ") as i64";
+      out << "  " << n << "_made += 1\n"
+          << "  " << n << "_tree(" << n << ", " << n << "_cells, " << n
           << "_lead, " << n << "_box.side";
       for (unsigned d = 0; d < dims; ++d)
         out << ", " << n << "_box." << side("lo", d) << " as f64";
-      out << ")\n"
-          << "  for c0: " << of.front() << ", w: mut " << n << "_cells[" << lead
-          << ".cell, " << lead << ".count] {\n"
-          << "    if len(w) > 0 {\n";
+      // On many threads only those near the root split on one, those below
+      // by the entities at their first rows (on one thread that costs
+      // more: each is searched twice, see bench/RESULTS.md).
+      if (parallelProgram)
+        out << ", max(" << mortonLeaf << ", len(" << n << ") / 512)";
+      else
+        out << ", " << mortonLeaf;
+      out << ", " << n << "_made)\n"
+          << "  let top_ = len(" << n << "_cells)\n";
+      out.flush();
+      size_t below = text.size();
+      // The cells left to split, by the entities at their first rows: how
+      // many cells inside each, and so where they go (after those near the
+      // root, each's own run of rows)...
+      out << "  " << n << "_more = 0\n"
+          << "  for c0: " << of.front() << ", t: mut " << n << "_cells[" << lead
+          << ".cell, " << splits << " { 1 } else { 0 }] {\n"
+          << "    var inside = 0\n"
+          << "    var kids = 0\n"
+          << "    if len(t) > 0 {\n"
+          << "      inside = " << n << "_inside(" << n
+          << ", t[0].first, t[0].count, t[0].level)\n"
+          << "      let end = t[0].first + t[0].count\n"
+          << "      var s = t[0].first\n"
+          << "      while s < end {\n"
+          << "        s = " << n << "_upper(" << n
+          << ", s, end, t[0].level + 1)\n"
+          << "        kids += 1\n"
+          << "      }\n"
+          << "    }\n"
+          << "    let at = " << n << "_more += inside\n"
+          << "    if len(t) > 0 {\n"
+          << "      t[0].child = top_ + at\n"
+          << "      t[0].kids = kids\n"
+          << "      t[0].inside = inside\n"
+          << "    }\n"
+          << "  }\n"
+          << "  " << n << "_grow(" << n << "_cells, " << n << "_more)\n"
+          << "  " << n << "_link(" << n
+          << "_cells, top_)\n"
+          // ... then the cells themselves, a cell's after another's in the
+          // order they are written, a leaf's box and values as it is made;
+          // and from the last back those of the others, of their cells.
+          << "  for c0: " << of.front() << ", w: mut " << n << "_cells["
+          << splits << " { " << n << "_cells[" << lead
+          << ".cell].child } else { 0 }, " << splits << " { " << n << "_cells["
+          << lead << ".cell].inside } else { 0 }] {\n"
+          << "    if len(w) > 0 {\n"
+          << "      let root = " << lead << ".cell\n"
+          << "      let base = " << n << "_cells[root].child\n"
+          << "      var m = 0\n"
+          << "      var i = 0 - 1\n"
+          << "      while i < m {\n"
+          << "        let pf = if i < 0 { " << n
+          << "_cells[root].first } else "
+             "{ w[i].first }\n"
+          << "        let pc = if i < 0 { " << n
+          << "_cells[root].count } else "
+             "{ w[i].count }\n"
+          << "        let pl = if i < 0 { " << n
+          << "_cells[root].level } else "
+             "{ w[i].level }\n"
+          << "        if i < 0 || " << n << "_splits(pc, pl) {\n"
+          << "          let psize = if i < 0 { " << n
+          << "_cells[root].size } else { w[i].size }\n"
+          << "          let pnext = if i < 0 { " << n
+          << "_cells[root].next } else { w[i].next }\n";
       for (unsigned d = 0; d < dims; ++d)
-        out << "      var " << side("lo", d) << ": " << ts << " = " << most
-            << "\n      var " << side("hi", d) << ": " << ts << " = " << least
-            << "\n";
-      for (const CellValue &value : cellValues)
-        out << "      " << valueStart(value) << "\n";
-      out << "      for r in w[0].first..w[0].first + w[0].count {\n";
-      for (const CellValue &value : cellValues)
-        out << "        " << valueStep(value, value.text) << "\n";
+        out << "          let pm" << d << " = if i < 0 { " << n
+            << "_cells[root]." << side("mid", d) << " } else { w[i]."
+            << side("mid", d) << " }\n";
+      out << "          let child = base + m\n"
+          << "          let end = pf + pc\n"
+          << "          var s = pf\n"
+          << "          while s < end {\n"
+          << "            let e = " << n << "_upper(" << n
+          << ", s, end, pl + 1)\n"
+          << "            let digit = ((" << n << "[s].key >> " << shiftOf
+          << ") & " << ((1 << dims) - 1) << ") as i32\n"
+          << "            w[m].first = s\n"
+          << "            w[m].count = e - s\n"
+          << "            w[m].level = pl + 1\n"
+          << "            w[m].next = base + m + 1\n"
+          << "            w[m].size = psize * 0.5\n";
       for (unsigned d = 0; d < dims; ++d)
-        out << "        " << side("lo", d) << " = min(" << side("lo", d) << ", "
-            << n << "[r]." << positions[d] << ")\n        " << side("hi", d)
-            << " = max(" << side("hi", d) << ", " << n << "[r]." << positions[d]
-            << ")\n";
-      out << "      }\n";
-      for (unsigned d = 0; d < dims; ++d)
-        out << "      w[0]." << side("lo", d) << " = " << side("lo", d)
-            << "\n      w[0]." << side("hi", d) << " = " << side("hi", d)
-            << "\n";
-      for (const CellValue &value : cellValues)
-        out << "      w[0]." << value.name << " = v_" << value.name << "\n";
-      out << "    }\n  }\n"
-          << "  " << n << "_up(" << n << "_cells)\n";
+        out << "            w[m]." << side("mid", d) << " = pm" << d
+            << " + (if ((digit >> " << d
+            << ") & 1) == 1 { 0.25 } else { 0.0 - 0.25 }) * psize\n";
+      // A cell's box and values: a leaf's of its rows (by compares, not
+      // `min`: no NaN or -0.0 to keep, and faster), another's of its cells.
+      auto vars = [&](const std::string &indent) {
+        for (unsigned d = 0; d < dims; ++d)
+          out << indent << "var " << side("lo", d) << ": " << ts << " = "
+              << most << "\n"
+              << indent << "var " << side("hi", d) << ": " << ts << " = "
+              << least << "\n";
+        for (const CellValue &value : cellValues)
+          out << indent << valueStart(value) << "\n";
+      };
+      auto keep = [&](const std::string &indent, const std::string &cell) {
+        for (unsigned d = 0; d < dims; ++d)
+          out << indent << cell << "." << side("lo", d) << " = "
+              << side("lo", d) << "\n"
+              << indent << cell << "." << side("hi", d) << " = "
+              << side("hi", d) << "\n";
+        for (const CellValue &value : cellValues)
+          out << indent << cell << "." << value.name << " = v_" << value.name
+              << "\n";
+      };
+      auto leafBox = [&](const std::string &indent, const std::string &cell,
+                         const std::string &from, const std::string &to) {
+        vars(indent);
+        out << indent << "for r in " << from << ".." << to << " {\n";
+        for (const CellValue &value : cellValues)
+          out << indent << "  " << valueStep(value, value.text) << "\n";
+        for (unsigned d = 0; d < dims; ++d)
+          out << indent << "  let p" << d << " = " << n << "[r]."
+              << positions[d] << "\n"
+              << indent << "  if p" << d << " < " << side("lo", d) << " { "
+              << side("lo", d) << " = p" << d << " }\n"
+              << indent << "  if p" << d << " > " << side("hi", d) << " { "
+              << side("hi", d) << " = p" << d << " }\n";
+        out << indent << "}\n";
+        keep(indent, cell);
+      };
+      auto innerBox = [&](const std::string &indent, const std::string &cell,
+                          const std::string &firstChild,
+                          const std::string &childCell) {
+        vars(indent);
+        out << indent << "let k0 = " << firstChild << "\n"
+            << indent << "for k in k0..k0 + " << cell << ".kids {\n";
+        for (const CellValue &value : cellValues)
+          out << indent << "  "
+              << valueStep(value, childCell + "." + value.name) << "\n";
+        for (unsigned d = 0; d < dims; ++d)
+          out << indent << "  " << side("lo", d) << " = min(" << side("lo", d)
+              << ", " << childCell << "." << side("lo", d) << ")\n"
+              << indent << "  " << side("hi", d) << " = max(" << side("hi", d)
+              << ", " << childCell << "." << side("hi", d) << ")\n";
+        out << indent << "}\n";
+        keep(indent, cell);
+      };
+      // A leaf's box as it is made, its rows just searched.
+      out << "            if !" << n << "_splits(e - s, pl + 1) {\n";
+      leafBox("              ", "w[m]", "s", "e");
+      out << "            }\n"
+          << "            m += 1\n"
+          << "            s = e\n"
+          << "          }\n"
+          << "          w[m - 1].next = pnext\n"
+          << "          if i >= 0 {\n"
+          << "            w[i].child = child\n"
+          << "            w[i].kids = base + m - child\n"
+          << "          }\n"
+          << "        }\n"
+          << "        i += 1\n"
+          << "      }\n"
+          << "      var j = m - 1\n"
+          << "      while j >= 0 {\n"
+          << "        if w[j].child >= 0 {\n";
+      innerBox("          ", "w[j]", "w[j].child - base", "w[k]");
+      out << "        }\n"
+          << "        j -= 1\n"
+          << "      }\n"
+          << "    }\n"
+          << "  }\n";
+      out.flush();
+      if (!parallelProgram)
+        text.replace(below, text.size() - below,
+                     "  " + n + "_link(" + n + "_cells, top_)\n");
+      // Those near the root, on one thread: the leaves first, in the order
+      // of their rows (ahead in memory: rows that are not a leaf's are a
+      // cell's split below), then the others from the last back.
+      std::string top = n + "_cells[c_]";
+      out << "  var r_ = 0\n"
+          << "  while r_ < len(" << n << ") {\n"
+          << "    let c_ = " << n << "_lead[r_].cell\n"
+          << "    if " << n << "_lead[r_].count != " << n << "_made {\n";
+      leafBox("      ", top, top + ".first",
+              top + ".first + " + top + ".count");
+      out << "    }\n"
+          << "    r_ += " << top << ".count\n"
+          << "  }\n"
+          << "  var c_ = top_ - 1\n";
+      out << "  while c_ >= 0 {\n"
+          << "    if " << top << ".child >= 0 {\n";
+      innerBox("      ", top, top + ".child", n + "_cells[k]");
+      out << "    }\n"
+          << "    c_ -= 1\n"
+          << "  }\n";
     }
     out << "  " << n
         << "_fresh = true\n}\n"
@@ -5483,7 +5712,8 @@ LogicalResult Parser::parseBufferStatement(const std::string &name,
       return failure();
     if (!rows->getType().isInteger(32))
       return error((*count)->loc, "how many rows is an i32");
-    BufferFillOp::create(builder, loc(at), target, *values, *rows);
+    BufferFillOp::create(builder, loc(at), target, *values, *rows,
+                         /*append=*/nullptr);
     return success();
   }
   if (!consumeIf(Token::PlusAssign))
@@ -5494,6 +5724,29 @@ LogicalResult Parser::parseBufferStatement(const std::string &name,
   if ((inEach || inEdges) && !inTurn && !inFunction)
     return error(at, "a row is given to a buffer once for each entity of a "
                      "'for', not in a loop over others in it");
+  // `+= [{ field: value, .. }; n]`: so many rows, all alike, after those it
+  // has.
+  if (consumeIf(Token::LBracket)) {
+    if (inQuery && !inTurn)
+      return error(at, "rows alike are given to a buffer outside a 'for': "
+                       "every entity would give them");
+    FailureOr<SmallVector<mlir::Value>> values = parseRow();
+    if (failed(values) ||
+        failed(expect(Token::Semicolon,
+                      "';' and how many rows: '" + name + " += [{ .. }; n]'")))
+      return failure();
+    FailureOr<ExprPtr> count = parseExpr();
+    if (failed(count) || failed(expect(Token::RBracket, "']'")))
+      return failure();
+    FailureOr<mlir::Value> rows = emit(**count, builder.getI32Type());
+    if (failed(rows))
+      return failure();
+    if (!rows->getType().isInteger(32))
+      return error((*count)->loc, "how many rows is an i32");
+    BufferFillOp::create(builder, loc(at), target, *values, *rows,
+                         /*append=*/builder.getUnitAttr());
+    return success();
+  }
   FailureOr<SmallVector<mlir::Value>> values = parseRow();
   if (failed(values))
     return failure();
