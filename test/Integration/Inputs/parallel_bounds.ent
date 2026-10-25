@@ -1,0 +1,49 @@
+// The least and the greatest of fractions that a `for` keeps in a unique
+// (test/Integration/parallel_bounds.test): of f64 and f32, over 200,000
+// entities; of only zeros of both signs (-0 the lesser); and with a NaN
+// among them (kept by both).
+import console
+
+component Thing { x: f64, y: f32, z: f64, w: f64 } capacity 200000
+
+unique Bound { lo: f64, hi: f64, ylo: f32, yhi: f32, zlo: f64, zhi: f64, wlo: f64, whi: f64 }
+
+system fill() {
+  for i in 0..200000 {
+    let v = ((i * 7919) % 100003 - 50000) as f64 * 0.25
+    var sign: f64 = if i % 2 == 0 { 1.0 } else { 0.0 - 1.0 }
+    let zero = (0.0 * sign) as f64
+    let w = if i == 123457 { 0.0 / 0.0 } else { v }
+    spawn { Thing { x: v, y: (v * 0.5) as f32, z: zero, w: w } }
+  }
+}
+
+system bound() {
+  Bound.lo = 1.0 / 0.0
+  Bound.hi = 0.0 - 1.0 / 0.0
+  Bound.ylo = 1.0e30
+  Bound.yhi = 0.0 - 1.0e30
+  Bound.zlo = 1.0 / 0.0
+  Bound.zhi = 0.0 - 1.0 / 0.0
+  Bound.wlo = 1.0 / 0.0
+  Bound.whi = 0.0 - 1.0 / 0.0
+  for t: Thing {
+    Bound.lo min= t.x
+    Bound.hi max= t.x
+    if t.x > 0.0 { Bound.ylo min= t.y }
+    Bound.yhi max= t.y
+    Bound.zlo min= t.z
+    Bound.zhi max= t.z
+    Bound.wlo min= t.w
+    Bound.whi max= t.w
+  }
+}
+
+system show() {
+  put("{Bound.lo} {Bound.hi} {Bound.ylo} {Bound.yhi}")
+  put("zeros {bits_of(Bound.zlo)} {bits_of(Bound.zhi)}")
+  put("nan {Bound.wlo != Bound.wlo} {Bound.whi != Bound.whi}")
+}
+
+schedule go() { fill() bound() show() }
+main { go() }

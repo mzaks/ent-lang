@@ -4125,3 +4125,51 @@ All cores:
   come in no order, so each one's cells and rows are misses.
 - Walking the cells without a stack (in key order, the bound the list's
   k-th) was 1.5 times as slow as the stack nearest first.
+
+## 2026-10-25: making the indexes again on many threads
+
+The same run as above, after two changes to how an index is made again
+(docs/indexes.md, step 5 "Part 1, as built"):
+
+- `min=` and `max=` of fractions into a unique, in a parallel `for`,
+  are reduced (each thread its own, then the threads'), as whole numbers
+  were: before they were combined atomically, a compare-and-swap for
+  every entity. The threads' are put together as whole numbers of the
+  fractions' bits in IEEE-754's order (-0 under +0, a NaN kept), so the
+  same on any number of threads (`test/Integration/parallel_bounds.test`).
+  The box of a grid and of a Morton index is that `for`: a million
+  points 0.16 ms, where 8.7 ms atomically (0.3 ms on one core).
+- A Morton index's leaves get their boxes from the entity at each leaf's
+  first row, which takes the leaf's cell as a window: on many threads,
+  where the whole tree was worked out on one.
+
+One core:
+
+| points | n | k | grid | (made) | morton | (made) | octTree |
+|---|---|---|---|---|---|---|---|
+| 2DinCube | 1M | 1 | 294.6 | 23.9 | 210.9 | 19.8 | 238.2 |
+| 2Dkuzmin | 100k | 1 | 9219 | 0.6 | 24.4 | 1.3 | 20.4 |
+| 3DinCube | 1M | 1 | 641.4 | 27.2 | 375.7 | 23.6 | 364.3 |
+| 3DonSphere | 1M | 1 | 1632 | 25.0 | 267.7 | 23.5 | 279.3 |
+| 3DinCube | 1M | 10 | 1734 | 27.1 | 986.1 | 23.3 | 1113 |
+| 3Dplummer | 100k | 10 | 11271 | 0.9 | 103.1 | 1.7 | 138.3 |
+
+All cores:
+
+| points | n | k | grid | (made) | morton | (made) | octTree |
+|---|---|---|---|---|---|---|---|
+| 2DinCube | 1M | 1 | 34.7 | 12.0 | 30.6 | 11.7 | 23.8 |
+| 2Dkuzmin | 100k | 1 | 1249 | 1.0 | 3.0 | 0.7 | 2.8 |
+| 3DinCube | 1M | 1 | 67.1 | 13.6 | 50.0 | 14.3 | 38.6 |
+| 3DonSphere | 1M | 1 | 163.1 | 11.5 | 39.6 | 14.3 | 29.3 |
+| 3DinCube | 1M | 10 | 166.1 | 17.2 | 107.0 | 14.9 | 100.4 |
+| 3Dplummer | 100k | 10 | 1415 | 1.1 | 10.7 | 0.9 | 19.9 |
+
+- Made on all cores: the Morton index 12 to 15 ms where 33 to 57, the
+  grid 11 to 17 where 30 to 45; now faster than on one core (23 to 27).
+- Morton on all cores: 1.07 to 1.35 times octTree where it was 1.5 to
+  2.5, Plummer 0.54. One core as before (0.75 to 1.19).
+- What is left of the making on one thread, about 6 ms of 15: splitting
+  the cells and numbering the rows (`N_number`, by every row's entity).
+  The rest is the rows filled in order and the entities moved into it
+  (clustered), on all threads, about as fast as memory goes.

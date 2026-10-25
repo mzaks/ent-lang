@@ -736,6 +736,13 @@ cells, their sums and the walk are part 2. How it is laid out and asked:
   the rows, so a query's cells and rows are those the one before read.
   Without it, on a million points the cells and rows of each query are
   misses (2.5 s, against 1 s clustered).
+- Made again on many threads: the box over the entities by each
+  thread's least and greatest (fractions reduced as whole numbers in the
+  same order), the keys, the sort and the rows as other indexes; the
+  cells split on one thread (few, by halving the rows), then the box of
+  each leaf by the entity at its first row, which takes the leaf's cell
+  as its own (`w: mut N_cells[..]`), and the others' from the last back.
+  A million points: 12 to 15 ms on all cores, where 33 to 57 before.
 
 The references:
 

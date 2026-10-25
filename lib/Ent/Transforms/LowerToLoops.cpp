@@ -2222,12 +2222,14 @@ static constexpr llvm::StringLiteral kInEachAttr = "ent.in_each";
 /// effect where it stands, as one outside a query does.
 static constexpr llvm::StringLiteral kAtOnceAttr = "ent.at_once";
 
-/// Marks an `ent.accumulate` of whole numbers that nothing else in its
-/// query sees (see kUnobservedAttr), in a query whose loops may be
-/// parallel ones: such numbers come to the same in whatever order they
-/// are combined, so each thread combines its own and the loop's end
-/// those (see reduceCells), and a loop on one thread combines them as it
-/// goes; no buffer of one for each row is filled and read again.
+/// Marks an `ent.accumulate` of whole numbers, or the least or the
+/// greatest of fractions, that nothing else in its query sees (see
+/// kUnobservedAttr), in a query whose loops may be parallel ones: such
+/// numbers come to the same in whatever order they are combined (IEEE-754
+/// minimum and maximum, as `combine` has them, are), so each thread
+/// combines its own and the loop's end those (see reduceCells), and a loop
+/// on one thread combines them as it goes; no buffer of one for each row
+/// is filled and read again.
 static constexpr llvm::StringLiteral kReducedAttr = "ent.reduced";
 
 /// Marks an `ent.apply` or `ent.accumulate` of a reactive query that
@@ -8515,6 +8517,12 @@ struct ReducedCell {
 /// one of `type`: what each thread starts from.
 static Value neutralOf(IRRewriter &rewriter, Location loc, StringRef rule,
                        Type type, bool noSign) {
+  if (auto fraction = dyn_cast<FloatType>(type))
+    return arith::ConstantOp::create(
+        rewriter, loc, type,
+        rewriter.getFloatAttr(type,
+                              APFloat::getInf(fraction.getFloatSemantics(),
+                                              /*Negative=*/rule == "max")));
   unsigned width = cast<IntegerType>(type).getWidth();
   APInt value = APInt::getZero(width);
   if (rule == "min")
@@ -8525,6 +8533,54 @@ static Value neutralOf(IRRewriter &rewriter, Location loc, StringRef rule,
                                    rewriter.getIntegerAttr(type, value));
 }
 
+/// A fraction as a whole number of its bits whose order as a signed number
+/// is IEEE-754's: the negative ones' bits but the sign turned over, so -0
+/// is just under +0; a NaN the least there is where the least is kept
+/// (`rule` "min"), else the greatest, so that it is kept, as IEEE-754
+/// minimum and maximum keep one.
+static Value fractionKey(IRRewriter &rewriter, Location loc, Value value,
+                         StringRef rule) {
+  unsigned width = value.getType().getIntOrFloatBitWidth();
+  Type whole = rewriter.getIntegerType(width);
+  Value bits = arith::BitcastOp::create(rewriter, loc, whole, value);
+  Value rest = arith::ConstantOp::create(
+      rewriter, loc, whole,
+      rewriter.getIntegerAttr(whole, APInt::getSignedMaxValue(width)));
+  Value negative = arith::CmpIOp::create(
+      rewriter, loc, arith::CmpIPredicate::slt, bits,
+      arith::ConstantOp::create(rewriter, loc, whole,
+                                rewriter.getIntegerAttr(whole, 0)));
+  Value key = arith::SelectOp::create(
+      rewriter, loc, negative, arith::XOrIOp::create(rewriter, loc, bits, rest),
+      bits);
+  Value nan = arith::CmpFOp::create(rewriter, loc, arith::CmpFPredicate::UNO,
+                                    value, value);
+  Value extreme = arith::ConstantOp::create(
+      rewriter, loc, whole,
+      rewriter.getIntegerAttr(whole, rule == "min"
+                                         ? APInt::getSignedMinValue(width)
+                                         : APInt::getSignedMaxValue(width)));
+  return arith::SelectOp::create(rewriter, loc, nan, extreme, key);
+}
+
+/// The fraction of `type` whose key (fractionKey) is `key`.
+static Value fractionOfKey(IRRewriter &rewriter, Location loc, Value key,
+                           Type type) {
+  unsigned width = type.getIntOrFloatBitWidth();
+  Type whole = key.getType();
+  Value rest = arith::ConstantOp::create(
+      rewriter, loc, whole,
+      rewriter.getIntegerAttr(whole, APInt::getSignedMaxValue(width)));
+  Value negative = arith::CmpIOp::create(
+      rewriter, loc, arith::CmpIPredicate::slt, key,
+      arith::ConstantOp::create(rewriter, loc, whole,
+                                rewriter.getIntegerAttr(whole, 0)));
+  Value bits = arith::SelectOp::create(
+      rewriter, loc, negative, arith::XOrIOp::create(rewriter, loc, key, rest),
+      key);
+  return arith::BitcastOp::create(rewriter, loc, type, bits);
+}
+
 /// Make the parallel entity loop `loop` reduce into `reduced`, the cells
 /// its body combines into where it stands: every iteration starts from
 /// the number that changes nothing, what it comes to is the loop's to
@@ -8532,6 +8588,13 @@ static Value neutralOf(IRRewriter &rewriter, Location loc, StringRef rule,
 /// the cell is read once before the loop and written once after it. Only
 /// the accumulate reaches the cell inside the loop, in the body itself or
 /// in an `if` of it. Gives the loop that replaces `loop` (or `loop`).
+///
+/// The least or the greatest of fractions is reduced as a whole number of
+/// as many bits that is in the same order (see fractionKey), a NaN the
+/// most of those where it is kept (the least where the least is, as
+/// IEEE-754 minimum has it): the conversion to OpenMP knows a minimum of
+/// fractions only by a comparison that a NaN and the zeros' signs are not
+/// in the order of.
 static scf::ParallelOp reduceCells(IRRewriter &rewriter, scf::ParallelOp loop,
                                    ArrayRef<ReducedCell> reduced) {
   if (reduced.empty())
@@ -8540,10 +8603,16 @@ static scf::ParallelOp reduceCells(IRRewriter &rewriter, scf::ParallelOp loop,
   rewriter.setInsertionPoint(loop);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   SmallVector<Value> cells, inits;
+  auto keyed = [](const ReducedCell &one) {
+    return isa<FloatType>(
+        cast<MemRefType>(one.cell.getType()).getElementType());
+  };
   for (const ReducedCell &one : reduced) {
     cells.push_back(one.cell);
-    inits.push_back(
-        memref::LoadOp::create(rewriter, loc, one.cell, ValueRange{zero}));
+    Value now =
+        memref::LoadOp::create(rewriter, loc, one.cell, ValueRange{zero});
+    inits.push_back(keyed(one) ? fractionKey(rewriter, loc, now, one.rule)
+                               : now);
   }
   auto reducing = scf::ParallelOp::create(rewriter, loc, loop.getLowerBound(),
                                           loop.getUpperBound(), loop.getStep(),
@@ -8567,6 +8636,9 @@ static scf::ParallelOp reduceCells(IRRewriter &rewriter, scf::ParallelOp loop,
   }
   carryCellsThrough(rewriter, *body, cells, state);
   rewriter.setInsertionPointToEnd(body);
+  for (auto [i, one] : llvm::enumerate(reduced))
+    if (keyed(one))
+      state.values[i] = fractionKey(rewriter, loc, state.values[i], one.rule);
   auto reduce = scf::ReduceOp::create(rewriter, loc, state.values);
   for (auto [one, region] : llvm::zip(reduced, reduce.getReductions())) {
     Block &block = region.front();
@@ -8580,10 +8652,9 @@ static scf::ParallelOp reduceCells(IRRewriter &rewriter, scf::ParallelOp loop,
     } else {
       bool least = one.rule == "min";
       arith::CmpIPredicate lesser =
-          one.noSign ? (least ? arith::CmpIPredicate::ult
-                              : arith::CmpIPredicate::ugt)
-                     : (least ? arith::CmpIPredicate::slt
-                              : arith::CmpIPredicate::sgt);
+          one.noSign && !keyed(one)
+              ? (least ? arith::CmpIPredicate::ult : arith::CmpIPredicate::ugt)
+              : (least ? arith::CmpIPredicate::slt : arith::CmpIPredicate::sgt);
       both = arith::SelectOp::create(
           rewriter, loc, arith::CmpIOp::create(rewriter, loc, lesser, a, b), a,
           b);
@@ -8591,9 +8662,13 @@ static scf::ParallelOp reduceCells(IRRewriter &rewriter, scf::ParallelOp loop,
     scf::ReduceReturnOp::create(rewriter, loc, both);
   }
   rewriter.setInsertionPointAfter(reducing);
-  for (auto [i, cell] : llvm::enumerate(cells))
-    memref::StoreOp::create(rewriter, loc, reducing.getResult(i), cell,
-                            ValueRange{zero});
+  for (auto [i, cell] : llvm::enumerate(cells)) {
+    Value result = reducing.getResult(i);
+    if (keyed(reduced[i]))
+      result = fractionOfKey(rewriter, loc, result,
+                             cast<MemRefType>(cell.getType()).getElementType());
+    memref::StoreOp::create(rewriter, loc, result, cell, ValueRange{zero});
+  }
   rewriter.eraseOp(loop);
   return reducing;
 }
@@ -18986,8 +19061,9 @@ static void lowerEach(IRRewriter &rewriter, EachOp each,
 }
 
 /// Mark the accumulates of `query` that a parallel loop may reduce (see
-/// kReducedAttr): whole numbers nothing else sees, sent from the body
-/// itself or an `if` of it, in a query that can run in parallel.
+/// kReducedAttr): whole numbers, or the least or greatest fraction,
+/// nothing else sees, sent from the body itself or an `if` of it, in a
+/// query that can run in parallel.
 static void markReduced(IRRewriter &rewriter, QueryOp query,
                         const LoopOptions &options, bool entityLocal,
                         bool sendsLooped) {
@@ -19000,7 +19076,9 @@ static void markReduced(IRRewriter &rewriter, QueryOp query,
                  !accumulate->hasAttr(kAtomicAttr) &&
                  !accumulate->hasAttr(kInEachAttr) &&
                  accumulate.getRule() != "set" &&
-                 isa<IntegerType>(accumulate.getValue().getType());
+                 (isa<IntegerType>(accumulate.getValue().getType()) ||
+                  (isa<FloatType>(accumulate.getValue().getType()) &&
+                   accumulate.getRule() != "add"));
     for (Operation *parent = accumulate->getParentOp();
          plain && parent != query; parent = parent->getParentOp())
       plain = isa<scf::IfOp>(parent);

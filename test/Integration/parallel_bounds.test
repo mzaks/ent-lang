@@ -1,0 +1,12 @@
+// The least and the greatest of fractions that a `for` keeps in a unique,
+// built for all the cores (Inputs/parallel_bounds.ent): each thread keeps
+// its own and the loop's end puts those together as whole numbers in the
+// same order (IEEE-754 minimum and maximum: -0 under +0, a NaN kept). The
+// same as one core comes to, with any number of threads.
+// RUN: %ent run %S/Inputs/parallel_bounds.ent 2>/dev/null | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/parallel_bounds.ent 2>/dev/null | FileCheck %s
+// RUN: env OMP_NUM_THREADS=3 %ent run --parallel %S/Inputs/parallel_bounds.ent 2>/dev/null | FileCheck %s
+
+// CHECK:      -12500.0 12500.5 0.125 6250.25
+// CHECK-NEXT: zeros 9223372036854775808 0
+// CHECK-NEXT: nan true true

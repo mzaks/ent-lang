@@ -4354,6 +4354,10 @@ LogicalResult Parser::parseIndex() {
         out << ", " << side("lo", d) << ": " << ts << ", " << side("hi", d)
             << ": " << ts;
       out << " } capacity 1\n"
+          // For each row, the leaf whose first row it is (`count` 1; else
+          // 0): which cell an entity works out the box of.
+          << "transient buffer " << n
+          << "_lead { cell: i32, count: i32 } capacity 1\n"
           // A side's steps, their bits spread `dims` apart.
           << "fn " << n << "_spread(q: u64) -> u64 {\n";
       if (dims == 3)
@@ -4408,15 +4412,17 @@ LogicalResult Parser::parseIndex() {
       // The cells: the root, then those inside each cell (a cell of more
       // rows than `leaf` is split, unless it is at the finest level), in
       // the order of their digits, after all the cells before them; each
-      // cell's `next`, from the root down; then the box of each cell's
-      // entities, from the last cell back.
+      // cell's `next`, from the root down; and each leaf at its first row
+      // in `lead`. The leaves' boxes are then worked out by the entities
+      // (in the update, on many threads), and the others' (`N_up`) from
+      // the last cell back.
       std::string none = whole ? "0" : "0.0";
       std::string boxes;
       for (unsigned d = 0; d < dims; ++d)
         boxes += ", " + side("lo", d) + ": " + none + ", " + side("hi", d) +
                  ": " + none;
       out << "proc " << n << "_tree(order: " << n << ", cells: mut " << n
-          << "_cells) {\n"
+          << "_cells, lead: mut " << n << "_lead) {\n"
           << "  cells = []\n"
           << "  if len(order) > 0 { cells += { first: 0, count: len(order), "
              "level: 0, child: 0 - 1, kids: 0, next: 1"
@@ -4460,36 +4466,35 @@ LogicalResult Parser::parseIndex() {
           << "      cells[last].next = cells[p].next\n"
           << "    }\n"
           << "  }\n"
+          << "  lead = [{ cell: 0, count: 0 }; len(order)]\n"
+          << "  for c in 0..len(cells) {\n"
+          << "    if cells[c].child < 0 {\n"
+          << "      lead[cells[c].first].cell = c\n"
+          << "      lead[cells[c].first].count = 1\n"
+          << "    }\n"
+          << "  }\n}\n"
+          << "proc " << n << "_up(cells: mut " << n << "_cells) {\n"
           << "  var c = len(cells) - 1\n"
-          << "  while c >= 0 {\n";
+          << "  while c >= 0 {\n"
+          << "    let child = cells[c].child\n"
+          << "    if child >= 0 {\n";
       for (unsigned d = 0; d < dims; ++d)
-        out << "    var " << side("lo", d) << ": " << ts << " = " << most
-            << "\n    var " << side("hi", d) << ": " << ts << " = " << least
+        out << "      var " << side("lo", d) << ": " << ts << " = " << most
+            << "\n      var " << side("hi", d) << ": " << ts << " = " << least
             << "\n";
-      out << "    let child = cells[c].child\n"
-          << "    if child < 0 {\n"
-          << "      for r in cells[c].first..cells[c].first + cells[c].count "
-             "{\n";
-      for (unsigned d = 0; d < dims; ++d)
-        out << "        " << side("lo", d) << " = min(" << side("lo", d)
-            << ", order[r]." << positions[d] << ")\n        " << side("hi", d)
-            << " = max(" << side("hi", d) << ", order[r]." << positions[d]
-            << ")\n";
-      out << "      }\n"
-          << "    } else {\n"
-          << "      for k in child..child + cells[c].kids {\n";
+      out << "      for k in child..child + cells[c].kids {\n";
       for (unsigned d = 0; d < dims; ++d)
         out << "        " << side("lo", d) << " = min(" << side("lo", d)
             << ", cells[k]." << side("lo", d) << ")\n        " << side("hi", d)
             << " = max(" << side("hi", d) << ", cells[k]." << side("hi", d)
             << ")\n";
-      out << "      }\n"
-          << "    }\n";
+      out << "      }\n";
       for (unsigned d = 0; d < dims; ++d)
-        out << "    cells[c]." << side("lo", d) << " = " << side("lo", d)
-            << "\n    cells[c]." << side("hi", d) << " = " << side("hi", d)
+        out << "      cells[c]." << side("lo", d) << " = " << side("lo", d)
+            << "\n      cells[c]." << side("hi", d) << " = " << side("hi", d)
             << "\n";
-      out << "    c -= 1\n"
+      out << "    }\n"
+          << "    c -= 1\n"
           << "  }\n}\n";
     }
     out << "system " << n << "_update() {\n";
@@ -4720,8 +4725,38 @@ LogicalResult Parser::parseIndex() {
     if (grid && !morton)
       out << "  " << n << "_bounds(" << n << ", " << n << "_cells, " << n
           << "_grid.cells)\n";
-    if (morton)
-      out << "  " << n << "_tree(" << n << ", " << n << "_cells)\n";
+    if (morton) {
+      // (The box of each leaf by the entity at its first row, the leaf's
+      // cell its own: on many threads.)
+      std::string lead = n + "_lead[c0." + rowField + "]";
+      std::string most = ts == "i32"   ? "2147483647"
+                         : ts == "i64" ? "9223372036854775807"
+                                       : "1.0 / 0.0";
+      std::string least =
+          whole ? "0 - " + most + " - 1" : std::string("0.0 - 1.0 / 0.0");
+      out << "  " << n << "_tree(" << n << ", " << n << "_cells, " << n
+          << "_lead)\n"
+          << "  for c0: " << of.front() << ", w: mut " << n << "_cells[" << lead
+          << ".cell, " << lead << ".count] {\n"
+          << "    if len(w) > 0 {\n";
+      for (unsigned d = 0; d < dims; ++d)
+        out << "      var " << side("lo", d) << ": " << ts << " = " << most
+            << "\n      var " << side("hi", d) << ": " << ts << " = " << least
+            << "\n";
+      out << "      for r in w[0].first..w[0].first + w[0].count {\n";
+      for (unsigned d = 0; d < dims; ++d)
+        out << "        " << side("lo", d) << " = min(" << side("lo", d) << ", "
+            << n << "[r]." << positions[d] << ")\n        " << side("hi", d)
+            << " = max(" << side("hi", d) << ", " << n << "[r]." << positions[d]
+            << ")\n";
+      out << "      }\n";
+      for (unsigned d = 0; d < dims; ++d)
+        out << "      w[0]." << side("lo", d) << " = " << side("lo", d)
+            << "\n      w[0]." << side("hi", d) << " = " << side("hi", d)
+            << "\n";
+      out << "    }\n  }\n"
+          << "  " << n << "_up(" << n << "_cells)\n";
+    }
     out << "  " << n
         << "_fresh = true\n}\n"
         // Out of date: its keys or what it copies changed, or (`moved`)
@@ -4797,16 +4832,20 @@ LogicalResult Parser::parseIndex() {
                                builder.getStringAttr(resolve(n + "_fresh"))),
           builder.getNamedAttr(
               "own",
-              strings(morton   ? SmallVector<std::string>{resolve(n),
-                                                          resolve(n + "_cells"),
-                                                          resolve(n + "_box")}
-                      : grid   ? SmallVector<std::string>{resolve(n),
-                                                          resolve(n + "_cells"),
-                                                          resolve(n + "_grid")}
-                      : hashed ? SmallVector<std::string>{resolve(n),
-                                                          resolve(n + "_list"),
-                                                          resolve(n + "_tags")}
-                               : SmallVector<std::string>{resolve(n)})),
+              strings(
+                  morton
+                      ? SmallVector<
+                            std::string>{resolve(n),
+                                         resolve(n + "_cells"),
+                                         resolve(n + "_box"),
+                                         resolve(n + "_lead")}
+                  : grid   ? SmallVector<std::string>{resolve(n),
+                                                      resolve(n + "_cells"),
+                                                      resolve(n + "_grid")}
+                  : hashed ? SmallVector<std::string>{resolve(n),
+                                                      resolve(n + "_list"),
+                                                      resolve(n + "_tags")}
+                           : SmallVector<std::string>{resolve(n)})),
           builder.getNamedAttr(
               "hidden",
               strings(grid
@@ -4934,6 +4973,7 @@ LogicalResult Parser::finishIndexOrders() {
       int64_t entities = capacity.getInt();
       setCapacity(index.cells,
                   entities + index.bits * (entities / (index.leaf + 1)) + 1);
+      setCapacity(buffer.getSymName().str() + "_lead", entities);
       continue;
     }
     setCapacity(found->second.cells, capacity.getInt() + 1);
