@@ -2,12 +2,15 @@
 // nearestNeighbors benchmark asks (github.com/cmuparlay/pbbsbench, its
 // octTree the program to hold this against): on the points of
 // `points.pts` (bench/points/cloud.ent), each point's `G.k` nearest other
-// points, nearest first, by the grid index and its `nearest k`.
+// points, nearest first, by the index `Cells` and its `nearest k` (the grid;
+// bench/points/run.py makes a Morton one too).
 //
-// Every run makes the index anew (as PBBS's makes its tree) and then asks
-// every point. What it prints: the ms of each run, of it the making, and
-// at the end the neighbours in `found.out`, which bench/points/check.cc
-// holds against a scan. bench/points/run.py runs it.
+// Every run makes the index anew (as PBBS's makes its tree; a clustered
+// index keeps the points in its order, so from the second run on they are
+// in it already) and then asks every point. What it prints: the ms of
+// each run, of it the making, and at the end the neighbours in
+// `found.out`, which bench/points/check.cc holds against a scan.
+// bench/points/run.py runs it.
 import console
 import cloud
 
@@ -18,7 +21,7 @@ world {
   G.runs = 5
 }
 
-system ready() { Found = [{ id: 0 - 1 }; G.n * G.k] }
+system ready() { Found = [{ id: 0 - 1, of: 0 - 1 }; G.n * G.k] }
 
 system made() { G.made = now() - G.started + 0.0 * len(Cells) as f64 }
 
@@ -29,6 +32,7 @@ system knn() {
     var j = 0
     for o, b: Point nearest k to (a.x, a.y, a.z) in Cells where o != me {
       Found[row + j].id = b.id
+      Found[row + j].of = a.id
       j += 1
     }
   }
@@ -46,8 +50,8 @@ schedule setup() {
   ready()
 }
 schedule run() {
-  Cells_moved()
   start()
+  Cells_moved()
   made()
   knn()
   report()

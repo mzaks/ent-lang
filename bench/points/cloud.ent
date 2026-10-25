@@ -21,8 +21,11 @@ unique Box { x0: f64, x1: f64, y0: f64, y1: f64, z0: f64, z1: f64 }
 
 component Point { x: f64, y: f64, z: f64, id: i32 } capacity 1048576
 
-// The neighbours of every point, `G.k` rows for each, nearest first.
-buffer Found { id: i32 } capacity 10485760
+// The neighbours of every point, `G.k` rows for each, nearest first: the
+// neighbour and the point (`of`), the points in the order they are kept
+// in (which an index may change: `save` writes them by their numbers).
+buffer Found { id: i32, of: i32 } capacity 10485760
+buffer Saved { id: i32 } capacity 10485760
 
 proc now() -> f64 { wait_until(0.0) }
 
@@ -141,8 +144,10 @@ system save() {
   Bytes = []
   var header: text[20] = "sequenceInt\n"
   for i in 0..len(header) { Bytes += { value: header[i] as u8 } }
-  for r in 0..len(Found) {
-    let v = Found[r].id
+  Saved = [{ id: 0 - 1 }; len(Found)]
+  for r in 0..len(Found) { Saved[Found[r].of * G.k + r % G.k].id = Found[r].id }
+  for r in 0..len(Saved) {
+    let v = Saved[r].id
     var power = 1
     while power * 10 <= v { power *= 10 }
     while power > 0 {

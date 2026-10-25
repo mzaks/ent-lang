@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The k nearest neighbours of every point (bench/points/knn2.ent and
-knn3.ent, by the grid index) against the Problem Based Benchmark Suite's
+knn3.ent, by the grid index and by a Morton one) against the Problem Based Benchmark Suite's
 nearestNeighbors (github.com/cmuparlay/pbbsbench) and its octTree: a
 kd-tree split by the Morton order of the points (Blelloch and Dobson,
 ALENEX 2022), on the same points.
@@ -19,6 +19,9 @@ takes hours there at a million (most points in a few cells). Every ent
 run is held against a scan by bench/points/check.cc (all k of --samples
 points), and octTree's once (PBBS leaves its last point out).
 
+The Morton index is `morton (..) leaf 32 clustered`: its points kept in
+its order, as octTree asks its points in the order of its tree.
+
 Variants, each its own process, round-robin: ent and octTree on one core
 (CPU 2, taskset; PARLAY_NUM_THREADS=1) and on all (whatever ent-lang and
 ParlayLib take). A run of ent makes the index anew and asks every point;
@@ -28,6 +31,7 @@ the index.
 
 Usage: bench/points/run.py [--size 1000000] [--clustered 100000]
                            [--rounds 3] [--samples 200]
+                           [--indexes grid,morton]
 """
 
 import argparse
@@ -87,26 +91,37 @@ def make_points(name, flags, dims, n):
     return folder
 
 
+# The index of each variant: the line knn2.ent and knn3.ent declare it
+# with, and what takes its place.
+GRID = "grid ({sides}) cell G.cell"
+INDEXES = {"grid": GRID, "morton": "morton ({sides}) leaf 32 clustered"}
+
+
 def build_ent(size):
-    """knn2.ent and knn3.ent for each k, on one core and all, with room
-    for `size` points."""
+    """knn2.ent and knn3.ent for each k and index, on one core and all,
+    with room for `size` points."""
     env = dict(os.environ, ENT_CFLAGS="-march=native")
     room = 1 << max(20, (size - 1).bit_length())
     binaries = {}
     for dims, k in sorted({(t[2], t[3]) for t in TESTS}):
         text = open(os.path.join(HERE, f"knn{dims}.ent")).read()
         text = text.replace("G.k = 10", f"G.k = {k}")
-        program = os.path.join(OUT, f"knn{dims}_k{k}.ent")
-        open(program, "w").write(text)
+        sides = ", ".join("xyz"[:dims])
         cloud = open(os.path.join(HERE, "cloud.ent")).read()
         cloud = cloud.replace("capacity 1048576", f"capacity {room}")
         cloud = cloud.replace("capacity 10485760", f"capacity {room * 10}")
         open(os.path.join(OUT, "cloud.ent"), "w").write(cloud)
-        for par in (False, True):
-            out = os.path.join(OUT, f"knn{dims}_k{k}" + ("-par" if par else ""))
-            run([ENT, "build", "-I", OUT] + (["--parallel"] if par else []) +
-                [program, "-o", out], env=env)
-            binaries[(dims, k, par)] = out
+        for index, line in INDEXES.items():
+            name = f"knn{dims}_k{k}_{index}"
+            program = os.path.join(OUT, name + ".ent")
+            grid = GRID.format(sides=sides)
+            assert grid in text
+            open(program, "w").write(text.replace(grid, line.format(sides=sides)))
+            for par in (False, True):
+                out = os.path.join(OUT, name + ("-par" if par else ""))
+                run([ENT, "build", "-I", OUT] + (["--parallel"] if par else []) +
+                    [program, "-o", out], env=env)
+                binaries[(dims, k, index, par)] = out
     return binaries
 
 
@@ -126,7 +141,10 @@ def main():
     parser.add_argument("--clustered", type=int, default=100000)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--samples", type=int, default=200)
+    parser.add_argument("--indexes", default=",".join(INDEXES))
     args = parser.parse_args()
+    for index in set(INDEXES) - set(args.indexes.split(",")):
+        del INDEXES[index]
 
     check = fetch_pbbs()
     octtree = os.path.join(NN, "octTree", "neighbors")
@@ -142,14 +160,16 @@ def main():
         for name, dims, k, n, folder in tests:
             key = (name, k)
             for par in (False, True):
-                out = run(([] if par else one) + [binaries[(dims, k, par)]], cwd=folder)
-                results.setdefault(key + ("ent", par), []).append(ent_times(out))
-                if round_ == 0:
-                    said = subprocess.run([check, "points.pts", "found.out", str(k),
-                                           str(args.samples)], cwd=folder,
-                                          capture_output=True, text=True)
-                    if said.returncode:
-                        raise SystemExit(f"ent {name} k {k}: {said.stdout}")
+                for index in INDEXES:
+                    out = run(([] if par else one) + [binaries[(dims, k, index, par)]],
+                              cwd=folder)
+                    results.setdefault(key + (index, par), []).append(ent_times(out))
+                    if round_ == 0:
+                        said = subprocess.run([check, "points.pts", "found.out", str(k),
+                                               str(args.samples)], cwd=folder,
+                                              capture_output=True, text=True)
+                        if said.returncode:
+                            raise SystemExit(f"{index} {name} k {k}: {said.stdout}")
                 env = dict(os.environ)
                 if not par:
                     env["PARLAY_NUM_THREADS"] = "1"
@@ -165,17 +185,19 @@ def main():
                     if said.returncode:
                         raise SystemExit(f"octTree {name} k {k}: {said.stdout}")
 
-    print(f"{'points':<12} {'n':>9} {'k':>3} | {'ent':>9} {'(made)':>8} {'octTree':>9} "
-          f"| {'ent all':>9} {'(made)':>8} {'oct all':>9}")
-    for name, dims, k, n, folder in tests:
-        row = []
-        for par in (False, True):
-            ent = results[(name, k, "ent", par)]
-            row += [statistics.median(t for t, _ in ent),
-                    statistics.median(m for _, m in ent),
-                    statistics.median(results[(name, k, "oct", par)])]
-        print(f"{name:<12} {n:>9} {k:>3} | {row[0]:9.2f} {row[1]:8.2f} {row[2]:9.2f} "
-              f"| {row[3]:9.2f} {row[4]:8.2f} {row[5]:9.2f}")
+    for par in (False, True):
+        print("all cores" if par else "one core")
+        print(f"{'points':<12} {'n':>9} {'k':>3} | {'grid':>9} {'(made)':>8} "
+              f"| {'morton':>9} {'(made)':>8} | {'octTree':>9}")
+        for name, dims, k, n, folder in tests:
+            row = []
+            for index in ("grid", "morton"):
+                ent = results.get((name, k, index, par), [(0.0, 0.0)])
+                row += [statistics.median(t for t, _ in ent),
+                        statistics.median(m for _, m in ent)]
+            row.append(statistics.median(results[(name, k, "oct", par)]))
+            print(f"{name:<12} {n:>9} {k:>3} | {row[0]:9.2f} {row[1]:8.2f} "
+                  f"| {row[2]:9.2f} {row[3]:8.2f} | {row[4]:9.2f}")
 
 
 if __name__ == "__main__":

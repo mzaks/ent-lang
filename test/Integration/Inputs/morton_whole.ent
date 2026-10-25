@@ -1,0 +1,80 @@
+// The same as morton.ent of whole numbers in two sides, in a box of
+// 1000 that wraps, 12 bits a side and 2 rows to a leaf; the nearest
+// held by how far they are, as a lattice has many as far as each other
+// (test/Integration/morton.test).
+import console
+import wyhash
+component Dot { x: i32, y: i32 } capacity 2048
+component Seen { n: i64, h: u64, a: i64, b: u64, k: u64, l: u64, m: i64, q: i64 } capacity 2048
+unique Check { near: i64, between: i64, nearest: i64, after: i64, pairs: i64 }
+
+index Grid of Dot grid (x, y) cell 70 wrap 1000
+index Tree of Dot morton (x, y) bits 12 leaf 2 wrap 1000
+
+world {
+  for i in 0..1500 {
+    // On a lattice of 10, many as far as others; clustered on x.
+    let c = (wyrand_unit(5, i as i64 * 3) * 30.0) as i32
+    spawn { Dot { x: ((wyrand_unit(5, i as i64 * 3 + 1) * c as f64) as i32 * 10 + 900) % 1000,
+                  y: (wyrand_unit(5, i as i64 * 3 + 2) * 100.0) as i32 * 10 },
+            Seen { n: 0, h: 0, a: 0, b: 0, k: 0, l: 0, m: 0, q: 0 } }
+  }
+}
+
+fn far(a: i32, b: i32, c: i32, d: i32) -> u64 {
+  let dx = (a - c) as i64
+  let dy = (b - d) as i64
+  (dx * dx + dy * dy) as u64
+}
+fn mix(h: u64, v: u64) -> u64 { wyhash64(h, v) }
+fn wrapped(v: i32) -> i32 { ((v % 1000) + 1000) % 1000 }
+
+system count() {
+  for me, a: Dot, s: mut Seen {
+    var n: i64 = 0
+    var h: u64 = 0
+    for o, b: Dot near (a.x, a.y) within 60 in Grid where o != me { n += 1  h += hash_of(o) + b.x as u64 }
+    for o, b: Dot near (a.x, a.y) within 60 in Tree where o != me { n -= 1  h -= hash_of(o) + b.x as u64 }
+    s.n = n
+    s.h = h
+    var bn: i64 = 0
+    var bh: u64 = 0
+    for o, b: Dot between (a.x - 300, a.y - 50) and (a.x + 100, a.y + 250) in Grid { bn += 1  bh += hash_of(o) + b.x as u64 }
+    for o, b: Dot between (a.x - 300, a.y - 50) and (a.x + 100, a.y + 250) in Tree { bn -= 1  bh -= hash_of(o) + b.x as u64 }
+    s.a = bn
+    s.b = bh
+    var k1: u64 = 7
+    for o, b: Dot nearest 7 to (a.x, a.y) in Grid where o != me { k1 = mix(k1, far(b.x, b.y, a.x, a.y)) }
+    var k2: u64 = 7
+    for o, b: Dot nearest 7 to (a.x, a.y) in Tree where o != me { k2 = mix(k2, far(b.x, b.y, a.x, a.y)) }
+    s.k = k1 - k2
+    var w1: u64 = 7
+    for o, b: Dot nearest 12 to (a.x + 1500, a.y + 3) within 40 in Grid { w1 = mix(w1, far(b.x, b.y, a.x + 1500, a.y + 3)) }
+    var w2: u64 = 7
+    for o, b: Dot nearest 12 to (a.x + 1500, a.y + 3) within 40 in Tree { w2 = mix(w2, far(b.x, b.y, a.x + 1500, a.y + 3)) }
+    s.l = w1 - w2
+    var p: i64 = 0
+    for o, b: Dot near (a.x, a.y) within 60 in Tree after me { p += 1 }
+    s.m = p
+    var q: i64 = 0
+    for o, b: Dot near (a.x, a.y) within 60 in Tree where o != me { q += 1 }
+    s.q = q
+  }
+}
+
+system report() {
+  for s: Seen {
+    if s.n != 0 || s.h != 0 { Check.near += 1 }
+    if s.a != 0 || s.b != 0 { Check.between += 1 }
+    if s.k != 0 || s.l != 0 { Check.nearest += 1 }
+    Check.pairs += s.q
+    Check.after += s.m
+  }
+  put("near {Check.near} differ, between {Check.between}, nearest {Check.nearest}; pairs {Check.pairs}, after me {Check.after}")
+}
+
+schedule go() {
+  count()
+  report()
+}
+main { go() }

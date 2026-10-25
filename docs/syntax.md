@@ -2225,6 +2225,60 @@ uniques. `examples/lj/lj.ent` finds the atoms near each atom so.
 - Of a grid of whole numbers, the corners, the place and `within` are
   whole numbers too, and how far things are is worked out to the unit.
 
+#### Morton indexes
+
+```
+component Star { x: f64, y: f64, z: f64, mass: f64 } capacity 1048576
+
+index Tree of Star morton (x, y, z) leaf 32 clustered
+
+system neighbours() {
+  for me, a: Star, n: mut Near {
+    for o, b: Star nearest 10 to (a.x, a.y, a.z) in Tree where o != me {
+      ..
+    }
+  }
+}
+```
+
+`morton (x, y)` or `morton (x, y, z)` in place of `grid (..) cell w`
+holds the entities in Morton order, in cells split where they are many
+(a quadtree, an octree): for entities bunched together, which a grid of
+cells all as wide puts in a few cells. Its places are as a grid's (one
+type, f32, f64, i32 or i64), and so are its queries: `near .. within r`,
+`between .. and ..`, `nearest k to ..` (`within r` too) and `after me`,
+visiting the same entities, `nearest` the same ones in the same order.
+It is made as a grid is (lazy or eager, `clustered`), not `incremental`.
+
+- `bits b` says how many steps a side is cut into, 2^b (from 1 to 31 in
+  two sides, 21 in three, the most the default); `leaf l` how many rows
+  a cell has before it is split, 16 by default (a cell at the finest
+  level is not split); `wrap size` a box that wraps on every side (from
+  0 to it), as a grid's.
+- The box is the one that wraps, or over where the entities are when it
+  is made, as wide on every side as on its widest (so its cells are
+  cubes). An entity's key is its steps on each side, the bits taken in
+  turn, x the lowest (`key_in_Name`, an i64); the rows are in the order
+  of their keys.
+- The cells are in `Name_cells`, the root first and then a level after
+  the other: each with its rows (`first`, `count`), its `level`, its
+  cells (`child` the first of them, -1 for a leaf; `kids` how many, side
+  by side), `next` the first cell after all of those inside it, depth
+  first (the root's that of no cell, how many there are), and the box
+  its entities are in (`lo0`, `hi0`, ..). `Name_box` has where the box
+  starts (`lo0`, ..), how wide it is (`side`), and its size where it
+  wraps.
+- `near` and `between` go down from the root by `child` and on by
+  `next`, into the cells whose box the place's reach (or the box asked)
+  meets, and over each leaf's rows; so in the order of the rows, the
+  same on one core and on many.
+- `nearest k` takes first the k rows on either side of the place's own
+  key, then goes down from the root, the nearest of a cell's cells
+  first, into those not farther than the list's k-th: the rows a cell
+  far away has are not looked at.
+- What it pays, against a grid and PBBS's octTree: `bench/points/run.py`
+  (bench/RESULTS.md).
+
 #### Indexes of a relation
 
 ```

@@ -653,8 +653,9 @@ The declaration:
 - `index Name of C morton (x, y)` or `(x, y, z)`: fields of the first
   component, of one type (f32, f64, i32 or i64), as a grid's. After it,
   in any order:
-  - `bits N`: how finely each side is cut, 2^N steps. At most 32 a side
-    in 2D and 21 in 3D (a key of 64 bits), which is the default.
+  - `bits N`: how finely each side is cut, 2^N steps. At most 31 a side
+    in 2D and 21 in 3D (a key of 63 bits at most, so it is in order as an
+    i64), which is the default.
   - `leaf N`: a cell of at most N entities is not split. The default is
     16. A cell at the finest level, 2^-bits of the box, is a leaf
     however many it holds.
@@ -713,6 +714,28 @@ in a pass from the leaves up (on many threads by subtree).
 
 Not in this step: the GPU; an `incremental` index; a cell with one cell
 inside skipped (a compressed tree); Hilbert order.
+
+**Part 1, as built** (2026-10-25): the declaration (`bits`, `leaf`,
+`wrap`, `{ }`, lazy/eager, `clustered`) and the grid's queries; the
+cells, their sums and the walk are part 2. How it is laid out and asked:
+
+- The cells (`Name_cells`) are laid out a level after the other, not in
+  preorder: a cell's cells side by side (`child` the first, `kids` how
+  many), so that the nearest of them can be chosen among them; `next`
+  is the first cell after all those inside it, depth first, which a walk
+  without a stack goes on by. Each has the tight box of its entities
+  (not its cube), worked out from the last cell back.
+- `near` and `between` walk without a stack: into a cell (`child`)
+  whose box the query meets, else on (`next`).
+- `nearest k` first takes the k rows on either side of the place's own
+  key into its list, which bounds how far it looks from the start; then
+  a stack of cells, each with how far its box is, a cell's cells put in
+  so that the nearest is on top, and none farther than the list's k-th. A walk without
+  a stack in the order of the keys was 1.5 times as slow on the cube.
+- `clustered` is what makes it fast: the queries come in the order of
+  the rows, so a query's cells and rows are those the one before read.
+  Without it, on a million points the cells and rows of each query are
+  misses (2.5 s, against 1 s clustered).
 
 The references:
 

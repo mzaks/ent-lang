@@ -1,0 +1,60 @@
+// The cells of a Morton index as laid out (test/Integration/morton.test):
+// walking by child and next visits each once, the leaves' rows one
+// after the other; each cell's rows those of its cells, in its box; no
+// leaf of more than 4 rows but at the finest level; rows in key order.
+import console
+import wyhash
+component Dot { x: f64, y: f64, z: f64 } capacity 4096
+index Tree of Dot morton (x, y, z) leaf 4
+
+world {
+  for i in 0..3000 {
+    // Clustered: most near the middle.
+    let r = wyrand_unit(7, i as i64 * 4)
+    let s = r * r * r
+    spawn { Dot { x: (wyrand_unit(7, i as i64 * 4 + 1) - 0.5) * s, y: (wyrand_unit(7, i as i64 * 4 + 2) - 0.5) * s,
+                  z: (wyrand_unit(7, i as i64 * 4 + 3) - 0.5) * s } }
+  }
+}
+
+system check() {
+  let n = len(Tree_cells)
+  var leaves = 0
+  var leafRows = 0
+  var bad = 0
+  // Walking by child and next visits every cell once, in preorder, the
+  // leaves' rows one after the other.
+  var c = 0
+  var visited = 0
+  var row = 0
+  while c < n {
+    visited += 1
+    if Tree_cells[c].child < 0 {
+      leaves += 1
+      if Tree_cells[c].first != row { bad += 1 }
+      row += Tree_cells[c].count
+      leafRows += Tree_cells[c].count
+      for r in Tree_cells[c].first..Tree_cells[c].first + Tree_cells[c].count {
+        if Tree[r].x < Tree_cells[c].lo0 || Tree[r].x > Tree_cells[c].hi0 { bad += 1 }
+        if Tree[r].z < Tree_cells[c].lo2 || Tree[r].z > Tree_cells[c].hi2 { bad += 1 }
+      }
+      if Tree_cells[c].count > 4 && Tree_cells[c].level < 21 { bad += 1 }
+      c = Tree_cells[c].next
+    } else {
+      var rows = 0
+      for k in Tree_cells[c].child..Tree_cells[c].child + Tree_cells[c].kids {
+        rows += Tree_cells[k].count
+        if Tree_cells[k].level != Tree_cells[c].level + 1 { bad += 1 }
+        if Tree_cells[k].lo1 < Tree_cells[c].lo1 || Tree_cells[k].hi1 > Tree_cells[c].hi1 { bad += 1 }
+      }
+      if rows != Tree_cells[c].count || Tree_cells[Tree_cells[c].child].first != Tree_cells[c].first { bad += 1 }
+      c = Tree_cells[c].child
+    }
+  }
+  var unsorted = 0
+  for r in 1..len(Tree) { if Tree[r].key < Tree[r - 1].key { unsorted += 1 } }
+  put("{len(Tree)} rows, {n} cells, visited {visited}, {leaves} leaves holding {leafRows} rows, {bad} bad, {unsorted} out of order")
+}
+
+schedule go() { check() }
+main { go() }

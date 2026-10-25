@@ -1,0 +1,76 @@
+// A Morton index against a grid over the same 3000 dots, most near the
+// middle (test/Integration/morton.test): near, between, nearest k and
+// nearest k within, the same dots; and 'after me' each pair once.
+import console
+import wyhash
+component Dot { x: f64, y: f64, z: f64 } capacity 4096
+component Seen { n: i64, h: u64, m: i64, g: u64, a: i64, b: u64, k: u64, l: u64 } capacity 4096
+unique Check { near: i64, between: i64, nearest: i64, after: i64, pairs: i64 }
+
+index Grid of Dot grid (x, y, z) cell 0.05
+index Tree of Dot morton (x, y, z) leaf 4
+
+world {
+  for i in 0..3000 {
+    let r = wyrand_unit(7, i as i64 * 4)
+    let s = r * r * r
+    spawn { Dot { x: (wyrand_unit(7, i as i64 * 4 + 1) - 0.5) * s, y: (wyrand_unit(7, i as i64 * 4 + 2) - 0.5) * s,
+                  z: (wyrand_unit(7, i as i64 * 4 + 3) - 0.5) * s },
+            Seen { n: 0, h: 0, m: 0, g: 0, a: 0, b: 0, k: 0, l: 0 } }
+  }
+}
+
+fn mix(h: u64, e: entity) -> u64 { wyhash64(h, hash_of(e)) }
+
+system count() {
+  for me, a: Dot, s: mut Seen {
+    var n: i64 = 0
+    var h: u64 = 0
+    for o, b: Dot near (a.x, a.y, a.z) within 0.07 in Grid where o != me { n += 1  h += hash_of(o) }
+    var m: i64 = 0
+    var g: u64 = 0
+    for o, b: Dot near (a.x, a.y, a.z) within 0.07 in Tree where o != me { m += 1  g += hash_of(o) }
+    s.n = n - m
+    s.h = h - g
+    var bn: i64 = 0
+    for o, b: Dot between (a.x - 0.03, a.y - 0.01, a.z - 0.05) and (a.x + 0.02, a.y + 0.04, a.z + 0.01) in Grid { bn += 1  h += hash_of(o) }
+    for o, b: Dot between (a.x - 0.03, a.y - 0.01, a.z - 0.05) and (a.x + 0.02, a.y + 0.04, a.z + 0.01) in Tree { bn -= 1  g += hash_of(o) }
+    s.a = bn
+    s.b = h - g
+    var k1: u64 = 7
+    for o, b: Dot nearest 6 to (a.x, a.y, a.z) in Grid where o != me { k1 = mix(k1, o) }
+    var k2: u64 = 7
+    for o, b: Dot nearest 6 to (a.x, a.y, a.z) in Tree where o != me { k2 = mix(k2, o) }
+    s.k = k1 - k2
+    var w1: u64 = 7
+    for o, b: Dot nearest 9 to (a.x, a.y, a.z) within 0.04 in Grid { w1 = mix(w1, o) }
+    var w2: u64 = 7
+    for o, b: Dot nearest 9 to (a.x, a.y, a.z) within 0.04 in Tree { w2 = mix(w2, o) }
+    s.l = w1 - w2
+    var p: i64 = 0
+    for o, b: Dot near (a.x, a.y, a.z) within 0.07 in Tree after me { p += 1 }
+    s.m = p
+    var q: i64 = 0
+    for o, b: Dot near (a.x, a.y, a.z) within 0.07 in Tree where o != me { q += 1 }
+    s.g = q as u64
+  }
+}
+
+system report() {
+  var pairs: i64 = 0
+  var halves: i64 = 0
+  for s: Seen {
+    if s.n != 0 || s.h != 0 { Check.near += 1 }
+    if s.a != 0 || s.b != 0 { Check.between += 1 }
+    if s.k != 0 || s.l != 0 { Check.nearest += 1 }
+    Check.pairs += s.g as i64
+    Check.after += s.m
+  }
+  put("near {Check.near} differ, between {Check.between}, nearest {Check.nearest}; pairs {Check.pairs}, after me {Check.after}")
+}
+
+schedule go() {
+  count()
+  report()
+}
+main { go() }

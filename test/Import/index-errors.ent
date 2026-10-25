@@ -333,3 +333,51 @@ system s() {
     for (c)-[t: Tree]->(e) by t.w { n.v += 1.0 }
   }
 }
+
+// -----
+
+component Dot { x: f64 } capacity 8
+// expected-error @+1 {{a Morton index is of two places or of three}}
+index Tree of Dot morton (x)
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+// expected-error @+1 {{a Morton index of 2 places has from 1 to 31 bits a side}}
+index Tree of Dot morton (x, y) bits 32
+
+// -----
+
+component Dot { x: f64, y: f64, z: f64 } capacity 8
+// expected-error @+1 {{a Morton index of 3 places has from 1 to 21 bits a side}}
+index Tree of Dot morton (x, y, z) bits 22
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+// expected-error @+1 {{a cell holds 1 entity or more before it is split}}
+index Tree of Dot morton (x, y) leaf 0
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+// expected-error @+1 {{'leaf' is said once}}
+index Tree of Dot morton (x, y) leaf 8 bits 10 leaf 4
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+// expected-error @+1 {{'bits' takes a whole number, as it is written: 'bits 16'}}
+index Tree of Dot morton (x, y) bits 1.5
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+// expected-error @+1 {{a Morton index's cells are split where the entities are many: no 'cell' ('bits' says how fine they go)}}
+index Tree of Dot morton (x, y) cell 1.0
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+// expected-error @+1 {{a Morton index's keys are worked out for every entity each time: it is not 'incremental'}}
+index Tree of Dot morton (x, y) incremental

@@ -759,6 +759,9 @@ private:
                              function_ref<LogicalResult(mlir::Value)> body);
   LogicalResult ifWithVars(Location where, mlir::Value holds,
                            function_ref<LogicalResult()> body);
+  LogicalResult whileWithVars(Location where,
+                              function_ref<mlir::Value()> condition,
+                              function_ref<LogicalResult()> body);
   /// In the body of a `for ... near`: the index and its row the entity is
   /// in, and where it is seen from the place (the image of each place's
   /// field nearest it, by the component's symbol and the field).
@@ -1036,6 +1039,11 @@ private:
     Type positionType;
     bool wrap = false;
     std::string gridUnique, cells;
+    /// A Morton index (`morton (x, y)`): how many bits a side its keys
+    /// have, and how many entities a cell holds at most before it is split;
+    /// `cells` its cells in preorder (`N_box` its box, as `gridUnique`).
+    bool morton = false;
+    int bits = 0, leaf = 0;
     SmallVector<std::tuple<std::string, std::string, std::string>> copied;
     /// The components of the entities it holds, by their symbols.
     SmallVector<std::string> of;
@@ -3308,7 +3316,9 @@ LogicalResult Parser::parseIndex() {
   // `grid (x, y, z) cell size [wrap box]`: the entities by the cell of a
   // grid they are in, its key a field of the index's own; else `by` a
   // field of the first component.
-  bool grid = false;
+  bool grid = false, morton = false;
+  // (Of `morton`: bits a side, and how many a cell holds unsplit.)
+  int64_t mortonBits = 0, mortonLeaf = 16;
   bool hashed = false, unique = false;
   SmallVector<std::string> positions;
   Type positionType;
@@ -3324,11 +3334,15 @@ LogicalResult Parser::parseIndex() {
     into = StringRef(start, previousEnd - start).str();
     return success();
   };
-  if (consumeKeyword("grid")) {
+  // (`morton (x, y)`: a grid's places, its cells split where the
+  // entities are many.)
+  morton = token.isKeyword("morton");
+  if (consumeKeyword("grid") || consumeKeyword("morton")) {
     grid = true;
-    if (failed(expect(Token::LParen,
-                      "'(' and the fields of '" + of.front() +
-                          "' that say where an entity is: 'grid (x, y)'")))
+    std::string kindWord = morton ? "morton" : "grid";
+    if (failed(expect(Token::LParen, "'(' and the fields of '" + of.front() +
+                                         "' that say where an entity is: '" +
+                                         kindWord + " (x, y)'")))
       return failure();
     do {
       llvm::SMLoc fieldAt = token.loc;
@@ -3356,14 +3370,67 @@ LogicalResult Parser::parseIndex() {
     if (failed(expect(Token::RParen, "')'")))
       return failure();
     if (positions.size() < 2 || positions.size() > 3)
-      return error(at, "a grid is of two places or of three");
-    if (!consumeKeyword("cell"))
-      return error("expected 'cell' and how wide a cell is at least");
-    if (failed(written(cellText)))
-      return failure();
-    if (consumeKeyword("wrap") && failed(written(wrapText)))
-      return failure();
-    key = "cell_in_" + *name;
+      return error(at, std::string(morton ? "a Morton index" : "a grid") +
+                           " is of two places or of three");
+    if (morton) {
+      // A key of 63 bits at most, so it is in order as an i64.
+      int64_t most = positions.size() == 2 ? 31 : 21;
+      mortonBits = most;
+      bool bitsSaid = false, leafSaid = false;
+      while (token.isKeyword("bits") || token.isKeyword("leaf") ||
+             token.isKeyword("wrap")) {
+        llvm::SMLoc optionAt = token.loc;
+        std::string option = token.spelling.str();
+        advance();
+        if (option == "wrap") {
+          if (!wrapText.empty())
+            return error(optionAt, "'wrap' is said once");
+          if (failed(written(wrapText)))
+            return failure();
+          continue;
+        }
+        bool &said = option == "bits" ? bitsSaid : leafSaid;
+        if (said)
+          return error(optionAt, "'" + option + "' is said once");
+        said = true;
+        llvm::SMLoc numberAt = token.loc;
+        if (!token.is(Token::Integer))
+          return error(numberAt, "'" + option +
+                                     "' takes a whole number, "
+                                     "as it is written: '" +
+                                     option + " 16'");
+        int64_t value = 0;
+        if (token.spelling.getAsInteger(0, value))
+          return error(numberAt,
+                       "'" + token.spelling.str() + "' is too big a number");
+        advance();
+        if (option == "bits") {
+          if (value < 1 || value > most)
+            return error(numberAt, "a Morton index of " +
+                                       Twine(positions.size()) +
+                                       " places has from 1 to " + Twine(most) +
+                                       " bits a side");
+          mortonBits = value;
+        } else {
+          if (value < 1)
+            return error(numberAt, "a cell holds 1 entity or more before "
+                                   "it is split");
+          mortonLeaf = value;
+        }
+      }
+      if (token.isKeyword("cell"))
+        return error("a Morton index's cells are split where the entities "
+                     "are many: no 'cell' ('bits' says how fine they go)");
+      key = "key_in_" + *name;
+    } else {
+      if (!consumeKeyword("cell"))
+        return error("expected 'cell' and how wide a cell is at least");
+      if (failed(written(cellText)))
+        return failure();
+      if (consumeKeyword("wrap") && failed(written(wrapText)))
+        return failure();
+      key = "cell_in_" + *name;
+    }
     keyType = builder.getI64Type();
   } else {
     if (!consumeKeyword("by"))
@@ -3428,8 +3495,10 @@ LogicalResult Parser::parseIndex() {
         return error(wayAt, "an index is made again one way: '" + how +
                                 "' or '" + way + "'");
       if (grid && way == "incremental")
-        return error(wayAt, "a grid's cells are worked out for every "
-                            "entity each time: it is not 'incremental'");
+        return error(wayAt, std::string(morton ? "a Morton index's keys"
+                                               : "a grid's cells") +
+                                " are worked out for every entity each "
+                                "time: it is not 'incremental'");
       how = way;
     }
     return success();
@@ -4089,7 +4158,7 @@ LogicalResult Parser::parseIndex() {
     auto side = [&](const char *what, unsigned d) {
       return std::string(what) + std::to_string(d);
     };
-    if (grid) {
+    if (grid && !morton) {
       out << "transient unique " << n << "_grid { cells: i64";
       for (unsigned d = 0; d < dims; ++d)
         out << ", " << side("n", d) << ": i64, " << side("w", d) << ": " << ts
@@ -4258,8 +4327,173 @@ LogicalResult Parser::parseIndex() {
           << "    starts[c as i32].first = r\n"
           << "  }\n}\n";
     }
+    // Of a Morton index: its box (`N_box`: where it starts on each side and
+    // ends, how wide its widest side is, the steps a unit of that, and of
+    // a box that wraps its size); and its cells (`N_cells`), each a run of
+    // rows whose keys share their first `level` digits, those inside a cell
+    // side by side (from `child`, `kids` of them; a leaf's `child` is -1),
+    // each with the cell after it in preorder that is not inside it
+    // (`next`) and the box its entities are in. `N_tree` lays them out.
+    if (morton) {
+      std::string most = ts == "i32"   ? "2147483647"
+                         : ts == "i64" ? "9223372036854775807"
+                                       : "1.0 / 0.0";
+      std::string least =
+          whole ? "0 - " + most + " - 1" : std::string("0.0 - 1.0 / 0.0");
+      int64_t children = int64_t(1) << dims;
+      int64_t top = (int64_t(1) << mortonBits) - 1;
+      out << "transient unique " << n << "_box { side: f64, scale: f64, "
+          << "size: " << ts;
+      for (unsigned d = 0; d < dims; ++d)
+        out << ", " << side("lo", d) << ": " << ts << ", " << side("hi", d)
+            << ": " << ts;
+      out << " }\n"
+          << "transient buffer " << n << "_cells { first: i32, count: i32, "
+          << "level: i32, child: i32, kids: i32, next: i32";
+      for (unsigned d = 0; d < dims; ++d)
+        out << ", " << side("lo", d) << ": " << ts << ", " << side("hi", d)
+            << ": " << ts;
+      out << " } capacity 1\n"
+          // A side's steps, their bits spread `dims` apart.
+          << "fn " << n << "_spread(q: u64) -> u64 {\n";
+      if (dims == 3)
+        out << "  var x = q & 0x1fffff\n"
+            << "  x = (x | (x << 32)) & 0x1f00000000ffff\n"
+            << "  x = (x | (x << 16)) & 0x1f0000ff0000ff\n"
+            << "  x = (x | (x << 8)) & 0x100f00f00f00f00f\n"
+            << "  x = (x | (x << 4)) & 0x10c30c30c30c30c3\n"
+            << "  x = (x | (x << 2)) & 0x1249249249249249\n";
+      else
+        out << "  var x = q & 0xffffffff\n"
+            << "  x = (x | (x << 16)) & 0x0000ffff0000ffff\n"
+            << "  x = (x | (x << 8)) & 0x00ff00ff00ff00ff\n"
+            << "  x = (x | (x << 4)) & 0x0f0f0f0f0f0f0f0f\n"
+            << "  x = (x | (x << 2)) & 0x3333333333333333\n"
+            << "  x = (x | (x << 1)) & 0x5555555555555555\n";
+      out << "  x\n}\n"
+          // The step of a place on one side, within the box.
+          << "fn " << n << "_step(x: " << ts << ", lo: " << ts
+          << ", scale: f64) -> u64 {\n"
+          << "  var q = (((x as f64) - (lo as f64)) * scale) as i64\n"
+          << "  if q < 0 { q = 0 }\n"
+          << "  if q > " << top << " { q = " << top << " }\n"
+          << "  q as u64\n}\n"
+          // The key of a place: its steps on each side, interleaved.
+          << "fn " << n << "_key(";
+      for (unsigned d = 0; d < dims; ++d)
+        out << (d ? ", " : "") << "p" << d << ": " << ts;
+      for (unsigned d = 0; d < dims; ++d)
+        out << ", " << side("lo", d) << ": " << ts;
+      out << ", scale: f64) -> i64 {\n  (";
+      for (unsigned d = 0; d < dims; ++d) {
+        std::string spread = n + "_spread(" + n + "_step(p" +
+                             std::to_string(d) + ", " + side("lo", d) +
+                             ", scale))";
+        out << (d ? " | (" + spread + " << " + std::to_string(d) + ")"
+                  : spread);
+      }
+      out << ") as i64\n}\n";
+      out
+          // Where `x` is seen from `p`: the image nearest it.
+          << "fn " << n << "_image(x: " << ts << ", p: " << ts
+          << ", size: " << ts << ") -> " << ts << " {\n";
+      if (wrap)
+        out << "  let d = x - p\n"
+            << (whole ? "  if d + d > size { x - size } else if d + d < 0 - "
+                        "size { x + size } else { x }\n}\n"
+                      : "  if d > size * 0.5 { x - size } else if d < 0.0 - "
+                        "size * 0.5 { x + size } else { x }\n}\n");
+      else
+        out << "  x\n}\n";
+      // The cells: the root, then those inside each cell (a cell of more
+      // rows than `leaf` is split, unless it is at the finest level), in
+      // the order of their digits, after all the cells before them; each
+      // cell's `next`, from the root down; then the box of each cell's
+      // entities, from the last cell back.
+      std::string none = whole ? "0" : "0.0";
+      std::string boxes;
+      for (unsigned d = 0; d < dims; ++d)
+        boxes += ", " + side("lo", d) + ": " + none + ", " + side("hi", d) +
+                 ": " + none;
+      out << "proc " << n << "_tree(order: " << n << ", cells: mut " << n
+          << "_cells) {\n"
+          << "  cells = []\n"
+          << "  if len(order) > 0 { cells += { first: 0, count: len(order), "
+             "level: 0, child: 0 - 1, kids: 0, next: 1"
+          << boxes << " } }\n"
+          << "  var i = 0\n"
+          << "  while i < len(cells) {\n"
+          << "    let first = cells[i].first\n"
+          << "    let count = cells[i].count\n"
+          << "    let level = cells[i].level\n"
+          << "    if count > " << mortonLeaf << " && level < " << mortonBits
+          << " {\n"
+          << "      let shift = ((" << mortonBits << " - level - 1) * " << dims
+          << ") as i64\n"
+          << "      let child = len(cells)\n"
+          << "      var start = first\n"
+          << "      let end = first + count\n"
+          << "      for digit in 0.." << children << " {\n"
+          << "        var low = start\n"
+          << "        var high = end\n"
+          << "        while low < high {\n"
+          << "          let mid = (low + high) >> 1\n"
+          << "          if ((order[mid].key >> shift) & " << children - 1
+          << ") <= digit as i64 { low = mid + 1 } else { high = mid }\n"
+          << "        }\n"
+          << "        if low > start { cells += { first: start, count: low - "
+             "start, level: level + 1, child: 0 - 1, kids: 0, next: 0"
+          << boxes << " } }\n"
+          << "        start = low\n"
+          << "      }\n"
+          << "      cells[i].child = child\n"
+          << "      cells[i].kids = len(cells) - child\n"
+          << "    }\n"
+          << "    i += 1\n"
+          << "  }\n"
+          << "  if len(cells) > 0 { cells[0].next = len(cells) }\n"
+          << "  for p in 0..len(cells) {\n"
+          << "    let child = cells[p].child\n"
+          << "    if child >= 0 {\n"
+          << "      let last = child + cells[p].kids - 1\n"
+          << "      for c in child..last { cells[c].next = c + 1 }\n"
+          << "      cells[last].next = cells[p].next\n"
+          << "    }\n"
+          << "  }\n"
+          << "  var c = len(cells) - 1\n"
+          << "  while c >= 0 {\n";
+      for (unsigned d = 0; d < dims; ++d)
+        out << "    var " << side("lo", d) << ": " << ts << " = " << most
+            << "\n    var " << side("hi", d) << ": " << ts << " = " << least
+            << "\n";
+      out << "    let child = cells[c].child\n"
+          << "    if child < 0 {\n"
+          << "      for r in cells[c].first..cells[c].first + cells[c].count "
+             "{\n";
+      for (unsigned d = 0; d < dims; ++d)
+        out << "        " << side("lo", d) << " = min(" << side("lo", d)
+            << ", order[r]." << positions[d] << ")\n        " << side("hi", d)
+            << " = max(" << side("hi", d) << ", order[r]." << positions[d]
+            << ")\n";
+      out << "      }\n"
+          << "    } else {\n"
+          << "      for k in child..child + cells[c].kids {\n";
+      for (unsigned d = 0; d < dims; ++d)
+        out << "        " << side("lo", d) << " = min(" << side("lo", d)
+            << ", cells[k]." << side("lo", d) << ")\n        " << side("hi", d)
+            << " = max(" << side("hi", d) << ", cells[k]." << side("hi", d)
+            << ")\n";
+      out << "      }\n"
+          << "    }\n";
+      for (unsigned d = 0; d < dims; ++d)
+        out << "    cells[c]." << side("lo", d) << " = " << side("lo", d)
+            << "\n    cells[c]." << side("hi", d) << " = " << side("hi", d)
+            << "\n";
+      out << "    c -= 1\n"
+          << "  }\n}\n";
+    }
     out << "system " << n << "_update() {\n";
-    if (grid) {
+    if (grid && !morton) {
       // The grid as the entities are now: its cells at least `cell` wide,
       // round the box where it wraps (`size` on every side), else over
       // where the entities are; no more cells than entities can be (the
@@ -4346,6 +4580,54 @@ LogicalResult Parser::parseIndex() {
       }
       out << "  for c0: mut " << of.front() << " {\n    c0." << *key << " = "
           << number << "\n  }\n";
+    }
+    if (morton) {
+      // The box as the entities are now: the box that wraps, else from the
+      // lowest of them on each side, as wide as they are on the widest (so
+      // its cells are cubes); each entity's key its steps on each side,
+      // interleaved, x the lowest bit of each digit.
+      if (wrap) {
+        out << "  var size_: " << ts << " = " << wrapText << "\n"
+            << "  " << n << "_box.size = size_\n";
+        for (unsigned d = 0; d < dims; ++d)
+          out << "  " << n << "_box." << side("lo", d) << " = "
+              << (whole ? "0" : "0.0") << "\n"
+              << "  " << n << "_box." << side("hi", d) << " = size_\n";
+        out << "  var side_ = size_ as f64\n";
+      } else {
+        std::string most = ts == "i32"   ? "2147483647"
+                           : ts == "i64" ? "9223372036854775807"
+                                         : "1.0 / 0.0";
+        for (unsigned d = 0; d < dims; ++d)
+          out << "  " << n << "_box." << side("lo", d) << " = " << most
+              << "\n  " << n << "_box." << side("hi", d) << " = "
+              << (whole ? "0 - " + most + " - 1" : "0.0 - 1.0 / 0.0") << "\n";
+        out << "  for c0: " << of.front() << " {\n";
+        for (unsigned d = 0; d < dims; ++d)
+          out << "    " << n << "_box." << side("lo", d) << " min= c0."
+              << positions[d] << "\n"
+              << "    " << n << "_box." << side("hi", d) << " max= c0."
+              << positions[d] << "\n";
+        out << "  }\n  var side_: f64 = 0.0\n";
+        for (unsigned d = 0; d < dims; ++d)
+          out << "  side_ = max(side_, (" << n << "_box." << side("hi", d)
+              << " as f64) - (" << n << "_box." << side("lo", d)
+              << " as f64))\n";
+      }
+      out << "  if !(side_ > 0.0) { side_ = 1.0 }\n"
+          << "  " << n << "_box.side = side_\n"
+          << "  let scale_ = " << (int64_t(1) << mortonBits) << ".0 / side_\n"
+          << "  " << n << "_box.scale = scale_\n";
+      for (unsigned d = 0; d < dims; ++d)
+        out << "  let " << side("lo_", d) << " = " << n << "_box."
+            << side("lo", d) << "\n";
+      out << "  for c0: mut " << of.front() << " {\n    c0." << *key << " = "
+          << n << "_key(";
+      for (unsigned d = 0; d < dims; ++d)
+        out << (d ? ", " : "") << "c0." << positions[d];
+      for (unsigned d = 0; d < dims; ++d)
+        out << ", " << side("lo_", d);
+      out << ", scale_)\n  }\n";
     }
     // Made anew by `by`: every entity in order by its key, those of a key
     // in the order they are stored (the order insertion by their places
@@ -4435,9 +4717,11 @@ LogicalResult Parser::parseIndex() {
       anew("    ", /*counted=*/true);
       out << "    " << n << "_whole = true\n  }\n";
     }
-    if (grid)
+    if (grid && !morton)
       out << "  " << n << "_bounds(" << n << ", " << n << "_cells, " << n
           << "_grid.cells)\n";
+    if (morton)
+      out << "  " << n << "_tree(" << n << ", " << n << "_cells)\n";
     out << "  " << n
         << "_fresh = true\n}\n"
         // Out of date: its keys or what it copies changed, or (`moved`)
@@ -4513,7 +4797,10 @@ LogicalResult Parser::parseIndex() {
                                builder.getStringAttr(resolve(n + "_fresh"))),
           builder.getNamedAttr(
               "own",
-              strings(grid     ? SmallVector<std::string>{resolve(n),
+              strings(morton   ? SmallVector<std::string>{resolve(n),
+                                                          resolve(n + "_cells"),
+                                                          resolve(n + "_box")}
+                      : grid   ? SmallVector<std::string>{resolve(n),
                                                           resolve(n + "_cells"),
                                                           resolve(n + "_grid")}
                       : hashed ? SmallVector<std::string>{resolve(n),
@@ -4553,8 +4840,11 @@ LogicalResult Parser::parseIndex() {
     kept.positions.assign(positions.begin(), positions.end());
     kept.positionType = positionType;
     kept.wrap = !wrapText.empty();
-    kept.gridUnique = resolve(n + "_grid");
+    kept.gridUnique = resolve(n + (morton ? "_box" : "_grid"));
     kept.cells = resolve(n + "_cells");
+    kept.morton = morton;
+    kept.bits = mortonBits;
+    kept.leaf = mortonLeaf;
   }
   // Where it holds the same entities, each writes its own row: a loop
   // worth running on many threads from far fewer entities than a loop
@@ -4633,9 +4923,20 @@ LogicalResult Parser::finishIndexOrders() {
     // A grid: as many cells at most as there may be entities.
     if (found->second.cells.empty())
       continue;
-    cast<BufferOp>(SymbolTable::lookupSymbolIn(
-                       module, builder.getStringAttr(found->second.cells)))
-        .setCapacityAttr(builder.getI64IntegerAttr(capacity.getInt() + 1));
+    auto setCapacity = [&](StringRef symbolName, int64_t rows) {
+      cast<BufferOp>(SymbolTable::lookupSymbolIn(
+                         module, builder.getStringAttr(symbolName)))
+          .setCapacityAttr(builder.getI64IntegerAttr(rows));
+    };
+    // A Morton index: a leaf for each entity at most, and cells split, of
+    // more than `leaf` each and apart, as many as fit at each level.
+    if (const Index &index = found->second; index.morton) {
+      int64_t entities = capacity.getInt();
+      setCapacity(index.cells,
+                  entities + index.bits * (entities / (index.leaf + 1)) + 1);
+      continue;
+    }
+    setCapacity(found->second.cells, capacity.getInt() + 1);
     std::string update =
         buffer.getSymName().str() + "_update";
     module.walk([&](arith::ConstantOp constant) {
@@ -6704,6 +7005,51 @@ LogicalResult Parser::ifWithVars(Location where, mlir::Value holds,
   return success();
 }
 
+// `body` again and again while `condition` holds (asked before each
+// round), every var going round as in a `while`.
+LogicalResult Parser::whileWithVars(Location where,
+                                    function_ref<mlir::Value()> condition,
+                                    function_ref<LogicalResult()> body) {
+  SmallVector<VarState> vars = captureVars();
+  SmallVector<mlir::Value> starts;
+  SmallVector<Type> types;
+  for (const VarState &state : vars) {
+    starts.push_back(state.value);
+    types.push_back(state.value.getType());
+  }
+  auto bindTo = [&](ValueRange values) {
+    SmallVector<VarState> inside = vars;
+    for (auto [state, value] : llvm::zip(inside, values))
+      state.value = value;
+    restoreVars(inside);
+  };
+  auto loop = scf::WhileOp::create(builder, where, types, starts);
+  LogicalResult made = success();
+  {
+    OpBuilder::InsertionGuard guard(builder);
+    SmallVector<Location> locations(types.size(), where);
+    Block *ask = builder.createBlock(&loop.getBefore(), {}, types, locations);
+    bindTo(ask->getArguments());
+    scf::ConditionOp::create(builder, where, condition(), ask->getArguments());
+    Block *round = builder.createBlock(&loop.getAfter(), {}, types, locations);
+    bindTo(round->getArguments());
+    SmallVector<mlir::Value> ends(round->getArguments());
+    if (failed(body())) {
+      made = failure();
+    } else {
+      ends.clear();
+      for (const VarState &state : captureVars())
+        if (ends.size() < vars.size())
+          ends.push_back(state.value);
+    }
+    scf::YieldOp::create(builder, where, ends);
+  }
+  for (auto [state, result] : llvm::zip(vars, loop.getResults()))
+    state.value = result;
+  restoreVars(vars);
+  return made;
+}
+
 // Whether an op of the statements in a `near` loop only reads, or sets
 // vars (which go round as values): such statements LLVM does many rows
 // at once as they are.
@@ -6803,8 +7149,13 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
   std::optional<BufferUse> held = bufferNamed(*named);
   if (!held || !indexes.count(held->symbol) ||
       indexes[held->symbol].positions.empty())
-    return error(indexAt, "'" + *named + "' is not an index of a grid "
-                          "('index " + *named + " of C grid (x, y) cell w')");
+    return error(indexAt, "'" + *named +
+                              "' is not an index of a grid "
+                              "('index " +
+                              *named +
+                              " of C grid (x, y) cell w') "
+                              "or a Morton index ('index " +
+                              *named + " of C morton (x, y)')");
   std::string symbolName = held->symbol;
   Index &index = indexes[symbolName];
   unsigned dims = index.positions.size();
@@ -6962,7 +7313,7 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
   };
   mlir::Value size = index.wrap ? read("size", t) : mlir::Value();
   SmallVector<mlir::Value> sides, starts, widths;
-  for (unsigned d = 0; d < dims; ++d) {
+  for (unsigned d = 0; d < dims && !index.morton; ++d) {
     std::string number = std::to_string(d);
     sides.push_back(read("n" + number, i64));
     widths.push_back(read("w" + number, t));
@@ -7023,9 +7374,13 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
       many[d] = call("_many", {own, out, sides[d]});
     }
   };
-  if (kind == Kind::Near)
+  if (kind == Kind::Near && !index.morton)
     aim(given);
-  if (kind == Kind::Between)
+  // (Of a Morton index: how far the rows within `r` are at most, squared,
+  // which its walk goes by too.)
+  if (kind == Kind::Near && index.morton)
+    far = squared(given);
+  if (kind == Kind::Between && !index.morton)
     for (unsigned d = 0; d < dims; ++d) {
       mlir::Value none = zeroOf(t);
       mlir::Value l = call("_low", {lowCorner[d], none, starts[d], widths[d]});
@@ -7179,52 +7534,64 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
   // those are, squared): those cells as up to two runs of cells next to
   // each other (where they go round the box), and so of rows next to
   // each other; then the entities in them the form takes.
+  // (Of a Morton index: the rows of the one leaf a walk is at, the run
+  // `visitRuns` goes over in place of the grid's.)
+  std::pair<mlir::Value, mlir::Value> mortonRun;
   auto visitRuns = [&](mlir::Value outer, Found found) -> LogicalResult {
-    mlir::Value low, high;
-    if (kind == Kind::Between) {
-      low = lowCell[0];
-      high = highCell[0];
+    mlir::Value start1, end1, start2, end2;
+    if (mortonRun.first) {
+      start1 = mortonRun.first;
+      end1 = mortonRun.second;
+      start2 = end1;
+      end2 = end1;
     } else {
-      mlir::Value left = reach;
-      if (outer && whole) {
-        left =
-            call("_root", {arith::SubIOp::create(builder, where, far, outer)});
-        if (t != i64)
-          left = arith::TruncIOp::create(builder, where, t, left);
-      } else if (outer) {
-        left = math::SqrtOp::create(
-            builder, where, arith::SubFOp::create(builder, where, far, outer));
+      mlir::Value low, high;
+      if (kind == Kind::Between) {
+        low = lowCell[0];
+        high = highCell[0];
+      } else {
+        mlir::Value left = reach;
+        if (outer && whole) {
+          left = call("_root",
+                      {arith::SubIOp::create(builder, where, far, outer)});
+          if (t != i64)
+            left = arith::TruncIOp::create(builder, where, t, left);
+        } else if (outer) {
+          left = math::SqrtOp::create(
+              builder, where,
+              arith::SubFOp::create(builder, where, far, outer));
+        }
+        low = call("_low", {at_[0], left, starts[0], widths[0]});
+        high = call("_high", {at_[0], left, starts[0], widths[0]});
       }
-      low = call("_low", {at_[0], left, starts[0], widths[0]});
-      high = call("_high", {at_[0], left, starts[0], widths[0]});
+      auto part = [&](int64_t which) {
+        return call("_run", {integer(where, i64, which), low, high, from[0],
+                             many[0], sides[0]});
+      };
+      // The cell number of the first along the first side.
+      mlir::Value base = integer(where, i64, 0);
+      for (unsigned d = dims; d-- > 1;)
+        base = arith::MulIOp::create(
+            builder, where,
+            arith::AddIOp::create(builder, where, base, cell[d]), sides[d - 1]);
+      // (Rows the index has, by the cells: read by row numbers, which are
+      // not asked whether they are rows of the buffer.)
+      auto cellRow = IndexOfType::get(context, cells);
+      auto firstOf = [&](mlir::Value along, int64_t plus) -> mlir::Value {
+        mlir::Value number = arith::AddIOp::create(
+            builder, where, base,
+            arith::AddIOp::create(builder, where, along,
+                                  integer(where, i64, plus)));
+        return BufferAtOp::create(
+            builder, where, i32, cells, builder.getStringAttr("first"),
+            asIndex(where, arith::TruncIOp::create(builder, where, i32, number),
+                    cellRow));
+      };
+      start1 = firstOf(part(0), 0);
+      end1 = firstOf(part(1), 1);
+      start2 = firstOf(part(2), 0);
+      end2 = firstOf(part(3), 1);
     }
-    auto part = [&](int64_t which) {
-      return call("_run", {integer(where, i64, which), low, high, from[0],
-                           many[0], sides[0]});
-    };
-    // The cell number of the first along the first side.
-    mlir::Value base = integer(where, i64, 0);
-    for (unsigned d = dims; d-- > 1;)
-      base = arith::MulIOp::create(
-          builder, where, arith::AddIOp::create(builder, where, base, cell[d]),
-          sides[d - 1]);
-    // (Rows the index has, by the cells: read by row numbers, which are
-    // not asked whether they are rows of the buffer.)
-    auto cellRow = IndexOfType::get(context, cells);
-    auto firstOf = [&](mlir::Value along, int64_t plus) -> mlir::Value {
-      mlir::Value number = arith::AddIOp::create(
-          builder, where, base,
-          arith::AddIOp::create(builder, where, along,
-                                integer(where, i64, plus)));
-      return BufferAtOp::create(
-          builder, where, i32, cells, builder.getStringAttr("first"),
-          asIndex(where, arith::TruncIOp::create(builder, where, i32, number),
-                  cellRow));
-    };
-    mlir::Value start1 = firstOf(part(0), 0);
-    mlir::Value end1 = firstOf(part(1), 1);
-    mlir::Value start2 = firstOf(part(2), 0);
-    mlir::Value end2 = firstOf(part(3), 1);
     // (After a row: each run from the row after it, where it starts
     // before; one that ends before it has none.)
     if (afterRow) {
@@ -7415,7 +7782,148 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
                             [&] { return inner(gap); });
         });
   };
+  // Of a Morton index: what is read of a cell (by its number, an i32),
+  // and how far, at least, its entities are from the place, squared (on
+  // each side from the place to its box, of the nearest image where the
+  // box wraps).
+  auto cellAt = [&](mlir::Value number, StringRef field,
+                    Type type) -> mlir::Value {
+    return BufferAtOp::create(
+        builder, where, type, cells, builder.getStringAttr(field),
+        asIndex(where, number, IndexOfType::get(context, cells)));
+  };
+  // (Of fractions by a comparison, which a NaN does not pass: one
+  // instruction, where `maximumf` has more for what a NaN gives.)
+  auto most = [&](mlir::Value a, mlir::Value b) -> mlir::Value {
+    if (isa<IntegerType>(a.getType()))
+      return arith::MaxSIOp::create(builder, where, a, b);
+    return arith::SelectOp::create(
+        builder, where,
+        arith::CmpFOp::create(builder, where, arith::CmpFPredicate::OGT, a, b),
+        a, b);
+  };
+  auto least = [&](mlir::Value a, mlir::Value b) -> mlir::Value {
+    if (isa<IntegerType>(a.getType()))
+      return arith::MinSIOp::create(builder, where, a, b);
+    return arith::SelectOp::create(
+        builder, where,
+        arith::CmpFOp::create(builder, where, arith::CmpFPredicate::OLT, a, b),
+        a, b);
+  };
+  auto cellGap = [&](mlir::Value number) -> mlir::Value {
+    mlir::Value total;
+    for (unsigned d = 0; d < dims; ++d) {
+      std::string side = std::to_string(d);
+      mlir::Value lo = cellAt(number, "lo" + side, t);
+      mlir::Value hi = cellAt(number, "hi" + side, t);
+      auto out = [&](mlir::Value a, mlir::Value b) {
+        return most(most(minus(a, at_[d]), minus(at_[d], b)),
+                    zeroOf(distanceType));
+      };
+      mlir::Value gap = out(lo, hi);
+      if (index.wrap) {
+        auto less = [&](mlir::Value a) -> mlir::Value {
+          if (whole)
+            return arith::SubIOp::create(builder, where, a, size);
+          return arith::SubFOp::create(builder, where, a, size);
+        };
+        gap = least(gap, out(less(lo), less(hi)));
+        gap = least(gap, out(plus(lo, size), plus(hi, size)));
+      }
+      mlir::Value square = squared(gap);
+      total = total ? plus(total, square) : square;
+    }
+    return total;
+  };
+  // Of `between`: whether a cell's box meets the corners' on every side
+  // (or its image a box on, where the box wraps).
+  auto cellMeets = [&](mlir::Value number) -> mlir::Value {
+    mlir::Value meets;
+    for (unsigned d = 0; d < dims; ++d) {
+      std::string side = std::to_string(d);
+      mlir::Value lo = cellAt(number, "lo" + side, t);
+      mlir::Value hi = cellAt(number, "hi" + side, t);
+      auto overlaps = [&](mlir::Value a, mlir::Value b) {
+        return arith::AndIOp::create(builder, where, atMost(a, highCorner[d]),
+                                     atMost(lowCorner[d], b))
+            .getResult();
+      };
+      mlir::Value side_ = overlaps(lo, hi);
+      if (index.wrap)
+        side_ = arith::OrIOp::create(builder, where, side_,
+                                     overlaps(plus(lo, size), plus(hi, size)));
+      meets = both(meets, side_);
+    }
+    return meets;
+  };
+  // The cells in preorder, from the root: a cell no entity of which the
+  // form may take is left with all inside it (on to its `next`), a leaf
+  // has its rows visited (and is left so), else the walk goes on to the
+  // first cell inside it, the next in preorder. The rows so in the order
+  // of the index.
+  auto mortonWalk = [&](Found found, function_ref<mlir::Value()> limit =
+                                         nullptr) -> LogicalResult {
+    ScopeGuard hidden(*this);
+    // (Where it is goes round as a var of a name no program can write.)
+    const char *cursor = " morton cell";
+    bind(cursor, Variable::ofVar(integer(where, i32, 0)));
+    auto setAt = [&](mlir::Value value) {
+      llvm::find_if(llvm::reverse(scopes),
+                    [&](auto &s) { return s.count(cursor); })
+          ->find(cursor)
+          ->second.value = value;
+    };
+    return whileWithVars(
+        where,
+        [&]() -> mlir::Value {
+          return arith::CmpIOp::create(
+              builder, where, arith::CmpIPredicate::slt, lookup(cursor)->value,
+              BufferLenOp::create(builder, where, i32, cells));
+        },
+        [&]() -> LogicalResult {
+          mlir::Value number = lookup(cursor)->value;
+          mlir::Value first = cellAt(number, "first", i32);
+          mlir::Value count = cellAt(number, "count", i32);
+          mlir::Value child = cellAt(number, "child", i32);
+          mlir::Value leaf =
+              arith::CmpIOp::create(builder, where, arith::CmpIPredicate::slt,
+                                    child, integer(where, i32, 0));
+          mlir::Value next = cellAt(number, "next", i32);
+          mlir::Value end = arith::AddIOp::create(builder, where, first, count);
+          mlir::Value reached =
+              kind == Kind::Between
+                  ? cellMeets(number)
+                  : atMost(cellGap(number), limit ? limit() : far);
+          if (afterRow)
+            reached = arith::AndIOp::create(
+                builder, where, reached,
+                arith::CmpIOp::create(
+                    builder, where, arith::CmpIPredicate::sgt,
+                    arith::SubIOp::create(builder, where, end,
+                                          integer(where, i32, 1)),
+                    afterRow));
+          mlir::Value rows_ =
+              arith::AndIOp::create(builder, where, reached, leaf);
+          if (failed(ifWithVars(where, rows_, [&]() -> LogicalResult {
+                // (Its rows from the first, as a grid's runs: after a row
+                // from the row after it, as there.)
+                mortonRun = {first, end};
+                auto reset = llvm::make_scope_exit([&] { mortonRun = {}; });
+                return visitRuns(mlir::Value(), found);
+              })))
+            return failure();
+          mlir::Value past = arith::OrIOp::create(
+              builder, where, leaf,
+              arith::XOrIOp::create(
+                  builder, where, reached,
+                  arith::ConstantIntOp::create(builder, where, 1, 1)));
+          setAt(arith::SelectOp::create(builder, where, past, next, child));
+          return success();
+        });
+  };
   auto walk = [&](Found found) -> LogicalResult {
+    if (index.morton)
+      return mortonWalk(found);
     return dims == 1 ? visitRuns(mlir::Value(), found)
                      : sideLoop(dims - 1, mlir::Value(), found);
   };
@@ -7438,27 +7946,394 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
       memref::AllocOp::create(builder, where, farType, ValueRange{capacity});
   auto countType = MemRefType::get({1}, i32);
   mlir::Value counter = memref::AllocOp::create(builder, where, countType);
-  // As far as any entity may be, squared: half the box on each side where
-  // it wraps, else the farther end of the grid from the place.
-  mlir::Value farthest;
-  for (unsigned d = 0; d < dims; ++d) {
-    mlir::Value span;
-    if (index.wrap) {
-      span = whole ? arith::DivSIOp::create(builder, where, size,
-                                            integer(where, t, 2))
-                         .getResult()
-                   : arith::MulFOp::create(
-                         builder, where, size,
-                         arith::ConstantOp::create(
-                             builder, where, builder.getFloatAttr(t, 0.5)))
-                         .getResult();
-      // (Half of an odd whole size rounds down: one more.)
-      if (whole)
-        span =
-            arith::AddIOp::create(builder, where, span, integer(where, t, 1));
-    } else {
-      mlir::Value top =
-          whole ? arith::AddIOp::create(builder, where, wide(starts[d]),
+  mlir::Value c0 = arith::ConstantIndexOp::create(builder, where, 0);
+  // Each row within the distance and taken: into the list where it is
+  // nearer than its last (or the list is not full), past those farther.
+  auto insert = [&](mlir::Value row, mlir::Value counted, mlir::Value in,
+                    mlir::Value howFar, NearRows &near) -> LogicalResult {
+    FailureOr<mlir::Value> taken = takes(row, near);
+    if (failed(taken))
+      return failure();
+    mlir::Value number =
+        arith::IndexCastOp::create(builder, where, i32, counted);
+    auto branch = scf::IfOp::create(builder, where, both(in, *taken),
+                                    /*withElseRegion=*/false);
+    OpBuilder::InsertionGuard inner(builder);
+    builder.setInsertionPoint(branch.thenBlock()->getTerminator());
+    mlir::Value n =
+        memref::LoadOp::create(builder, where, counter, ValueRange{c0});
+    // (Nearer than the list's `at`: by how far, then by row.)
+    auto nearer = [&](mlir::Value atIndex) -> mlir::Value {
+      mlir::Value otherFar = memref::LoadOp::create(builder, where, distances,
+                                                    ValueRange{atIndex});
+      mlir::Value otherRow =
+          memref::LoadOp::create(builder, where, listed, ValueRange{atIndex});
+      mlir::Value same = compare(arith::CmpIPredicate::eq,
+                                 arith::CmpFPredicate::OEQ, howFar, otherFar);
+      mlir::Value earlier = arith::CmpIOp::create(
+          builder, where, arith::CmpIPredicate::slt, number, otherRow);
+      return arith::OrIOp::create(
+          builder, where, below(howFar, otherFar),
+          arith::AndIOp::create(builder, where, same, earlier));
+    };
+    mlir::Value room =
+        arith::CmpIOp::create(builder, where, arith::CmpIPredicate::slt, n, k);
+    mlir::Value any = arith::CmpIOp::create(
+        builder, where, arith::CmpIPredicate::sgt, k, integer(where, i32, 0));
+    // Where it goes in from: the end, or the last place of a full list.
+    auto goesIn =
+        scf::IfOp::create(builder, where, TypeRange{builder.getI1Type()}, room,
+                          /*withElseRegion=*/true);
+    {
+      OpBuilder::InsertionGuard g(builder);
+      builder.setInsertionPointToStart(goesIn.thenBlock());
+      scf::YieldOp::create(
+          builder, where,
+          ValueRange{arith::ConstantIntOp::create(builder, where, 1, 1)});
+      builder.setInsertionPointToStart(goesIn.elseBlock());
+      auto ask =
+          scf::IfOp::create(builder, where, TypeRange{builder.getI1Type()}, any,
+                            /*withElseRegion=*/true);
+      {
+        OpBuilder::InsertionGuard g2(builder);
+        builder.setInsertionPointToStart(ask.thenBlock());
+        mlir::Value lastAt = arith::IndexCastOp::create(
+            builder, where, indexType,
+            arith::SubIOp::create(builder, where, k, integer(where, i32, 1)));
+        scf::YieldOp::create(builder, where, ValueRange{nearer(lastAt)});
+        builder.setInsertionPointToStart(ask.elseBlock());
+        scf::YieldOp::create(
+            builder, where,
+            ValueRange{arith::ConstantIntOp::create(builder, where, 0, 1)});
+      }
+      scf::YieldOp::create(builder, where, ask.getResults());
+    }
+    auto put = scf::IfOp::create(builder, where, goesIn.getResult(0),
+                                 /*withElseRegion=*/false);
+    builder.setInsertionPoint(put.thenBlock()->getTerminator());
+    mlir::Value slot = arith::SelectOp::create(
+        builder, where, room, n,
+        arith::SubIOp::create(builder, where, k, integer(where, i32, 1)));
+    // Past those farther: each moved one on.
+    auto past =
+        scf::WhileOp::create(builder, where, TypeRange{i32}, ValueRange{slot});
+    {
+      OpBuilder::InsertionGuard g(builder);
+      Block *ask = builder.createBlock(&past.getBefore(), {}, {i32}, {where});
+      mlir::Value j = ask->getArgument(0);
+      mlir::Value more = arith::CmpIOp::create(
+          builder, where, arith::CmpIPredicate::sgt, j, integer(where, i32, 0));
+      auto check = scf::IfOp::create(builder, where,
+                                     TypeRange{builder.getI1Type()}, more,
+                                     /*withElseRegion=*/true);
+      {
+        OpBuilder::InsertionGuard g2(builder);
+        builder.setInsertionPointToStart(check.thenBlock());
+        mlir::Value previous = arith::IndexCastOp::create(
+            builder, where, indexType,
+            arith::SubIOp::create(builder, where, j, integer(where, i32, 1)));
+        scf::YieldOp::create(builder, where, ValueRange{nearer(previous)});
+        builder.setInsertionPointToStart(check.elseBlock());
+        scf::YieldOp::create(
+            builder, where,
+            ValueRange{arith::ConstantIntOp::create(builder, where, 0, 1)});
+      }
+      scf::ConditionOp::create(builder, where, check.getResult(0),
+                               ValueRange{j});
+      Block *move = builder.createBlock(&past.getAfter(), {}, {i32}, {where});
+      mlir::Value to = move->getArgument(0);
+      mlir::Value back =
+          arith::SubIOp::create(builder, where, to, integer(where, i32, 1));
+      mlir::Value toAt =
+          arith::IndexCastOp::create(builder, where, indexType, to);
+      mlir::Value backAt =
+          arith::IndexCastOp::create(builder, where, indexType, back);
+      memref::StoreOp::create(
+          builder, where,
+          memref::LoadOp::create(builder, where, listed, ValueRange{backAt}),
+          listed, ValueRange{toAt});
+      memref::StoreOp::create(
+          builder, where,
+          memref::LoadOp::create(builder, where, distances, ValueRange{backAt}),
+          distances, ValueRange{toAt});
+      scf::YieldOp::create(builder, where, ValueRange{back});
+    }
+    mlir::Value placed = arith::IndexCastOp::create(builder, where, indexType,
+                                                    past.getResult(0));
+    memref::StoreOp::create(builder, where, number, listed, ValueRange{placed});
+    memref::StoreOp::create(builder, where, howFar, distances,
+                            ValueRange{placed});
+    memref::StoreOp::create(
+        builder, where,
+        arith::MinSIOp::create(
+            builder, where,
+            arith::AddIOp::create(builder, where, n, integer(where, i32, 1)),
+            k),
+        counter, ValueRange{c0});
+    return success();
+  };
+  if (index.morton) {
+    // Of a Morton index: first the rows around the place's own key (k on
+    // either side, by halving), near it as the Morton order goes; then the
+    // cells in preorder as `near` walks them, a cell farther than the
+    // list's last (where it is full, or than `within`) left with all inside
+    // it, a leaf's other rows each into the list as above.
+    memref::StoreOp::create(builder, where, integer(where, i32, 0), counter,
+                            ValueRange{c0});
+    far = given ? squared(given) : mlir::Value();
+    mlir::Value endless =
+        whole ? integer(where, i64, std::numeric_limits<int64_t>::max())
+              : arith::ConstantOp::create(
+                    builder, where,
+                    builder.getFloatAttr(
+                        distanceType, std::numeric_limits<double>::infinity()))
+                    .getResult();
+    mlir::Value cap = far ? far : endless;
+    auto bound = [&]() -> mlir::Value {
+      mlir::Value n =
+          memref::LoadOp::create(builder, where, counter, ValueRange{c0});
+      mlir::Value full = arith::CmpIOp::create(builder, where,
+                                               arith::CmpIPredicate::sge, n, k);
+      mlir::Value lastAt = arith::IndexCastOp::create(
+          builder, where, indexType,
+          arith::MaxSIOp::create(
+              builder, where,
+              arith::SubIOp::create(builder, where, k, integer(where, i32, 1)),
+              integer(where, i32, 0)));
+      mlir::Value last =
+          memref::LoadOp::create(builder, where, distances, ValueRange{lastAt});
+      return arith::SelectOp::create(builder, where, full, least(last, cap),
+                                     cap);
+    };
+    SmallVector<VarState> varsBefore = captureVars();
+    // The place's key, and the first row whose key is not below it.
+    SmallVector<mlir::Value> keyArgs(at_.begin(), at_.end());
+    for (unsigned d = 0; d < dims; ++d)
+      keyArgs.push_back(read("lo" + std::to_string(d), t));
+    keyArgs.push_back(read("scale", builder.getF64Type()));
+    mlir::Value placeKey = call("_key", keyArgs, i64);
+    Function &find = functions.ofSymbol(index.find);
+    mlir::Value held =
+        BufferOfOp::create(builder, where, find.params.front(), rows)
+            .getResult();
+    mlir::Value own =
+        InvokeOp::create(builder, where, i32,
+                         FlatSymbolRefAttr::get(context, index.find),
+                         ValueRange{held, placeKey}, UnitAttr())
+            ->getResult(0);
+    mlir::Value many_ = BufferLenOp::create(builder, where, i32, rows);
+    mlir::Value wantedRows =
+        arith::MaxSIOp::create(builder, where, k, integer(where, i32, 0));
+    mlir::Value seedFrom = arith::IndexCastOp::create(
+        builder, where, indexType,
+        arith::MaxSIOp::create(
+            builder, where, integer(where, i32, 0),
+            arith::SubIOp::create(builder, where, own, wantedRows)));
+    mlir::Value seedTo = arith::IndexCastOp::create(
+        builder, where, indexType,
+        arith::MinSIOp::create(
+            builder, where, many_,
+            arith::AddIOp::create(builder, where, own, wantedRows)));
+    if (failed(loopWithVars(where, seedFrom, seedTo,
+                            [&](mlir::Value counted) -> LogicalResult {
+                              mlir::Value row = rowOf(counted);
+                              NearRows near{symbolName, row, {}};
+                              mlir::Value distance;
+                              mlir::Value in = seenAt(row, near, &distance);
+                              return insert(row, counted, in, distance, near);
+                            })))
+      return failure();
+    // (Those rows into the list once.)
+    auto others = [&](mlir::Value row, mlir::Value counted, mlir::Value in,
+                      mlir::Value howFar, NearRows &near) -> LogicalResult {
+      mlir::Value apart = arith::OrIOp::create(
+          builder, where,
+          arith::CmpIOp::create(builder, where, arith::CmpIPredicate::ult,
+                                counted, seedFrom),
+          arith::CmpIOp::create(builder, where, arith::CmpIPredicate::uge,
+                                counted, seedTo));
+      return insert(row, counted, both(in, apart), howFar, near);
+    };
+    // The cells from the root, depth first, the nearest of those inside a
+    // cell first: a stack in memory (a cell's cells at most for each
+    // level), each with how far its box is, those inside a cell asked
+    // together (side by side) and each not farther than the list's last
+    // put in past those nearer than it, so that the nearest is on top.
+    int64_t room = (index.bits + 1) * (int64_t(1) << dims) + 1;
+    mlir::Value stack =
+        memref::AllocOp::create(builder, where, MemRefType::get({room}, i32));
+    mlir::Value gaps = memref::AllocOp::create(
+        builder, where, MemRefType::get({room}, distanceType));
+    auto at32 = [&](mlir::Value v) -> mlir::Value {
+      return arith::IndexCastOp::create(builder, where, indexType, v);
+    };
+    mlir::Value start = arith::AndIOp::create(
+        builder, where,
+        arith::CmpIOp::create(builder, where, arith::CmpIPredicate::sgt, k,
+                              integer(where, i32, 0)),
+        arith::CmpIOp::create(builder, where, arith::CmpIPredicate::sgt,
+                              BufferLenOp::create(builder, where, i32, cells),
+                              integer(where, i32, 0)));
+    memref::StoreOp::create(builder, where, integer(where, i32, 0), stack,
+                            ValueRange{c0});
+    memref::StoreOp::create(builder, where, zeroOf(distanceType), gaps,
+                            ValueRange{c0});
+    auto search = scf::WhileOp::create(
+        builder, where, TypeRange{i32},
+        ValueRange{arith::ExtUIOp::create(builder, where, i32, start)});
+    {
+      OpBuilder::InsertionGuard guard(builder);
+      Block *ask = builder.createBlock(&search.getBefore(), {}, {i32}, {where});
+      mlir::Value height = ask->getArgument(0);
+      scf::ConditionOp::create(
+          builder, where,
+          arith::CmpIOp::create(builder, where, arith::CmpIPredicate::sgt,
+                                height, integer(where, i32, 0)),
+          ValueRange{height});
+      Block *step = builder.createBlock(&search.getAfter(), {}, {i32}, {where});
+      mlir::Value top = arith::SubIOp::create(
+          builder, where, step->getArgument(0), integer(where, i32, 1));
+      mlir::Value number =
+          memref::LoadOp::create(builder, where, stack, ValueRange{at32(top)});
+      mlir::Value gap =
+          memref::LoadOp::create(builder, where, gaps, ValueRange{at32(top)});
+      auto reached = scf::IfOp::create(builder, where, TypeRange{i32},
+                                       atMost(gap, bound()),
+                                       /*withElseRegion=*/true);
+      {
+        OpBuilder::InsertionGuard inner(builder);
+        builder.setInsertionPointToStart(reached.elseBlock());
+        scf::YieldOp::create(builder, where, ValueRange{top});
+        builder.setInsertionPointToStart(reached.thenBlock());
+        mlir::Value child = cellAt(number, "child", i32);
+        mlir::Value leaf =
+            arith::CmpIOp::create(builder, where, arith::CmpIPredicate::slt,
+                                  child, integer(where, i32, 0));
+        auto split = scf::IfOp::create(builder, where, TypeRange{i32}, leaf,
+                                       /*withElseRegion=*/true);
+        builder.setInsertionPointToStart(split.thenBlock());
+        {
+          mlir::Value first = cellAt(number, "first", i32);
+          mlir::Value end = arith::AddIOp::create(builder, where, first,
+                                                  cellAt(number, "count", i32));
+          mortonRun = {first, end};
+          auto reset = llvm::make_scope_exit([&] { mortonRun = {}; });
+          if (failed(visitRuns(mlir::Value(), others)))
+            return failure();
+          scf::YieldOp::create(builder, where, ValueRange{top});
+        }
+        builder.setInsertionPointToStart(split.elseBlock());
+        mlir::Value kids = cellAt(number, "kids", i32);
+        auto inside = scf::ForOp::create(
+            builder, where, at32(child),
+            at32(arith::AddIOp::create(builder, where, child, kids)),
+            arith::ConstantIndexOp::create(builder, where, 1), ValueRange{top});
+        {
+          OpBuilder::InsertionGuard g(builder);
+          builder.setInsertionPointToStart(inside.getBody());
+          mlir::Value cell = arith::IndexCastOp::create(
+              builder, where, i32, inside.getInductionVar());
+          mlir::Value height = inside.getRegionIterArg(0);
+          mlir::Value g2 = cellGap(cell);
+          auto keep = scf::IfOp::create(builder, where, TypeRange{i32},
+                                        atMost(g2, bound()),
+                                        /*withElseRegion=*/true);
+          {
+            OpBuilder::InsertionGuard g3(builder);
+            builder.setInsertionPointToStart(keep.elseBlock());
+            scf::YieldOp::create(builder, where, ValueRange{height});
+            builder.setInsertionPointToStart(keep.thenBlock());
+            // (Past those of this cell's nearer than it, from the top
+            // down: they move up one.)
+            auto past = scf::WhileOp::create(builder, where, TypeRange{i32},
+                                             ValueRange{height});
+            {
+              OpBuilder::InsertionGuard g4(builder);
+              Block *check =
+                  builder.createBlock(&past.getBefore(), {}, {i32}, {where});
+              mlir::Value j = check->getArgument(0);
+              mlir::Value above = arith::CmpIOp::create(
+                  builder, where, arith::CmpIPredicate::sgt, j, top);
+              auto nearer = scf::IfOp::create(
+                  builder, where, TypeRange{builder.getI1Type()}, above,
+                  /*withElseRegion=*/true);
+              {
+                OpBuilder::InsertionGuard g5(builder);
+                builder.setInsertionPointToStart(nearer.thenBlock());
+                mlir::Value under = memref::LoadOp::create(
+                    builder, where, gaps,
+                    ValueRange{at32(arith::SubIOp::create(
+                        builder, where, j, integer(where, i32, 1)))});
+                scf::YieldOp::create(builder, where,
+                                     ValueRange{below(under, g2)});
+                builder.setInsertionPointToStart(nearer.elseBlock());
+                scf::YieldOp::create(builder, where,
+                                     ValueRange{arith::ConstantIntOp::create(
+                                         builder, where, 0, 1)});
+              }
+              scf::ConditionOp::create(builder, where, nearer.getResult(0),
+                                       ValueRange{j});
+              Block *move =
+                  builder.createBlock(&past.getAfter(), {}, {i32}, {where});
+              mlir::Value to = move->getArgument(0);
+              mlir::Value from_ = arith::SubIOp::create(builder, where, to,
+                                                        integer(where, i32, 1));
+              memref::StoreOp::create(
+                  builder, where,
+                  memref::LoadOp::create(builder, where, stack,
+                                         ValueRange{at32(from_)}),
+                  stack, ValueRange{at32(to)});
+              memref::StoreOp::create(
+                  builder, where,
+                  memref::LoadOp::create(builder, where, gaps,
+                                         ValueRange{at32(from_)}),
+                  gaps, ValueRange{at32(to)});
+              scf::YieldOp::create(builder, where, ValueRange{from_});
+            }
+            mlir::Value placed = at32(past.getResult(0));
+            memref::StoreOp::create(builder, where, cell, stack,
+                                    ValueRange{placed});
+            memref::StoreOp::create(builder, where, g2, gaps,
+                                    ValueRange{placed});
+            scf::YieldOp::create(
+                builder, where,
+                ValueRange{arith::AddIOp::create(builder, where, height,
+                                                 integer(where, i32, 1))});
+          }
+          scf::YieldOp::create(builder, where, keep.getResults());
+        }
+        scf::YieldOp::create(builder, where, inside.getResults());
+        builder.setInsertionPointAfter(split);
+        scf::YieldOp::create(builder, where, split.getResults());
+      }
+      scf::YieldOp::create(builder, where, reached.getResults());
+    }
+    memref::DeallocOp::create(builder, where, stack);
+    memref::DeallocOp::create(builder, where, gaps);
+    restoreVars(varsBefore);
+  } else {
+    // As far as any entity may be, squared: half the box on each side where
+    // it wraps, else the farther end of the grid from the place.
+    mlir::Value farthest;
+    for (unsigned d = 0; d < dims; ++d) {
+      mlir::Value span;
+      if (index.wrap) {
+        span = whole ? arith::DivSIOp::create(builder, where, size,
+                                              integer(where, t, 2))
+                           .getResult()
+                     : arith::MulFOp::create(
+                           builder, where, size,
+                           arith::ConstantOp::create(
+                               builder, where, builder.getFloatAttr(t, 0.5)))
+                           .getResult();
+        // (Half of an odd whole size rounds down: one more.)
+        if (whole)
+          span =
+              arith::AddIOp::create(builder, where, span, integer(where, t, 1));
+      } else {
+        mlir::Value top =
+            whole
+                ? arith::AddIOp::create(builder, where, wide(starts[d]),
                                         arith::MulIOp::create(builder, where,
                                                               sides[d],
                                                               wide(widths[d])))
@@ -7469,271 +8344,150 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
                           builder, where, widths[d],
                           arith::SIToFPOp::create(builder, where, t, sides[d])))
                       .getResult();
-      if (whole) {
-        mlir::Value p = wide(at_[d]);
-        mlir::Value a =
-            arith::SubIOp::create(builder, where, p, wide(starts[d]));
-        mlir::Value b = arith::SubIOp::create(builder, where, top, p);
-        mlir::Value absA = math::AbsIOp::create(builder, where, a);
-        mlir::Value absB = math::AbsIOp::create(builder, where, b);
-        span = arith::MaxSIOp::create(builder, where, absA, absB);
-      } else {
-        mlir::Value a = math::AbsFOp::create(
-            builder, where,
-            arith::SubFOp::create(builder, where, at_[d], starts[d]));
-        mlir::Value b = math::AbsFOp::create(
-            builder, where, arith::SubFOp::create(builder, where, top, at_[d]));
-        span = arith::MaximumFOp::create(builder, where, a, b);
+        if (whole) {
+          mlir::Value p = wide(at_[d]);
+          mlir::Value a =
+              arith::SubIOp::create(builder, where, p, wide(starts[d]));
+          mlir::Value b = arith::SubIOp::create(builder, where, top, p);
+          mlir::Value absA = math::AbsIOp::create(builder, where, a);
+          mlir::Value absB = math::AbsIOp::create(builder, where, b);
+          span = arith::MaxSIOp::create(builder, where, absA, absB);
+        } else {
+          mlir::Value a = math::AbsFOp::create(
+              builder, where,
+              arith::SubFOp::create(builder, where, at_[d], starts[d]));
+          mlir::Value b = math::AbsFOp::create(
+              builder, where,
+              arith::SubFOp::create(builder, where, top, at_[d]));
+          span = arith::MaximumFOp::create(builder, where, a, b);
+        }
+      }
+      mlir::Value square = squared(span);
+      farthest = farthest ? plus(farthest, square) : square;
+    }
+    // The first distance: where the entities are as many everywhere, the
+    // one that half as many again as k are within (in the area, or volume,
+    // the grid is over: a ball of it as big as k and a half of the
+    // entities' shares), no farther than `within`.
+    Type f64 = builder.getF64Type();
+    auto real = [&](mlir::Value v) -> mlir::Value {
+      if (v.getType() == f64)
+        return v;
+      if (isa<IntegerType>(v.getType()))
+        return arith::SIToFPOp::create(builder, where, f64, v);
+      return arith::ExtFOp::create(builder, where, f64, v);
+    };
+    mlir::Value volume;
+    for (unsigned d = 0; d < dims; ++d) {
+      mlir::Value side = arith::MulFOp::create(builder, where, real(sides[d]),
+                                               real(widths[d]));
+      volume =
+          volume
+              ? arith::MulFOp::create(builder, where, volume, side).getResult()
+              : side;
+    }
+    mlir::Value entities = arith::MaxSIOp::create(
+        builder, where, BufferLenOp::create(builder, where, i32, rows),
+        integer(where, i32, 1));
+    // (A ball of radius 1: pi, of three sides 4 pi / 3.)
+    double ball = dims == 2 ? M_PI : dims == 3 ? 4.0 * M_PI / 3.0 : 2.0;
+    mlir::Value share = arith::DivFOp::create(
+        builder, where,
+        arith::MulFOp::create(
+            builder, where, volume,
+            arith::MulFOp::create(
+                builder, where, real(k),
+                arith::ConstantOp::create(builder, where,
+                                          builder.getF64FloatAttr(1.5)))),
+        arith::MulFOp::create(
+            builder, where, real(entities),
+            arith::ConstantOp::create(builder, where,
+                                      builder.getF64FloatAttr(ball))));
+    // (A guess: of three sides from the fourth root, three steps of
+    // Newton's towards the third, without a library for it.)
+    mlir::Value guess = share;
+    if (dims >= 2)
+      guess = math::SqrtOp::create(builder, where, share);
+    if (dims == 3) {
+      guess = math::SqrtOp::create(builder, where, guess);
+      mlir::Value third = arith::ConstantOp::create(
+          builder, where, builder.getF64FloatAttr(1.0 / 3.0));
+      // (Of nothing, nothing: not a share over a root of nothing.)
+      mlir::Value tiny = arith::ConstantOp::create(
+          builder, where, builder.getF64FloatAttr(1e-300));
+      for (int step = 0; step < 3; ++step) {
+        mlir::Value y = arith::MaximumFOp::create(builder, where, guess, tiny);
+        guess = arith::MulFOp::create(
+            builder, where, third,
+            arith::AddFOp::create(
+                builder, where, arith::AddFOp::create(builder, where, y, y),
+                arith::DivFOp::create(
+                    builder, where, share,
+                    arith::MulFOp::create(builder, where, y, y))));
       }
     }
-    mlir::Value square = squared(span);
-    farthest = farthest ? plus(farthest, square) : square;
-  }
-  // The first distance: where the entities are as many everywhere, the
-  // one that half as many again as k are within (in the area, or volume,
-  // the grid is over: a ball of it as big as k and a half of the
-  // entities' shares), no farther than `within`.
-  Type f64 = builder.getF64Type();
-  auto real = [&](mlir::Value v) -> mlir::Value {
-    if (v.getType() == f64)
-      return v;
-    if (isa<IntegerType>(v.getType()))
-      return arith::SIToFPOp::create(builder, where, f64, v);
-    return arith::ExtFOp::create(builder, where, f64, v);
-  };
-  mlir::Value volume;
-  for (unsigned d = 0; d < dims; ++d) {
-    mlir::Value side =
-        arith::MulFOp::create(builder, where, real(sides[d]), real(widths[d]));
-    volume =
-        volume ? arith::MulFOp::create(builder, where, volume, side).getResult()
-               : side;
-  }
-  mlir::Value entities = arith::MaxSIOp::create(
-      builder, where, BufferLenOp::create(builder, where, i32, rows),
-      integer(where, i32, 1));
-  // (A ball of radius 1: pi, of three sides 4 pi / 3.)
-  double ball = dims == 2 ? M_PI : dims == 3 ? 4.0 * M_PI / 3.0 : 2.0;
-  mlir::Value share = arith::DivFOp::create(
-      builder, where,
-      arith::MulFOp::create(
-          builder, where, volume,
-          arith::MulFOp::create(
-              builder, where, real(k),
-              arith::ConstantOp::create(builder, where,
-                                        builder.getF64FloatAttr(1.5)))),
-      arith::MulFOp::create(
-          builder, where, real(entities),
-          arith::ConstantOp::create(builder, where,
-                                    builder.getF64FloatAttr(ball))));
-  // (A guess: of three sides from the fourth root, three steps of
-  // Newton's towards the third, without a library for it.)
-  mlir::Value guess = share;
-  if (dims >= 2)
-    guess = math::SqrtOp::create(builder, where, share);
-  if (dims == 3) {
-    guess = math::SqrtOp::create(builder, where, guess);
-    mlir::Value third = arith::ConstantOp::create(
-        builder, where, builder.getF64FloatAttr(1.0 / 3.0));
-    // (Of nothing, nothing: not a share over a root of nothing.)
-    mlir::Value tiny = arith::ConstantOp::create(
-        builder, where, builder.getF64FloatAttr(1e-300));
-    for (int step = 0; step < 3; ++step) {
-      mlir::Value y = arith::MaximumFOp::create(builder, where, guess, tiny);
-      guess = arith::MulFOp::create(
-          builder, where, third,
-          arith::AddFOp::create(
-              builder, where, arith::AddFOp::create(builder, where, y, y),
-              arith::DivFOp::create(
-                  builder, where, share,
-                  arith::MulFOp::create(builder, where, y, y))));
-    }
-  }
-  mlir::Value first;
-  if (whole)
-    first = arith::AddIOp::create(
-        builder, where, arith::FPToSIOp::create(builder, where, t, guess),
-        integer(where, t, 1));
-  else
-    first = t == f64
-                ? guess
-                : arith::TruncFOp::create(builder, where, t, guess).getResult();
-  if (given) {
-    first =
-        whole ? arith::MinSIOp::create(builder, where, first, given).getResult()
+    mlir::Value first;
+    if (whole)
+      first = arith::AddIOp::create(
+          builder, where, arith::FPToSIOp::create(builder, where, t, guess),
+          integer(where, t, 1));
+    else
+      first =
+          t == f64
+              ? guess
+              : arith::TruncFOp::create(builder, where, t, guess).getResult();
+    if (given) {
+      first =
+          whole
+              ? arith::MinSIOp::create(builder, where, first, given).getResult()
               : arith::MinimumFOp::create(builder, where, first, given)
                     .getResult();
-    mlir::Value cap = squared(given);
-    farthest =
-        whole
-            ? arith::MinSIOp::create(builder, where, farthest, cap).getResult()
-            : arith::MinimumFOp::create(builder, where, farthest, cap)
-                  .getResult();
-  }
-  mlir::Value c0 = arith::ConstantIndexOp::create(builder, where, 0);
-  auto whileLoop =
-      scf::WhileOp::create(builder, where, TypeRange{t}, ValueRange{first});
-  {
-    OpBuilder::InsertionGuard guard(builder);
-    Block *before =
-        builder.createBlock(&whileLoop.getBefore(), {}, {t}, {where});
-    mlir::Value distance = before->getArgument(0);
-    memref::StoreOp::create(builder, where, integer(where, i32, 0), counter,
-                            ValueRange{c0});
-    aim(distance);
-    SmallVector<VarState> varsBefore = captureVars();
-    // Each row within the distance and taken: into the list where it is
-    // nearer than its last (or the list is not full), past those farther.
-    auto insert = [&](mlir::Value row, mlir::Value counted, mlir::Value in,
-                      mlir::Value howFar, NearRows &near) -> LogicalResult {
-      FailureOr<mlir::Value> taken = takes(row, near);
-      if (failed(taken))
+      mlir::Value cap = squared(given);
+      farthest = whole
+                     ? arith::MinSIOp::create(builder, where, farthest, cap)
+                           .getResult()
+                     : arith::MinimumFOp::create(builder, where, farthest, cap)
+                           .getResult();
+    }
+    auto whileLoop =
+        scf::WhileOp::create(builder, where, TypeRange{t}, ValueRange{first});
+    {
+      OpBuilder::InsertionGuard guard(builder);
+      Block *before =
+          builder.createBlock(&whileLoop.getBefore(), {}, {t}, {where});
+      mlir::Value distance = before->getArgument(0);
+      memref::StoreOp::create(builder, where, integer(where, i32, 0), counter,
+                              ValueRange{c0});
+      aim(distance);
+      SmallVector<VarState> varsBefore = captureVars();
+      if (failed(walk(insert)))
         return failure();
-      mlir::Value number =
-          arith::IndexCastOp::create(builder, where, i32, counted);
-      auto branch = scf::IfOp::create(builder, where, both(in, *taken),
-                                      /*withElseRegion=*/false);
-      OpBuilder::InsertionGuard inner(builder);
-      builder.setInsertionPoint(branch.thenBlock()->getTerminator());
+      restoreVars(varsBefore);
       mlir::Value n =
           memref::LoadOp::create(builder, where, counter, ValueRange{c0});
-      // (Nearer than the list's `at`: by how far, then by row.)
-      auto nearer = [&](mlir::Value atIndex) -> mlir::Value {
-        mlir::Value otherFar = memref::LoadOp::create(builder, where, distances,
-                                                      ValueRange{atIndex});
-        mlir::Value otherRow =
-            memref::LoadOp::create(builder, where, listed, ValueRange{atIndex});
-        mlir::Value same = compare(arith::CmpIPredicate::eq,
-                                   arith::CmpFPredicate::OEQ, howFar, otherFar);
-        mlir::Value earlier = arith::CmpIOp::create(
-            builder, where, arith::CmpIPredicate::slt, number, otherRow);
-        return arith::OrIOp::create(
-            builder, where, below(howFar, otherFar),
-            arith::AndIOp::create(builder, where, same, earlier));
-      };
-      mlir::Value room = arith::CmpIOp::create(builder, where,
-                                               arith::CmpIPredicate::slt, n, k);
-      mlir::Value any = arith::CmpIOp::create(
-          builder, where, arith::CmpIPredicate::sgt, k, integer(where, i32, 0));
-      // Where it goes in from: the end, or the last place of a full list.
-      auto goesIn =
-          scf::IfOp::create(builder, where, TypeRange{builder.getI1Type()},
-                            room, /*withElseRegion=*/true);
-      {
-        OpBuilder::InsertionGuard g(builder);
-        builder.setInsertionPointToStart(goesIn.thenBlock());
-        scf::YieldOp::create(
-            builder, where,
-            ValueRange{arith::ConstantIntOp::create(builder, where, 1, 1)});
-        builder.setInsertionPointToStart(goesIn.elseBlock());
-        auto ask = scf::IfOp::create(builder, where,
-                                     TypeRange{builder.getI1Type()}, any,
-                                     /*withElseRegion=*/true);
-        {
-          OpBuilder::InsertionGuard g2(builder);
-          builder.setInsertionPointToStart(ask.thenBlock());
-          mlir::Value lastAt = arith::IndexCastOp::create(
-              builder, where, indexType,
-              arith::SubIOp::create(builder, where, k, integer(where, i32, 1)));
-          scf::YieldOp::create(builder, where, ValueRange{nearer(lastAt)});
-          builder.setInsertionPointToStart(ask.elseBlock());
-          scf::YieldOp::create(
-              builder, where,
-              ValueRange{arith::ConstantIntOp::create(builder, where, 0, 1)});
-        }
-        scf::YieldOp::create(builder, where, ask.getResults());
-      }
-      auto put = scf::IfOp::create(builder, where, goesIn.getResult(0),
-                                   /*withElseRegion=*/false);
-      builder.setInsertionPoint(put.thenBlock()->getTerminator());
-      mlir::Value slot = arith::SelectOp::create(
-          builder, where, room, n,
-          arith::SubIOp::create(builder, where, k, integer(where, i32, 1)));
-      // Past those farther: each moved one on.
-      auto past = scf::WhileOp::create(builder, where, TypeRange{i32},
-                                       ValueRange{slot});
-      {
-        OpBuilder::InsertionGuard g(builder);
-        Block *ask = builder.createBlock(&past.getBefore(), {}, {i32}, {where});
-        mlir::Value j = ask->getArgument(0);
-        mlir::Value more =
-            arith::CmpIOp::create(builder, where, arith::CmpIPredicate::sgt, j,
-                                  integer(where, i32, 0));
-        auto check = scf::IfOp::create(builder, where,
-                                       TypeRange{builder.getI1Type()}, more,
-                                       /*withElseRegion=*/true);
-        {
-          OpBuilder::InsertionGuard g2(builder);
-          builder.setInsertionPointToStart(check.thenBlock());
-          mlir::Value previous = arith::IndexCastOp::create(
-              builder, where, indexType,
-              arith::SubIOp::create(builder, where, j, integer(where, i32, 1)));
-          scf::YieldOp::create(builder, where, ValueRange{nearer(previous)});
-          builder.setInsertionPointToStart(check.elseBlock());
-          scf::YieldOp::create(
-              builder, where,
-              ValueRange{arith::ConstantIntOp::create(builder, where, 0, 1)});
-        }
-        scf::ConditionOp::create(builder, where, check.getResult(0),
-                                 ValueRange{j});
-        Block *move = builder.createBlock(&past.getAfter(), {}, {i32}, {where});
-        mlir::Value to = move->getArgument(0);
-        mlir::Value back =
-            arith::SubIOp::create(builder, where, to, integer(where, i32, 1));
-        mlir::Value toAt =
-            arith::IndexCastOp::create(builder, where, indexType, to);
-        mlir::Value backAt =
-            arith::IndexCastOp::create(builder, where, indexType, back);
-        memref::StoreOp::create(
-            builder, where,
-            memref::LoadOp::create(builder, where, listed, ValueRange{backAt}),
-            listed, ValueRange{toAt});
-        memref::StoreOp::create(builder, where,
-                                memref::LoadOp::create(builder, where,
-                                                       distances,
-                                                       ValueRange{backAt}),
-                                distances, ValueRange{toAt});
-        scf::YieldOp::create(builder, where, ValueRange{back});
-      }
-      mlir::Value placed = arith::IndexCastOp::create(builder, where, indexType,
-                                                      past.getResult(0));
-      memref::StoreOp::create(builder, where, number, listed,
-                              ValueRange{placed});
-      memref::StoreOp::create(builder, where, howFar, distances,
-                              ValueRange{placed});
-      memref::StoreOp::create(
-          builder, where,
-          arith::MinSIOp::create(
-              builder, where,
-              arith::AddIOp::create(builder, where, n, integer(where, i32, 1)),
-              k),
-          counter, ValueRange{c0});
-      return success();
-    };
-    if (failed(walk(insert)))
-      return failure();
-    restoreVars(varsBefore);
-    mlir::Value n =
-        memref::LoadOp::create(builder, where, counter, ValueRange{c0});
-    mlir::Value short_ =
-        arith::CmpIOp::create(builder, where, arith::CmpIPredicate::slt, n, k);
-    // (An index with no rows has no grid to be as far as.)
-    mlir::Value some = arith::CmpIOp::create(
-        builder, where, arith::CmpIPredicate::sgt,
-        BufferLenOp::create(builder, where, i32, rows), integer(where, i32, 0));
-    mlir::Value more = arith::AndIOp::create(
-        builder, where, arith::AndIOp::create(builder, where, short_, some),
-        below(far, farthest));
-    mlir::Value twice = plus(distance, distance);
-    mlir::Value next =
-        given ? (whole ? arith::MinSIOp::create(builder, where, twice, given)
+      mlir::Value short_ = arith::CmpIOp::create(
+          builder, where, arith::CmpIPredicate::slt, n, k);
+      // (An index with no rows has no grid to be as far as.)
+      mlir::Value some =
+          arith::CmpIOp::create(builder, where, arith::CmpIPredicate::sgt,
+                                BufferLenOp::create(builder, where, i32, rows),
+                                integer(where, i32, 0));
+      mlir::Value more = arith::AndIOp::create(
+          builder, where, arith::AndIOp::create(builder, where, short_, some),
+          below(far, farthest));
+      mlir::Value twice = plus(distance, distance);
+      mlir::Value next =
+          given
+              ? (whole ? arith::MinSIOp::create(builder, where, twice, given)
                              .getResult()
                        : arith::MinimumFOp::create(builder, where, twice, given)
                              .getResult())
               : twice;
-    scf::ConditionOp::create(builder, where, more, ValueRange{next});
-    Block *after = builder.createBlock(&whileLoop.getAfter(), {}, {t}, {where});
-    scf::YieldOp::create(builder, where, ValueRange{after->getArgument(0)});
+      scf::ConditionOp::create(builder, where, more, ValueRange{next});
+      Block *after =
+          builder.createBlock(&whileLoop.getAfter(), {}, {t}, {where});
+      scf::YieldOp::create(builder, where, ValueRange{after->getArgument(0)});
+    }
   }
   // Then the statements for each, nearest first (where they are seen
   // from, again; how far was asked already).
