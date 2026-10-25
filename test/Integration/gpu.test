@@ -221,6 +221,16 @@
 // RUN: FileCheck %s --check-prefix=LAST --input-file=%t.last.gpu
 // LAST: frame 0 rows 14000 7000 hash 9859367445994158056 6983961741620595120 first 384 last 500
 
+// Slices of entities `with` and `without` a tag their archetype holds in
+// its rows (test/Integration/slice_tags.test), the slices' systems on the
+// GPU: of those that have it, or lack it, the same as on the CPU.
+// RUN: sed -e 's/^system slice_/gpu system slice_/' %S/Inputs/slice_tags.ent > %t.tags.ent
+// RUN: %ent run %S/Inputs/slice_tags.ent > %t.tags.cpu
+// RUN: %ent run %t.tags.ent --gpu > %t.tags.gpu
+// RUN: diff %t.tags.cpu %t.tags.gpu
+// RUN: grep -c "^gpu system slice_" %t.tags.ent | FileCheck %s --check-prefix=TAGS
+// TAGS: 4
+
 // Rows given to buffers from `for`s of a `gpu` system (two archetypes,
 // every entity and those under an `if`, two `for`s one after the other
 // into one buffer): put in the order of the entities on the GPU, read

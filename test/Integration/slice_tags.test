@@ -1,0 +1,14 @@
+// Slices of `for ... by` with `with` and `without` a tag the archetype
+// holds in its rows (not apart): the slice is of the entities that have
+// it, or lack it, not of all of them (before, `first 3` found none once
+// the three nearest had lost the tag). The same on one core and on many.
+// RUN: %ent run %S/Inputs/slice_tags.ent 2>/dev/null > %t.one
+// RUN: env ENT_PARALLEL_MIN=4 %ent run --parallel %S/Inputs/slice_tags.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+
+// CHECK: round 0: 20 marked; first 3: 19 18 17; last 2: 1 0; from 5 to 12: 15 14 13 12 11 10 9; unmarked first 2:
+// CHECK: round 1: 17 marked; first 3: 16 15 14; last 2: 1 0; from 5 to 12: 15 14 13 12 11 10 9; unmarked first 2: 19 18
+// CHECK: round 2: 14 marked; first 3: 13 12 11; last 2: 1 0; from 5 to 12: 13 12 11 10 9; unmarked first 2: 19 18
+// CHECK: round 3: 11 marked; first 3: 10 9 8; last 2: 1 0; from 5 to 12: 10 9; unmarked first 2: 19 18
+// CHECK: round 4: 8 marked; first 3: 7 6 5; last 2: 1 0; from 5 to 12:; unmarked first 2: 19 18

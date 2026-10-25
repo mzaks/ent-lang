@@ -1,0 +1,72 @@
+// Slices of `for ... by` over entities that have or lack a tag kept in
+// their archetype's rows (not apart): the tag is taken away from the
+// ones a slice gave, round by round, so that those with it and those
+// without are mixed in the rows. Each slice is of the entities the
+// `with` or `without` asks for, as a full `for ... by` lists them.
+// (test/Integration/slice_tags.test; the `slice_` systems on the GPU in
+// test/Integration/gpu.test.)
+import console
+
+component Item { key: i32, far: f32 } capacity 64
+tag Marked
+
+unique Round { n: i32 }
+transient buffer First { key: i32 } capacity 64
+transient buffer Last { key: i32 } capacity 64
+transient buffer Range { key: i32 } capacity 64
+transient buffer Unmarked { key: i32 } capacity 64
+
+system make() {
+  for k in 0..20 { spawn { Item { key: k, far: (20 - k) as f32 }, Marked } }
+}
+system clear() {
+  First = []
+  Last = []
+  Range = []
+  Unmarked = []
+}
+system slice_first() {
+  for c: Item with Marked by c.far first 3 { First += { key: c.key } }
+}
+system slice_last() {
+  for c: Item with Marked by c.far last 2 { Last += { key: c.key } }
+}
+system slice_range() {
+  for c: Item with Marked by c.far from 5.0 to 12.0 { Range += { key: c.key } }
+}
+system slice_unmarked() {
+  for c: Item without Marked by c.far first 2 { Unmarked += { key: c.key } }
+}
+system tell() {
+  let marked = for c: Item with Marked { }
+  var line: text[126] = "round {Round.n}: {marked} marked; first 3:"
+  for i in 0..len(First) { line += " {First[i].key}" }
+  line += "; last 2:"
+  for i in 0..len(Last) { line += " {Last[i].key}" }
+  line += "; from 5 to 12:"
+  for i in 0..len(Range) { line += " {Range[i].key}" }
+  line += "; unmarked first 2:"
+  for i in 0..len(Unmarked) { line += " {Unmarked[i].key}" }
+  put(line)
+}
+// (The three nearest that are marked are marked no more.)
+system unmark() {
+  for e, c: Item with Marked {
+    for i in 0..len(First) { if First[i].key == c.key { e.remove(Marked) } }
+  }
+  Round.n += 1
+}
+schedule start() { make() }
+schedule round() {
+  clear()
+  slice_first()
+  slice_last()
+  slice_range()
+  slice_unmarked()
+  tell()
+  unmark()
+}
+main {
+  start()
+  loop { round() } until Round.n >= 5
+}

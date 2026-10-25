@@ -17744,6 +17744,26 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
   Value keys[2] = {scratch(0, i64, room), scratch(2, i64, room)};
   Value whose[2] = {scratch(1, i64, room), scratch(3, i64, room)};
 
+  // A slice is of the entities the query goes over by their components
+  // (`with`, `without`, `any`; see lowerOrdered): where an archetype holds
+  // some of them optionally, its rows without what is asked get the
+  // greatest key, after every other in the order, and only those that
+  // have it are counted (`passed`), among which the slice is found. (A
+  // key of an i64 at its very greatest is as great: such entities and
+  // those left out go in the order they were listed.)
+  bool sifting = !query.getSlice().empty() &&
+                 llvm::any_of(matched, [&](const WorldArchetype *archetype) {
+                   return !getPresenceTest(query, ArchetypeOp(archetype->op))
+                               .empty();
+                 });
+  Value passed;
+  if (sifting) {
+    passed = scratch(9, i64, one);
+    OpBuilder::InsertionGuard guard(rewriter);
+    (void)parallelTurns(rewriter, loc, one, /*gpu=*/true);
+    store(whole(0, i64), passed, zero);
+  }
+
   // The entities there are now, each archetype's after those before it: a
   // key and, in the 32 bits above its row, the archetype's place.
   Value listed = zero;
@@ -17756,6 +17776,39 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
       Value stored = load(world.column(*archetype, byComponent, byField), row);
       Value key = orderKey(rewriter, loc, stored,
                            archetype->find(byComponent, byField)->type);
+      if (sifting) {
+        PresenceTest test =
+            getPresenceTest(query, ArchetypeOp(archetype->op));
+        auto has = [&](FlatSymbolRefAttr component) -> Value {
+          Value byte = load(world.column(*archetype, component.getAttr(),
+                                         rewriter.getStringAttr("")),
+                            row);
+          return arith::CmpIOp::create(rewriter, loc,
+                                       arith::CmpIPredicate::ne, byte,
+                                       whole(0, rewriter.getI8Type()));
+        };
+        Value keep = whole(1, rewriter.getI1Type());
+        auto also = [&](Value term) {
+          keep = arith::AndIOp::create(rewriter, loc, keep, term);
+        };
+        for (FlatSymbolRefAttr component : test.present)
+          also(has(component));
+        for (FlatSymbolRefAttr component : test.absent)
+          also(arith::XOrIOp::create(rewriter, loc, has(component),
+                                     whole(1, rewriter.getI1Type())));
+        for (const auto &group : test.anyPresent) {
+          Value any = whole(0, rewriter.getI1Type());
+          for (FlatSymbolRefAttr component : group)
+            any = arith::OrIOp::create(rewriter, loc, any, has(component));
+          also(any);
+        }
+        key = arith::SelectOp::create(rewriter, loc, keep, key,
+                                      whole(INT64_MAX, i64));
+        memref::AtomicRMWOp::create(
+            rewriter, loc, arith::AtomicRMWKind::addi,
+            arith::ExtUIOp::create(rewriter, loc, i64, keep), passed,
+            ValueRange{zero});
+      }
       Value at = add(before, row);
       store(key, keys[0], at);
       store(add(arith::ShLIOp::create(rewriter, loc, whole(number, i64),
@@ -17914,11 +17967,14 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
     {
       OpBuilder::InsertionGuard guard(rewriter);
       (void)parallelTurns(rewriter, loc, one, /*gpu=*/true);
+      // (Of those listed, the ones that have what is asked: the first in
+      // the order.)
+      Value count = sifting ? toIndex(load(passed, zero)) : listed;
       auto firstNotBelow = [&](Value bound) -> Value {
         auto search = scf::WhileOp::create(
             rewriter, loc,
             TypeRange{rewriter.getIndexType(), rewriter.getIndexType()},
-            ValueRange{zero, listed},
+            ValueRange{zero, count},
             [&](OpBuilder &, Location, ValueRange range) {
               scf::ConditionOp::create(
                   rewriter, loc,
@@ -17943,7 +17999,7 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
             });
         return search.getResult(0);
       };
-      Value lo = zero, hi = listed;
+      Value lo = zero, hi = count;
       if (Value from = query.getSlicePart("from"))
         lo = firstNotBelow(orderKey(rewriter, loc, from, byType));
       if (Value to = query.getSlicePart("to"))
@@ -18425,6 +18481,72 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
       rewriter.setInsertionPointToStart(gather.getBody());
       list(gather.getInductionVar());
     };
+    // A slice is of the entities the query goes over by their components
+    // (`with`, `without`, `any`): where the archetype holds some of them
+    // optionally (a tag that is not apart, say), only the rows that have
+    // or lack them as asked are listed, one after another, so that the
+    // slice is taken of those. (Listing them all, the slice would be of
+    // all, and the body then pass over those without: the first k by the
+    // key might be none of those asked for.)
+    PresenceTest test = getPresenceTest(query, ArchetypeOp(archetype->op));
+    if (!query.getSlice().empty() && !test.empty() && !spread) {
+      auto has = [&](FlatSymbolRefAttr component, Value row) -> Value {
+        Value byte = memref::LoadOp::create(
+            rewriter, loc,
+            world.column(*archetype, component.getAttr(),
+                         rewriter.getStringAttr("")),
+            ValueRange{row});
+        return arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::ne, byte,
+            arith::ConstantIntOp::create(rewriter, loc, 0, 8));
+      };
+      auto sift = scf::ForOp::create(
+          rewriter, loc, from, rows, one, ValueRange{before},
+          [&](OpBuilder &, Location, Value row, ValueRange at) {
+            Value keep = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+            auto also = [&](Value term) {
+              keep = arith::AndIOp::create(rewriter, loc, keep, term);
+            };
+            for (FlatSymbolRefAttr component : test.present)
+              also(has(component, row));
+            for (FlatSymbolRefAttr component : test.absent)
+              also(arith::XOrIOp::create(
+                  rewriter, loc, has(component, row),
+                  arith::ConstantIntOp::create(rewriter, loc, 1, 1)));
+            for (const auto &group : test.anyPresent) {
+              Value any = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
+              for (FlatSymbolRefAttr component : group)
+                any = arith::OrIOp::create(rewriter, loc, any,
+                                           has(component, row));
+              also(any);
+            }
+            auto ifKeep = scf::IfOp::create(rewriter, loc, keep,
+                                            /*withElseRegion=*/false);
+            {
+              OpBuilder::InsertionGuard inner(rewriter);
+              rewriter.setInsertionPointToStart(ifKeep.thenBlock());
+              Value stored = memref::LoadOp::create(
+                  rewriter, loc,
+                  world.column(*archetype, byComponent, byField),
+                  ValueRange{row});
+              memref::StoreOp::create(
+                  rewriter, loc,
+                  keyOf(stored, archetype->find(byComponent, byField)->type),
+                  keys, ValueRange{at[0]});
+              memref::StoreOp::create(rewriter, loc,
+                                      world.entityId(loc, *archetype, row),
+                                      ids, ValueRange{at[0]});
+            }
+            scf::YieldOp::create(
+                rewriter, loc,
+                ValueRange{arith::SelectOp::create(
+                    rewriter, loc, keep,
+                    arith::AddIOp::create(rewriter, loc, at[0], one), at[0])});
+          });
+      memref::StoreOp::create(rewriter, loc, sift.getResult(0), cells,
+                              ValueRange{zero});
+      continue;
+    }
     if (options.parallelEntities && !spread &&
         int64_t(archetype->capacity) >= options.parallelMinEvents) {
       auto ifMany = scf::IfOp::create(
