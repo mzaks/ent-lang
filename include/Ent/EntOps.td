@@ -317,9 +317,12 @@ def Ent_BufferClaimOp : Ent_Op<"buffer.claim", [
     `%start` to `%start + %count` (but not that) are the visited entity's
     for this run of the query, which reads and writes them through
     `ent.buffer.at` and `ent.buffer.set` marked `ent.window` (a window,
-    `w: mut Cohorts[start, count]`), and no other access of the buffer.
+    `w: mut Cohorts[start, count]`), and no other access of the buffer
+    but reads by its name: then all windows are taken first, before the
+    query, and those reads see the rows as they were before it.
     Where another entity of the run took one of them too, or the rows are
-    not all rows the buffer has, the query's end stops the program.
+    not all rows the buffer has, or a read by the name is of a row taken,
+    the query's end stops the program.
   }];
   let arguments = (ins FlatSymbolRefAttr:$buffer, I32:$start, I32:$count);
   let assemblyFormat = "$buffer $start `,` $count attr-dict";

@@ -1844,7 +1844,14 @@ to a device at once (all there is to draw), in place of a call for each.
   order they ran in, on one core, on many and on the GPU alike. Without
   `mut` the rows are only read and nothing is taken (as a buffer in a
   `for` is read anyway). A `for` with a window of a buffer does nothing
-  else to it but read its `len`; one window of a buffer each, of the
+  else to it but read its `len` and read rows by the buffer's name
+  (`Cohorts[k].bees`); where it reads so, the windows of all its
+  entities are taken first, by a pass of their own before the `for`
+  (reading what says where they are), and a row read by the name that
+  one of them took, the entity's own too, stops the program after the
+  `for`. So what is read by the name is as it was before the `for`: the
+  rows of earlier levels of a tree, say, while each sink writes its own
+  lists after them (`bench/treecode/groups.ent`). One window of a buffer each, of the
   visited entity's own bindings (not in a pattern, nor in a `for` that
   takes turns, where the buffer is read and written as it is; not yet
   in one that goes along a tree, by a field or reacts to changes, nor in

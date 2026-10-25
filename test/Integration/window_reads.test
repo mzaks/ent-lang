@@ -1,0 +1,17 @@
+// A `for` that writes a buffer through windows and also reads it by its
+// name reads it as it was before the `for`: for one core and for all of
+// them the same; a row of a window read by the name stops the program.
+// RUN: %ent build %S/Inputs/window_reads.ent -o %t.one
+// RUN: %ent build %S/Inputs/window_reads.ent --parallel -o %t.all
+// RUN: not --crash %t.one > %t.one.out
+// RUN: not --crash %t.all > %t.all.out
+// RUN: diff %t.one.out %t.all.out
+// RUN: FileCheck %s --input-file=%t.one.out
+// CHECK: day 1: check
+// CHECK: day 2: check
+// CHECK-NOT: day 3
+// Without that read the third day is as the others.
+// RUN: sed -e 's/h.from = h.start }/h.from = h.from }/' %S/Inputs/window_reads.ent > %t.fine.ent
+// RUN: %ent build %t.fine.ent --parallel -o %t.fine
+// RUN: %t.fine | FileCheck %s --check-prefix=FINE
+// FINE: day 3: check

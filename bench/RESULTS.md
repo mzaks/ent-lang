@@ -4287,3 +4287,39 @@ errors to every digit, `apart` the most either port is from treecode.
 - A `for` with a loop of a count known only as it runs is now shared out
   from a 33rd of the entities (as one that calls out): the passes a level
   ran on one thread at 65536 bodies before.
+
+## 2026-10-25: ordered reductions elsewhere; the group walk's lists in place
+
+`-mllvm -force-ordered-reductions=true` (in `ENT_CFLAGS`) on the other
+programs: of all the benches and examples, it changes the code of only
+graph's pick, treecode's two ports, epidemic, lj's melt and traffic's
+junctions (the rest are the same to the byte, also built `--parallel`
+where looked at). Native builds, best of five round-robin, the same
+output both ways (junctions left out: one run takes minutes):
+
+| program | 1 core, ms | with | all cores, ms | with |
+|---|---|---|---|---|
+| lj melt | 825.8 | 829.5 | 162.8 | 165.7 |
+| epidemic | 356.3 | 351.9 | 352.3 | 344.6 |
+| graph pick | 772.7 | 777.5 | 701.3 | 701.8 |
+| treecode groups, 65536, theta 1 (and the direct sum) | 12831 | 13284 | | |
+| treecode forces, 4096 | 215.8 | 217.0 | | |
+
+- Within 2% either way, where the cells' quadrupoles at theta 0.5 gain
+  13%; not the default (with `ENT_CFLAGS` it can be had).
+
+A `for` that writes a buffer through windows may now read it by its
+name (docs/syntax.md): its windows are taken first, by a pass of the
+`for` with only them, and what is read is the buffer as it was before;
+a row read so that one of the windows took stops the program. The group
+walk's sinks so write their lists straight into `Hits` and their row of
+`Sink`, reading their parents' by the name: no `Fresh`, no pass a level
+copying from it. Old against new, the same compiler, 65536 bodies, best
+of three round-robin, ms:
+
+| theta | quad | old, 1 core | new | all cores | new |
+|---|---|---|---|---|---|
+| 1.0 | no | 352.5 | 340.2 (0.965) | 63.6 | 62.0 (0.976) |
+| 0.5 | yes | 1523.9 | 1468.4 (0.964) | 253.9 | 250.2 (0.985) |
+
+- The same interactions and errors, every theta (run.py).

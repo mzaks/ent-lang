@@ -29,9 +29,9 @@ component Acc { ax: f64, ay: f64, az: f64, dx: f64, dy: f64, dz: f64,
 // Of groups.ent: the sink a body works out the lists of, at the level it is at (the
 // cells whose first row is the body's, one a level, from `Sink.top` down
 // by `child`; -1 where none is left); whether it is a sink of this level,
-// where its lists are in `Fresh` and how long, until `found` puts them in
-// `Hits`.
-component Lead { cell: i32, found: bool, at: i32, n: i32, nb: i32, nc: i32, no: i32 } capacity 1048576
+// where its lists go in `Hits` (after those of the levels before) and how
+// long, of them bodies.
+component Lead { cell: i32, found: bool, at: i32, n: i32, nb: i32 } capacity 1048576
 
 unique Err { sum: f64, worst: f64, tsum: f64, tworst: f64, apart: f64, cells: i64, bodies: i64 }
 
@@ -91,7 +91,7 @@ system load() {
     spawn { Body { x: x, y: y, z: z, m: real(Bytes, masses + 8 * i), sx: x + half, sy: y + half, sz: z + half },
             Acc { ax: 0.0, ay: 0.0, az: 0.0, dx: 0.0, dy: 0.0, dz: 0.0,
                   tx: real(Bytes, a), ty: real(Bytes, a + 8), tz: real(Bytes, a + 16), cells: 0, bodies: 0 },
-            Lead { cell: 0 - 1, found: false, at: 0, n: 0, nb: 0, nc: 0, no: 0 } }
+            Lead { cell: 0 - 1, found: false, at: 0, n: 0, nb: 0 } }
   }
   Bytes = []
   G.best = 1.0e300

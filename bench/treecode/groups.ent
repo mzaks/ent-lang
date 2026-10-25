@@ -33,22 +33,18 @@ world {
 // none).
 buffer Sink { at: i32, n: i32, nb: i32, nc: i32, no: i32, parent: i32, top: i32 } capacity 2097152
 buffer Hits { cell: i32 } capacity 67108864
-// The lists of the sinks of a level, before they are in `Hits` (a `for`
-// that writes a buffer does not read it).
-buffer Fresh { cell: i32 } capacity 16777216
 // Of each cell, as treecode keeps it: its centre of mass, mass, critical
 // radius (squared) and quadrupole about its centre of mass.
 buffer Moment { x: f64, y: f64, z: f64, m: f64, rcrit2: f64, xx: f64, xy: f64, xz: f64,
                 yy: f64, yz: f64, zz: f64 } capacity 2097152
 
 // The level whose sinks are worked out, the deepest; how much of `Hits`
-// the sinks have taken, of `Fresh` those of the level.
+// the sinks have taken, those of the level.
 unique Walk { level: i32, depth: i32, hits: i32, fresh: i32 }
 
 system ready() {
   Sink = [{ at: 0, n: 0, nb: 0, nc: 0, no: 0, parent: 0 - 1, top: 0 - 1 }; 2097152]
   Hits = [{ cell: 0 }; 67108864]
-  Fresh = [{ cell: 0 }; 16777216]
   Moment = [{ x: 0.0, y: 0.0, z: 0.0, m: 0.0, rcrit2: 0.0, xx: 0.0, xy: 0.0, xz: 0.0,
               yy: 0.0, yz: 0.0, zz: 0.0 }; 2097152]
 }
@@ -131,7 +127,7 @@ fn far(moments: Moment, c: i32, px: f64, py: f64, pz: f64, size: f64, half: f64)
 
 // The sinks of `Walk.level` (from 1: the root's lists are worked out
 // first): their candidates, the cells inside those their parents opened,
-// how many, and of them leaves; room for them in `Fresh`.
+// how many, and of them leaves; room for them in `Hits`.
 system count() {
   let level = Walk.level
   Walk.fresh = 0
@@ -160,13 +156,18 @@ system count() {
 }
 
 // Where each candidate goes: its bodies first, then the cells far enough
-// (treecode's criterion), and those it opened from the end back.
+// (treecode's criterion), and those it opened from the end back, into
+// `Hits` after those of the levels before; what was found into `Sink`.
+// (Its parent's row and lists, read by name, are as they were before.)
+// Each body on to the next of its cells.
 system sinks() {
   let half = 0.5 * G.rsize
-  for me, a: Body, l: mut Lead, w: mut Fresh[l.at, l.n] {
+  let base = Walk.hits
+  for me, a: Body, l: mut Lead, h: mut Hits[base + l.at, l.n],
+      t: mut Sink[max(l.cell, 0), if l.found { 1 } else { 0 }] {
     if l.found {
       let s = l.cell
-      let p = Sink[s].parent
+      let p = t[0].parent
       let opened = Sink[p].at + Sink[p].n - Sink[p].no
       let size = Bodies_cells[s].size
       let px = Bodies_cells[s].mid0
@@ -181,37 +182,23 @@ system sinks() {
         let child = Bodies_cells[o].child
         for k in child..child + Bodies_cells[o].kids {
           if Bodies_cells[k].child < 0 {
-            w[nb].cell = k
+            h[nb].cell = k
             nb += 1
           } else if far(Moment, k, px, py, pz, size, half) {
-            w[leaves + nc].cell = k
+            h[leaves + nc].cell = k
             nc += 1
           } else {
             no += 1
-            w[l.n - no].cell = k
+            h[l.n - no].cell = k
           }
         }
       }
-      l.nc = nc
-      l.no = no
-    }
-  }
-}
-
-// What the sinks of the level found, into `Hits` and `Sink`; each body on
-// to the next of its cells.
-system found() {
-  let base = Walk.hits
-  for me, a: Body, l: mut Lead, h: mut Hits[base + l.at, l.n],
-      t: mut Sink[max(l.cell, 0), if l.found { 1 } else { 0 }] {
-    if l.found {
-      for j in 0..l.n { h[j].cell = Fresh[l.at + j].cell }
       t[0].at = base + l.at
       t[0].n = l.n
-      t[0].nb = l.nb
-      t[0].nc = l.nc
-      t[0].no = l.no
-      l.cell = Bodies_cells[l.cell].child
+      t[0].nb = nb
+      t[0].nc = nc
+      t[0].no = no
+      l.cell = Bodies_cells[s].child
     }
   }
   Walk.hits = base + Walk.fresh
@@ -372,7 +359,6 @@ schedule run() {
 schedule level() {
   count()
   sinks()
-  found()
 }
 schedule sum() {
   forces()

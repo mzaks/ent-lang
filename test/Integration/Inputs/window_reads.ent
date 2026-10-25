@@ -1,0 +1,48 @@
+// A `for` that writes a buffer through windows and reads it by its name
+// (docs/syntax.md): each hive writes rows of `Cells` of its own, from
+// rows of the other half that it reads by the name, and the next day the
+// halves change places. Built for one core and for all of them, it
+// prints the same. On the third day one hive reads by the name a row of
+// its own window, and the program stops.
+import console
+
+component Hive { number: i32, start: i32, size: i32, from: i32 } capacity 4000
+buffer Cells { bees: i32 } capacity 80000
+unique Check: i64
+unique Days: i32
+
+system grow() {
+  for h: mut Hive, w: mut Cells[h.start, h.size] {
+    for i in 0..len(w) {
+      w[i].bees = (Cells[h.from + i].bees * 3 + h.number + i) % 1000
+    }
+    let start = h.start
+    h.start = h.from
+    h.from = start
+  }
+}
+system check() {
+  Check = 0
+  for i in 0..len(Cells) { Check += Cells[i].bees as i64 * (i % 97 + 1) as i64 }
+  spawn { Print { line: "day {Days}: check {Check}" } }
+}
+system count() { Days += 1 }
+system own() {
+  for h: mut Hive { if Days == 3 && h.number == 5 { h.from = h.start } }
+}
+schedule day() { count()  own()  grow()  check()  write()  clear() }
+
+world {
+  var at = 0
+  for n in 0..2000 {
+    let size = n % 7 + 3
+    spawn { Hive { number: n, start: at, size: size, from: 0 } }
+    at += size
+  }
+  for h: mut Hive { h.from = h.start + at }
+  for i in 0..2 * at { Cells += { bees: i % 13 } }
+}
+
+main {
+  loop { day() } until Days == 3
+}

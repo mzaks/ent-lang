@@ -37,7 +37,7 @@ system d() {
   // expected-error @+1 {{which its query also uses outside the window}}
   for h: Hive, w: mut Cells[h.start, h.size] {
     // expected-note @+1 {{it does here}}
-    w[0].bees = Cells[3].bees
+    Cells[3].bees = w[0].bees
   }
 }
 

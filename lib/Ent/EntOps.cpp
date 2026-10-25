@@ -976,6 +976,10 @@ BufferClaimOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
       (*this)->getParentOfType<EdgesOp>())
     return emitOpError("takes rows of ")
            << getBufferAttr() << " in a 'for' inside a 'for': not yet";
+  // (Read by its name too, where the window is a binding of the query, so
+  // taken before any entity's body runs: the rows as they were before the
+  // query, those taken stopping the program; see lowerQuery.)
+  bool binding = (*this)->getBlock() == &query.getBody().front();
   Operation *other = nullptr;
   query.walk([&](Operation *op) {
     if (other || op == getOperation())
@@ -984,7 +988,8 @@ BufferClaimOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
     if (!name || name != getBufferAttr())
       return;
     bool windowed = isa<BufferAtOp, BufferSetOp>(op) && op->hasAttr(kWindowAttr);
-    if (!windowed && !isa<BufferLenOp, RowsCheckOp, BufferRowsOp>(op))
+    bool read = binding && isa<BufferAtOp>(op);
+    if (!windowed && !read && !isa<BufferLenOp, RowsCheckOp, BufferRowsOp>(op))
       other = op;
   });
   if (other) {
@@ -992,8 +997,8 @@ BufferClaimOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
         emitOpError("takes rows of ")
         << getBufferAttr()
         << ", which its query also uses outside the window: in a query a "
-           "buffer with a window is read and written through it (and its "
-           "length read)";
+           "buffer with a window is written through it (and read through it, "
+           "or by its name, and its length read)";
     diag.attachNote(other->getLoc()) << "it does here";
     return diag;
   }
