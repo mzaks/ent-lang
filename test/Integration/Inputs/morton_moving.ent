@@ -1,0 +1,51 @@
+// A Morton index made again, frame by frame, of dots that move, so each
+// making has another number of cells than the one before (test/Integration/morton.test). Its `near` against
+// a grid's, and a sum of what it finds, the same on one core and on all
+// (where the cells below those near the root split on many threads).
+import console
+import wyhash
+
+component Dot { x: f64, y: f64, n: i64 } capacity 8192
+unique Check { frame: i64, differ: i64, pairs: i64 }
+
+index Grid of Dot grid (x, y) cell 0.05
+index Tree of Dot morton (x, y) leaf 4
+
+world {
+  for i in 0..6000 {
+    spawn { Dot { x: wyrand_unit(3, i as i64 * 2), y: wyrand_unit(3, i as i64 * 2 + 1), n: 0 } }
+  }
+}
+
+system count() {
+  for me, a: mut Dot {
+    var n: i64 = 0
+    var m: i64 = 0
+    for o, b: Dot near (a.x, a.y) within 0.04 in Grid where o != me { n += 1 }
+    for o, b: Dot near (a.x, a.y) within 0.04 in Tree where o != me { m += 1 }
+    if n != m { Check.differ += 1 }
+    Check.pairs += m
+  }
+}
+
+system move() {
+  // Sheared across x, which wraps: dots drawn together in places and
+  // spread in others (a Morton index's box follows the dots, so only
+  // such a move changes its cells).
+  for d: mut Dot {
+    d.x = d.x + 0.3 + 0.7 * d.y * d.y
+    if d.x >= 1.0 { d.x = d.x - 1.0 }
+    d.y = d.y + 0.1 * d.x
+    if d.y >= 1.0 { d.y = d.y - 1.0 }
+  }
+}
+
+system report() {
+  put("frame {Check.frame}: {Check.differ} differ, pairs {Check.pairs}")
+  Check.frame += 1
+  Check.differ = 0
+  Check.pairs = 0
+}
+
+schedule frame() { count() report() move() }
+main { loop { frame() } until Check.frame >= 6 }

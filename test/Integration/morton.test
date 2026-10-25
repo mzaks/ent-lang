@@ -1,7 +1,8 @@
 // `index N of C morton (x, y, z) [bits b] [leaf l] [wrap s]`: its queries
 // against a grid's on the same dots, clustered, in a box that wraps, and
 // of whole numbers in two sides (the nearest by how far); and its cells
-// as laid out. The same on one core and on all.
+// as laid out; made again of dots that move. The same on one core and
+// on all.
 // RUN: %ent run %S/Inputs/morton.ent 2>/dev/null > %t.one
 // RUN: %ent run --parallel %S/Inputs/morton.ent 2>/dev/null > %t.all
 // RUN: cmp %t.one %t.all
@@ -15,8 +16,14 @@
 // RUN: cmp %t.whole %t.whole.all
 // RUN: FileCheck %s --check-prefix=WHOLE --input-file=%t.whole
 // RUN: %ent run %S/Inputs/morton_cells.ent 2>/dev/null | FileCheck %s --check-prefix=CELLS
+// RUN: %ent run %S/Inputs/morton_moving.ent 2>/dev/null > %t.moving
+// RUN: %ent run --parallel %S/Inputs/morton_moving.ent 2>/dev/null > %t.moving.all
+// RUN: cmp %t.moving %t.moving.all
+// RUN: FileCheck %s --check-prefix=MOVING --input-file=%t.moving
 
 // SAME:  near 0 differ, between 0, nearest 0; pairs 2636028, after me 1318014
 // WRAP:  near 0 differ, between 0, nearest 0; pairs 321288, after me 160644
 // WHOLE: near 0 differ, between 0, nearest 0; pairs 121676, after me 60838
+// MOVING: frame 0: 0 differ, pairs 174858
+// MOVING: frame 5: 0 differ, pairs 173938
 // CELLS: 3000 rows, 2119 cells, visited 2119, 1708 leaves holding 3000 rows, 0 bad, 0 out of order

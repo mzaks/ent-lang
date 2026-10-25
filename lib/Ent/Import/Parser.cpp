@@ -5013,9 +5013,13 @@ LogicalResult Parser::parseIndex() {
       // The cells left to split, by the entities at their first rows: how
       // many cells inside each, and so where they go (after those near the
       // root, each's own run of rows)...
-      out << "  " << n << "_more = 0\n"
-          << "  for c0: " << of.front() << ", t: mut " << n << "_cells[" << lead
-          << ".cell, " << splits << " { 1 } else { 0 }] {\n"
+      out << "  " << n
+          << "_more = 0\n"
+          // (A row not marked in this making may still say a cell of one
+          // before, past those there are now: its window starts at 0.)
+          << "  for c0: " << of.front() << ", t: mut " << n << "_cells["
+          << splits << " { " << lead << ".cell } else { 0 }, " << splits
+          << " { 1 } else { 0 }] {\n"
           << "    var inside = 0\n"
           << "    var kids = 0\n"
           << "    if len(t) > 0 {\n"
