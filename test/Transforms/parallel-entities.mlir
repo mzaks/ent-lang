@@ -9,6 +9,8 @@ ent.component @S (x: f32)
 ent.component @L (x: f32)
 ent.archetype @Small (@S) capacity 1000
 ent.archetype @Large (@L) capacity 2000000
+ent.component @M (n: i32, x: f32)
+ent.archetype @Mid (@M) capacity 100000
 ent.buffer @Cells (next: i32) capacity 4096
 
 func.func private @log()
@@ -137,6 +139,33 @@ ent.system @walkSmall() reads [@Cells] writes [@S] {
   }
 }
 
+// A loop in the body of a count known only as it runs: each entity's turn
+// is worth 33 plain ones, as one that calls out, so 100000 entities may
+// reach the threshold.
+// DEFAULT-LABEL: func.func private @loopMid(
+// DEFAULT:       %[[N:.*]] = arith.index_cast
+// DEFAULT:       %[[T:.*]] = arith.constant 1000000 : index
+// DEFAULT:       %[[K:.*]] = arith.constant 33 : index
+// DEFAULT:       %[[W:.*]] = arith.muli %[[N]], %[[K]] : index
+// DEFAULT:       %[[BIG:.*]] = arith.cmpi sge, %[[W]], %[[T]] : index
+// DEFAULT:       scf.if %[[BIG]] {
+// DEFAULT:         scf.parallel
+ent.system @loopMid() writes [@M] {
+  ent.query (%m: !ent.ref<@M, mut>) {
+    %n = ent.get %m "n" : !ent.ref<@M, mut> -> i32
+    %count = arith.index_cast %n : i32 to index
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %zero = arith.constant 0.0 : f32
+    %sum = scf.for %i = %c0 to %count step %c1 iter_args(%acc = %zero) -> (f32) {
+      %one = arith.constant 1.0 : f32
+      %next = arith.addf %acc, %one : f32
+      scf.yield %next : f32
+    }
+    ent.set %m "x", %sum : !ent.ref<@M, mut>, f32
+  }
+}
+
 ent.schedule @frame(%d: f32) {
   ent.run @shiftSmall(%d) : f32
   ent.run @shiftLarge(%d) : f32
@@ -144,4 +173,5 @@ ent.schedule @frame(%d: f32) {
   ent.run @ownScratch()
   ent.run @sharedScratch()
   ent.run @walkSmall()
+  ent.run @loopMid()
 }

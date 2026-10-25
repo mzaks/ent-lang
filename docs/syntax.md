@@ -2328,6 +2328,10 @@ system gravity() {
   entities of cell `c`, in the order of their rows.
 - A `for` with a walk in it is worth sharing out from as many entities
   as a `for` over others: as many as `Name_cells` has cells, each.
+- The cells are a buffer (`Name_cells[c].child`, `.next`, `.first`, the
+  sums), which a program may go over as it likes: `bench/treecode/
+  groups.ent` works out treecode's lists of cells for each cube of
+  bodies, a level after another, from them.
 - Gravity against Barnes's treecode 1.4: `bench/treecode/run.py`
   (bench/RESULTS.md).
 

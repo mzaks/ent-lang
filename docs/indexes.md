@@ -769,10 +769,23 @@ treecode's root cube (`wrap` over the places moved by half of it), the
 same cells, each opened for the same bodies (treecode's own counts of
 body–cell and body–body forces), and every force within 1e-13 of
 treecode's (the same terms, added in another order); so the same error
-against the direct sum. A walk for each body is 3.6 to 5 times
+against the direct sum. A walk for each body is 3 to 4 times
 treecode's time on one core: treecode tests a cell once for all the
-bodies of a cube (an interaction list), a walk once for each body. On
-all cores 2 to 2.5 times as fast as treecode on one.
+bodies of a cube (an interaction list), a walk once for each body.
+
+The group walk (`bench/treecode/groups.ent`, 2026-10-25) does as
+treecode does, in the program, over `Name_cells`: each cell a sink, its
+candidates the cells inside those its parent opened, sorted into its
+bodies, its cells far enough and those it opens; a level after another,
+the sinks of a level on many threads, each by the body at its first row
+(a running sum for room, a window to write). Each body then takes the
+forces of the lists of the sinks it is in, and walks for itself below
+its leaf. The same interactions; on one core about treecode's time
+without quadrupoles at 65536 bodies, 1.5 times with them (treecode's
+gcc does two cells at once there); on all cores 4 to 5.5 times as fast
+as treecode. What it took of the language: none new, but the rule that
+a `for` writes no buffer it reads (each level's lists go to a buffer of
+their own and are copied after) costs a pass a level.
 
 The references:
 

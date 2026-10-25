@@ -20398,35 +20398,25 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                                  .getResult()
                            : rows;
   });
-  SmallVector<EachOp> eaches;
-  query.walk([&](EachOp each) { eaches.push_back(each); });
-  for (EachOp each : eaches) {
-    rewriter.setInsertionPoint(query);
-    for (const WorldArchetype &archetype : layout.archetypes) {
-      if (!matches(each, ArchetypeOp(archetype.op)))
-        continue;
-      options.innerCapacity += archetype.capacity;
-      Value rows = world.count(query.getLoc(), archetype);
-      options.innerRows =
-          options.innerRows
-              ? arith::AddIOp::create(rewriter, query.getLoc(),
-                                      options.innerRows, rows)
-                    .getResult()
-              : rows;
-    }
-    lowerEach(rewriter, each, layout, world);
-  }
   // (Loops in it over the rows of a buffer: a walk over the cells of an
   // index, `for r in 0..len(B)`; as many as the buffer has, for each
-  // entity, as of a `for` over other entities.)
+  // entity, as of a `for` over other entities. Other loops of a count
+  // known only as it runs, `for i in 0..c.n`, as a call out: see
+  // `bodyWeight`. Not those of a `for` over other entities in it, which
+  // count as that.)
   query.walk([&](Operation *op) {
+    if (!isa<scf::WhileOp, scf::ForOp>(op) || op->getParentOfType<EachOp>())
+      return;
     BufferLenOp len;
+    bool known = false;
     if (auto loop = dyn_cast<scf::WhileOp>(op))
       loop.getBefore().walk([&](BufferLenOp found) {
         len = found;
         return WalkResult::interrupt();
       });
     else if (auto loop = dyn_cast<scf::ForOp>(op)) {
+      known = getConstantIntValue(loop.getLowerBound()) &&
+              getConstantIntValue(loop.getUpperBound());
       Value bound = loop.getUpperBound();
       while (Operation *from = bound.getDefiningOp()) {
         if ((len = dyn_cast<BufferLenOp>(from)) ||
@@ -20436,8 +20426,11 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
         bound = from->getOperand(0);
       }
     }
-    if (!len)
+    if (!len) {
+      if (!known)
+        options.bodyWeight += 32;
       return;
+    }
     const WorldBuffer &buffer = layout.getBuffer(len.getBufferAttr().getAttr());
     options.innerCapacity += buffer.capacity;
     rewriter.setInsertionPoint(query);
@@ -20452,6 +20445,23 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                                   .getResult()
                             : rows;
   });
+  SmallVector<EachOp> eaches;
+  query.walk([&](EachOp each) { eaches.push_back(each); });
+  for (EachOp each : eaches) {
+    rewriter.setInsertionPoint(query);
+    for (const WorldArchetype &archetype : layout.archetypes) {
+      if (!matches(each, ArchetypeOp(archetype.op)))
+        continue;
+      options.innerCapacity += archetype.capacity;
+      Value rows = world.count(query.getLoc(), archetype);
+      options.innerRows = options.innerRows
+                              ? arith::AddIOp::create(rewriter, query.getLoc(),
+                                                      options.innerRows, rows)
+                                    .getResult()
+                              : rows;
+    }
+    lowerEach(rewriter, each, layout, world);
+  }
   if (query.getCascade())
     return lowerCascade(rewriter, query, layout, world, given);
   // A `for` a hash index answers: where many have the key (one in 64 of

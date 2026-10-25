@@ -53,7 +53,8 @@ after a short stretch on one core, and what the program does on one core
 for longer (drawing, say) has the machine to itself. OMP_NUM_THREADS,
 OMP_PLACES, OMP_PROC_BIND or KMP_AFFINITY, and KMP_BLOCKTIME or
 OMP_WAIT_POLICY, where the program runs, say otherwise. A loop runs on many threads from a million entities on (fewer
-where its body calls out), and the events a reactive one walks from 16384
+where its body calls out or has a loop of a count known as it runs, or loops
+over other entities or over the rows of a buffer, so many times fewer), and the events a reactive one walks from 16384
 on; what was sent from loops in its body may be combined on many threads
 from 16384 values on, where that has taken less so far than on one (the
 program times both ways as it runs; ENT_COMBINE=groups or one, where it

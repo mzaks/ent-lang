@@ -1,0 +1,165 @@
+// The bodies of treecode's Plummer model and what is held against what:
+// bench/treecode/forces.ent (a walk for each body) and groups.ent (a walk
+// for each cube of bodies, as treecode's) import it. `load` reads
+// `plummer.dat`, which treecode writes (`tstop=0 options=out-phi,out-acc`,
+// built with BINARYIO): the bodies, and treecode's own accelerations;
+// `direct` works out the direct sum and `compare` how far the walk's and
+// treecode's are from it. bench/treecode/run.py runs them.
+import console
+import files
+import clock
+import math
+
+capacity Bytes 16777216
+
+// How many bodies there are; treecode's theta, whether it takes the
+// quadrupoles and its softening (`eps`, squared); the runs of the walk.
+unique G { n: i32, theta: f64, quad: bool, eps2: f64, rsize: f64, runs: i32,
+           started: f64, made: f64, best: f64 }
+
+// Where a body is, and where it is in treecode's root cube (`s`: from its
+// low corner).
+component Body { x: f64, y: f64, z: f64, m: f64, sx: f64, sy: f64, sz: f64 } capacity 1048576
+
+// The acceleration of each body: by the walk, by the direct sum, by
+// treecode; and what the walk took for it, cells and bodies.
+component Acc { ax: f64, ay: f64, az: f64, dx: f64, dy: f64, dz: f64,
+                tx: f64, ty: f64, tz: f64, cells: i64, bodies: i64 } capacity 1048576
+
+// Of groups.ent: the sink a body works out the lists of, at the level it is at (the
+// cells whose first row is the body's, one a level, from `Sink.top` down
+// by `child`; -1 where none is left); whether it is a sink of this level,
+// where its lists are in `Fresh` and how long, until `found` puts them in
+// `Hits`.
+component Lead { cell: i32, found: bool, at: i32, n: i32, nb: i32, nc: i32, no: i32 } capacity 1048576
+
+unique Err { sum: f64, worst: f64, tsum: f64, tworst: f64, apart: f64, cells: i64, bodies: i64 }
+
+// Treecode's tree: its root cube (from -rsize/2 to rsize/2 on each side,
+// rsize the least power of 2 that holds the bodies, as its expandbox
+// works it out; here a box from 0 that `wrap`s, which no walk goes round),
+// a body at each leaf, in the order of the tree. Each row has its body's
+// place and mass; each cell keeps its mass, and the moments its centre of
+// mass and its quadrupole come from.
+index Bodies of Body morton (sx, sy, sz) leaf 1 wrap G.rsize clustered
+    { bx: Body.x, by: Body.y, bz: Body.z, bm: Body.m } cells {
+  m: sum Body.m,
+  mx: sum Body.m * Body.x, my: sum Body.m * Body.y, mz: sum Body.m * Body.z,
+  mxx: sum Body.m * Body.x * Body.x, mxy: sum Body.m * Body.x * Body.y,
+  mxz: sum Body.m * Body.x * Body.z, myy: sum Body.m * Body.y * Body.y,
+  myz: sum Body.m * Body.y * Body.z, mzz: sum Body.m * Body.z * Body.z
+}
+
+proc now() -> f64 { wait_until(0.0) }
+
+// The whole number of 4 bytes at `at`, and the f64 of 8, as treecode
+// writes them (the machine's order, least first).
+fn whole(bytes: Bytes, at: i32) -> i32 {
+  var v: i32 = 0
+  for k in 0..4 { v = v | (bytes[at + k].value as i32 << (8 * k)) }
+  v
+}
+fn real(bytes: Bytes, at: i32) -> f64 {
+  var v: u64 = 0
+  for k in 0..8 { v = v | (bytes[at + k].value as u64 << (8 * k) as u64) }
+  float_of(v)
+}
+
+// treecode's file: nbody, NDIM and the time, then the masses, the
+// positions, the velocities, the potentials and the accelerations.
+system load() {
+  let size = read_file("plummer.dat", Bytes)
+  if size < 16 { put("no plummer.dat") }
+  let n = whole(Bytes, 0)
+  G.n = n
+  let masses = 16
+  let positions = masses + 8 * n
+  let accelerations = positions + 2 * 24 * n + 8 * n
+  if size != accelerations + 24 * n { put("plummer.dat is not as treecode writes it (out-phi,out-acc)") }
+  var dmax: f64 = 0.0
+  for i in 0..3 * n { dmax = max(dmax, abs64(real(Bytes, positions + 8 * i))) }
+  var rsize: f64 = 1.0
+  while rsize < 2.0 * dmax { rsize = 2.0 * rsize }
+  G.rsize = rsize
+  let half = 0.5 * rsize
+  for i in 0..n {
+    let p = positions + 24 * i
+    let a = accelerations + 24 * i
+    let x = real(Bytes, p)
+    let y = real(Bytes, p + 8)
+    let z = real(Bytes, p + 16)
+    spawn { Body { x: x, y: y, z: z, m: real(Bytes, masses + 8 * i), sx: x + half, sy: y + half, sz: z + half },
+            Acc { ax: 0.0, ay: 0.0, az: 0.0, dx: 0.0, dy: 0.0, dz: 0.0,
+                  tx: real(Bytes, a), ty: real(Bytes, a + 8), tz: real(Bytes, a + 16), cells: 0, bodies: 0 },
+            Lead { cell: 0 - 1, found: false, at: 0, n: 0, nb: 0, nc: 0, no: 0 } }
+  }
+  Bytes = []
+  G.best = 1.0e300
+}
+
+system start() { G.started = now() }
+system made() { G.made = now() - G.started + 0.0 * len(Bodies) as f64 }
+
+system report() {
+  let t = now() - G.started
+  G.best = min(G.best, t)
+  put("walk {t * 1000.0} ms, made {G.made * 1000.0} ms")
+  G.runs -= 1
+}
+
+system direct() {
+  let eps2 = G.eps2
+  for me, a: Body, f: mut Acc {
+    var ax: f64 = 0.0
+    var ay: f64 = 0.0
+    var az: f64 = 0.0
+    for o, b: Body where o != me {
+      let ex = b.x - a.x
+      let ey = b.y - a.y
+      let ez = b.z - a.z
+      let r2 = ex * ex + ey * ey + ez * ez + eps2
+      let w = b.m / (r2 * sqrt(r2))
+      ax += w * ex
+      ay += w * ey
+      az += w * ez
+    }
+    f.dx = ax
+    f.dy = ay
+    f.dz = az
+  }
+}
+
+// How far each acceleration is from the direct sum's, over how big that
+// is: the mean and the worst, of the walk's and of treecode's; and the
+// most the walk's is from treecode's (the same cells and bodies, added
+// in another order).
+system compare() {
+  for f: Acc {
+    let d2 = f.dx * f.dx + f.dy * f.dy + f.dz * f.dz
+    let ex = f.ax - f.dx
+    let ey = f.ay - f.dy
+    let ez = f.az - f.dz
+    let e = sqrt((ex * ex + ey * ey + ez * ez) / d2)
+    let tx = f.tx - f.dx
+    let ty = f.ty - f.dy
+    let tz = f.tz - f.dz
+    let t = sqrt((tx * tx + ty * ty + tz * tz) / d2)
+    Err.sum += e
+    Err.worst max= e
+    Err.tsum += t
+    Err.tworst max= t
+    let ux = f.ax - f.tx
+    let uy = f.ay - f.ty
+    let uz = f.az - f.tz
+    Err.apart max= sqrt((ux * ux + uy * uy + uz * uz) / (f.tx * f.tx + f.ty * f.ty + f.tz * f.tz))
+    Err.cells += f.cells
+    Err.bodies += f.bodies
+  }
+  let n = G.n as f64
+  put("ent: mean error {Err.sum / n} worst {Err.worst}; cells {Err.cells} bodies {Err.bodies}")
+  put("treecode: mean error {Err.tsum / n} worst {Err.tworst}")
+  // (In units of 1e-15: a value prints to six decimals.)
+  put("ent against treecode: at most {Err.apart * 1.0e15}e-15")
+  put("best walk {G.best * 1000.0} ms")
+}
+

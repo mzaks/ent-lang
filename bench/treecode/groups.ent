@@ -1,0 +1,394 @@
+// Gravity on the bodies of a Plummer model as Barnes's treecode 1.4 works
+// it out (NEMO's src/nbody/evolve/hackcode/treecode1), the way it does:
+// each cell of the tree a "sink", its cube tested against the cells of
+// its level once for all its bodies, with lists of what passed that its
+// bodies take forces from (treegrav.c's walktree). forces.ent tests them
+// for each body instead.
+//
+// A sink's candidates are the cells inside those its parent opened (the
+// root's, the root): a leaf is a body to take one by one, a cell far
+// enough from the sink's cube (treecode's criterion) one to take as one
+// body, any other opened. So for each sink three lists, its bodies, its
+// cells and those it opened (in `Hits`; `Sink` says where), worked out a
+// level after the other: the sinks of a level on many threads, each by
+// the body at its first row (`Lead`), from the lists of their parents.
+//
+// Then each body takes the forces of the lists of the sinks it is in,
+// from the root to its leaf, and below that walks as forces.ent does:
+// what its leaf opened, against the cubes of the body's place (treecode's
+// tree goes on so, a cube a level for a body alone).
+import math
+import plummer
+
+world {
+  G.theta = 1.0
+  G.quad = false
+  G.eps2 = 0.025 * 0.025
+  G.runs = 5
+}
+
+// Of each cell, as a sink: where its lists are in `Hits` and how long,
+// its bodies (leaves), then its cells, then those it opened, in all `n`;
+// its parent. Of each row: the first cell whose first row it is (-1:
+// none).
+buffer Sink { at: i32, n: i32, nb: i32, nc: i32, no: i32, parent: i32, top: i32 } capacity 2097152
+buffer Hits { cell: i32 } capacity 67108864
+// The lists of the sinks of a level, before they are in `Hits` (a `for`
+// that writes a buffer does not read it).
+buffer Fresh { cell: i32 } capacity 16777216
+// Of each cell, as treecode keeps it: its centre of mass, mass, critical
+// radius (squared) and quadrupole about its centre of mass.
+buffer Moment { x: f64, y: f64, z: f64, m: f64, rcrit2: f64, xx: f64, xy: f64, xz: f64,
+                yy: f64, yz: f64, zz: f64 } capacity 2097152
+
+// The level whose sinks are worked out, the deepest; how much of `Hits`
+// the sinks have taken, of `Fresh` those of the level.
+unique Walk { level: i32, depth: i32, hits: i32, fresh: i32 }
+
+system ready() {
+  Sink = [{ at: 0, n: 0, nb: 0, nc: 0, no: 0, parent: 0 - 1, top: 0 - 1 }; 2097152]
+  Hits = [{ cell: 0 }; 67108864]
+  Fresh = [{ cell: 0 }; 16777216]
+  Moment = [{ x: 0.0, y: 0.0, z: 0.0, m: 0.0, rcrit2: 0.0, xx: 0.0, xy: 0.0, xz: 0.0,
+              yy: 0.0, yz: 0.0, zz: 0.0 }; 2097152]
+}
+
+// Each cell's parent, its moments, the deepest level, and the first cell
+// of each row.
+system prepare() {
+  let cells = len(Bodies_cells)
+  let half = 0.5 * G.rsize
+  let theta = G.theta
+  var depth = 0
+  for c in 0..cells {
+    let m = Bodies_cells[c].m
+    let cx = Bodies_cells[c].mx / m
+    let cy = Bodies_cells[c].my / m
+    let cz = Bodies_cells[c].mz / m
+    let ox = cx - (Bodies_cells[c].mid0 - half)
+    let oy = cy - (Bodies_cells[c].mid1 - half)
+    let oz = cz - (Bodies_cells[c].mid2 - half)
+    let rcrit = Bodies_cells[c].size / theta + sqrt(ox * ox + oy * oy + oz * oz)
+    // 3 S - I trace S, S the second moments about the centre of mass.
+    let sxx = Bodies_cells[c].mxx - m * cx * cx
+    let sxy = Bodies_cells[c].mxy - m * cx * cy
+    let sxz = Bodies_cells[c].mxz - m * cx * cz
+    let syy = Bodies_cells[c].myy - m * cy * cy
+    let syz = Bodies_cells[c].myz - m * cy * cz
+    let szz = Bodies_cells[c].mzz - m * cz * cz
+    let tr = sxx + syy + szz
+    Moment[c].x = cx
+    Moment[c].y = cy
+    Moment[c].z = cz
+    Moment[c].m = m
+    Moment[c].rcrit2 = rcrit * rcrit
+    Moment[c].xx = 3.0 * sxx - tr
+    Moment[c].xy = 3.0 * sxy
+    Moment[c].xz = 3.0 * sxz
+    Moment[c].yy = 3.0 * syy - tr
+    Moment[c].yz = 3.0 * syz
+    Moment[c].zz = 3.0 * szz - tr
+    let child = Bodies_cells[c].child
+    for k in child..child + Bodies_cells[c].kids { Sink[k].parent = c }
+    depth = max(depth, Bodies_cells[c].level)
+    Sink[c].top = 0 - 1
+  }
+  for i in 0..cells {
+    let c = cells - 1 - i
+    Sink[Bodies_cells[c].first].top = c
+  }
+  // The root, against itself: opened.
+  Hits[0].cell = 0
+  Sink[0].at = 0
+  Sink[0].n = 1
+  Sink[0].nb = 0
+  Sink[0].nc = 0
+  Sink[0].no = 1
+  Walk.level = 1
+  Walk.depth = depth
+  Walk.hits = 1
+}
+
+system lead() {
+  for me, a: Body, l: mut Lead {
+    let top = Sink[a.row_in_Bodies].top
+    l.cell = if top == 0 { Bodies_cells[0].child } else { top }
+  }
+}
+
+// Whether cell `c` is far enough from the cube (`p`, `size`) of a sink of
+// its level: treecode's accept, the cube in the root cube's places (`s`).
+fn far(moments: Moment, c: i32, px: f64, py: f64, pz: f64, size: f64, half: f64) -> bool {
+  let kx = abs64(moments[c].x - (px - half))
+  let ky = abs64(moments[c].y - (py - half))
+  let kz = abs64(moments[c].z - (pz - half))
+  let dmax = max(size, max(kx, max(ky, kz)))
+  let qx = max(kx - 0.5 * size, 0.0)
+  let qy = max(ky - 0.5 * size, 0.0)
+  let qz = max(kz - 0.5 * size, 0.0)
+  qx * qx + qy * qy + qz * qz > moments[c].rcrit2 && dmax > 1.5 * size
+}
+
+// The sinks of `Walk.level` (from 1: the root's lists are worked out
+// first): their candidates, the cells inside those their parents opened,
+// how many, and of them leaves; room for them in `Fresh`.
+system count() {
+  let level = Walk.level
+  Walk.fresh = 0
+  for me, a: Body, l: mut Lead {
+    let s = l.cell
+    l.found = s >= 0 && Bodies_cells[s].level == level
+    var n = 0
+    var leaves = 0
+    if l.found {
+      let p = Sink[s].parent
+      let opened = Sink[p].at + Sink[p].n - Sink[p].no
+      for i in opened..opened + Sink[p].no {
+        let o = Hits[i].cell
+        let child = Bodies_cells[o].child
+        for k in child..child + Bodies_cells[o].kids {
+          n += 1
+          if Bodies_cells[k].child < 0 { leaves += 1 }
+        }
+      }
+    }
+    let at = Walk.fresh += n
+    l.at = at
+    l.n = n
+    l.nb = leaves
+  }
+}
+
+// Where each candidate goes: its bodies first, then the cells far enough
+// (treecode's criterion), and those it opened from the end back.
+system sinks() {
+  let half = 0.5 * G.rsize
+  for me, a: Body, l: mut Lead, w: mut Fresh[l.at, l.n] {
+    if l.found {
+      let s = l.cell
+      let p = Sink[s].parent
+      let opened = Sink[p].at + Sink[p].n - Sink[p].no
+      let size = Bodies_cells[s].size
+      let px = Bodies_cells[s].mid0
+      let py = Bodies_cells[s].mid1
+      let pz = Bodies_cells[s].mid2
+      let leaves = l.nb
+      var nb = 0
+      var nc = 0
+      var no = 0
+      for i in opened..opened + Sink[p].no {
+        let o = Hits[i].cell
+        let child = Bodies_cells[o].child
+        for k in child..child + Bodies_cells[o].kids {
+          if Bodies_cells[k].child < 0 {
+            w[nb].cell = k
+            nb += 1
+          } else if far(Moment, k, px, py, pz, size, half) {
+            w[leaves + nc].cell = k
+            nc += 1
+          } else {
+            no += 1
+            w[l.n - no].cell = k
+          }
+        }
+      }
+      l.nc = nc
+      l.no = no
+    }
+  }
+}
+
+// What the sinks of the level found, into `Hits` and `Sink`; each body on
+// to the next of its cells.
+system found() {
+  let base = Walk.hits
+  for me, a: Body, l: mut Lead, h: mut Hits[base + l.at, l.n],
+      t: mut Sink[max(l.cell, 0), if l.found { 1 } else { 0 }] {
+    if l.found {
+      for j in 0..l.n { h[j].cell = Fresh[l.at + j].cell }
+      t[0].at = base + l.at
+      t[0].n = l.n
+      t[0].nb = l.nb
+      t[0].nc = l.nc
+      t[0].no = l.no
+      l.cell = Bodies_cells[l.cell].child
+    }
+  }
+  Walk.hits = base + Walk.fresh
+  Walk.level += 1
+}
+
+system forces() {
+  let quad = G.quad
+  let eps2 = G.eps2
+  let half = 0.5 * G.rsize
+  for me, a: Body, f: mut Acc {
+    let row = a.row_in_Bodies
+    var ax: f64 = 0.0
+    var ay: f64 = 0.0
+    var az: f64 = 0.0
+    var cells: i64 = 0
+    var bodies: i64 = 0
+    // The sinks the body is in, from the root down to its leaf.
+    var s = 0
+    var down = true
+    while down {
+      let bf = Sink[s].at
+      for i in bf..bf + Sink[s].nb {
+        let k = Hits[i].cell
+        let first = Bodies_cells[k].first
+        for r in first..first + Bodies_cells[k].count {
+          if r != row {
+            let ex = Bodies[r].bx - a.x
+            let ey = Bodies[r].by - a.y
+            let ez = Bodies[r].bz - a.z
+            let r2 = ex * ex + ey * ey + ez * ez + eps2
+            let w = Bodies[r].bm / (r2 * sqrt(r2))
+            ax += w * ex
+            ay += w * ey
+            az += w * ez
+            bodies += 1
+          }
+        }
+      }
+      let cf = Sink[s].at + Sink[s].nb
+      for i in cf..cf + Sink[s].nc {
+        let c = Hits[i].cell
+        // As treecode's sumnode, and sumcell where it takes the quadrupoles.
+        let ex = Moment[c].x - a.x
+        let ey = Moment[c].y - a.y
+        let ez = Moment[c].z - a.z
+        let r2 = ex * ex + ey * ey + ez * ez + eps2
+        let r = sqrt(r2)
+        var w = Moment[c].m / r / r2
+        if quad {
+          let qdx = Moment[c].xx * ex + Moment[c].xy * ey + Moment[c].xz * ez
+          let qdy = Moment[c].xy * ex + Moment[c].yy * ey + Moment[c].yz * ez
+          let qdz = Moment[c].xz * ex + Moment[c].yz * ey + Moment[c].zz * ez
+          let drqdr = qdx * ex + qdy * ey + qdz * ez
+          let dr5i = 1.0 / (r2 * r2 * r)
+          let phiq = 0.5 * dr5i * drqdr
+          w += 5.0 * phiq / r2
+          // (Each term in one, as treecode's ADDMULVS2.)
+          ax += w * ex + qdx * (0.0 - dr5i)
+          ay += w * ey + qdy * (0.0 - dr5i)
+          az += w * ez + qdz * (0.0 - dr5i)
+        } else {
+          ax += w * ex
+          ay += w * ey
+          az += w * ez
+        }
+        cells += 1
+      }
+      let child = Bodies_cells[s].child
+      if child < 0 {
+        down = false
+      } else {
+        // The cell of the next level the body's row is in.
+        var k = child
+        while Bodies_cells[k].first + Bodies_cells[k].count <= row { k += 1 }
+        s = k
+      }
+    }
+    // Below its leaf, what that opened: the cells inside each, against
+    // the cube of their level the body is in.
+    let of = Sink[s].at + Sink[s].n - Sink[s].no
+    for i in of..of + Sink[s].no {
+      let o = Hits[i].cell
+      let end = Bodies_cells[o].next
+      var c = Bodies_cells[o].child
+      while c != end {
+        let next = Bodies_cells[c].next
+        if Bodies_cells[c].child < 0 {
+          let first = Bodies_cells[c].first
+          for r in first..first + Bodies_cells[c].count {
+            let ex = Bodies[r].bx - a.x
+            let ey = Bodies[r].by - a.y
+            let ez = Bodies[r].bz - a.z
+            let r2 = ex * ex + ey * ey + ez * ez + eps2
+            let w = Bodies[r].bm / (r2 * sqrt(r2))
+            ax += w * ex
+            ay += w * ey
+            az += w * ez
+            bodies += 1
+          }
+          c = next
+        } else {
+          let size = Bodies_cells[c].size
+          let px = Bodies_cells[c].mid0 + floor64((a.sx - Bodies_cells[c].mid0) / size + 0.5) * size
+          let py = Bodies_cells[c].mid1 + floor64((a.sy - Bodies_cells[c].mid1) / size + 0.5) * size
+          let pz = Bodies_cells[c].mid2 + floor64((a.sz - Bodies_cells[c].mid2) / size + 0.5) * size
+          if far(Moment, c, px, py, pz, size, half) {
+            let ex = Moment[c].x - a.x
+            let ey = Moment[c].y - a.y
+            let ez = Moment[c].z - a.z
+            let r2 = ex * ex + ey * ey + ez * ez + eps2
+            let r = sqrt(r2)
+            var w = Moment[c].m / r / r2
+            if quad {
+              let qdx = Moment[c].xx * ex + Moment[c].xy * ey + Moment[c].xz * ez
+              let qdy = Moment[c].xy * ex + Moment[c].yy * ey + Moment[c].yz * ez
+              let qdz = Moment[c].xz * ex + Moment[c].yz * ey + Moment[c].zz * ez
+              let drqdr = qdx * ex + qdy * ey + qdz * ez
+              let dr5i = 1.0 / (r2 * r2 * r)
+              let phiq = 0.5 * dr5i * drqdr
+              w += 5.0 * phiq / r2
+              // (Each term in one, as treecode's ADDMULVS2.)
+              ax += w * ex + qdx * (0.0 - dr5i)
+              ay += w * ey + qdy * (0.0 - dr5i)
+              az += w * ez + qdz * (0.0 - dr5i)
+            } else {
+              ax += w * ex
+              ay += w * ey
+              az += w * ez
+            }
+            cells += 1
+            c = next
+          } else {
+            c = Bodies_cells[c].child
+          }
+        }
+      }
+    }
+    f.ax = ax
+    f.ay = ay
+    f.az = az
+    f.cells = cells
+    f.bodies = bodies
+  }
+}
+
+schedule setup() {
+  load()
+  ready()
+}
+schedule run() {
+  start()
+  Bodies_moved()
+  made()
+  prepare()
+  lead()
+}
+schedule level() {
+  count()
+  sinks()
+  found()
+}
+schedule sum() {
+  forces()
+  report()
+}
+schedule finish() {
+  direct()
+  compare()
+}
+
+main {
+  setup()
+  loop {
+    run()
+    loop { level() } until Walk.level > Walk.depth
+    sum()
+  } until G.runs <= 0
+  finish()
+}

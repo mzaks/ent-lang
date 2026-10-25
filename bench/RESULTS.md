@@ -4231,3 +4231,59 @@ anew each time, not in it). AMD Ryzen AI 9 HX 370, on mains power.
 - With the index's own cube (the box of the bodies, not a power of 2
   around the origin) the cells are others and the errors close to these
   (0.000957 against 0.000890 at 0.75 with quadrupoles, 4096).
+
+## 2026-10-25: treecode's group walk, in ent
+
+`bench/treecode/groups.ent`: treecode's own walk written in ent over
+the Morton index's cells (`Bodies_cells`), next to the walk for each
+body (`forces.ent`). Each cell is a sink: its candidates are the cells
+inside those its parent opened, sorted into bodies, cells far enough
+(tested once for the sink's cube, as treecode's walktree) and cells
+opened; the sinks of a level on many threads, a level after another.
+Then each body adds up the lists of the sinks it is in and walks for
+itself below its leaf (treecode's tree for a body alone). Each cell's
+centre of mass, critical radius and quadrupole are worked out once
+(`Moment`), as treecode's tree has them. Both ports now add a cell's two
+terms in one, as treecode's ADDMULVS2 does (the per-body walk was the
+faster for it). Same run as above: the same interactions, the same
+errors to every digit, `apart` the most either port is from treecode.
+
+4096 bodies, ms:
+
+| theta | quad | treecode | walk, 1 core | all | groups, 1 core | all | apart |
+|---|---|---|---|---|---|---|---|
+| 1.0 | no | 11.0 | 30.9 | 4.8 | 12.2 | 6.2 | 7.0e-15 |
+| 1.0 | yes | 12.0 | 36.7 | 5.6 | 16.6 | 7.0 | 8.8e-15 |
+| 0.75 | no | 16.0 | 42.1 | 6.5 | 16.5 | 8.5 | 7.8e-15 |
+| 0.75 | yes | 17.0 | 49.4 | 7.6 | 22.0 | 9.4 | 7.0e-15 |
+| 0.5 | no | 26.0 | 60.6 | 9.2 | 26.2 | 14.2 | 1.4e-14 |
+| 0.5 | yes | 27.0 | 70.1 | 10.6 | 33.2 | 15.5 | 9.0e-15 |
+
+65536 bodies, ms:
+
+| theta | quad | treecode | walk, 1 core | all | groups, 1 core | all | apart |
+|---|---|---|---|---|---|---|---|
+| 1.0 | no | 328 | 1079 | 148.6 | 343 | 62.8 | 3.2e-14 |
+| 1.0 | yes | 343 | 1347 | 180.1 | 537 | 86.6 | 3.3e-14 |
+| 0.75 | no | 505 | 1744 | 239.8 | 529 | 93.7 | 3.6e-14 |
+| 0.75 | yes | 540 | 2161 | 294.6 | 833 | 132.6 | 3.2e-14 |
+| 0.5 | no | 939 | 3084 | 442.9 | 960 | 177.5 | 4.1e-14 |
+| 0.5 | yes | 997 | 3894 | 545.6 | 1491 | 255.1 | 3.7e-14 |
+
+- On one core the group walk is treecode's time without quadrupoles
+  (1.02 to 1.05 at 65536) and 1.5 times with them; at 4096, 1.0 to 1.4.
+  The walk for each body is 3 to 4 times.
+- Where the time goes (65536, theta 0.5, quadrupoles, one core): the
+  forces about 1200 ms of 1420, the sinks 140, copying each level's lists
+  into place 45, counting the candidates 37. The forces are the cells' terms:
+  ten loads of `Moment` for a cell and four divisions, one cell at a
+  time. treecode's gcc does two cells at once (`vdivpd`), adding their
+  terms in order; LLVM does as much only where asked
+  (`-mllvm -force-ordered-reductions=true`: eight at once, 1278 ms where
+  1469).
+- On all cores 4 to 5.5 times as fast as treecode at 65536; at 4096 the
+  passes a level (three, each over every body) cost more than they save,
+  and the walk for each body is the faster.
+- A `for` with a loop of a count known only as it runs is now shared out
+  from a 33rd of the entities (as one that calls out): the passes a level
+  ran on one thread at 65536 bodies before.
