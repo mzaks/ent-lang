@@ -32,6 +32,18 @@
 // EXTREMES: frame 0: -99.999725 99.999466 -1.999995 0.999998 5.0 bits 2147483648 0
 // EXTREMES: frame 2: -20.499931 29.499866 -5.124988 1.624995 5.0 bits 2147483648 0
 
+// A buffer emptied, kept to its first rows and given rows alike outside
+// the `for`s of a `gpu system`, round by round in a `while`: its count the
+// CPU's and the GPU's loops', the rows filled on the GPU, the same.
+// RUN: %ent run %S/Inputs/gpu_buffers.ent > %t.buffers.cpu
+// RUN: %ent run %S/Inputs/gpu_buffers.ent --gpu > %t.buffers.gpu
+// RUN: %ent run %S/Inputs/gpu_buffers.ent --gpu --parallel > %t.buffers.gpupar
+// RUN: diff %t.buffers.cpu %t.buffers.gpu
+// RUN: diff %t.buffers.cpu %t.buffers.gpupar
+// RUN: FileCheck %s --check-prefix=BUFFERS --input-file=%t.buffers.gpu
+// BUFFERS: frame 2: 20034 rows, sum 1499849901, first -1 0 49990 1 last -2
+// BUFFERS: seen 801580000
+
 // Along relations' edges from both ends, in the shape of the epidemic's
 // `workplace`, and writing the edges' own field: the same.
 // RUN: %ent run %S/Inputs/gpu_edges.ent > %t.edges.cpu

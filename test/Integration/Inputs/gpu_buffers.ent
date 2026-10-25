@@ -1,0 +1,50 @@
+// A buffer emptied, kept to its first rows and given rows alike in a `gpu
+// system` outside its `for`s (test/Integration/gpu.test): its count the
+// CPU's, which the GPU's loops after read too, the rows given filled on
+// the GPU. Level by level in a `while`, as a Morton index's cells are made
+// on the GPU: each round the entities write rows given that round.
+import console
+
+component Dot { n: i32, seen: i32 } capacity 20000
+archetype Plain { Dot } capacity 20000
+buffer Cells { a: i32, b: f32 } capacity 100000
+unique U { frame: i32, round: i32, top: i32, rows: i64, sum: i64 }
+
+world {
+  for i in 0..20000 { spawn { Dot { n: i, seen: 0 } } }
+}
+
+gpu system levels() {
+  Cells = []
+  Cells += [{ a: 0 - 1, b: 0.5 }; 3]
+  U.round = 0
+  while U.round < 4 {
+    U.top = len(Cells)
+    Cells += [{ a: 0 - 2, b: 1.5 }; 5000 + U.round * 7]
+    for d: Dot, w: mut Cells[if d.n < 5000 { U.top + d.n } else { 0 }, if d.n < 5000 { 1 } else { 0 }] {
+      if len(w) > 0 { w[0].a = d.n * 10 + U.round }
+    }
+    for d: mut Dot { d.seen = len(Cells) }
+    U.round += 1
+  }
+  Cells = Cells[..len(Cells) - 11]
+  for d: mut Dot { d.seen += len(Cells) }
+}
+
+system check() {
+  U.rows = len(Cells)
+  U.sum = 0
+  for i in 0..len(Cells) { U.sum += (Cells[i].a as i64) * 3 + (Cells[i].b * 2.0) as i64 }
+  var seen: i64 = 0
+  put("frame {U.frame}: {U.rows} rows, sum {U.sum}, first {Cells[0].a} {Cells[3].a} {Cells[5002].a} {Cells[5003].a} last {Cells[len(Cells) - 1].a}")
+  U.frame += 1
+}
+
+system seen() {
+  U.sum = 0
+  for d: Dot { U.sum += d.seen as i64 }
+  put("seen {U.sum}")
+}
+
+schedule frame() { levels() check() seen() }
+main { loop { frame() } until U.frame >= 3 }

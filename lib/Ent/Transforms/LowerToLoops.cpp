@@ -22906,6 +22906,19 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
       }
     }
     Value counter = world.bufferCount(buffer);
+    // (In a `gpu` system, outside its loops for the GPU: the count is the
+    // CPU's, which the GPU's copy is given as it changes, for the loops
+    // after; rows given are put in the GPU's copy, see the fill.)
+    bool aroundGpu = gpu && !onGpu;
+    auto countToGpu = [&](Value rows) {
+      if (!aroundGpu)
+        return;
+      callGpu(rewriter, loc, program, "ent_gpu_cell_set",
+              ValueRange{arith::ConstantIntOp::create(rewriter, loc,
+                                                      buffer.countOffset, 64),
+                         rows,
+                         arith::ConstantIntOp::create(rewriter, loc, 8, 64)});
+    };
     // Another buffer's rows, of the same fields: each column copied, and
     // how many there are.
     if (auto copy = dyn_cast<BufferCopyOp>(op)) {
@@ -22945,9 +22958,9 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
                 ValueRange{bufferNumber(),
                            arith::ConstantIntOp::create(rewriter, loc, 0, 64)});
       });
-      memref::StoreOp::create(
-          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 64),
-          counter, ValueRange{zero});
+      Value none = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
+      memref::StoreOp::create(rewriter, loc, none, counter, ValueRange{zero});
+      countToGpu(none);
       rewriter.eraseOp(op);
       continue;
     }
@@ -23165,9 +23178,9 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
                 ValueRange{bufferNumber(),
                            arith::MinUIOp::create(rewriter, loc, rows, count)});
       });
-      memref::StoreOp::create(
-          rewriter, loc, arith::MinUIOp::create(rewriter, loc, rows, count),
-          counter, ValueRange{zero});
+      Value kept = arith::MinUIOp::create(rewriter, loc, rows, count);
+      memref::StoreOp::create(rewriter, loc, kept, counter, ValueRange{zero});
+      countToGpu(kept);
       rewriter.eraseOp(op);
     } else if (auto fill = dyn_cast<BufferFillOp>(op)) {
       Value more = arith::MaxSIOp::create(
@@ -23194,8 +23207,22 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
         values.push_back(world.toStorage(loc, value));
       SmallVector<Value> columns;
       for (const WorldColumn &field : buffer.fields)
-        columns.push_back(world.bufferField(buffer, field));
-      {
+        columns.push_back(
+            (aroundGpu ? *gpu : world).bufferField(buffer, field));
+      if (aroundGpu) {
+        // (Around the loops for the GPU: the rows in the GPU's copy, by a
+        // loop for it.)
+        auto loop = scf::ParallelOp::create(
+            rewriter, loc, ValueRange{world.toIndex(loc, from)},
+            ValueRange{world.toIndex(loc, rows)},
+            ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 1)});
+        loop->setAttr(kGpuLoopAttr, rewriter.getUnitAttr());
+        OpBuilder::InsertionGuard each(rewriter);
+        rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+        for (auto [value, column] : llvm::zip(values, columns))
+          memref::StoreOp::create(rewriter, loc, value, column,
+                                  ValueRange{loop.getInductionVars()[0]});
+      } else {
         // (Asked: a run of the rows, not written.)
         OpBuilder::InsertionGuard filled(rewriter);
         whereAsked([&] {
@@ -23221,6 +23248,7 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
         }
       }
       memref::StoreOp::create(rewriter, loc, rows, counter, ValueRange{zero});
+      countToGpu(rows);
       rewriter.eraseOp(op);
     } else {
       // A row it has not reads as nought: row 0 is read, which there is

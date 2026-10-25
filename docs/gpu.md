@@ -151,9 +151,16 @@ Errors, each naming the construct and what it waits for:
 | writing or sending to a component a reactive query reacts to, or to the field a tree is ordered by | its events (stamps), and the tree's order, are kept on the CPU | later |
 
 An extern system cannot be `gpu`. The code of a `gpu system` around its
-`for`s reads and writes uniques and computes; what it would do to
-entities or buffers (spawn, `Marks = []`, a lookup) goes in a system of
-its own, so that every run touches the world's columns from one side.
+`for`s reads and writes uniques and computes; it may also empty a
+buffer, keep its first rows, give it rows alike and ask how many it has
+(`Cells = []`, `Cells = Cells[..n]`, `Cells += [{ .. }; n]`, `len(Cells)`,
+2026-10-25): the count is the CPU's, set there and given to the GPU's
+copy at once (`ent_gpu_cell_set`) for the loops after; the rows given
+are filled by a loop for the GPU. So a `while` around `for`s can make a
+buffer level by level (`Inputs/gpu_buffers.ent`). What else it would do
+to entities or buffers (spawn, `Marks += { .. }`, a row read, a lookup)
+goes in a system of its own, so that every run touches the world's
+columns from one side.
 
 ## Lowering
 

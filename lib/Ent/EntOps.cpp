@@ -1481,9 +1481,11 @@ notForGpu(SymbolTableCollection &symbolTable, Operation *op) {
 }
 
 /// A `gpu` system's queries: each must be one the GPU can run. Its code
-/// outside them reads and writes uniques and computes: what it does to
-/// entities and buffers is for a system of its own, so that every run
-/// touches the columns from one place, the CPU or the GPU.
+/// outside them reads and writes uniques and computes, and empties a
+/// buffer, keeps its first rows, gives it rows alike or asks how many it
+/// has (its count is the CPU's, the rows given filled on the GPU): what
+/// else it does to entities and buffers is for a system of its own, so
+/// that every run touches the columns from one place, the CPU or the GPU.
 static LogicalResult verifyGpuQueries(SymbolTableCollection &symbolTable,
                                       SystemOp system) {
   WalkResult around = system.getBody().walk<WalkOrder::PreOrder>(
@@ -1491,12 +1493,13 @@ static LogicalResult verifyGpuQueries(SymbolTableCollection &symbolTable,
         if (isa<QueryOp>(op))
           return WalkResult::skip();
         if (isa<SpawnOp, DespawnOp, LookupOp, ApplyOp, ConnectOp, DisconnectOp,
-                AppendOp, ClearOp, BufferSetOp, BufferFillOp, BufferAtOp,
-                BufferLenOp, BufferOfOp, TableAtOp, BufferCopyOp, SetAddOp,
-                SetHasOp>(op)) {
+                AppendOp, BufferSetOp, BufferAtOp, BufferOfOp, TableAtOp,
+                BufferCopyOp, SetAddOp, SetHasOp>(op)) {
           op->emitOpError("is in a 'gpu' system, outside its 'for's, where "
-                          "its code only reads and writes uniques: what it "
-                          "does to entities and buffers goes in a system of "
+                          "its code only reads and writes uniques and empties "
+                          "a buffer, keeps its first rows, gives it rows "
+                          "alike or asks how many it has: what it does to "
+                          "entities and buffers but that goes in a system of "
                           "its own");
           return WalkResult::interrupt();
         }

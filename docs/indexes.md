@@ -845,6 +845,7 @@ Steps:
    (`Name = []`, `Name = Name[..n]`, `Name += [{ .. }; n]`) in a `gpu
    system` outside its `for`s: its count is the CPU's anyway; the rows
    given are filled on the GPU.
+   **Built**, with `len(Name)` (docs/gpu.md).
 3. The Morton index's making in a form for the GPU, beside the CPU's:
    the box, the keys, the rows by a `for ... by` (always anew); the
    cells split level by level, each by the entity at its first row
