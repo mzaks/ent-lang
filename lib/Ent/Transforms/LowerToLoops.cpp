@@ -9352,7 +9352,7 @@ static void lowerDuplicates(IRRewriter &rewriter, ModuleOp module,
 /// clustered index keeps in its order move there (see moveRows), the
 /// entity of the index's row r to row r; and so each one's place among
 /// the entities as stored (`place_in_Name`, and its index row's `place`)
-/// is that row.
+/// is that row, and so is its row of the index (`row_in_Name`).
 static void lowerClusters(IRRewriter &rewriter, func::FuncOp func,
                           const WorldLayout &layout, WorldAccess &world) {
   SmallVector<ClusterOp> clusters;
@@ -9365,10 +9365,13 @@ static void lowerClusters(IRRewriter &rewriter, func::FuncOp func,
     auto info =
         cast<BufferOp>(index.op)->getAttrOfType<DictionaryAttr>("ent.index");
     StringAttr first = cast<StringAttr>(cast<ArrayAttr>(info.get("of"))[0]);
-    StringAttr place;
-    for (Attribute hidden : cast<ArrayAttr>(info.get("hidden")))
+    StringAttr place, rowIn;
+    for (Attribute hidden : cast<ArrayAttr>(info.get("hidden"))) {
       if (cast<StringAttr>(hidden).getValue().starts_with("place_in_"))
         place = cast<StringAttr>(hidden);
+      if (cast<StringAttr>(hidden).getValue().starts_with("row_in_"))
+        rowIn = cast<StringAttr>(hidden);
+    }
     auto fieldOf = [&](StringRef field) -> const WorldColumn & {
       return *llvm::find_if(index.fields, [&](const WorldColumn &column) {
         return column.field.getValue() == field;
@@ -9387,6 +9390,15 @@ static void lowerClusters(IRRewriter &rewriter, func::FuncOp func,
           loc, memref::LoadOp::create(rewriter, loc, world.bufferCount(index),
                                       ValueRange{zero}));
       Value who = world.bufferField(index, fieldOf("who"));
+      // (Whether any row moves: where none does, as where the index was
+      // made again of entities that did not move, nothing is copied, since
+      // a pass that looks at each row for whether it moves reads them all
+      // where it is made of vectors.)
+      Value moves = memref::AllocaOp::create(
+          rewriter, loc, MemRefType::get({}, rewriter.getI1Type()));
+      memref::StoreOp::create(rewriter, loc,
+                              arith::ConstantIntOp::create(rewriter, loc, 0, 1),
+                              moves);
       {
         auto each = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
                                             ValueRange{rows}, ValueRange{one});
@@ -9400,8 +9412,22 @@ static void lowerClusters(IRRewriter &rewriter, func::FuncOp func,
         memref::StoreOp::create(
             rewriter, loc, arith::IndexCastOp::create(rewriter, loc, i32, r),
             newRows, ValueRange{row});
+        auto moved = scf::IfOp::create(
+            rewriter, loc,
+            arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne, row,
+                                  r));
+        rewriter.setInsertionPoint(moved.thenBlock()->getTerminator());
+        memref::StoreOp::create(
+            rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 1),
+            moves);
       }
-      moveRows(rewriter, loc, layout, world, archetype, newRows);
+      {
+        auto ifMoves = scf::IfOp::create(
+            rewriter, loc, memref::LoadOp::create(rewriter, loc, moves));
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPoint(ifMoves.thenBlock()->getTerminator());
+        moveRows(rewriter, loc, layout, world, archetype, newRows);
+      }
       // (Each where it is now: the row, of the index and of the archetype.)
       Value places = world.bufferField(index, fieldOf("place"));
       Value placeColumn = world.column(archetype, first, place);
@@ -9413,6 +9439,10 @@ static void lowerClusters(IRRewriter &rewriter, func::FuncOp func,
       Value at = arith::IndexCastOp::create(rewriter, loc, i64, r);
       memref::StoreOp::create(rewriter, loc, at, places, ValueRange{r});
       memref::StoreOp::create(rewriter, loc, at, placeColumn, ValueRange{r});
+      if (rowIn)
+        memref::StoreOp::create(
+            rewriter, loc, arith::IndexCastOp::create(rewriter, loc, i32, r),
+            world.column(archetype, first, rowIn), ValueRange{r});
     }
     rewriter.eraseOp(cluster);
   }

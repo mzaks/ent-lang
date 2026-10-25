@@ -4847,9 +4847,11 @@ LogicalResult Parser::parseIndex() {
           << "place: c0." << placeField;
       for (const Copy &copy : copies)
         out << ", " << copy.name << ": " << through(copy);
-      out << " }\n"
-          << indent << "}\n"
-          << indent << n << "_number(" << n << ", " << of.front() << ")\n";
+      out << " }\n" << indent << "}\n";
+      // (Clustered, the rows themselves move into the order, and each
+      // entity is told its row as it does: see ClusterOp.)
+      if (!clustered)
+        out << indent << n << "_number(" << n << ", " << of.front() << ")\n";
     };
     if (how == "rebuild") {
       // (Every time anew.)
@@ -5106,6 +5108,14 @@ LogicalResult Parser::parseIndex() {
   if (clustered) {
     OpBuilder::InsertionGuard guard(builder);
     builder.setInsertionPoint(update.getBody().front().getTerminator());
+    // (Of a Morton index, before its cells are worked out: their leaves'
+    // boxes by the entities at their first rows, which are rows of the
+    // archetype then.)
+    update.walk([&](InvokeOp invoke) {
+      if (morton &&
+          invoke.getCallee() == (bufferName.getValue() + "_tree").str())
+        builder.setInsertionPoint(invoke);
+    });
     ClusterOp::create(builder, loc(at),
                       FlatSymbolRefAttr::get(context, bufferName));
   }

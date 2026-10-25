@@ -129,8 +129,9 @@ def Ent_ClusterOp
     `clustered`), just made: the rows of the one archetype that holds its
     entities move so that the entity of the index's row r is at row r,
     every column and the ids, the entity table following; each row's place
-    (`place_in_Name`, and the index row's `place`) is its row then. In a
-    system, outside its queries: the index's own update.
+    (`place_in_Name`, and the index row's `place`) is its row then, and so
+    is its row of the index (`row_in_Name`). In a system, outside its
+    queries: the index's own update.
   }];
   let arguments = (ins FlatSymbolRefAttr:$index);
   let assemblyFormat = "$index attr-dict";

@@ -4339,3 +4339,51 @@ them; old (Fresh) against new, the same compiler, ms:
 - The copy costs about 1.5% of the walk; windows also work now along a
   tree, by a field and in a `for` that reacts to changes
   (test/Integration/window_kinds.test).
+
+## 2026-10-25: the Morton index made with less on one thread
+
+Two changes to making a clustered index (bench/points/run.py, Morton
+only, the same machine and points as above):
+
+- The rows clustered right after they are put in order (of a Morton
+  index before its cells are worked out), each entity told its row as
+  it moves (`row_in_Name`): no pass on one thread telling every entity
+  its row (`N_number`) any more.
+- Nothing moved where no row moves: the pass that looks at each row for
+  whether it moves was made of vectors, masked, and so read every
+  column of every row (2.8 ms of a million points) even where the index
+  was made again of entities that had not moved.
+
+One core:
+
+| points | n | k | morton | (made) | octTree |
+|---|---|---|---|---|---|
+| 2DinCube | 1M | 1 | 204.5 | 15.2 | 239.1 |
+| 2Dkuzmin | 100k | 1 | 24.2 | 1.0 | 20.8 |
+| 3DinCube | 1M | 1 | 369.7 | 18.7 | 366.9 |
+| 3DonSphere | 1M | 1 | 267.8 | 19.1 | 282.5 |
+| 3DinCube | 1M | 10 | 991.8 | 18.9 | 1117.6 |
+| 3Dplummer | 100k | 10 | 104.2 | 1.4 | 141.8 |
+
+All cores:
+
+| points | n | k | morton | (made) | octTree |
+|---|---|---|---|---|---|
+| 2DinCube | 1M | 1 | 26.5 | 8.0 | 24.2 |
+| 2Dkuzmin | 100k | 1 | 3.2 | 0.6 | 2.8 |
+| 3DinCube | 1M | 1 | 46.2 | 10.5 | 36.9 |
+| 3DonSphere | 1M | 1 | 35.9 | 10.6 | 29.0 |
+| 3DinCube | 1M | 10 | 101.6 | 10.6 | 97.3 |
+| 3Dplummer | 100k | 10 | 10.5 | 0.7 | 21.2 |
+
+- Made on all cores 8 to 10.6 ms where 11.7 to 14.3; on one core 15 to
+  19 where 20 to 24. Against octTree on all cores 1.04 to 1.25 where
+  1.07 to 1.35 (Plummer 0.50: ent the faster).
+- What is left on one thread, about 4 ms of a million points: splitting
+  the cells (binary searches, about half), the leads filled, `next`, the
+  boxes of cells above the leaves.
+- Tried for treecode's quadrupoles (1.5 times treecode on one core): a
+  cell's eleven moments next to each other in one buffer (`Moment[c * 16
+  + k]`) instead of a column each: 18% slower, so not the cause; the
+  difference is the arithmetic of cells gathered by id, where treecode
+  copies each cell into its list and goes along it.
