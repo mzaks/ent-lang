@@ -25,7 +25,8 @@ the fourth step on, and the first three steps' rewiring in all (where the
 links as laid get room). Both must end with the same hash.
 
 Then pick.ent on one core, with the indexes of the links by weight and by
-their ends (`//I`) and without: every page's three heaviest links out
+their ends (`//I`), without, and without with the ones the compiler
+finds made (`found`: --infer-indexes): every page's three heaviest links out
 (`by l.w last 3`), and its links to vertex 0 (`where v == hub`), of every
 page and of those with more than 1,000 links out. The best of five runs
 (the indexed ones' first, which makes the index, said apart); both must
@@ -114,10 +115,12 @@ def build_ent():
     plain = os.path.join(OUT, "pick_plain.ent")
     open(plain, "w").write("".join(line for line in text.splitlines(True)
                                    if not line.rstrip().endswith("//I")))
-    for name, program in (("indexed", os.path.join(HERE, "pick.ent")),
-                          ("plain", plain)):
+    for name, program, flags in (
+            ("indexed", os.path.join(HERE, "pick.ent"), []),
+            ("plain", plain, ["--no-index-remarks"]),
+            ("found", plain, ["--infer-indexes"])):
         out = os.path.join(OUT, "pick-" + name)
-        run([ENT, "build", "-I", HERE, program, "-o", out], env=env)
+        run([ENT, "build", "-I", HERE] + flags + [program, "-o", out], env=env)
         picks[name] = out
     return binaries, churn, picks
 
@@ -225,13 +228,17 @@ def main():
                 times = [ms for ms, _ in runs]
                 found.setdefault((name, kind), []).append(
                     (min(times[1:]), times[0]))
-    print(f"{'pick':<26} {'indexed':>9} {'(first)':>9} {'plain':>9}")
+    print(f"{'pick':<26} {'indexed':>9} {'(first)':>9} {'plain':>9} "
+          f"{'found':>9} {'(first)':>9}")
     for kind in ("top", "hub of more than 0", "hub of more than 1000"):
         idx = found[("indexed", kind)]
         pl = found[("plain", kind)]
+        fd = found[("found", kind)]
         print(f"{kind:<26} {statistics.median(x[0] for x in idx):9.2f} "
               f"{statistics.median(x[1] for x in idx):9.2f} "
-              f"{statistics.median(x[0] for x in pl):9.2f}")
+              f"{statistics.median(x[0] for x in pl):9.2f} "
+              f"{statistics.median(x[0] for x in fd):9.2f} "
+              f"{statistics.median(x[1] for x in fd):9.2f}")
 
 
 if __name__ == "__main__":

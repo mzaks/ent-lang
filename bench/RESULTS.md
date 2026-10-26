@@ -4679,3 +4679,58 @@ which there were none. Without it (the command and machine of
 So `incremental` on many threads no longer costs more than on one (open
 in the entry of 2026-10-23). The others as before: scan 0.28 / 0.28, as fits 0.27
 / 0.30, `rebuild` 1.33 / 1.29 (the first row).
+
+## 2026-10-26: indexes found by the compiler (step 12)
+
+`ent build` names in a remark the index that would serve a `for` the
+program declares none for, and `--infer-indexes` makes it (docs/indexes.md,
+step 12). Native builds, on mains. Two ways of telling whether it works.
+
+Programs whose indexes are written by hand, built without them and with
+`--infer-indexes`; each finds the index written by hand and runs as fast
+with it, saying the same:
+
+- **Epidemic** (`bench/epidemic/run.py 100000 1000000 --inferred`, the
+  `where`s of `--partition` with no declaration, the tally as it was):
+  `index DiseaseByStage of disease::Disease, disease::Person by stage
+  partition`
+  found (Person for its capacity, as by hand). Ms a day, one core / four
+  threads / all the cores: 5.0 / 2.1 / 1.4 and 67.1 / 19.2 / 9.6 at a
+  million, the hand-written partition 5.0 / 2.1 / 1.4 and 66.5 / 19.2 /
+  9.6 (bench/epidemic/RESULTS.md); 85,658 and 857,886 infected each way.
+  No index is now about as fast at a million (67.2 / 19.1 / 9.5).
+- **Hash** (`bench/hash/run.py 1000 1000 1000 50`, `found`): `index
+  ShipByTeam of Ship by team hash`, as `as fits`, ms a frame one core /
+  all: 0.268 / 0.279 against 0.267 / 0.279 (10 reads), 0.524 / 0.555
+  against 0.522 / 0.552 (100 reads), 0.396 / 0.596 against 0.397 / 0.561
+  and 0.648 / 0.846 against 0.647 / 0.867 where one in 50 changes.
+- **Graph** (`bench/graph/run.py`, `pick` built from the source without
+  its `//I` lines, `found`): `index LinkByW of web::Link by w` and `index
+  LinkEnds of web::Link by source, target` found; ms, indexed / found:
+  top three 2.35 / 2.36 (the first run, which makes the index, 367.3 /
+  367.1; sorting each page's links where they are gone over, 52.5),
+  links to the hub of every page 6.01 / 6.00 (2.76 holding every link
+  against it: there the hand-written index loses too), of the pages with
+  more than 1,000 links 0.49 / 0.46.
+- **Traffic** (`examples/traffic/lanes.ent`, `town.ent`): their sorted
+  indexes are read by name (the car ahead is `Traffic[r + 1]`), not by a
+  `for ... by`, so the program cannot go without them; nothing to find.
+- **LJ** (`examples/lj/lj.ent`): its grid serves a `for` that adds
+  forces, fractions, whose sums the grid's order would round otherwise,
+  in a box that wraps (the nearest image); a grid is found only where the
+  order cannot change what the `for` does, so not there.
+
+A program written the plain way (`examples/infer/crowd.ent`, `bench/infer/
+run.py`): 40,000 people on a square, each counting who stands within reach
+and how many of them are ill (a `for` inside a `for` by how far), the ill
+counted by stage, the ten who met most listed. Found: a grid of Walker
+and Health by (x, y) and the `near` the `for` reads, and a partition of
+Health by stage; the `for ... by w.met last 10` gets none (`met` changes
+every step, as often as it is read). 100 steps, s, the best of three:
+
+| | one core | all cores |
+|---|---|---|
+| as written | 25.13 | 3.38 |
+| indexes found | 0.65 | 0.14 |
+
+The same said either way.

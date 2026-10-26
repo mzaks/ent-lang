@@ -46,6 +46,12 @@
 // RUN: %ent run %S/Inputs/infer_near.ent --infer-indexes > %t.near.inferred
 // RUN: cmp %t.near %t.near.inferred
 
+// Relations, and a component's room from another.
+// RUN: %ent run %S/Inputs/infer_edges.ent > %t.edges 2> %t.edges.err
+// RUN: FileCheck %s --check-prefix=EDGES --input-file=%t.edges.err
+// RUN: %ent run %S/Inputs/infer_edges.ent --infer-indexes > %t.edges.inferred
+// RUN: cmp %t.edges %t.edges.inferred
+
 // REMARK-DAG: index Unread is read by nothing: it is not made
 // REMARK-DAG: :25:{{[0-9]+}}: remark: visits every entity to find those whose kind is of some values; an index would find them: 'index BugByKind of Bug by kind partition'
 // REMARK-DAG: :26:{{[0-9]+}}: remark: visits every entity to find those whose kind is of some values; an index would find them: 'index BugByKind of Bug by kind partition'
@@ -72,3 +78,6 @@
 // BYINDEX-NOT: by_index
 // NEAR: infer_near.ent:24:9: remark: visits every entity to find those within Box.r of a place; an index would find them: 'index PNear of P grid (x, y) cell Box.r', and 'near (a.x, a.y) within Box.r * 1.000001 in PNear'
 // NEAR-NOT: within
+// EDGES-DAG: infer_edges.ent:22:9: remark: sorts an entity's edges by w each time it runs, and more such loops run than systems change them; an index would keep them in order: 'index LinkByW of Link by w'
+// EDGES-DAG: infer_edges.ent:30:9: remark: holds each of an entity's edges against the entity at their other end each time it runs, and more such loops run than systems change the relation; an index would find those by halving: 'index LinkEnds of Link by source, target'
+// EDGES-DAG: infer_edges.ent:33:7: remark: visits every entity to find those whose m is of some values; an index would find them: 'index MoodByM of Mood, Node by m partition'

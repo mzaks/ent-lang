@@ -899,10 +899,17 @@ struct EntInferIndexes
   /// `for`s it would serve.
   struct Found {
     FlatSymbolRefAttr component;
+    /// Another component its entities have, for its capacity (roomFor).
+    FlatSymbolRefAttr also;
+    /// Of a grid, the other components the `for`s it serves bind.
+    SmallVector<FlatSymbolRefAttr> with;
     StringAttr field;
     bool partition = false;
     /// A sorted index, for `for ... by` the field (else by a value).
     bool sorted = false;
+    /// Of a relation (`component` its name): its edges by the field, or
+    /// by their other ends (`field` "source").
+    bool relation = false;
     /// A grid, by where the entities are (`field` the first of those),
     /// for `for`s inside `for`s by how far away they are.
     bool grid = false;
@@ -938,13 +945,43 @@ struct EntInferIndexes
             system && isa_and_nonnull<SystemOp>(symbols.lookup(system)))
           making.insert(system);
     }
-    // (An index holds a row for each entity of its component: as many as
-    // the component's capacity, or the program's default.)
+    // (An index holds a row for each entity of its components: as many as
+    // the least capacity of those, or the program's default. Of a
+    // component without, also another of its module with one that every
+    // entity with it has, as `Person` in `of Disease, Person`: what
+    // `room` gives, or nothing where none is needed.)
     bool roomy = module->hasAttr("ent.default_capacity");
-    auto room = [&](ComponentOp component) {
-      return component && (roomy || component.getCapacityAttr());
+    // (The module a symbol is of: none for the program's own.)
+    auto moduleOf = [](StringRef symbol) {
+      return symbol.contains('.') ? symbol.rsplit('.').first : StringRef();
     };
-    SmallVector<Found> found;
+    auto roomFor =
+        [&](ComponentOp component) -> std::optional<FlatSymbolRefAttr> {
+      if (!component)
+        return std::nullopt;
+      if (roomy || component.getCapacityAttr())
+        return FlatSymbolRefAttr();
+      auto own = FlatSymbolRefAttr::get(component.getSymNameAttr());
+      SmallVector<ArchetypeOp> holding;
+      for (ArchetypeOp archetype : archetypes)
+        if (archetype.contains(own))
+          holding.push_back(archetype);
+      for (ComponentOp other : module.getOps<ComponentOp>()) {
+        auto named = FlatSymbolRefAttr::get(other.getSymNameAttr());
+        if (other.getCapacityAttr() && other != component &&
+            moduleOf(other.getSymName()) == moduleOf(component.getSymName()) &&
+            !holding.empty() &&
+            llvm::all_of(holding, [&](ArchetypeOp archetype) {
+              return archetype.contains(named) && !archetype.isOptional(named);
+            }))
+          return named;
+      }
+      return std::nullopt;
+    };
+    auto room = [&](ComponentOp component) {
+      return roomFor(component).has_value();
+    };
+    SmallVector<Found, 4> found;
     auto findOrAdd = [&](FlatSymbolRefAttr component, StringAttr field,
                          bool partition, bool sorted = false,
                          bool grid = false) -> Found & {
@@ -954,6 +991,8 @@ struct EntInferIndexes
           return one;
       Found &made = found.emplace_back();
       made.component = component;
+      made.also = roomFor(symbols.lookup<ComponentOp>(component.getAttr()))
+                      .value_or(FlatSymbolRefAttr());
       made.field = field;
       made.partition = partition;
       made.sorted = sorted;
@@ -964,6 +1003,8 @@ struct EntInferIndexes
                              : component.getValue().rsplit('.').second.str();
       if (grid) {
         base += "Near";
+      } else if (field.getValue() == "source") {
+        base += "Ends";
       } else {
         base += "By";
         base += llvm::toUpper(field.getValue().front());
@@ -1095,6 +1136,59 @@ struct EntInferIndexes
       one.serves.assign(queries.begin(), queries.end());
     }
 
+    // A loop over an entity's edges `by` a field of theirs sorts them each
+    // time it runs, and one `where` their other end is an entity holds
+    // every edge against it; an index of the relation keeps each entity's
+    // edges in the field's order, or in the order of their other ends,
+    // where the loop finds the slice by halving. Kept as the relation
+    // changes, it pays, as a sorted index does, where more such loops run
+    // than systems change the relation (connect, disconnect, the field).
+    llvm::MapVector<std::pair<Attribute, Attribute>, SmallVector<Operation *>>
+        edgeLoops;
+    module.walk([&](EdgesOp edges) {
+      auto system = edges->getParentOfType<SystemOp>();
+      auto relation =
+          symbols.lookup<RelationOp>(edges.getRelationAttr().getAttr());
+      if (!system || !relation || making.contains(system.getSymNameAttr()) ||
+          system.getGpu())
+        return;
+      auto had = relation->getAttrOfType<ArrayAttr>("ordered_by");
+      auto has = [&](StringRef order) {
+        return had && llvm::any_of(had, [&](Attribute one) {
+                 return cast<StringAttr>(one).getValue() == order;
+               });
+      };
+      StringAttr order;
+      if (StringAttr field = edges.getOrderFieldAttr();
+          field && !has(field.getValue()))
+        order = field;
+      else if (!edges.getOrderFieldAttr() && edges.getSlicePart("other") &&
+               !has("source"))
+        order = StringAttr::get(module.getContext(), "source");
+      if (order)
+        edgeLoops[{relation.getSymNameAttr(), order}].push_back(edges);
+    });
+    for (auto &[key, loops] : edgeLoops) {
+      auto relation = cast<StringAttr>(key.first);
+      auto order = cast<StringAttr>(key.second);
+      StringAttr none = StringAttr::get(module.getContext(), "");
+      unsigned changing = 0, going = 0;
+      for (SystemOp system : module.getOps<SystemOp>())
+        if (often.contains(system.getSymNameAttr())) {
+          SystemAccess access = computeAccess(system, archetypes);
+          changing += access.writes.contains({StringAttr(), relation, none}) ||
+                      access.writes.contains({StringAttr(), relation, order});
+        }
+      for (Operation *loop : loops)
+        going +=
+            often.contains(loop->getParentOfType<SystemOp>().getSymNameAttr());
+      if (going <= changing)
+        continue;
+      Found &one = findOrAdd(FlatSymbolRefAttr::get(relation), order, false);
+      one.relation = true;
+      one.serves = loops;
+    }
+
     // A `for` inside a `for` that visits every entity of a component to
     // find those within a distance of the place of the one the `for`
     // around visits (`where (b.x - a.x) * (b.x - a.x) + .. <= r * r`, of
@@ -1138,9 +1232,6 @@ struct EntInferIndexes
       });
       return text;
     };
-    auto moduleOf = [](StringRef symbol) {
-      return symbol.contains('.') ? symbol.rsplit('.').first : StringRef();
-    };
     module.walk([&](EachOp each) {
       auto query = each->getParentOfType<QueryOp>();
       auto system = each->getParentOfType<SystemOp>();
@@ -1150,15 +1241,40 @@ struct EntInferIndexes
         return;
       Block &body = each.getBody().front();
       unsigned vars = each.getInits().size();
-      if (vars == 0 ||
-          body.getNumArguments() != 1 + vars + (each.getEntity() ? 1 : 0))
+      unsigned refs =
+          body.getNumArguments() - vars - (each.getEntity() ? 1 : 0);
+      if (vars == 0 || refs == 0)
         return;
-      Value visited = body.getArgument(0);
+      // (The component whose fields say where: the one a difference reads
+      // of the entity visited; the others it binds the grid holds too.)
+      Value visited;
+      body.walk([&](Operation *op) {
+        if (!isa<arith::SubFOp, arith::SubIOp>(op))
+          return WalkResult::advance();
+        for (Value operand : op->getOperands())
+          if (auto get = operand.getDefiningOp<GetOp>();
+              get && isa<BlockArgument>(get.getRef()) &&
+              cast<BlockArgument>(get.getRef()).getOwner() == &body &&
+              cast<BlockArgument>(get.getRef()).getArgNumber() < refs) {
+            visited = get.getRef();
+            return WalkResult::interrupt();
+          }
+        return WalkResult::advance();
+      });
+      if (!visited)
+        return;
       auto ref = cast<RefType>(visited.getType());
       FlatSymbolRefAttr component = ref.getComponent();
-      if (ref.getVia() ||
-          moduleOf(component.getValue()) != moduleOf(system.getSymName()))
-        return;
+      SmallVector<FlatSymbolRefAttr> with;
+      for (BlockArgument bound : body.getArguments().take_front(refs)) {
+        auto boundRef = cast<RefType>(bound.getType());
+        if (boundRef.getVia() || boundRef.getIsOptional() ||
+            moduleOf(boundRef.getComponent().getValue()) !=
+                moduleOf(system.getSymName()))
+          return;
+        if (bound != visited)
+          with.push_back(boundRef.getComponent());
+      }
       auto declaredComponent = symbols.lookup<ComponentOp>(component.getAttr());
       if (!room(declaredComponent))
         return;
@@ -1177,7 +1293,8 @@ struct EntInferIndexes
         StringRef dialect = op->getDialect()->getNamespace();
         reads &= dialect == "arith" || dialect == "math" ||
                  isa<scf::IfOp, scf::YieldOp, GetOp, ReadOp, YieldOp>(op) ||
-                 llvm::is_contained({"ent.entity", "ent.same", "ent.has"},
+                 llvm::is_contained({"ent.entity", "ent.same", "ent.has",
+                                     "builtin.unrealized_conversion_cast"},
                                     op->getName().getStringRef());
       });
       if (!reads)
@@ -1351,7 +1468,8 @@ struct EntInferIndexes
       if (one.places.empty()) {
         one.places = places;
         one.cell = radius;
-      } else if (one.places != places) {
+        one.with = with;
+      } else if (one.places != places || one.with != with) {
         return;
       }
       // (A little farther than the radius for fractions: the grid works
@@ -1386,10 +1504,10 @@ struct EntInferIndexes
             took[place.str()] = value.getAsNumber().value_or(0);
       }
     }
-    // (A `for` inside a `for` is timed as the `for` around.)
+    // (A `for` inside a `for`, or over edges, is timed as the `for` around.)
     auto placeOf = [](Operation *served) {
-      if (auto each = dyn_cast<EachOp>(served))
-        served = each->getParentOfType<QueryOp>();
+      if (isa<EachOp, EdgesOp>(served) && served->getParentOfType<QueryOp>())
+        served = served->getParentOfType<QueryOp>();
       std::string place;
       served->getLoc()->walk([&](Location inner) {
         auto file = dyn_cast<FileLineColLoc>(inner);
@@ -1415,11 +1533,22 @@ struct EntInferIndexes
     llvm::raw_string_ostream lines(text);
     for (Found &one : found) {
       // (A component of another module by its name there: `circuit::And`.)
-      SmallVector<StringRef> parts;
-      one.component.getValue().split(parts, '.');
-      std::string component = llvm::join(parts, "::");
+      auto written = [](FlatSymbolRefAttr symbol) {
+        SmallVector<StringRef> parts;
+        symbol.getValue().split(parts, '.');
+        return llvm::join(parts, "::");
+      };
+      std::string component = written(one.component);
+      for (FlatSymbolRefAttr other : one.with)
+        component += ", " + written(other);
+      if (one.also && !llvm::is_contained(one.with, one.also))
+        component += ", " + written(one.also);
       std::string declaration = "index " + one.name + " of " + component;
-      if (one.grid) {
+      if (one.relation) {
+        declaration += one.field.getValue() == "source"
+                           ? " by source, target"
+                           : " by " + one.field.getValue().str();
+      } else if (one.grid) {
         SmallVector<StringRef> places;
         for (StringAttr place : one.places)
           places.push_back(place.getValue());
@@ -1442,12 +1571,24 @@ struct EntInferIndexes
       if (!remarks)
         continue;
       for (Operation *query : one.serves) {
+        bool ends = one.relation && one.field.getValue() == "source";
         InFlightDiagnostic remark =
-            one.sorted ? query->emitRemark("sorts the entities by ")
+            ends           ? query->emitRemark(
+                                 "holds each of an entity's edges against the entity "
+                                 "at their other end each time it runs")
+            : one.relation ? query->emitRemark("sorts an entity's edges by ")
+            : one.sorted   ? query->emitRemark("sorts the entities by ")
             : one.grid
                 ? query->emitRemark("visits every entity to find those within ")
                 : query->emitRemark("visits every entity to find those whose ");
-        if (one.sorted)
+        if (ends)
+          remark << ", and more such loops run than systems change the "
+                    "relation";
+        else if (one.relation)
+          remark << one.field.getValue()
+                 << " each time it runs, and more such loops run than "
+                    "systems change them";
+        else if (one.sorted)
           remark << one.field.getValue()
                  << " each time it runs, and more such 'for's run than "
                     "systems change them";
@@ -1465,8 +1606,10 @@ struct EntInferIndexes
                << " traced)";
           remark << spent;
         }
-        remark << (one.sorted ? "; an index would keep them in order: '"
-                              : "; an index would find them: '")
+        remark << (ends ? "; an index would find those by halving: '"
+                   : one.sorted || one.relation
+                       ? "; an index would keep them in order: '"
+                       : "; an index would find them: '")
                << declaration << "'";
         if (one.grid)
           remark << ", and '" << one.near[query] << "'";

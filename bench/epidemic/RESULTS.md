@@ -3,6 +3,24 @@
 `examples/epidemic` against its reference, OpenABM-Covid19 (commit
 367a0d3, built from its C with `cc -O3 -march=native` and GSL 2.8).
 
+## 2026-10-26, latest: the partition found by the compiler
+
+`bench/epidemic/run.py 100000 1000000 --inferred`: the loops over the ill
+ask for the four stages as with `--partition`, the model declares no
+index and tallies as it did, built with `--infer-indexes`; the compiler
+finds `index DiseaseByStage of disease::Disease, disease::Person by stage
+partition`, the one `--partition` declares (docs/indexes.md, step 12). Ms
+a day, one core / four threads on the fast cores / all the cores:
+
+| | 100,000 | infected | a million | infected |
+|---|---|---|---|---|
+| no index | 5.0 / 2.1 / 1.7 | 85,658 | 67.2 / 19.1 / 9.5 | 857,886 |
+| partition declared | 5.0 / 2.1 / 1.4 | 85,658 | 66.5 / 19.2 / 9.6 | 857,886 |
+| partition found | 5.0 / 2.1 / 1.4 | 85,658 | 67.1 / 19.2 / 9.6 | 857,886 |
+
+At a million the model without an index is now as fast as with one (it
+was 79.7 / 19.6 / 10.3 on 2026-10-26, below).
+
 ## 2026-10-26, later: the partition's sets made on the GPU
 
 `BENCH_ONE_CPU=4 BENCH_CPUS=4-7 BENCH_ALL=0 bench/epidemic/run.py 1000000

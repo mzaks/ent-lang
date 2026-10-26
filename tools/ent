@@ -139,7 +139,9 @@ the program does not declare would find them, a remark at the `for`
 names the index (`index BugByTeam of Bug by team hash`, a partition of
 an enum, a bool or a u8); at a `for ... by` a field that more such
 `for`s go by than systems change (`index DotByKey of Dot by key`, a
-sorted index that keeps them in order); at a `for` inside a `for` that
+sorted index that keeps them in order); at a loop over edges `by` a
+field of theirs or `where` the other end is an entity (an index of the
+relation); at a `for` inside a `for` that
 finds the entities within r of a place (`(b.x - a.x) * (b.x - a.x) + ..
 <= r * r`) and only counts or gathers whole numbers of them (`index
 PNear of P grid (x, y) cell r`, and the `near` it would read); and one

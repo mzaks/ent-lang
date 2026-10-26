@@ -1,0 +1,40 @@
+// Loops over edges `by` a field and `where` the other end is an entity,
+// more often than systems change the relation (infer_indexes.test): an
+// index of the relation found for each. And a partition of a component
+// without a capacity, its room from one every entity with it has.
+import console
+component Node { id: i32 } capacity 500
+component Mood { m: u8 }
+relation (Node)-[Link { w: i32 }]->(Node) capacity 4000
+buffer Ids { who: entity } capacity 500
+unique T { step: i32, sum: i64 }
+world {
+  for i in 0..500 { Ids += { who: spawn { Node { id: i }, Mood { m: (i % 3) as u8 } } } }
+  for i in 0..500 {
+    for k in 0..6 {
+      connect (Ids[i].who)-[Link { w: (i * 31 + k * 17) % 101 }]->(Ids[(i * 7 + k * 13) % 500].who)
+    }
+  }
+}
+system top() {
+  for e, n: Node {
+    var sum = 0
+    for (e)-[l: Link]->(v) by l.w last 2 { sum += l.w }
+    T.sum += sum as i64
+  }
+}
+system hub() {
+  let hub = Ids[0].who
+  for e, n: Node {
+    var count = 0
+    for (e)-[l: Link]->(v) where v == hub { count += 1 }
+    T.sum += count as i64 * 1000
+  }
+  for n: Node, d: Mood where d.m == 1 { T.sum += n.id as i64 }
+}
+system tell() {
+  T.step += 1
+  put("step {T.step}: {T.sum}")
+}
+schedule step() { top() hub() tell() }
+main { loop { step() } until T.step == 3 }

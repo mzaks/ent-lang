@@ -1,0 +1,75 @@
+// A crowd written the plain way, without an index (docs/indexes.md, step
+// 12): people walk a square, each counts who stands near (a `for` inside
+// a `for` by how far), the ill infect those near them, the ten with the
+// most met are listed every step (a `for ... by` and `last`), and the ill
+// are counted by stage (a `where` of an enum's values). `ent build` names
+// the indexes that would serve those `for`s; `ent build --infer-indexes`
+// makes them, and the program says the same, faster (bench/infer).
+import console
+
+enum Stage { Well, Ill, Over }
+component Walker { x: f64, y: f64, id: i32, met: i32 } capacity 40000
+component Health { stage: Stage, since: i32, near: i32 } capacity 40000
+unique Square { side: f64, reach: f64 }
+unique Day { step: i32, ill: i32, top: i64 }
+
+world {
+  Square.side = 400.0
+  Square.reach = 3.0
+  for i in 0..40000 {
+    spawn {
+      Walker { x: ((i * 7919) % 10007) as f64 * 0.0399, y: ((i * 104729) % 9973) as f64 * 0.0401, id: i, met: 0 },
+      Health { stage: if i % 997 == 0 { Stage.Ill } else { Stage.Well }, since: 0, near: 0 }
+    }
+  }
+}
+
+// (Steps of a tenth to the side and up, by who they are and the day.)
+system walk() {
+  for w: mut Walker {
+    w.x += (((w.id * 13 + Day.step) % 11) - 5) as f64 * 0.1
+    w.y += (((w.id * 7 + Day.step * 3) % 11) - 5) as f64 * 0.1
+    if w.x < 0.0 { w.x += Square.side }
+    if w.x >= Square.side { w.x -= Square.side }
+    if w.y < 0.0 { w.y += Square.side }
+    if w.y >= Square.side { w.y -= Square.side }
+  }
+}
+
+// Who stands within reach of each, and how many of them are ill.
+system meet() {
+  for me, a: mut Walker, h: mut Health {
+    var seen = 0
+    var ill = 0
+    for o, b: Walker, c: Health where o != me &&
+        (b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y) <= Square.reach * Square.reach {
+      seen += 1
+      ill += if c.stage == Stage.Ill { 1 } else { 0 }
+    }
+    a.met += seen
+    h.near = ill
+  }
+}
+
+// One near the ill falls ill on some days; the ill get over it in 20.
+system catch() {
+  for w: Walker, h: mut Health where h.stage == Stage.Well {
+    if h.near > 0 && (w.id * 31 + Day.step * 17) % 50 < h.near { h.stage = Stage.Ill h.since = Day.step }
+  }
+  for h: mut Health where h.stage == Stage.Ill {
+    if Day.step - h.since >= 20 { h.stage = Stage.Over }
+  }
+}
+
+// The ten who met most, and how many are ill.
+system tell() {
+  Day.top = 0
+  for w: Walker by w.met last 10 { Day.top += w.id as i64 * w.met as i64 }
+  Day.ill = 0
+  for h: Health where h.stage == Stage.Ill { Day.ill += 1 }
+  Day.step += 1
+  if Day.step % 10 == 0 { put("step {Day.step}: ill {Day.ill}, top {Day.top}") }
+}
+
+schedule step() { walk() meet() catch() tell() }
+main { loop { step() } until Day.step == 100 }

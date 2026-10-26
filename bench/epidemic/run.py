@@ -2,7 +2,8 @@
 """Measures the city's epidemic (examples/epidemic) and its reference.
 
   examples/epidemic/reference/fetch.sh               once
-  python3 bench/epidemic/run.py [sizes] [--reference] [--apart | --partition]
+  python3 bench/epidemic/run.py [sizes] [--reference]
+                                [--apart | --partition | --inferred]
                                 [--tracing] [--days n]
 
 For each size (people: 100000 1000000 by default) a copy of the model is
@@ -36,6 +37,11 @@ Stages of Disease, Person by stage partition`): the loops over the ill go over
 the four stages of the ill (`where d.stage == Stage.Presymptomatic ||
 ..`), which it answers, in place of the tag `Ill`, and the day's tally
 of each stage is its count.
+
+With --inferred the loops over the ill ask for the four stages as with
+--partition, but the model declares no index and counts its tally as it
+did: built with `ent build --infer-indexes`, the compiler finds the
+partition (docs/indexes.md, step 12).
 
 With --gpu a,b the systems named are `gpu system`s and the model is built
 with `--gpu` (docs/gpu.md), on one core and on the fast cores as above
@@ -187,10 +193,12 @@ STAGES = ["Susceptible", "Presymptomatic", "Asymptomatic", "Mild", "Severe",
           "Hospitalised", "Critical", "Recovering", "Recovered", "Dead"]
 
 
-def partitioned(name, text):
-    """The model with a partition by stage (--partition)."""
+def partitioned(name, text, declared=True):
+    """The model with a partition by stage (--partition); or, not
+    `declared`, only asking for the stages, for the compiler to find it
+    (--inferred)."""
     changes = []
-    if name == "disease.ent":
+    if name == "disease.ent" and declared:
         tally = text[text.index("  for d: Disease {\n    let s = d.stage"):]
         tally = tally[:tally.index("\n  }\n") + 5]
         counts = "".join(
@@ -225,8 +233,8 @@ def build_model(people, parallel, apart, gpu=()):
     for name in os.listdir(MODEL):
         if name.endswith(".ent"):
             text = open(os.path.join(MODEL, name)).read()
-            if apart == "partition":
-                text = partitioned(name, text)
+            if apart in ("partition", "inferred"):
+                text = partitioned(name, text, apart == "partition")
             elif apart and name == "disease.ent":
                 changed = text.replace("tag Ill\n", "tag Ill apart\n")
                 if changed == text:
@@ -247,6 +255,7 @@ def build_model(people, parallel, apart, gpu=()):
     subprocess.run(
         [sys.executable, os.path.join(ROOT, "tools", "ent"), "build"] +
         (["--parallel"] if parallel else []) + (["--gpu"] if gpu else []) +
+        (["--infer-indexes"] if apart == "inferred" else []) +
         [os.path.join(folder, "bench.ent"), "-o", built],
         check=True, env=environment)
     return folder, built
@@ -343,7 +352,8 @@ def main():
         del arguments[arguments.index("--days"):arguments.index("--days") + 2]
     sizes = [int(a) for a in arguments if a.isdigit()] or [100000, 1000000]
     apart = ("apart" if "--apart" in arguments else
-             "partition" if "--partition" in arguments else "")
+             "partition" if "--partition" in arguments else
+             "inferred" if "--inferred" in arguments else "")
     gpu = ()
     if "--gpu" in arguments:
         gpu = tuple(arguments[arguments.index("--gpu") + 1].split(","))
@@ -360,6 +370,7 @@ def main():
         print(f"{people} people, {days} days"
               f"{', the ill apart' if apart == 'apart' else ''}"
               f"{', by stage in a partition' if apart == 'partition' else ''}"
+              f"{', the partition found' if apart == 'inferred' else ''}"
               f"{', with tracing' if MEASURES else ''}")
         runs = [("one core", run_model(people, days, False, apart, one, None)),
                 (f"{threads} threads on the fast cores",

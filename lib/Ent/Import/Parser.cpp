@@ -78,8 +78,9 @@ struct SourceModule {
   /// The schedule that runs its `world` block, if it has one.
   std::string worldSchedule;
   llvm::StringSet<> reported;
-  /// The indexes found by the compiler of the components it declared so
-  /// far, read before the code that comes next (see Parser::splice).
+  /// The indexes found by the compiler of the components and relations it
+  /// declared so far, read before the code that comes next (see
+  /// Parser::splice).
   std::string found;
 };
 
@@ -1264,18 +1265,24 @@ OwningOpRef<ModuleOp> Parser::parseModule() {
         foundNear[place] = clause.str();
         continue;
       }
-      SmallVector<StringRef> words;
-      line.split(words, ' ');
-      if (words.size() < 4 || words[0] != "index" || words[2] != "of")
+      // (`index Name of m::C, m::D by ..`: C and D by their names in m.)
+      auto [head, rest] = line.split(" of ");
+      size_t end = std::min(rest.find(" by "), rest.find(" grid "));
+      if (!head.starts_with("index ") || end == StringRef::npos)
         continue;
-      SmallVector<StringRef> parts;
-      words[3].split(parts, "::");
-      std::string declaration =
-          (Twine("index ") + words[1] + " of " + parts.back() + " " +
-           line.drop_front((words[0].size() + words[1].size() +
-                            words[2].size() + words[3].size() + 4)))
-              .str();
-      foundOf[llvm::join(parts, ".")] += declaration + "\n";
+      SmallVector<StringRef> named, local;
+      rest.take_front(end).split(named, ", ");
+      std::string first;
+      for (StringRef component : named) {
+        SmallVector<StringRef> parts;
+        component.split(parts, "::");
+        if (first.empty())
+          first = llvm::join(parts, ".");
+        local.push_back(parts.back());
+      }
+      foundOf[first] += (head + " of " + llvm::join(local, ", ") +
+                         rest.drop_front(end) + "\n")
+                            .str();
     }
   }
   if (failed(parseDeclarations()) || hadError)
@@ -1347,8 +1354,18 @@ void Parser::finishIndexes() {
 // The declarations of one file, up to its end.
 LogicalResult Parser::parseDeclarations() {
   while (true) {
-    // (The indexes found of components declared before, read before the
-    // first code after them: where what they are made of is declared.)
+    // (The indexes found of components and relations declared before,
+    // read before the first code after them: where what they are made of
+    // is declared.)
+    for (auto found = foundOf.begin(); found != foundOf.end();) {
+      StringRef of = found->getKey();
+      auto here = found++;
+      if (of.consume_front(current->prefix) && !of.contains('.') &&
+          current->names.contains(of)) {
+        current->found += here->second;
+        foundOf.erase(here);
+      }
+    }
     if (!current->found.empty() && !buildingIndex &&
         (token.is(Token::Eof) ||
          llvm::any_of(std::initializer_list<StringRef>{"system", "gpu", "fn",
@@ -1420,18 +1437,11 @@ LogicalResult Parser::parseDeclarations() {
       consumeIf(Token::Semicolon);
       continue;
     }
-    if (token.isKeyword("component") || token.isKeyword("tag")) {
-      bool tag = token.isKeyword("tag");
-      advance();
-      std::string name = (current->prefix + token.spelling).str();
-      result = parseComponent(tag);
-      // (The indexes found of it, read before the code after it.)
-      if (auto found = foundOf.find(name);
-          succeeded(result) && found != foundOf.end()) {
-        current->found += found->second;
-        foundOf.erase(found);
-      }
-    } else if (consumeKeyword("unique"))
+    if (consumeKeyword("component"))
+      result = parseComponent(/*tag=*/false);
+    else if (consumeKeyword("tag"))
+      result = parseComponent(/*tag=*/true);
+    else if (consumeKeyword("unique"))
       result = parseUnique();
     else if (token.isKeyword("buffer") && peek().is(Token::Identifier)) {
       advance();
