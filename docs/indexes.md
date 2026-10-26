@@ -514,7 +514,10 @@ them (the same conditions): a partition of an enum, a bool or a u8, a
 hash index of another whole number or a text; it says each in a remark
 at the `for`s and writes the declarations to a file, which
 `ent-translate --inferred=` reads after the program's own (`ent build
---infer-indexes`). The user chose (2026-10-26): suggested always, made
+--infer-indexes`). Given a trace's times (`times=`, from `ent build
+--tune`: each place's loops on all their threads, and the run), a `for`
+whose loops took less than `worth` of the run (1%) is left out, and the
+remarks say how long each took. The user chose (2026-10-26): suggested always, made
 behind the flag; from the code, refined by a trace; partitions, hash,
 sorted and grids; shown on programs with their indexes taken out and on
 a new one.
@@ -546,7 +549,7 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 | 9 | Embeddings by brute force (int8 and binary, ranked again) | The recall to measure against | needs a vector type |
 | 10 | IVF with k-means in ent-lang | | |
 | 11 | LSH families | | |
-| 12 | `--ent-infer-indexes` | Policies, unread indexes, indexes found | in progress (2026-10-26): remarks and `--infer-indexes` for partitions and hash indexes, unread indexes not made; next a trace's times, sorted, grids |
+| 12 | `--ent-infer-indexes` | Policies, unread indexes, indexes found | in progress (2026-10-26): remarks and `--infer-indexes` for partitions and hash indexes, unread indexes not made, a trace's times; next sorted, grids |
 | 13 | B+ tree, BVH, HNSW from outside (where measurements or programs need them) | | |
 
 **Step 1, as it stands** (2026-10-22). The sort that every `for ...

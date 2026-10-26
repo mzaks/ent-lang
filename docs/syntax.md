@@ -2511,7 +2511,9 @@ u8, else a hash index of a whole number or a text (`by f hash`). An
 index that nothing reads is not made, and a remark says so. With `ent
 build --infer-indexes` the indexes named are made, as if the program
 declared them at its end; what the program does is the same, as with any
-index (docs/indexes.md, step 12).
+index (docs/indexes.md, step 12). Built with `--tune trace.json` (a
+trace of a run built with `--trace`), only the `for`s whose loops took
+at least 1% of the traced run are named, each with how long they took.
 
 ### Entities given to a fn or proc
 

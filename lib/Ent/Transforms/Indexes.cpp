@@ -8,6 +8,10 @@
 #include "mlir/IR/IRMapping.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Format.h"
+#include "llvm/Support/JSON.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 
 namespace mlir::ent {
@@ -805,9 +809,10 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
                            touches(access.reads, kept.readBy);
                   });
       if (!read && !runs.empty()) {
-        buffer.emitRemark("index ")
-            << buffer.getSymName()
-            << " is read by nothing: it is not made (docs/indexes.md)";
+        if (remarks)
+          buffer.emitRemark("index ")
+              << buffer.getSymName()
+              << " is read by nothing: it is not made (docs/indexes.md)";
         continue;
       }
       for (RunOp run : runs) {
@@ -982,6 +987,50 @@ struct EntInferIndexes
       findOrAdd(component, field, partitioned).serves.push_back(query);
     });
 
+    // (Of a trace: how long each `for`'s loops took, by its place, and
+    // the run; those that took less than `worth` of it are left.)
+    llvm::StringMap<double> took;
+    double run = 0;
+    if (!times.empty()) {
+      auto read = llvm::MemoryBuffer::getFile(times);
+      llvm::Expected<llvm::json::Value> parsed =
+          read ? llvm::json::parse((*read)->getBuffer())
+               : llvm::Expected<llvm::json::Value>(
+                     llvm::errorCodeToError(read.getError()));
+      if (!parsed) {
+        module.emitError("cannot read the trace's times ")
+            << times << ": " << llvm::toString(parsed.takeError());
+        return signalPassFailure();
+      }
+      if (const llvm::json::Object *object = parsed->getAsObject()) {
+        run = object->getNumber("run").value_or(0);
+        if (const llvm::json::Object *places = object->getObject("places"))
+          for (const auto &[place, value] : *places)
+            took[place.str()] = value.getAsNumber().value_or(0);
+      }
+    }
+    auto placeOf = [](QueryOp query) {
+      std::string place;
+      query.getLoc()->walk([&](Location inner) {
+        auto file = dyn_cast<FileLineColLoc>(inner);
+        if (!file)
+          return WalkResult::advance();
+        place = (llvm::sys::path::filename(file.getFilename().getValue()) +
+                 ":" + Twine(file.getLine()) + ":" + Twine(file.getColumn()))
+                    .str();
+        return WalkResult::interrupt();
+      });
+      return place;
+    };
+    if (!times.empty()) {
+      for (Found &one : found)
+        llvm::erase_if(one.serves, [&](QueryOp query) {
+          return took.lookup(placeOf(query)) < worth * run;
+        });
+      llvm::erase_if(found,
+                     [](const Found &one) { return one.serves.empty(); });
+    }
+
     std::string text;
     llvm::raw_string_ostream lines(text);
     for (Found &one : found) {
@@ -992,11 +1041,22 @@ struct EntInferIndexes
       lines << declaration << "\n";
       if (!remarks)
         continue;
-      for (QueryOp query : one.serves)
-        query.emitRemark("visits every entity to find those whose ")
-            << one.field.getValue()
-            << (one.partition ? " is of some values" : " is one value")
-            << "; an index would find them: '" << declaration << "'";
+      for (QueryOp query : one.serves) {
+        InFlightDiagnostic remark =
+            query.emitRemark("visits every entity to find those whose ");
+        remark << one.field.getValue()
+               << (one.partition ? " is of some values" : " is one value");
+        if (!times.empty()) {
+          std::string spent;
+          llvm::raw_string_ostream said(spent);
+          said << " ("
+               << llvm::format("%.1f", took.lookup(placeOf(query)) / 1000.0)
+               << " ms of the " << llvm::format("%.1f", run / 1000.0)
+               << " traced)";
+          remark << spent;
+        }
+        remark << "; an index would find them: '" << declaration << "'";
+      }
     }
     if (out.empty())
       return;

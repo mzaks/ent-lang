@@ -310,6 +310,9 @@ def EntIndexes : Pass<"ent-indexes", "ModuleOp"> {
     Option<"ranks", "ranks", "bool", /*default=*/"false",
            "Built for many ranks: a partition is kept as sets, made anew "
            "every time">,
+    Option<"remarks", "remarks", "bool", /*default=*/"true",
+           "Say in a remark of an index that nothing reads that it is not "
+           "made">,
   ];
 }
 
@@ -323,13 +326,21 @@ def EntInferIndexes : Pass<"ent-infer-indexes", "ModuleOp"> {
     use for it (the same conditions), and one for each field. With
     `out`, the declarations are written to that file, one a line, which
     `ent-translate --import-ent --inferred=<file>` reads as if the
-    program declared them (`ent build --infer-indexes`).
+    program declared them (`ent build --infer-indexes`). With `times`
+    (a trace's, `ent build --tune`), only `for`s whose loops took at
+    least `worth` of the traced run; the remark says how long.
   }];
   let options = [
     Option<"out", "out", "std::string", /*default=*/"\"\"",
            "Write the declarations of the indexes found to this file">,
     Option<"remarks", "remarks", "bool", /*default=*/"true",
            "Say each, a remark at the `for` it would serve">,
+    Option<"times", "times", "std::string", /*default=*/"\"\"",
+           "How long each place's loops took in a trace (a JSON file, "
+           "`ent build --tune`): only `for`s that took long enough">,
+    Option<"worth", "worth", "double", /*default=*/"0.01",
+           "With `times`, the share of the traced run a `for`'s loops "
+           "take at least to be served">,
   ];
 }
 

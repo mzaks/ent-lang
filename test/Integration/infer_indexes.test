@@ -18,6 +18,19 @@
 // RUN: ent-translate --import-ent %t.ent --inferred=%t.found -I %S/../../devices \
 // RUN:   | ent-opt --ent-indexes | FileCheck %s --check-prefix=VIA
 
+// Refined by a trace: a `for` whose loops took less than `worth` of the run
+// gets no remark nor index; through the driver, --tune gives the times.
+// RUN: rm -rf %t.dir && mkdir -p %t.dir && cp %t.ent %t.dir/ii.ent
+// RUN: echo '{"run": 1000, "places": {"ii.ent:29:9": 600, "ii.ent:25:7": 5}}' > %t.times.json
+// RUN: ent-translate --import-ent %t.dir/ii.ent --mlir-print-debuginfo -I %S/../../devices \
+// RUN:   | ent-opt --ent-infer-indexes="out=%t.timed times=%t.times.json worth=0.1" \
+// RUN:     --mlir-print-op-on-diagnostic=false -o /dev/null 2> %t.timed.err
+// RUN: FileCheck %s --check-prefix=TIMED --input-file=%t.timed.err
+// RUN: FileCheck %s --check-prefix=TIMED-FOUND --input-file=%t.timed
+// RUN: cd %t.dir && env ENT_TRACE=%t.dir/trace.json %ent run ii.ent --trace > /dev/null 2>&1
+// RUN: cd %t.dir && %ent build ii.ent --tune trace.json 2> %t.tuned.err
+// RUN: FileCheck %s --check-prefix=TUNED --input-file=%t.tuned.err
+
 // REMARK-DAG: index Unread is read by nothing: it is not made
 // REMARK-DAG: :25:{{[0-9]+}}: remark: visits every entity to find those whose kind is of some values; an index would find them: 'index BugByKind of Bug by kind partition'
 // REMARK-DAG: :26:{{[0-9]+}}: remark: visits every entity to find those whose kind is of some values; an index would find them: 'index BugByKind of Bug by kind partition'
@@ -32,3 +45,8 @@
 // VIA: via_partition = @BugByKind
 // VIA: via_hash = @BugByTeam
 // CHECK: frame 5:
+// TIMED: ii.ent:29:9: remark: visits every entity to find those whose team is one value (0.6 ms of the 1.0 traced); an index would find them: 'index BugByTeam of Bug by team hash'
+// TIMED-NOT: whose kind
+// TIMED-FOUND: index BugByTeam of Bug by team hash
+// TIMED-FOUND-NOT: BugByKind
+// TUNED: ii.ent:29:{{[0-9]+}}: remark: visits every entity to find those whose team is one value ({{[0-9.]+}} ms of the {{[0-9.]+}} traced)

@@ -140,7 +140,8 @@ names the index (`index BugByTeam of Bug by team hash`, a partition of
 an enum, a bool or a u8); and one at an index nothing reads, which is
 not made. With --infer-indexes those indexes are made, as if the
 program declared them (docs/indexes.md, step 12); --no-index-remarks
-leaves the remarks out.
+leaves the remarks out. With --tune and a trace, only the `for`s whose
+loops took at least 1% of the traced run are named, each with its time.
 
 A module that needs libraries says so in `m.link`: the linker's arguments
 for them, as on a command line (`-lraylib`, `-L/opt/x/lib -lx`).
@@ -579,6 +580,40 @@ def tangled_from(remade):
     return max(64, 1 << (max(measured) + 1))
 
 
+def loop_times(path, output):
+    """How long the loops over entities of each place of the program took
+    in the trace at `path`, all their calls' time on their threads
+    together, and how long the traced run was (microseconds), written to
+    `output` for --ent-infer-indexes ({"run": .., "places": {"f.ent:l:c":
+    ..}})."""
+    try:
+        with open(path) as source:
+            events = json.load(source)["traceEvents"]
+    except (OSError, ValueError, KeyError) as error:
+        sys.exit(f"ent: cannot read the trace '{path}': {error}")
+    places = {}
+    first, last = None, None
+    for event in events:
+        if "ts" in event:
+            end = event["ts"] + event.get("dur", 0)
+            first = event["ts"] if first is None else min(first, event["ts"])
+            last = end if last is None else max(last, end)
+        key = event.get("args", {}).get("site")
+        if not key:
+            continue
+        site, how = key.split("|", 1)
+        if how in ("count", "tangle") or site.startswith("send "):
+            continue
+        # (Its threads' time where it ran on many, its own on one.)
+        if event["cat"] != "work" and how != "serial":
+            continue
+        place = site.split(" ", 1)[0]
+        places[place] = places.get(place, 0.0) + event["dur"]
+    with open(output, "w") as out:
+        json.dump({"run": (last - first) if first is not None else 0,
+                   "places": places}, out)
+
+
 def tuned_loops(path):
     """What `--tune` chooses of each loop over entities from the trace at
     `path`: the loops by their sites (ent-lower-to-loops), each whether it
@@ -697,7 +732,13 @@ def build(arguments, output, directory):
     # each said, at the `for`s; with --infer-indexes made, as if declared.)
     if arguments.infer_indexes or not arguments.no_index_remarks:
         found = os.path.join(directory, stem + ".indexes.ent")
-        run([optimise, imported, "--ent-infer-indexes=out=" + found
+        # (Of a trace: only `for`s whose loops took time there.)
+        times = ""
+        if arguments.tune:
+            times = os.path.join(directory, stem + ".times.json")
+            loop_times(arguments.tune, times)
+            times = " times=" + times
+        run([optimise, imported, "--ent-infer-indexes=out=" + found + times
              + (" remarks=0" if arguments.no_index_remarks else ""),
              "--mlir-print-op-on-diagnostic=false", "-o", os.devnull])
         if arguments.infer_indexes and os.path.getsize(found):
@@ -715,6 +756,8 @@ def build(arguments, output, directory):
         choices.append("gpu=1")
     if arguments.ranks:
         choices.append("ranks=1")
+    if arguments.no_index_remarks:
+        choices.append("remarks=0")
     indexes = "--ent-indexes" + ("=" + " ".join(choices) if choices else "")
     run([optimise, imported, indexes, "--mlir-print-debuginfo",
          "--mlir-print-op-on-diagnostic=false", "-o", module])
