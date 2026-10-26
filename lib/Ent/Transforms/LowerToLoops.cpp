@@ -1307,7 +1307,7 @@ static bool isEntityLocal(QueryOp query) {
             BufferRowsOp>(op) ||
         // (An entity into a set, or out: its bit, atomically where the
         // loop runs on many threads; and reading another set's bits.)
-        isa<SetAddOp, SetHasOp>(op) || !hasOwnEffects(op))
+        isa<SetAddOp, SetHasOp, SetCountOp>(op) || !hasOwnEffects(op))
       return WalkResult::advance();
     // A buffer is read like a resource: no query changes one while it
     // runs (the rows it gives one are there when it ends), so its rows
@@ -1478,6 +1478,63 @@ static LoopOptions sitedOptions(IRRewriter &rewriter, Location loc,
 /// Set`, see emitEntityLoops), or none.
 static const WorldBuffer *scanSet = nullptr;
 
+/// Of a family of sets that loops visit the entities of (a partition's
+/// bits, see kViaPartitionAttr): the sets they are of (i64s), or those
+/// they are not (`except`).
+struct ScanParts {
+  SmallVector<Value> asked;
+  bool except = false;
+};
+static const ScanParts *scanParts = nullptr;
+
+/// The word `word` (an index) of the set that loops visit the entities of,
+/// `words` (see scanSet): of a family of sets, that word of each set they
+/// are of, or'ed (see scanParts).
+static Value loadSetWord(OpBuilder &builder, Location loc,
+                         const WorldBuffer &set, Value words, Value word,
+                         const ScanParts *parts) {
+  if (set.parts == 1 || !parts)
+    return memref::LoadOp::create(builder, loc, words, ValueRange{word});
+  int64_t perPart = set.capacity / set.parts;
+  Value each = arith::ConstantIndexOp::create(builder, loc, perPart);
+  auto ofPart = [&](OpBuilder &b, Value part) -> Value {
+    return memref::LoadOp::create(
+        b, loc, words,
+        ValueRange{arith::AddIOp::create(
+            b, loc, word, arith::MulIOp::create(b, loc, part, each))});
+  };
+  Type index = builder.getIndexType();
+  Value bits = arith::ConstantIntOp::create(builder, loc, 0, 64);
+  if (!parts->except) {
+    for (Value part : parts->asked)
+      bits = arith::OrIOp::create(
+          builder, loc, bits,
+          ofPart(builder,
+                 arith::IndexCastOp::create(builder, loc, index, part)));
+    return bits;
+  }
+  // (Those of every set but the ones named.)
+  auto each_ = scf::ForOp::create(
+      builder, loc, arith::ConstantIndexOp::create(builder, loc, 0),
+      arith::ConstantIndexOp::create(builder, loc, set.parts),
+      arith::ConstantIndexOp::create(builder, loc, 1), ValueRange{bits},
+      [&](OpBuilder &b, Location, Value part, ValueRange held) {
+        Value number = arith::IndexCastOp::create(b, loc, b.getI64Type(), part);
+        Value wanted = arith::ConstantIntOp::create(b, loc, 1, 1);
+        for (Value named : parts->asked)
+          wanted = arith::AndIOp::create(
+              b, loc, wanted,
+              arith::CmpIOp::create(b, loc, arith::CmpIPredicate::ne, number,
+                                    named));
+        Value read = arith::SelectOp::create(
+            b, loc, wanted, ofPart(b, part),
+            arith::ConstantIntOp::create(b, loc, 0, 64));
+        scf::YieldOp::create(
+            b, loc, ValueRange{arith::OrIOp::create(b, loc, held[0], read)});
+      });
+  return each_.getResult(0);
+}
+
 /// The word of a set's bits that holds `key` (an index), and the bit.
 static std::pair<Value, Value> setPlace(IRRewriter &rewriter, Location loc,
                                         Value key) {
@@ -1497,11 +1554,12 @@ static std::pair<Value, Value> setPlace(IRRewriter &rewriter, Location loc,
 /// entities `set` holds: `emitRow` for each, in the order of the rows.
 /// Where an archetype's keys are its rows (row ids, of at least 64 rows
 /// each), a word at a time, and a word of nought costs a load; else a
-/// test of each row's bit.
+/// test of each row's bit. (Of a family of sets, those `parts` says.)
 static void emitSetRows(IRRewriter &rewriter, Location loc,
                         const WorldArchetype &archetype, WorldAccess &world,
                         const WorldBuffer &set, Value first, Value end,
-                        function_ref<void(Value row)> emitRow) {
+                        function_ref<void(Value row)> emitRow,
+                        const ScanParts *parts) {
   const EntityScheme &scheme = world.getLayout().entities;
   Value words = world.bufferField(set, set.fields.front());
   Type i64 = rewriter.getI64Type();
@@ -1514,7 +1572,7 @@ static void emitSetRows(IRRewriter &rewriter, Location loc,
     auto [word, bit] =
         setPlace(rewriter, loc,
                  world.entityKey(loc, world.entityId(loc, archetype, row)));
-    Value bits = memref::LoadOp::create(rewriter, loc, words, ValueRange{word});
+    Value bits = loadSetWord(rewriter, loc, set, words, word, parts);
     auto held = scf::IfOp::create(
         rewriter, loc,
         arith::CmpIOp::create(
@@ -1542,7 +1600,7 @@ static void emitSetRows(IRRewriter &rewriter, Location loc,
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPoint(wordsLoop.getBody()->getTerminator());
   Value word = wordsLoop.getInductionVar();
-  Value bits = memref::LoadOp::create(rewriter, loc, words, ValueRange{word});
+  Value bits = loadSetWord(rewriter, loc, set, words, word, parts);
   Value zero64 = arith::ConstantIntOp::create(rewriter, loc, 0, 64);
   // (Its regions made once it is in place: the body is lowered there,
   // which looks for the module around it.)
@@ -1621,7 +1679,9 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
   // started), or as many as the archetype holds now. (Of a set's, those
   // it holds; not of loops made inside these.)
   const WorldBuffer *set = scanSet;
+  const ScanParts *parts = scanParts;
   llvm::SaveAndRestore<const WorldBuffer *> scanning(scanSet, nullptr);
+  llvm::SaveAndRestore<const ScanParts *> scanningParts(scanParts, nullptr);
   Value count = rows ? rows : world.count(loc, archetype);
   Value zero = from ? from : arith::ConstantIndexOp::create(rewriter, loc, 0);
 
@@ -1631,8 +1691,9 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
     auto guard = scf::IfOp::create(rewriter, loc, present);
     rewriter.setInsertionPointToStart(guard.thenBlock());
     if (set)
-      emitSetRows(rewriter, loc, archetype, world, *set, zero, count,
-                  [&](Value row) { emitBody(row, count, /*parallel=*/false); });
+      emitSetRows(
+          rewriter, loc, archetype, world, *set, zero, count,
+          [&](Value row) { emitBody(row, count, /*parallel=*/false); }, parts);
     else
       emitBody(zero, count, /*parallel=*/false);
     return guard;
@@ -1666,8 +1727,9 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
       rewriter.setInsertionPointToStart(block);
       auto end = scf::YieldOp::create(rewriter, loc);
       rewriter.setInsertionPoint(end);
-      emitSetRows(rewriter, loc, archetype, world, *set, zero, count,
-                  [&](Value row) { emitBody(row, count, /*parallel=*/false); });
+      emitSetRows(
+          rewriter, loc, archetype, world, *set, zero, count,
+          [&](Value row) { emitBody(row, count, /*parallel=*/false); }, parts);
       return once;
     }
     auto loop = scf::ForOp::create(rewriter, sited, zero, count, one);
@@ -1703,7 +1765,7 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
         emitSetRows(
             rewriter, loc, archetype, world, *set, startOf(slice),
             startOf(arith::AddIOp::create(rewriter, loc, slice, one)),
-            [&](Value row) { emitBody(row, count, /*parallel=*/true); });
+            [&](Value row) { emitBody(row, count, /*parallel=*/true); }, parts);
         return loop;
       }
       auto rowsOf = scf::ForOp::create(
@@ -1728,19 +1790,21 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
       Value end = arith::MinUIOp::create(
           rewriter, loc, count,
           arith::AddIOp::create(rewriter, loc, first, sixtyFour));
-      emitSetRows(rewriter, loc, archetype, world, *set, first, end,
-                  [&](Value row) { emitBody(row, count, /*parallel=*/true); });
+      emitSetRows(
+          rewriter, loc, archetype, world, *set, first, end,
+          [&](Value row) { emitBody(row, count, /*parallel=*/true); }, parts);
       return loop;
     }
     if (set) {
       auto loop = scf::ParallelOp::create(rewriter, sited, ValueRange{zero},
                                           ValueRange{count}, ValueRange{one});
       rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-      emitSetRows(rewriter, loc, archetype, world, *set,
-                  loop.getInductionVars().front(),
-                  arith::AddIOp::create(rewriter, loc,
-                                        loop.getInductionVars().front(), one),
-                  [&](Value row) { emitBody(row, count, /*parallel=*/true); });
+      emitSetRows(
+          rewriter, loc, archetype, world, *set,
+          loop.getInductionVars().front(),
+          arith::AddIOp::create(rewriter, loc, loop.getInductionVars().front(),
+                                one),
+          [&](Value row) { emitBody(row, count, /*parallel=*/true); }, parts);
       return loop;
     }
     auto loop = scf::ParallelOp::create(rewriter, sited, ValueRange{zero},
@@ -1791,8 +1855,7 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
         rewriter, loc, first, last, one,
         ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 64)},
         [&](OpBuilder &, Location, Value at, ValueRange sum) {
-          Value bits =
-              memref::LoadOp::create(rewriter, loc, words, ValueRange{at});
+          Value bits = loadSetWord(rewriter, loc, *set, words, at, parts);
           scf::YieldOp::create(
               rewriter, loc,
               ValueRange{arith::AddIOp::create(
@@ -2617,6 +2680,10 @@ static Value worldPointer(IRRewriter &rewriter, Location loc, Value arena);
 /// stretch of each one's rows starts (an index), from which the loops that
 /// combine what its rows sent start too.
 static llvm::DenseMap<const WorldArchetype *, Value> rankFirstRows;
+/// Of those, the archetypes whose first row is where the rows of a
+/// partition's values start (a `for` it answers, of the archetype it keeps
+/// by them: see partitionRange), not a rank's.
+static llvm::DenseSet<const WorldArchetype *> partitionFirstRows;
 /// While a query over distributed archetypes is lowered: a send combined
 /// into an entity that another rank has (or every rank, of an archetype
 /// not distributed) is posted to it (devices/ranks.c), on a channel of the
@@ -14489,7 +14556,8 @@ static Value emitRunningScan(IRRewriter &rewriter, Location loc, Value scratch,
 /// fraction's bits, with those but the sign's turned over where it is
 /// below nought (the bits of a fraction go up with it above nought and
 /// down below it); nought below nought the key of nought, as `==` has
-/// them alike. (A NaN has no place: it goes where its bits say.)
+/// them alike. (A NaN has no place: it goes where its bits say.) An enum
+/// by its case's number, a bool false first.
 static Value orderKey(OpBuilder &builder, Location loc, Value stored,
                       Type type) {
   Type i64 = builder.getI64Type();
@@ -14520,7 +14588,7 @@ static Value orderKey(OpBuilder &builder, Location loc, Value stored,
   unsigned width = cast<IntegerType>(stored.getType()).getWidth();
   if (width == 64)
     return stored;
-  return hasNoSign(type)
+  return hasNoSign(type) || isa<EnumType>(type) || width == 1
              ? arith::ExtUIOp::create(builder, loc, i64, stored).getResult()
              : arith::ExtSIOp::create(builder, loc, i64, stored).getResult();
 }
@@ -14672,7 +14740,7 @@ static void placeAppended(IRRewriter &rewriter, Operation *op,
   state.set("staged", listed ? "list" : "rows");
   state.set("least", many);
   state.fact("parallel", parallel);
-  state.fact("ranks", bool(first));
+  state.fact("ranks", bool(first) && !partitionFirstRows.contains(&archetype));
   if (connect) {
     const WorldRelation &relation =
         layout.getRelation(connect.getRelationAttr().getAttr());
@@ -19389,6 +19457,122 @@ static HashSlot probeHash(IRRewriter &rewriter, Location loc,
 
 /// Of a query a hash index answers: the slot of the key it asks for, and
 /// how many have it (see probeHash).
+/// Of a `for` a partition answers (QueryOp::kViaPartitionAttr): whether it
+/// asks for the value numbered `value` (an i64): it is `equals`, one of
+/// `equals_among` or none of `equals_except`. (Their numbers `asked`,
+/// worked out before.)
+static Value partitionWants(OpBuilder &builder, Location loc, QueryOp query,
+                            ArrayRef<Value> asked, Value value) {
+  bool except = !query.getSliceParts("equals_except").empty();
+  Value wants = arith::ConstantIntOp::create(builder, loc, except, 1);
+  for (Value one : asked) {
+    if (except)
+      wants = arith::AndIOp::create(
+          builder, loc, wants,
+          arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::ne, value,
+                                one));
+    else
+      wants = arith::OrIOp::create(
+          builder, loc, wants,
+          arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::eq, value,
+                                one));
+  }
+  return wants;
+}
+
+/// The numbers of the values a `for` a partition answers asks for, as
+/// i64s, at the insertion point.
+static SmallVector<Value> partitionAsked(OpBuilder &builder, Location loc,
+                                         QueryOp query,
+                                         const WorldLayout &layout) {
+  SmallVector<Value> asked;
+  for (StringRef part : {"equals", "equals_among", "equals_except"})
+    for (Value value : query.getSliceParts(part))
+      asked.push_back(wordOf(builder, loc, value, layout));
+  return asked;
+}
+
+/// Each value of the partition `name` in turn (an index, and its first
+/// row and count, indexes) where `query` asks for it, at the insertion
+/// point: `body` of those and what it carries (`carried`, which it gives
+/// back), the loop's results.
+static ValueRange
+forPartitionRuns(OpBuilder &builder, Location loc, QueryOp query,
+                 const WorldLayout &layout, WorldAccess &world, StringAttr name,
+                 ValueRange carried,
+                 function_ref<SmallVector<Value>(Value first, Value count,
+                                                 ValueRange carried)>
+                     body) {
+  const WorldBuffer &parts = layout.getBuffer(
+      StringAttr::get(builder.getContext(), name.getValue() + "_parts"));
+  auto column = [&](StringRef field) -> Value {
+    return world.bufferField(
+        parts, *llvm::find_if(parts.fields, [&](const WorldColumn &c) {
+          return c.field.getValue() == field;
+        }));
+  };
+  Value firsts = column("first"), counts = column("count");
+  SmallVector<Value> asked = partitionAsked(builder, loc, query, layout);
+  Type index = builder.getIndexType();
+  auto loop = scf::ForOp::create(
+      builder, loc, arith::ConstantIndexOp::create(builder, loc, 0),
+      arith::ConstantIndexOp::create(builder, loc, parts.capacity),
+      arith::ConstantIndexOp::create(builder, loc, 1), carried,
+      [&](OpBuilder &b, Location l, Value v, ValueRange at) {
+        Value wants =
+            partitionWants(b, l, query, asked,
+                           arith::IndexCastOp::create(b, l, b.getI64Type(), v));
+        auto ifWants = scf::IfOp::create(
+            b, l, wants,
+            [&](OpBuilder &bb, Location ll) {
+              Value first = arith::IndexCastOp::create(
+                  bb, ll, index, memref::LoadOp::create(bb, ll, firsts, v));
+              Value count = arith::IndexCastOp::create(
+                  bb, ll, index, memref::LoadOp::create(bb, ll, counts, v));
+              scf::YieldOp::create(bb, ll, body(first, count, at));
+            },
+            [&](OpBuilder &bb, Location ll) {
+              scf::YieldOp::create(bb, ll, at);
+            });
+        scf::YieldOp::create(b, l, ifWants.getResults());
+      });
+  return loop.getResults();
+}
+
+/// Of a `for` a partition answers, of the archetype the partition keeps by
+/// its values: the rows from the first of the values it asks for to the
+/// end of the last (indexes; nought and nought where it asks for none
+/// that any entity has). The `for` still asks its `where` of those
+/// between.
+static std::pair<Value, Value> partitionRange(OpBuilder &builder, Location loc,
+                                              QueryOp query,
+                                              const WorldLayout &layout,
+                                              WorldAccess &world) {
+  Type index = builder.getIndexType();
+  Value zero = arith::ConstantIndexOp::create(builder, loc, 0);
+  Value most = arith::ConstantIndexOp::create(
+      builder, loc, std::numeric_limits<int64_t>::max());
+  ValueRange range = forPartitionRuns(
+      builder, loc, query, layout, world, query.getViaPartition().getAttr(),
+      ValueRange{most, zero},
+      [&](Value first, Value count, ValueRange at) -> SmallVector<Value> {
+        Value some = arith::CmpIOp::create(
+            builder, loc, arith::CmpIPredicate::ugt, count, zero);
+        Value end = arith::AddIOp::create(builder, loc, first, count);
+        return {arith::SelectOp::create(
+                    builder, loc, some,
+                    arith::MinUIOp::create(builder, loc, at[0], first), at[0]),
+                arith::SelectOp::create(
+                    builder, loc, some,
+                    arith::MaxUIOp::create(builder, loc, at[1], end), at[1])};
+      });
+  (void)index;
+  Value none = arith::CmpIOp::create(builder, loc, arith::CmpIPredicate::uge,
+                                     range[0], range[1]);
+  return {arith::SelectOp::create(builder, loc, none, zero, range[0]),
+          arith::SelectOp::create(builder, loc, none, zero, range[1])};
+}
+
 static HashSlot findHashSlot(IRRewriter &rewriter, Location loc, QueryOp query,
                              const WorldLayout &layout, WorldAccess &world) {
   Type i64 = rewriter.getI64Type();
@@ -22030,6 +22214,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
                                       matches(archetype, query);
                              });
   llvm::SaveAndRestore keepFirstRows(rankFirstRows);
+  llvm::SaveAndRestore keepPartitionRows(partitionFirstRows);
   llvm::SaveAndRestore keepPosting(rankPosting, spread);
   llvm::SaveAndRestore keepEdgeNotes(rankEdgeNotes, spread);
   rankChannels.clear();
@@ -22164,8 +22349,13 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   markReduced(rewriter, query, options, entityLocal, sendsLooped);
   SmallVector<ConnectOp> connects;
   query.getBody().walk([&](ConnectOp connect) { connects.push_back(connect); });
+  // (Not those given where they stand, kAtOnceAttr: no rows wait for
+  // them.)
   SmallVector<AppendOp> appends;
-  query.getBody().walk([&](AppendOp append) { appends.push_back(append); });
+  query.getBody().walk([&](AppendOp append) {
+    if (!append->hasAttr(kAtOnceAttr))
+      appends.push_back(append);
+  });
   // Relations whose edges the query changes: sorted when it ends.
   llvm::SetVector<Attribute> changedRelations;
   noteOrderWrites(rewriter, query, layout, world, changedRelations);
@@ -22215,7 +22405,15 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     Value rows = startCounts.lookup(&archetype);
     // (A distributed archetype's: this rank's stretch of them.)
     Value from = rankFirstRows.lookup(&archetype);
-    if (from)
+    // (Of a `for` a partition answers that keeps this archetype's rows by
+    // its values: the rows of those it asks for.)
+    if (FlatSymbolRefAttr part = query.getViaPartition();
+        part && !from && archetype.clusteredBy == part.getAttr()) {
+      std::tie(from, rows) =
+          partitionRange(rewriter, loc, query, layout, world);
+      rankFirstRows[&archetype] = from;
+      partitionFirstRows.insert(&archetype);
+    } else if (from)
       rows = arith::IndexCastOp::create(
           rewriter, loc, rewriter.getIndexType(),
           callGpu(rewriter, loc, module, "ent_ranks_end_row",
@@ -22249,6 +22447,15 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
         scanSet, query.getInSet()
                      ? &layout.getBuffer(query.getInSet().getAttr())
                      : nullptr);
+    // (Of a partition's bits: the sets of the values it asks for.)
+    ScanParts asked;
+    if (query.getInSet() && query.getViaPartition()) {
+      asked.asked = partitionAsked(rewriter, loc, query, layout);
+      asked.except = !query.getSliceParts("equals_except").empty();
+    }
+    llvm::SaveAndRestore<const ScanParts *> scanningParts(
+        scanParts,
+        query.getInSet() && query.getViaPartition() ? &asked : nullptr);
     Operation *loops = emitEntityLoops(
         rewriter, loc, archetype, world, here, entityLocal,
         [&](Value entity, Value rows, bool parallel) {
@@ -23149,7 +23356,7 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
                            AppendOp, ClearOp, BufferLenOp, BufferAtOp,
                            IndexGetOp, BufferOfOp, BufferSetOp, BufferFillOp,
                            BufferKeepOp, RunningOp, BufferClaimOp, BufferCopyOp,
-                           SetAddOp, SetHasOp>(op)
+                           SetAddOp, SetHasOp, SetCountOp>(op)
                            ? WalkResult::interrupt()
                            : WalkResult::advance();
               })
@@ -23738,7 +23945,7 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
   func.walk([&](Operation *op) {
     if (isa<AppendOp, ClearOp, BufferLenOp, BufferAtOp, BufferSetOp,
             BufferFillOp, BufferKeepOp, RowsCheckOp, BufferClaimOp, IndexGetOp,
-            BufferCopyOp, SetAddOp, SetHasOp>(op))
+            BufferCopyOp, SetAddOp, SetHasOp, SetCountOp>(op))
       uses.push_back(op);
     else if (auto invoke = dyn_cast<InvokeOp>(op);
              invoke && takesBuffer(invoke))
@@ -23934,12 +24141,12 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
       // (Its word and bit, where it has one: an entity's key is below the
       // keys there are, so a value that names none, all ones, is in no
       // set.)
+      int64_t perPart = buffer.capacity / buffer.parts;
       auto placeOf = [&](Value entity) {
         Value key = world.entityKey(loc, world.toStorage(loc, entity));
-        Value known =
-            arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult, key,
-                                  arith::ConstantIndexOp::create(
-                                      rewriter, loc, buffer.capacity * 64));
+        Value known = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::ult, key,
+            arith::ConstantIndexOp::create(rewriter, loc, perPart * 64));
         auto [word, bit] = setPlace(rewriter, loc, key);
         return std::make_tuple(known, word, bit);
       };
@@ -23966,6 +24173,15 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
         auto [known, word, bit] = placeOf(add.getEntity());
         auto guard = scf::IfOp::create(rewriter, loc, known);
         rewriter.setInsertionPointToStart(guard.thenBlock());
+        // (Of a family: in the words of its set `part`.)
+        if (Value part = add.getPart())
+          word = arith::AddIOp::create(
+              rewriter, loc, word,
+              arith::MulIOp::create(
+                  rewriter, loc,
+                  arith::IndexCastUIOp::create(rewriter, loc,
+                                               rewriter.getIndexType(), part),
+                  arith::ConstantIndexOp::create(rewriter, loc, perPart)));
         // (On many threads: atomically, where the bit is not as it is to
         // be yet, which most of the time of a set filled from many places
         // it is.)
@@ -23999,6 +24215,33 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
                   : arith::OrIOp::create(rewriter, loc, old, mask).getResult(),
               words, ValueRange{word});
         rewriter.eraseOp(op);
+        continue;
+      }
+      if (auto counted = dyn_cast<SetCountOp>(op)) {
+        // (Of a family: the words of its set `part`.)
+        Value first = arith::MulIOp::create(
+            rewriter, loc,
+            arith::IndexCastUIOp::create(rewriter, loc, rewriter.getIndexType(),
+                                         counted.getPart()),
+            arith::ConstantIndexOp::create(rewriter, loc, perPart));
+        Value last = arith::AddIOp::create(
+            rewriter, loc, first,
+            arith::ConstantIndexOp::create(rewriter, loc, perPart));
+        auto each = scf::ForOp::create(
+            rewriter, loc, first, last, one, ValueRange{nought},
+            [&](OpBuilder &, Location, Value at, ValueRange held) {
+              Value bits =
+                  memref::LoadOp::create(rewriter, loc, words, ValueRange{at});
+              scf::YieldOp::create(
+                  rewriter, loc,
+                  ValueRange{arith::AddIOp::create(
+                      rewriter, loc, held[0],
+                      LLVM::CtPopOp::create(rewriter, loc, i64, bits))});
+            });
+        rewriter.setInsertionPointAfter(each);
+        rewriter.replaceOp(op, arith::TruncIOp::create(rewriter, loc,
+                                                       rewriter.getI32Type(),
+                                                       each.getResult(0)));
         continue;
       }
       if (isa<ClearOp>(op)) {

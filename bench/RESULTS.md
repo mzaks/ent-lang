@@ -4659,3 +4659,23 @@ order. Tried, and not kept:
 So the k-d tree's making stays three sorts and its levels; the Morton
 index (one sort) is made in a quarter of the time, and on all cores it
 stays the faster in all.
+
+## 2026-10-26: a reactive `for` that lists what changed, without a pass over every row
+
+Rows a reactive `for` gives a buffer in whatever order (an index's list
+of what changed, `ent.any_order`) are given where they are sent, as the
+`for` walks the log of what changed; but a pass over every row of the
+archetype still followed, for rows that wait to be given in order, of
+which there were none. Without it (the command and machine of
+2026-10-23, `bench/hash/run.py`, ms a frame, one core / `--parallel`):
+
+| 1,000 teams | `incremental`, before | `incremental` |
+|---|---|---|
+| one in 1,000 changes, 10 reads | 0.24 / 0.30 | 0.16 / 0.19 |
+| one in 1,000 changes, 100 reads | 0.49 / 0.57 | 0.43 / 0.46 |
+| one in 50 changes, 10 reads | 0.33 / 0.59 | 0.25 / 0.28 |
+| one in 50 changes, 100 reads | 0.58 / 0.89 | 0.51 / 0.54 |
+
+So `incremental` on many threads no longer costs more than on one (open
+in the entry of 2026-10-23). The others as before: scan 0.28 / 0.28, as fits 0.27
+/ 0.30, `rebuild` 1.33 / 1.29 (the first row).

@@ -522,8 +522,11 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     // A set: a bit for each entity key, so many words. (Keys are slots or
     // row ids, which a destroyed entity's slot would be given again: not
     // yet in a program that destroys entities; nor on many ranks.)
+    // (A family of sets is an index's, which is made anew where entities
+    // were destroyed or made: a slot given again is in none then.)
+    auto parts = buffer->getAttrOfType<IntegerAttr>(kSetPartsAttr);
     if (buffer->hasAttr(kSetAttr)) {
-      if (scheme.kind == EntityScheme::Generational)
+      if (scheme.kind == EntityScheme::Generational && !parts)
         return buffer.emitError("a set in a program that destroys "
                                 "entities: not yet");
       if (llvm::any_of(layout.archetypes, [](const WorldArchetype &a) {
@@ -532,7 +535,9 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
         return buffer.emitError("a set in a program whose entities live on "
                                 "many ranks: not yet");
       entry.set = true;
-      buffer.setCapacity(std::max<int64_t>(1, (layout.entityKeys + 63) / 64));
+      entry.parts = parts ? parts.getInt() : 1;
+      buffer.setCapacity(entry.parts *
+                         std::max<int64_t>(1, (layout.entityKeys + 63) / 64));
     }
     entry.capacity = buffer.getCapacity();
     entry.rows = buffer->hasAttr(kIndexedAttr)

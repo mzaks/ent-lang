@@ -486,6 +486,9 @@ struct WorldBuffer {
   uint64_t countOffset = 0;
   /// A set (see kSetAttr): its rows are the words of its bits.
   bool set = false;
+  /// A family of sets (kSetPartsAttr): how many, each `capacity / parts`
+  /// words; else 1.
+  int64_t parts = 1;
   /// One column per field; `component` is the buffer's name.
   SmallVector<WorldColumn> fields;
   /// Of a buffer whose rows a `for` writes, or reads through a window (0
@@ -771,6 +774,9 @@ struct WorldLayout {
   /// (see `entityKeys`) in its field `bits` of u64 words; its capacity
   /// the words, whatever it was declared with. Transient.
   static constexpr llvm::StringLiteral kSetAttr = "ent.set";
+  /// Of a set: that it is a family of so many sets, one after another
+  /// (an i64), each as many words as a set (see ent.set.add's `part`).
+  static constexpr llvm::StringLiteral kSetPartsAttr = "ent.set_parts";
   /// On a component: the field its entities are placed by on many ranks
   /// (`distribute Colony by number`), a whole number (ranges of it) or an
   /// entity (with that one). Its archetypes are distributed.

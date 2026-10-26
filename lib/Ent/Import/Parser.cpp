@@ -423,6 +423,7 @@ public:
         tables([this](StringRef name) { return resolve(name); }),
         buffers([this](StringRef name) { return resolve(name); }),
         sets([this](StringRef name) { return resolve(name); }),
+        setFamilies([this](StringRef name) { return resolve(name); }),
         assetFiles([this](StringRef name) { return resolve(name); }),
         constants([this](StringRef name) { return resolve(name); }),
         prefabs([this](StringRef name) { return resolve(name); }) {
@@ -607,6 +608,8 @@ private:
   LogicalResult parseBuffer();
   LogicalResult parseSet();
   LogicalResult parseSetStatement(const std::string &name, llvm::SMLoc at);
+  LogicalResult parseSetFamilyStatement(const std::string &name,
+                                        llvm::SMLoc at);
   LogicalResult parseIndex();
   LogicalResult finishIndexOrders();
   FailureOr<mlir::Value> emitIndexCall(const Expr &expr, StringRef symbol,
@@ -1045,6 +1048,9 @@ private:
   Declared<Record> buffers;
   /// The sets (`set Name`): entities, each once, a bit for each.
   Declared<bool> sets;
+  /// The families of sets an index keeps (a partition's bits, `N_bits`):
+  /// `N_bits[v] += e` in what it declares, see ent.set.add's `part`.
+  Declared<bool> setFamilies;
   /// The indexes (`index Name of Component by field`), by the symbol of
   /// the buffer that holds their rows: the component that keeps each
   /// entity's row, the field it keeps it in, the type of the key, and the
@@ -1083,6 +1089,14 @@ private:
     bool hashed = false;
     bool textKey = false;
     std::string keyField;
+    /// A partition (`by field partition`): the field's type (an enum, a
+    /// bool or a u8; the rows hold it as a u8), how many values it has,
+    /// and the buffers of each value's first row and count (`N_parts`)
+    /// and of the values that have entities (`N_kept`).
+    bool partition = false;
+    Type partKey;
+    int64_t partValues = 0;
+    std::string parts, kept, count;
   };
   llvm::StringMap<Index> indexes;
   /// Parsing what an index declares for itself, which fills it (and of
@@ -3204,7 +3218,7 @@ LogicalResult Parser::parseSetStatement(const std::string &name,
     if (!isa<EntityType>(entity->getType()))
       return mismatch((*value)->loc, entity->getType(),
                       EntityType::get(context));
-    SetAddOp::create(builder, loc(at), target, *entity,
+    SetAddOp::create(builder, loc(at), target, *entity, mlir::Value(),
                      remove ? builder.getUnitAttr() : UnitAttr());
     return success();
   }
@@ -3236,6 +3250,43 @@ LogicalResult Parser::parseSetStatement(const std::string &name,
                              *from + "' is none");
   if (*from != name)
     BufferCopyOp::create(builder, loc(at), target, symbol(*from));
+  return success();
+}
+
+// Of an index's family of sets: Name[v] += e, Name[v] -= e, an entity
+// into the set v (an i32) or out of it; Name = [], every set emptied.
+LogicalResult Parser::parseSetFamilyStatement(const std::string &name,
+                                              llvm::SMLoc at) {
+  FlatSymbolRefAttr target = symbol(name);
+  if (consumeIf(Token::Assign)) {
+    if (failed(expect(Token::LBracket, "'[]'")) ||
+        failed(expect(Token::RBracket, "'[]'")))
+      return failure();
+    ClearOp::create(builder, loc(at), target);
+    return success();
+  }
+  if (failed(expect(Token::LBracket, "'[': the set of a value")))
+    return failure();
+  FailureOr<ExprPtr> part = parseExpr();
+  if (failed(part))
+    return failure();
+  if (failed(expect(Token::RBracket, "']'")))
+    return failure();
+  FailureOr<mlir::Value> value = emit(**part, builder.getI32Type());
+  if (failed(value))
+    return failure();
+  if (!token.is(Token::PlusAssign) && !token.is(Token::MinusAssign))
+    return error("expected '+=' or '-=' and an entity");
+  bool remove = token.is(Token::MinusAssign);
+  advance();
+  FailureOr<ExprPtr> entityExpr = parseExpr();
+  if (failed(entityExpr))
+    return failure();
+  FailureOr<mlir::Value> entity = emit(**entityExpr, EntityType::get(context));
+  if (failed(entity))
+    return failure();
+  SetAddOp::create(builder, loc(at), target, *entity, *value,
+                   remove ? builder.getUnitAttr() : UnitAttr());
   return success();
 }
 
@@ -3352,6 +3403,11 @@ LogicalResult Parser::parseIndex() {
   // (Of `morton`: bits a side, and how many a cell holds unsplit.)
   int64_t mortonBits = 0, mortonLeaf = 16;
   bool hashed = false, unique = false;
+  // (`by field partition`: of an enum, a bool or a u8, a run of rows for
+  // each of its values.)
+  bool partitioned = false;
+  Type partKey;
+  int64_t partValues = 0;
   SmallVector<std::string> positions;
   Type positionType;
   std::string cellText, wrapText;
@@ -3488,10 +3544,29 @@ LogicalResult Parser::parseIndex() {
       return error(keyAt, "component '" + of.front() + "' has no field '" +
                               *key + "'");
     auto whole = dyn_cast<IntegerType>(keyType);
+    // `partition`: by a field of few values, its rows of each value one
+    // after another, which a `where` of the field's values reads; kept as
+    // the number of the value (a u8).
+    const char *hashAt = token.loc.getPointer();
+    if (consumeKeyword("partition")) {
+      partitioned = true;
+      partKey = keyType;
+      if (auto named = dyn_cast<EnumType>(keyType))
+        partValues = enums.ofSymbol(named.getName().getValue()).size();
+      else if (keyType.isInteger(1))
+        partValues = 2;
+      else if (whole && whole.getWidth() == 8 && whole.isUnsigned())
+        partValues = 256;
+      else
+        return error(keyAt, "a partition is by an enum, a bool or a u8 (of "
+                            "256 values at most); '" +
+                                *key + "' is " + typeWords(keyType));
+      keyType = builder.getIntegerType(8, /*isSigned=*/false);
+      whole = cast<IntegerType>(keyType);
+    }
     // `hash [unique]`: by equal keys (a whole number, an enum, an entity,
     // a row number or a text), not in order.
-    const char *hashAt = token.loc.getPointer();
-    if (consumeKeyword("hash")) {
+    if (!partitioned && consumeKeyword("hash")) {
       hashed = true;
       // (On the same line: a `unique` on the next is a declaration.)
       unique =
@@ -3519,6 +3594,10 @@ LogicalResult Parser::parseIndex() {
   if (clustered && hashed)
     return error(clusteredAt, "a hash index has no order to keep the rows "
                               "in: it is not 'clustered'");
+  if (clustered && partitioned)
+    return error(clusteredAt, "whether a partition keeps the archetype's "
+                              "rows by its values is the compiler's "
+                              "choice: no 'clustered'");
   // When it is brought up to date (`lazy`, the default, or `eager`) and
   // how (`rebuild`, `incremental`, or as fits), after the key or after
   // what it copies (docs/indexes.md, section 4).
@@ -3724,6 +3803,11 @@ LogicalResult Parser::parseIndex() {
       {rowField, builder.getI32Type()}, {placeField, builder.getI64Type()}};
   if (grid)
     hidden.push_back({*key, keyType});
+  // (A partition kept as bits: the set each entity is in, see
+  // `N_update_bits`.)
+  std::string partField = "part_in_" + *name;
+  if (partitioned)
+    hidden.push_back({partField, builder.getIntegerType(8, false)});
   for (auto &[field, type] : hidden)
     if (holder.fieldType(field))
       return error(at, "'" + of.front() + "' has a field '" + field +
@@ -3825,6 +3909,43 @@ LogicalResult Parser::parseIndex() {
                                        builder.getI64IntegerAttr(1));
   declared->setAttr(WorldLayout::kTransientAttr, builder.getUnitAttr());
   buffers[*name] = std::move(record);
+  // A partition: each value's first row and how many it has (`N_parts`,
+  // a row for each value), and the values that have any, in their order
+  // (`N_kept`).
+  if (partitioned) {
+    auto declareRows =
+        [&](const std::string &rowsName,
+            SmallVector<std::pair<std::string, Type>> rowFields) {
+          Record rows;
+          SmallVector<Attribute> rowNames, rowTypes;
+          for (auto &[field, type] : rowFields) {
+            rows.fields.push_back({field, type});
+            rowNames.push_back(builder.getStringAttr(field));
+            rowTypes.push_back(TypeAttr::get(type));
+          }
+          BufferOp made = BufferOp::create(
+              builder, loc(at), declareSymbol(at, rowsName),
+              builder.getArrayAttr(rowNames), builder.getArrayAttr(rowTypes),
+              builder.getI64IntegerAttr(partValues));
+          made->setAttr(WorldLayout::kTransientAttr, builder.getUnitAttr());
+          buffers[rowsName] = std::move(rows);
+        };
+    declareRows(*name + "_parts", {{"first", builder.getI32Type()},
+                                   {"count", builder.getI32Type()}});
+    declareRows(*name + "_kept", {{"value", keyType}});
+    // (Its bits: a set for each value, which EntIndexes may keep instead
+    // of its rows.)
+    BufferOp bits = BufferOp::create(
+        builder, loc(at), declareSymbol(at, *name + "_bits"),
+        builder.getArrayAttr({builder.getStringAttr("bits")}),
+        builder.getArrayAttr({TypeAttr::get(builder.getI64Type())}),
+        builder.getI64IntegerAttr(1));
+    bits->setAttr(WorldLayout::kSetAttr, builder.getUnitAttr());
+    bits->setAttr(WorldLayout::kSetPartsAttr,
+                  builder.getI64IntegerAttr(partValues));
+    bits->setAttr(WorldLayout::kTransientAttr, builder.getUnitAttr());
+    setFamilies[*name + "_bits"] = true;
+  }
   // A hash index: its entities, a row each in the order they are stored,
   // with its key (a text's hashes), its place there, the rows before and
   // after it of its key, and what it copies (the room the first
@@ -3941,6 +4062,8 @@ LogicalResult Parser::parseIndex() {
     return v + " = " + value.rule + "(" + v + ", " + next + ")";
   };
   std::string n = *name;
+  // (The key as the rows hold it: a partition's value as a u8.)
+  std::string keyRead = partitioned ? "(c0." + *key + " as u8)" : "c0." + *key;
   std::string text;
   llvm::raw_string_ostream out(text);
   // Each copied field by the binding it is read through (`c1.x`).
@@ -4224,8 +4347,31 @@ LogicalResult Parser::parseIndex() {
         << "transient unique " << n << "_places: i64\n"
         << "transient unique " << n << "_skip: i64\n"
         << "transient unique " << n << "_wait: i64\n"
-        << "transient unique " << n
-        << "_whole: bool\n"
+        << "transient unique " << n << "_whole: bool\n";
+    if (partitioned) {
+      // (A partition: the first row whose value is not below `value`,
+      // by halving; and how many a value has.)
+      std::string keySpelled;
+      if (auto named = dyn_cast<EnumType>(partKey)) {
+        StringRef symbolName = named.getName().getValue();
+        keySpelled = symbolName.rsplit('.').second.empty()
+                         ? symbolName.str()
+                         : symbolName.rsplit('.').second.str();
+      } else {
+        keySpelled = partKey.isInteger(1) ? "bool" : "u8";
+      }
+      out << "fn " << n << "_upto(order: " << n << ", value: i32) -> i32 {\n"
+          << "  var low = 0\n  var high = len(order)\n"
+          << "  while low < high {\n"
+          << "    let mid = (low + high) >> 1\n"
+          << "    if (order[mid].key as i32) < value { low = mid + 1 } else "
+             "{ high = mid }\n"
+          << "  }\n  low\n}\n"
+          << "fn " << n << "_count(parts: " << n
+          << "_parts, value: " << keySpelled
+          << ") -> i32 {\n  parts[value as i32].count\n}\n";
+    }
+    out
         // Every entity told its row.
         << "proc " << n << "_number(order: " << n << ", held: mut "
         << of.front() << ") {\n"
@@ -4984,7 +5130,7 @@ LogicalResult Parser::parseIndex() {
             << indent << "}\n";
       out << indent << n << " = []\n"
           << indent << "for e" << bindings << " by c0." << *key << " {\n"
-          << indent << "  " << n << " += { key: c0." << *key << ", who: e, "
+          << indent << "  " << n << " += { key: " << keyRead << ", who: e, "
           << "place: c0." << placeField;
       for (const Copy &copy : copies)
         out << ", " << copy.name << ": " << through(copy);
@@ -5022,7 +5168,7 @@ LogicalResult Parser::parseIndex() {
           << "    for e" << bindings << " on changed c0." << *key;
       for (const Copy &copy : copies)
         out << ", changed " << through(copy);
-      out << " {\n      " << n << "_changed += { who: e, key: c0." << *key;
+      out << " {\n      " << n << "_changed += { who: e, key: " << keyRead;
       for (const Copy &copy : copies)
         out << ", " << copy.name << ": " << through(copy);
       out << " }\n    }\n"
@@ -5045,7 +5191,7 @@ LogicalResult Parser::parseIndex() {
         out << "  } else {\n";
       }
       out << "    for e" << bindings << ", w: mut " << n << "[c0." << rowField
-          << ", 1] {\n      w[0].key = c0." << *key << "\n";
+          << ", 1] {\n      w[0].key = " << keyRead << "\n";
       for (const Copy &copy : copies)
         out << "      w[0]." << copy.name << " = " << through(copy) << "\n";
       out << "    }\n";
@@ -5576,14 +5722,75 @@ LogicalResult Parser::parseIndex() {
       text.resize(gpuFrom);
       gpuMade = true;
     }
+    // A partition: each value's run, found by halving, and the values
+    // that have one.
+    if (partitioned)
+      out << "  " << n << "_parts = [{ first: 0, count: 0 }; " << partValues
+          << "]\n"
+          << "  " << n << "_kept = []\n"
+          << "  var at_ = 0\n"
+          << "  for v_ in 0.." << partValues << " {\n"
+          << "    let end_ = " << n << "_upto(" << n << ", v_ + 1)\n"
+          << "    " << n << "_parts[v_].first = at_\n"
+          << "    " << n << "_parts[v_].count = end_ - at_\n"
+          << "    if end_ > at_ { " << n << "_kept += { value: v_ as u8 } }\n"
+          << "    at_ = end_\n"
+          << "  }\n";
     out << "  " << n
         << "_fresh = true\n}\n"
         // Out of date: its keys or what it copies changed, or (`moved`)
         // which entities it holds.
         << "system " << n << "_stale() { " << n << "_fresh = false }\n"
         << "system " << n << "_moved() {\n  " << n << "_fresh = false\n  " << n
-        << "_whole = false\n}\n"
-        << "fn " << n << "_find(order: " << n << ", key: " << spelled
+        << "_whole = false\n}\n";
+    // A partition kept as bits instead of rows (EntIndexes chooses): a set
+    // for each value (`N_bits`), each entity in that of its value, which
+    // it keeps (`part_in_N`); where the same entities are in it, only
+    // those whose value changed moved from one to the other, else every
+    // entity put in anew; how many each value has, and those that have
+    // any.
+    if (partitioned) {
+      std::string bits = n + "_bits";
+      std::string value = "(" + keyRead + ") as i32";
+      out << "system " << n << "_update_bits() {\n"
+          << "  if " << n
+          << "_whole {\n"
+          // (Out of the set of its value as it was, then into that of its
+          // value now: two `for`s, as a `for` does not both put entities
+          // into a set and take them out.)
+          << "    for e" << bindings << " on changed c0." << *key << " {\n"
+          << "      let from_ = c0." << partField << " as i32\n"
+          << "      if " << value << " != from_ { " << bits
+          << "[from_] -= e }\n"
+          << "    }\n"
+          << "    for e" << mutBindings << " on changed c0." << *key << " {\n"
+          << "      let to_ = " << value << "\n"
+          << "      if to_ != c0." << partField << " as i32 {\n"
+          << "        " << bits << "[to_] += e\n"
+          << "        c0." << partField << " = to_ as u8\n"
+          << "      }\n    }\n"
+          << "  } else {\n"
+          << "    " << bits << " = []\n"
+          << "    for e" << mutBindings << " {\n"
+          << "      let to_ = " << value << "\n"
+          << "      c0." << partField << " = to_ as u8\n"
+          << "      " << bits << "[to_] += e\n"
+          << "    }\n"
+          << "    " << n << "_whole = true\n"
+          << "  }\n"
+          // (How many: what is read of it, but where nothing reads them,
+          // see EntIndexes.)
+          << "  " << n << "_parts = [{ first: 0, count: 0 }; " << partValues
+          << "]\n"
+          << "  " << n << "_kept = []\n"
+          << "  for v_ in 0.." << partValues << " {\n"
+          << "    let count_ = len(" << bits << "[v_])\n"
+          << "    " << n << "_parts[v_].count = count_\n"
+          << "    if count_ > 0 { " << n << "_kept += { value: v_ as u8 } }\n"
+          << "  }\n"
+          << "  " << n << "_fresh = true\n}\n";
+    }
+    out << "fn " << n << "_find(order: " << n << ", key: " << spelled
         << ") -> i32 {\n"
         << "  var low = 0\n  var high = len(order)\n"
         << "  let rounds = (bits_of(len(order) as f32) >> 23) as i32 - 126\n"
@@ -5668,11 +5875,19 @@ LogicalResult Parser::parseIndex() {
                   : hashed ? SmallVector<std::string>{resolve(n),
                                                       resolve(n + "_list"),
                                                       resolve(n + "_tags")}
-                           : SmallVector<std::string>{resolve(n)})),
+                  : partitioned
+                      ? SmallVector<std::string>{resolve(n),
+                                                 resolve(n + "_parts"),
+                                                 resolve(n + "_kept"),
+                                                 resolve(n + "_bits")}
+                      : SmallVector<std::string>{resolve(n)})),
           builder.getNamedAttr(
               "hidden",
               strings(grid
                           ? SmallVector<std::string>{rowField, placeField, *key}
+                      : partitioned
+                          ? SmallVector<std::string>{rowField, placeField,
+                                                     partField}
                           : SmallVector<std::string>{rowField, placeField})),
       }));
   {
@@ -5687,6 +5902,13 @@ LogicalResult Parser::parseIndex() {
       info.set("hash", builder.getUnitAttr());
     if (unique)
       info.set("unique", builder.getUnitAttr());
+    // (A partition: how many values; whether it keeps the archetype's rows
+    // by them, EntIndexes chooses.)
+    if (partitioned) {
+      info.set("partition", builder.getI64IntegerAttr(partValues));
+      info.set("bits_update",
+               builder.getStringAttr(resolve(n + "_update_bits")));
+    }
     // (Its making on the GPU, which EntIndexes runs instead where so.)
     if (gpuMade)
       info.set("gpu_update", builder.getStringAttr(resolve(n + "_update_gpu")));
@@ -5697,6 +5919,14 @@ LogicalResult Parser::parseIndex() {
   kept.hashed = hashed;
   kept.textKey = textKey;
   kept.keyField = *key;
+  if (partitioned) {
+    kept.partition = true;
+    kept.partKey = partKey;
+    kept.partValues = partValues;
+    kept.parts = resolve(n + "_parts");
+    kept.kept = resolve(n + "_kept");
+    kept.count = resolve(n + "_count");
+  }
   for (const Copy &copy : copies)
     kept.copied.push_back({resolve(copy.component), copy.field, copy.name});
   for (const std::string &component : of)
@@ -5801,9 +6031,16 @@ LogicalResult Parser::finishIndexOrders() {
     auto found = indexes.find(buffer.getSymName());
     if (found == indexes.end())
       continue;
-    auto component = cast<ComponentOp>(SymbolTable::lookupSymbolIn(
-        module, builder.getStringAttr(found->second.component)));
-    IntegerAttr capacity = component.getCapacityAttr();
+    // (Its entities have every component it names: as many at most as
+    // the one of them with the least room has.)
+    IntegerAttr capacity;
+    for (const std::string &held : found->second.of) {
+      auto component = cast<ComponentOp>(
+          SymbolTable::lookupSymbolIn(module, builder.getStringAttr(held)));
+      if (IntegerAttr room = component.getCapacityAttr();
+          room && (!capacity || room.getInt() < capacity.getInt()))
+        capacity = room;
+    }
     if (!capacity)
       capacity = module->getAttrOfType<IntegerAttr>("ent.default_capacity");
     if (!capacity)
@@ -5919,6 +6156,32 @@ FailureOr<mlir::Value> Parser::emitIndexCall(const Expr &expr,
     mlir::Value row = arith::SelectOp::create(builder, at, lookup.getFound(),
                                               lookup.getValue(), none);
     return asIndex(at, row, rowType);
+  }
+  // Name.count(value), of a partition: how many entities have it.
+  if (expr.field == "count") {
+    if (!index.partition)
+      return error(expr.loc, "'" + expr.name +
+                                 ".count' is of a partition "
+                                 "('by field partition'): how many have a "
+                                 "value");
+    FailureOr<mlir::Value> value = emit(*expr.operands[0], index.partKey);
+    if (failed(value))
+      return failure();
+    if (value->getType() != index.partKey)
+      return mismatch(expr.operands[0]->loc, value->getType(), index.partKey);
+    if (given || inFunction)
+      return error(expr.loc, "'" + expr.name +
+                                 ".count' is asked of the "
+                                 "world's partition, in a system");
+    Function &count = functions.ofSymbol(index.count);
+    mlir::Value parts =
+        BufferOfOp::create(builder, at, count.params.front(),
+                           FlatSymbolRefAttr::get(context, index.parts))
+            .getResult();
+    return InvokeOp::create(builder, at, builder.getI32Type(),
+                            FlatSymbolRefAttr::get(context, index.count),
+                            ValueRange{parts, *value}, UnitAttr())
+        ->getResult(0);
   }
   if ((expr.field == "get") != index.hashed)
     return error(expr.loc,
@@ -10126,12 +10389,31 @@ LogicalResult Parser::parseCountedFor(llvm::SMLoc at) {
   }
   if (failed(expectKeyword("in")))
     return failure();
-  // for c in Name.cells { }: the cells of a Morton index, a walk.
+  // for c in Name.cells { }: the cells of a Morton index, a walk. And
+  // for v in Name.parts { }: the values of a partition that entities
+  // have, in their order (the rows of `N_kept`).
+  const Index *partsOf = nullptr;
   if (token.is(Token::Identifier) && peek().is(Token::Dot) &&
       !lookup(token.spelling)) {
     Lexer ahead = lexer;
     ahead.next();
     Token field = ahead.next();
+    if (field.is(Token::Identifier) && field.spelling == "parts")
+      if (std::optional<BufferUse> held = bufferNamed(token.spelling);
+          held && indexes.count(held->symbol) &&
+          indexes[held->symbol].partition) {
+        if (!numbered.empty())
+          return error(numberedAt, "a 'for' over the values of a partition "
+                                   "has one name, the value's: 'for v in " +
+                                       token.spelling.str() + ".parts'");
+        if (held->given || inFunction)
+          return error(at, "the values of the world's partition are gone "
+                           "over in a system");
+        partsOf = &indexes[held->symbol];
+        advance();
+        advance();
+        advance();
+      }
     if (field.is(Token::Identifier) && field.spelling == "cells")
       if (std::optional<BufferUse> held = bufferNamed(token.spelling);
           held && indexes.count(held->symbol) && indexes[held->symbol].morton) {
@@ -10151,8 +10433,14 @@ LogicalResult Parser::parseCountedFor(llvm::SMLoc at) {
   bool overRows = false;
   std::string overTable;
   mlir::Value overWhich;
-  if (token.is(Token::Identifier) && peek().is(Token::LBrace) &&
-      !lookup(token.spelling) && enums.count(token.spelling)) {
+  if (partsOf) {
+    type = builder.getI32Type();
+    low = integer(where, type, 0);
+    high = BufferLenOp::create(builder, where, type,
+                               FlatSymbolRefAttr::get(context, partsOf->kept))
+               .getResult();
+  } else if (token.is(Token::Identifier) && peek().is(Token::LBrace) &&
+             !lookup(token.spelling) && enums.count(token.spelling)) {
     cases = EnumType::get(context, symbol(token.spelling));
     type = cases.getStorageType();
     low = integer(where, builder.getI32Type(), 0);
@@ -10243,6 +10531,45 @@ LogicalResult Parser::parseCountedFor(llvm::SMLoc at) {
       counted = UnrealizedConversionCastOp::create(builder, where,
                                                    Type(cases), counted)
                     .getResult(0);
+    // (A value of a partition: as its field's type.)
+    if (partsOf) {
+      mlir::Value value =
+          BufferAtOp::create(builder, where,
+                             builder.getIntegerType(8, /*isSigned=*/false),
+                             FlatSymbolRefAttr::get(context, partsOf->kept),
+                             builder.getStringAttr("value"), counted)
+              .getResult();
+      auto given = std::make_unique<Expr>();
+      given->kind = Expr::Given;
+      given->loc = at;
+      given->given = value;
+      // (A bool: the value is not nought; an enum: the case of that
+      // number.)
+      Expr made;
+      made.kind = Expr::Given;
+      made.loc = at;
+      if (partsOf->partKey.isInteger(1)) {
+        auto nought = std::make_unique<Expr>();
+        nought->kind = Expr::Int;
+        nought->loc = at;
+        made.kind = Expr::Binary;
+        made.op = Token::NotEqual;
+        made.operands.push_back(std::move(given));
+        made.operands.push_back(std::move(nought));
+      } else if (isa<EnumType>(partsOf->partKey)) {
+        made.kind = Expr::Cast;
+        made.castType = partsOf->partKey;
+        made.operands.push_back(std::move(given));
+      }
+      if (made.kind == Expr::Binary || made.kind == Expr::Cast) {
+        FailureOr<mlir::Value> emitted = emit(made, partsOf->partKey);
+        if (failed(emitted))
+          return failure();
+        counted = *emitted;
+      } else {
+        counted = value;
+      }
+    }
     if (!numbered.empty()) {
       if (!overRows)
         return error(numberedAt, "a 'for' has a number and a row ('for i, "
@@ -11369,10 +11696,11 @@ LogicalResult Parser::parseFor() {
     if (!type)
       return error(fieldAt, "component '" + component + "' has no field '" +
                                 *field + "'");
-    if ((!type.isIntOrIndex() || type.isInteger(1)) && !type.isF32() &&
-        !type.isF64())
-      return error(fieldAt, "the order is by a whole number or a fraction "
-                            "(f32, f64); '" +
+    // (An enum by its cases' numbers, a bool false first.)
+    if (!type.isIntOrIndex() && !type.isF32() && !type.isF64() &&
+        !isa<EnumType>(type))
+      return error(fieldAt, "the order is by a whole number, a fraction "
+                            "(f32, f64), an enum or a bool; '" +
                                 *field + "' is " + typeWords(type));
     by = builder.getArrayAttr(
         {symbol(component), builder.getStringAttr(*field)});
@@ -11631,6 +11959,92 @@ LogicalResult Parser::parseFor() {
         keyEquals = {symbol(bound->component),
                      builder.getStringAttr(field.field)};
         break;
+      }
+    }
+    // Else, for a partition by the field: `where x.f == a || x.f == b ..`
+    // (one of these values, `equals_among`), or `x.f != a && x.f != b ..`
+    // (none of them, `equals_except`), the values the same for all its
+    // entities as above.
+    // (The field and value of `x.f op value`, of a binding of the `for`'s
+    // own, where so.)
+    auto keyed = [&](const Expr &condition, Token::Kind op)
+        -> std::optional<std::pair<const Expr *, const Expr *>> {
+      if (condition.kind != Expr::Binary || condition.op != op)
+        return std::nullopt;
+      for (int side : {0, 1}) {
+        const Expr &field = *condition.operands[side];
+        const Expr &value = *condition.operands[1 - side];
+        if (field.kind != Expr::Field || !outside(value))
+          continue;
+        for (const Binding &binding : bindings)
+          if (binding.name == field.name && !binding.via && !binding.optional &&
+              components[binding.component].fieldType(field.field))
+            return std::make_pair(&field, &value);
+      }
+      return std::nullopt;
+    };
+    auto sameField = [](const Expr &one, const Expr &other) {
+      return one.name == other.name && one.field == other.field;
+    };
+    SmallVector<std::pair<const Expr *, const Expr *>> picked;
+    std::string pickedAs;
+    for (const Expr *condition : conditions) {
+      if (!keyEquals.empty() || !picked.empty() ||
+          condition->kind != Expr::Binary || condition->op != Token::OrOr)
+        continue;
+      SmallVector<const Expr *> leaves{condition};
+      SmallVector<std::pair<const Expr *, const Expr *>> among;
+      bool all = true;
+      while (!leaves.empty() && all) {
+        const Expr *leaf = leaves.pop_back_val();
+        if (leaf->kind == Expr::Binary && leaf->op == Token::OrOr) {
+          // (Right first: the values in the order they are written.)
+          leaves.push_back(leaf->operands[1].get());
+          leaves.push_back(leaf->operands[0].get());
+          continue;
+        }
+        auto pair = keyed(*leaf, Token::Equal);
+        all =
+            pair && (among.empty() || sameField(*among[0].first, *pair->first));
+        if (all)
+          among.push_back(*pair);
+      }
+      if (all) {
+        picked = std::move(among);
+        pickedAs = "equals_among";
+      }
+    }
+    if (keyEquals.empty() && picked.empty()) {
+      for (const Expr *condition : conditions)
+        if (auto pair = keyed(*condition, Token::NotEqual);
+            pair &&
+            (picked.empty() || sameField(*picked[0].first, *pair->first)))
+          picked.push_back(*pair);
+      pickedAs = "equals_except";
+    }
+    if (keyEquals.empty() && !picked.empty()) {
+      const Expr &field = *picked[0].first;
+      const Binding *bound = nullptr;
+      for (const Binding &binding : bindings)
+        if (binding.name == field.name)
+          bound = &binding;
+      Type type = components[bound->component].fieldType(field.field);
+      // (Only of what a partition is by: an enum, a bool or a u8.)
+      auto whole = dyn_cast<IntegerType>(type);
+      if (isa<EnumType>(type) ||
+          (whole && (whole.getWidth() == 1 ||
+                     (whole.getWidth() == 8 && whole.isUnsigned())))) {
+        for (auto [ignored, value] : picked) {
+          FailureOr<mlir::Value> equals = emit(*value, type);
+          if (failed(equals))
+            return failure();
+          if (equals->getType() != type)
+            return mismatch(value->loc, equals->getType(), type);
+          sliceValues.push_back(*equals);
+          sliceOrder.push_back(builder.getStringAttr(pickedAs));
+        }
+        keyEquals = {symbol(bound->component),
+                     builder.getStringAttr(field.field)};
       }
     }
   }
@@ -12038,6 +12452,8 @@ LogicalResult Parser::parseNameStatement() {
     return parseBufferStatement(name, at);
   if (sets.count(name) && !lookup(name))
     return parseSetStatement(name, at);
+  if (buildingIndex && setFamilies.count(name))
+    return parseSetFamilyStatement(name, at);
   if (componentGiven(name) && token.is(Token::LBracket))
     return parseGivenStatement(name, at);
 
@@ -13401,6 +13817,11 @@ Type Parser::typeOf(const Expr &expr) {
       if (std::optional<BufferUse> held = bufferNamed(expr.name);
           held && indexes.count(held->symbol))
         return EntityType::get(context);
+    // (Partition.count(value): how many, an i32.)
+    if (expr.field == "count")
+      if (std::optional<BufferUse> held = bufferNamed(expr.name);
+          held && indexes.count(held->symbol))
+        return builder.getI32Type();
     // (Index.row(e), Index.find(key): a row of the index.)
     if (expr.field == "row" || expr.field == "find")
       if (std::optional<BufferUse> held = bufferNamed(expr.name);
@@ -14279,7 +14700,8 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
   case Expr::Binary:
     return emitBinary(expr, expected);
   case Expr::Call: {
-    if (expr.field == "row" || expr.field == "find" || expr.field == "get")
+    if (expr.field == "row" || expr.field == "find" || expr.field == "get" ||
+        expr.field == "count")
       if (std::optional<BufferUse> held = bufferNamed(expr.name);
           held && indexes.count(held->symbol))
         return emitIndexCall(expr, held->symbol, held->given);
@@ -14334,6 +14756,20 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
                                    expr.operands[0]->name + "')");
       return BufferLenOp::create(builder, at, builder.getI32Type(),
                                  FlatSymbolRefAttr::get(context, held.symbol))
+          .getResult();
+    }
+    // (Of a set of an index's family: how many entities it holds now.)
+    if (expr.name == "len" && expr.operands.size() == 1 && buildingIndex &&
+        expr.operands[0]->kind == Expr::Index &&
+        expr.operands[0]->operands[0]->kind == Expr::Name &&
+        setFamilies.count(expr.operands[0]->operands[0]->name)) {
+      FailureOr<mlir::Value> part =
+          emit(*expr.operands[0]->operands[1], builder.getI32Type());
+      if (failed(part))
+        return failure();
+      return SetCountOp::create(builder, at, builder.getI32Type(),
+                                symbol(expr.operands[0]->operands[0]->name),
+                                *part)
           .getResult();
     }
     // (Of a set: how many entities it holds now.)

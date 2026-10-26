@@ -1,0 +1,66 @@
+// Partitions (docs/indexes.md, section 5.4): how many have each value,
+// the values that have any, and what a `for ... where x.f == v` (or of
+// any of some values, or of none of them) visits, are as without the
+// indexes, as the entities change their values, come and go; on one core
+// and on many. Kept as a set for each value, the `for`s it answers go
+// through its bits (via_partition, in_set); where no system changes the
+// field and rows move anyway, it keeps the archetype's rows by its values
+// (clustered).
+// RUN: sed -e '/\/\/I$/d' -e 's|^\( *\)//P |\1|' %S/Inputs/partition.ent > %t.plain.ent
+// RUN: %ent run %t.plain.ent > %t.plain
+// RUN: %ent run %S/Inputs/partition.ent 2>&1 > %t.one | count 0
+// RUN: cmp %t.one %t.plain
+// RUN: env ENT_PARALLEL_MIN=1 %ent run --parallel %S/Inputs/partition.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+// RUN: ent-translate --import-ent %S/Inputs/partition.ent -I %S/../../devices \
+// RUN:   | ent-opt --ent-indexes | FileCheck %s --check-prefix=VIA
+// RUN: sed -e '/\/\/I$/d' %S/Inputs/partition_kept.ent > %t.kept_plain.ent
+// RUN: %ent run %t.kept_plain.ent > %t.kept_plain
+// RUN: %ent run %S/Inputs/partition_kept.ent 2>&1 > %t.kept | count 0
+// RUN: cmp %t.kept %t.kept_plain
+// RUN: env ENT_PARALLEL_MIN=1 %ent run --parallel %S/Inputs/partition_kept.ent 2>/dev/null > %t.kept_all
+// RUN: cmp %t.kept %t.kept_all
+// RUN: FileCheck %s --check-prefix=KEPT --input-file=%t.kept
+// RUN: ent-translate --import-ent %S/Inputs/partition_kept.ent -I %S/../../devices \
+// RUN:   | ent-opt --ent-indexes | FileCheck %s --check-prefix=CLUSTERED
+
+// CHECK: A 10 B 10 D 10 E 0
+// CHECK-NEXT: part A 10
+// CHECK-NEXT: part B 10
+// CHECK-NEXT: part C 10
+// CHECK-NEXT: part D 10
+// CHECK-NEXT: ok false 26
+// CHECK-NEXT: ok true 14
+// CHECK-NEXT: k 0 8
+// CHECK: B 210
+// CHECK: not AE
+// CHECK: got 1048
+
+// VIA-LABEL: ent.system @Stages_update_bits(
+// VIA-LABEL: ent.system @show(
+// VIA: in_set = @Stages_bits
+// VIA-SAME: via_partition = @Stages
+// VIA: in_set = @Stages_bits
+// VIA-SAME: via_partition = @Stages
+// VIA: in_set = @Stages_bits
+// VIA-SAME: via_partition = @Stages
+// VIA: in_set = @Oks_bits
+// VIA-SAME: via_partition = @Oks
+// VIA: in_set = @Ks_bits
+// VIA-SAME: via_partition = @Ks
+// VIA: in_set = @Ws_bits
+// VIA-SAME: via_partition = @Ws
+// VIA-LABEL: ent.system @change(
+// VIA-NOT: via_partition
+
+// KEPT: frame 0 bees
+// KEPT: frame 5 bees
+
+// CLUSTERED: ent.buffer @Kinds
+// CLUSTERED-SAME: clustered
+// CLUSTERED-LABEL: ent.system @show(
+// CLUSTERED: via_partition = @Kinds
+// CLUSTERED-NOT: in_set
+// CLUSTERED: via_partition = @Kinds
+// CLUSTERED: via_partition = @Kinds

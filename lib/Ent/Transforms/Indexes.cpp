@@ -113,8 +113,17 @@ bool changesOrderOutside(SystemOp system, QueryOp query,
       return WalkResult::skip();
     if (isa<SpawnOp, DespawnOp, AddOp, RemoveOp>(op))
       return WalkResult::interrupt();
+    // (A proc changes of the world only what it is handed to change: here
+    // the key's component.)
     if (auto invoke = dyn_cast<InvokeOp>(op); invoke && invoke.getProc())
-      return WalkResult::interrupt();
+      for (Value operand : invoke->getOperands()) {
+        if (auto rows = dyn_cast<BufferType>(operand.getType());
+            rows && rows.getMut() && rows.getName() == component)
+          return WalkResult::interrupt();
+        if (auto ref = dyn_cast<RefType>(operand.getType());
+            ref && ref.getIsMutable() && ref.getComponent() == component)
+          return WalkResult::interrupt();
+      }
     if (auto set = dyn_cast<SetOp>(op))
       if (cast<RefType>(set.getRef().getType()).getComponent() == component &&
           set.getFieldAttr() == field)
@@ -169,6 +178,138 @@ bool touches(const llvm::SetVector<Column> &accessed,
                       [&](const Column &c) { return accessed.contains(c); });
 }
 
+/// The archetypes that hold the entities of an index of `of` (each of
+/// them, not optionally).
+llvm::SmallDenseSet<Attribute> holdersOf(ArrayRef<ArchetypeOp> archetypes,
+                                         ArrayRef<StringAttr> of) {
+  llvm::SmallDenseSet<Attribute> held;
+  for (ArchetypeOp archetype : archetypes)
+    if (llvm::all_of(of, [&](StringAttr component) {
+          return archetype.contains(FlatSymbolRefAttr::get(component)) &&
+                 !archetype.isOptional(FlatSymbolRefAttr::get(component));
+        }))
+      held.insert(archetype.getSymNameAttr());
+  return held;
+}
+
+/// Whether the body of `query` combines into what it also reads: adds to
+/// a unique's field it reads, or sends to a field of a component it reads
+/// or sets (of any entity). A `for` then may not go by a field (see
+/// QueryOp's verifier): it is combined as the query goes there, and is
+/// not visited by an index's order of its places.
+bool combinesIntoWhatItReads(QueryOp query) {
+  WalkResult found = query.getBody().walk([&](Operation *op) {
+    bool seen = false;
+    if (auto accumulate = dyn_cast<AccumulateOp>(op))
+      query.getBody().walk([&](ReadOp read) {
+        seen |= read.getResourceAttr() == accumulate.getResourceAttr() &&
+                read.getField() == accumulate.getField();
+      });
+    if (auto apply = dyn_cast<ApplyOp>(op))
+      query.getBody().walk([&](Operation *other) {
+        FlatSymbolRefAttr component;
+        StringRef field;
+        if (auto get = dyn_cast<GetOp>(other)) {
+          component = get.getRef().getType().getComponent();
+          field = get.getField();
+        } else if (auto set = dyn_cast<SetOp>(other)) {
+          component = set.getRef().getType().getComponent();
+          field = set.getField();
+        } else if (auto lookup = dyn_cast<LookupOp>(other)) {
+          if (lookup.getValue().use_empty())
+            return;
+          component = lookup.getComponentAttr();
+          field = lookup.getField();
+        } else {
+          seen |= isa<AddOp>(other) &&
+                  other->getAttr("component") == apply.getComponentAttr();
+          return;
+        }
+        seen |=
+            component == apply.getComponentAttr() && field == apply.getField();
+      });
+    return seen ? WalkResult::interrupt() : WalkResult::advance();
+  });
+  return found.wasInterrupted();
+}
+
+/// Whether a `for` whose `where` asks for values of a field the same for
+/// all its entities (QueryOp::kKeyEqualsAttr) may visit only those an
+/// index by the field (`key`), over the entities `held` has, says have
+/// them: over those entities or some of them; not where the system changes the
+/// key or which entities there are, but in the `for` itself and there only of
+/// the entity visited (written or sent); nor where the body spawns, adds
+/// or removes, or binds another entity along a tree; nor in what makes an
+/// index (`making`), nor on the GPU.
+bool answerable(QueryOp query, ArrayRef<StringAttr> key,
+                const llvm::SmallDenseSet<Attribute> &held,
+                const llvm::DenseSet<Attribute> &making) {
+  auto equals = query->getAttrOfType<ArrayAttr>(QueryOp::kKeyEqualsAttr);
+  auto system = query->getParentOfType<SystemOp>();
+  // (Nor one over a set's entities, which it finds by the set.)
+  if (!equals || query.getViaHash() || query.getViaPartition() ||
+      query.getInSet() || !system || system.getGpu() ||
+      making.contains(system.getSymNameAttr()))
+    return false;
+  auto component = cast<FlatSymbolRefAttr>(equals[0]);
+  auto field = cast<StringAttr>(equals[1]);
+  if (component.getAttr() != key[0] || field != key[1])
+    return false;
+  // (Of some of them too: those of the others are passed over, found by
+  // their ids.)
+  SmallVector<ArchetypeOp> matched = getMatchedArchetypes(query);
+  if (matched.empty() || !llvm::all_of(matched, [&](ArchetypeOp archetype) {
+        return held.contains(archetype.getSymNameAttr());
+      }))
+    return false;
+  if (changesOrderOutside(system, query, component, field))
+    return false;
+  Block &body = query.getBody().front();
+  // (Nor what it binds of another entity along a tree.)
+  if (llvm::any_of(body.getArguments(), [](BlockArgument arg) {
+        return static_cast<bool>(cast<RefType>(arg.getType()).getVia());
+      }))
+    return false;
+  WalkResult inside = query.getBody().walk([&](Operation *op) {
+    if (isa<SpawnOp, AddOp, RemoveOp>(op))
+      return WalkResult::interrupt();
+    // (The key written, or sent: of the entity visited only.)
+    auto other = [&](Value ref, StringAttr written) {
+      return cast<RefType>(ref.getType()).getComponent() == component &&
+             written == field && ref.getParentBlock() != &body;
+    };
+    if (auto set = dyn_cast<SetOp>(op);
+        set && other(set.getRef(), set.getFieldAttr()))
+      return WalkResult::interrupt();
+    if (auto combine = dyn_cast<CombineOp>(op);
+        combine && other(combine.getRef(), combine.getFieldAttr()))
+      return WalkResult::interrupt();
+    if (auto apply = dyn_cast<ApplyOp>(op);
+        apply && apply.getComponentAttr() == component &&
+        apply.getFieldAttr() == field)
+      return WalkResult::interrupt();
+    return WalkResult::advance();
+  });
+  return !inside.wasInterrupted();
+}
+
+/// Whether a `for` a partition answers may visit the entities of its bits
+/// (as `for .. in Set` does: QueryOp::kInSetAttr): not one by a field,
+/// in turn or by what changed, nor one whose body gives rows to a buffer,
+/// keeps a running sum or takes a window (see QueryOp's verifier).
+bool overBits(QueryOp query) {
+  if (query.hasBy() || query.getCascade() || query.isTurn() ||
+      query->hasAttr(QueryOp::kTriggersAttr))
+    return false;
+  return !query.getBody()
+              .walk([](Operation *op) {
+                return isa<AppendOp, RunningOp, BufferClaimOp, SpawnOp>(op)
+                           ? WalkResult::interrupt()
+                           : WalkResult::advance();
+              })
+              .wasInterrupted();
+}
+
 struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
   using EntIndexesBase::EntIndexesBase;
 
@@ -197,6 +338,206 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
         it->second = computeAccess(system, archetypes);
       return it->second;
     };
+
+    // A partition (`by field partition`): the `for`s whose `where` asks
+    // for values of its field that it answers (QueryOp::kViaPartitionAttr),
+    // and how it keeps them. Where one archetype holds its entities, which
+    // neither a sorted tree nor another clustered index keeps in order, no
+    // system changes its field (an entity has its value from its spawn
+    // on), and rows move anyway (entities are despawned, or given and
+    // taken an `apart` component, or rows are kept in order: else every
+    // entity would be found through a table, not by its number as a row,
+    // which costs more than a `for` saves, see bench/epidemic), it keeps
+    // the archetype's rows by its values (clustered, made where entities
+    // came or went): such a `for` then visits only their rows, one after
+    // another, as a `for` with an `apart` tag does those stored apart.
+    // Else it keeps a set of each value's entities (its bits, mended
+    // from those whose value changed only), whose words such a `for`
+    // goes through, those of the values it asks for at once, as through
+    // a set's (QueryOp::kInSetAttr); not one that may not (see overBits),
+    // which asks every entity.
+    {
+      llvm::DenseSet<Attribute> making;
+      for (auto [buffer, info] : indexes) {
+        making.insert(info.get("update"));
+        if (Attribute bits = info.get("bits_update"))
+          making.insert(bits);
+      }
+      llvm::SmallDenseSet<Attribute> kept;
+      for (auto [buffer, info] : indexes)
+        if (info.get("clustered"))
+          for (Attribute holder : holdersOf(archetypes, strings(info, "of")))
+            kept.insert(holder);
+      for (RelationOp relation : module.getOps<RelationOp>())
+        if (relation.getSorted())
+          if (FailureOr<SmallVector<ArchetypeOp>> sorted =
+                  getSortedArchetypes(relation);
+              succeeded(sorted))
+            for (ArchetypeOp archetype : *sorted)
+              kept.insert(archetype.getSymNameAttr());
+      bool moving = !kept.empty();
+      module.walk([&](Operation *op) {
+        if (isa<DespawnOp>(op))
+          moving = true;
+        if (isa<AddOp, RemoveOp>(op))
+          if (auto component = dyn_cast_or_null<ComponentOp>(symbols.lookup(
+                  cast<FlatSymbolRefAttr>(op->getAttr("component")).getAttr()));
+              component && component.getApart())
+            moving = true;
+      });
+      for (auto &[buffer, info] : indexes) {
+        if (!info.get("partition"))
+          continue;
+        SmallVector<StringAttr> key = strings(info, "key");
+        llvm::SmallDenseSet<Attribute> held =
+            holdersOf(archetypes, strings(info, "of"));
+        SmallVector<QueryOp> answered;
+        module.walk([&](QueryOp query) {
+          if (answerable(query, key, held, making))
+            answered.push_back(query);
+        });
+        // (What it holds as the update of its bits reads it, which hands
+        // no proc the component to change: its field only.)
+        auto bits = cast<StringAttr>(info.get("bits_update"));
+        NamedAttrList asBits(info);
+        asBits.set("update", bits);
+        Kept made = keptOf(buffer, asBits.getDictionary(module.getContext()),
+                           archetypes, symbols);
+        int64_t changing = 0;
+        for (SystemOp system : module.getOps<SystemOp>())
+          if (!making.contains(system.getSymNameAttr()) &&
+              writesValues(system, made))
+            ++changing;
+        bool clustered = moving && changing == 0 && held.size() == 1 &&
+                         !kept.contains(*held.begin()) && !answered.empty();
+        auto bitsName = FlatSymbolRefAttr::get(
+            module.getContext(), (buffer.getSymName() + "_bits").str());
+        for (QueryOp query : answered) {
+          if (!clustered && !overBits(query))
+            continue;
+          query->setAttr(QueryOp::kViaPartitionAttr,
+                         FlatSymbolRefAttr::get(buffer.getSymNameAttr()));
+          if (clustered)
+            continue;
+          query->setAttr(QueryOp::kInSetAttr, bitsName);
+          // (A system that says what it reads reads the bits too.)
+          auto system = query->getParentOfType<SystemOp>();
+          if (system.hasContract() && !system.canRead(bitsName)) {
+            SmallVector<Attribute> reads;
+            if (ArrayAttr declared = system.getReadsAttr())
+              llvm::append_range(reads, declared);
+            reads.push_back(bitsName);
+            system.setReadsAttr(ArrayAttr::get(module.getContext(), reads));
+          }
+        }
+        // (Kept as bits: made by the update of its bits; its rows not
+        // kept.)
+        if (!clustered) {
+          NamedAttrList changed(info);
+          Operation *rows =
+              symbols.lookup(cast<StringAttr>(info.get("update")));
+          changed.set("update", bits);
+          info = changed.getDictionary(module.getContext());
+          buffer->setAttr("ent.index", info);
+          symbols.erase(rows);
+          buffer.setCapacity(1);
+          auto update = cast<SystemOp>(symbols.lookup(bits));
+          // (Where no system changes the field, no entity's value does:
+          // the reactive `for`s that find them are left out. Nor where a
+          // `gpu` system does, whose changes are not kept on the CPU: then
+          // its bits are made anew every time.)
+          bool onGpu =
+              llvm::any_of(module.getOps<SystemOp>(), [&](SystemOp system) {
+                return system.getGpu() &&
+                       !making.contains(system.getSymNameAttr()) &&
+                       writesValues(system, made);
+              });
+          if (changing == 0 || onGpu) {
+            SmallVector<Operation *> reactive;
+            update.walk([&](QueryOp query) {
+              if (query->hasAttr(QueryOp::kTriggersAttr))
+                reactive.push_back(query);
+            });
+            std::string whole = (buffer.getSymName() + "_whole").str();
+            if (onGpu)
+              update.walk([&](WriteOp write) {
+                if (write.getResource() == whole)
+                  reactive.push_back(write);
+              });
+            for (Operation *op : reactive)
+              op->erase();
+          }
+          // (Nor how many each value has, where nothing reads that,
+          // `count`, nor the values that have any, `parts`.)
+          auto parts = StringAttr::get(module.getContext(),
+                                       buffer.getSymName() + "_parts");
+          auto values = StringAttr::get(module.getContext(),
+                                        buffer.getSymName() + "_kept");
+          bool counted = false;
+          for (SystemOp system : module.getOps<SystemOp>())
+            if (!making.contains(system.getSymNameAttr()))
+              for (const Column &column :
+                   computeAccess(system, archetypes).reads)
+                counted |= std::get<1>(column) == parts ||
+                           std::get<1>(column) == values;
+          if (!counted) {
+            SmallVector<Operation *> counting;
+            for (Operation &op :
+                 update.getBody().front().without_terminator()) {
+              bool counts =
+                  op.walk([&](Operation *inner) {
+                      auto named =
+                          inner->getAttrOfType<FlatSymbolRefAttr>("buffer");
+                      return isa<SetCountOp>(inner) ||
+                                     (named && (named.getAttr() == parts ||
+                                                named.getAttr() == values))
+                                 ? WalkResult::interrupt()
+                                 : WalkResult::advance();
+                    }).wasInterrupted();
+              if (counts && op.use_empty())
+                counting.push_back(&op);
+            }
+            for (Operation *op : llvm::reverse(counting))
+              op->erase();
+          }
+          continue;
+        }
+        // (Else its bits are not kept: what keeps them is left out.)
+        symbols.erase(symbols.lookup(bits));
+        symbols.erase(symbols.lookup((buffer.getSymName() + "_bits").str()));
+        moving = true;
+        kept.insert(*held.begin());
+        NamedAttrList changed(info);
+        changed.set("clustered", UnitAttr::get(module.getContext()));
+        info = changed.getDictionary(module.getContext());
+        buffer->setAttr("ent.index", info);
+        // (Its update moves the rows, which tells each entity its row.)
+        auto update = cast<SystemOp>(
+            symbols.lookup(cast<StringAttr>(info.get("update"))));
+        std::string number = (buffer.getSymName() + "_number").str();
+        SmallVector<InvokeOp> numbering;
+        update.walk([&](InvokeOp invoke) {
+          if (invoke.getCallee() == number)
+            numbering.push_back(invoke);
+        });
+        for (InvokeOp invoke : numbering) {
+          SmallVector<Operation *> named;
+          for (Value arg : invoke->getOperands())
+            if (Operation *def = arg.getDefiningOp())
+              named.push_back(def);
+          invoke->erase();
+          for (Operation *def : named)
+            if (def->use_empty())
+              def->erase();
+        }
+        OpBuilder at(update.getBody().front().getTerminator());
+        ClusterOp::create(at, buffer.getLoc(),
+                          FlatSymbolRefAttr::get(buffer.getSymNameAttr()));
+      }
+      llvm::stable_sort(indexes, [](auto &a, auto &b) {
+        return a.second.get("clustered") && !b.second.get("clustered");
+      });
+    }
 
     // An index with a form made on the GPU (a Morton index's) is made so
     // where the program is built for one, all the runs that read it are of
@@ -326,55 +667,15 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
           place = hidden;
       if (!place)
         continue;
-      llvm::SmallDenseSet<Attribute> held;
-      for (ArchetypeOp archetype : archetypes)
-        if (llvm::all_of(of, [&](StringAttr component) {
-              return archetype.contains(FlatSymbolRefAttr::get(component)) &&
-                     !archetype.isOptional(FlatSymbolRefAttr::get(component));
-            }))
-          held.insert(archetype.getSymNameAttr());
+      llvm::SmallDenseSet<Attribute> held = holdersOf(archetypes, of);
       module.walk([&](QueryOp query) {
-        auto equals = query->getAttrOfType<ArrayAttr>(QueryOp::kKeyEqualsAttr);
-        auto system = query->getParentOfType<SystemOp>();
-        // (Nor one over a set's entities, which it finds by the set.)
-        if (!equals || query.getViaHash() || query.getInSet() || !system ||
-            system.getGpu() || making.contains(system.getSymNameAttr()))
+        // (Of one value, which a hash finds.)
+        if (!query.getSlicePart("equals") ||
+            !answerable(query, key, held, making) ||
+            combinesIntoWhatItReads(query))
           return;
-        auto component = cast<FlatSymbolRefAttr>(equals[0]);
-        auto field = cast<StringAttr>(equals[1]);
-        if (component.getAttr() != key[0] || field != key[1])
-          return;
-        SmallVector<ArchetypeOp> matched = getMatchedArchetypes(query);
-        if (matched.size() != held.size() ||
-            !llvm::all_of(matched, [&](ArchetypeOp archetype) {
-              return held.contains(archetype.getSymNameAttr());
-            }))
-          return;
-        if (changesOrderOutside(system, query, component, field))
-          return;
-        Block &body = query.getBody().front();
-        WalkResult inside = query.getBody().walk([&](Operation *op) {
-          if (isa<SpawnOp, AddOp, RemoveOp>(op))
-            return WalkResult::interrupt();
-          // (The key written, or sent: of the entity visited only.)
-          auto other = [&](Value ref, StringAttr written) {
-            return cast<RefType>(ref.getType()).getComponent() == component &&
-                   written == field && ref.getParentBlock() != &body;
-          };
-          if (auto set = dyn_cast<SetOp>(op);
-              set && other(set.getRef(), set.getFieldAttr()))
-            return WalkResult::interrupt();
-          if (auto combine = dyn_cast<CombineOp>(op);
-              combine && other(combine.getRef(), combine.getFieldAttr()))
-            return WalkResult::interrupt();
-          if (auto apply = dyn_cast<ApplyOp>(op);
-              apply && apply.getComponentAttr() == component &&
-              apply.getFieldAttr() == field)
-            return WalkResult::interrupt();
-          return WalkResult::advance();
-        });
-        if (inside.wasInterrupted())
-          return;
+        auto component = cast<FlatSymbolRefAttr>(
+            query->getAttrOfType<ArrayAttr>(QueryOp::kKeyEqualsAttr)[0]);
         query->setAttr(QueryOp::kViaHashAttr,
                        FlatSymbolRefAttr::get(buffer.getSymNameAttr()));
         query->setAttr(QueryOp::kByAttr,
@@ -382,7 +683,7 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
       });
     }
     module.walk([&](QueryOp query) {
-      if (!query.getViaHash())
+      if (!query.getViaHash() && !query.getViaPartition())
         query.dropEquals();
     });
 

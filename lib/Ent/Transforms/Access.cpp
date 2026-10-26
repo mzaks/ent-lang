@@ -556,6 +556,13 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
               {StringAttr(),
                StringAttr::get(context, index.getValue() + suffix),
                StringAttr::get(context, "rows")});
+      // (A partition's rows and runs, or its bits, see kViaPartitionAttr.)
+      if (FlatSymbolRefAttr index = query.getViaPartition())
+        for (StringRef suffix : {"", "_parts", "_bits"})
+          access.reads.insert(
+              {StringAttr(),
+               StringAttr::get(context, index.getValue() + suffix),
+               StringAttr::get(context, "rows")});
       if (FlatSymbolRefAttr index = query.getByIndex())
         access.reads.insert(
             {StringAttr(), index.getAttr(), StringAttr::get(context, "rows")});
@@ -660,7 +667,7 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
       return;
     }
     // (A set is one thing too: its bits.)
-    if (isa<SetAddOp, SetHasOp>(op)) {
+    if (isa<SetAddOp, SetHasOp, SetCountOp>(op)) {
       Column set{StringAttr(),
                  cast<FlatSymbolRefAttr>(op->getAttr("buffer")).getAttr(),
                  StringAttr::get(context, "rows")};

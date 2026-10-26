@@ -1,0 +1,36 @@
+// A partition whose field no system changes, of entities that come and
+// go: it keeps the archetype's rows by its values (docs/indexes.md,
+// section 5.4), and its `for`s visit those of the values asked for.
+// Lines ending in //I are the index's own.
+import console
+enum Kind { Ant, Bee, Cat, Dog }
+component U { k: Kind, n: i32, age: i32 } capacity 256
+unique T { frame: i32, sum: i64, next: i32 }
+index Kinds of U by k partition //I
+
+world {
+  for i in 0..40 { spawn { U { k: ((i * 7) % 4) as Kind, n: i, age: 0 } } }
+  T.next = 40
+}
+
+system show() {
+  T.sum = 0
+  for u: U where u.k == Kind.Bee { T.sum += u.n as i64 }
+  put("frame {T.frame} bees {T.sum}")
+  for u: mut U where u.k == Kind.Cat || u.k == Kind.Dog { u.age += 1 }
+  T.sum = 0
+  for u: U where u.k != Kind.Ant { T.sum += (u.age * u.n) as i64 }
+  put("not ants {T.sum}")
+}
+
+system churn() {
+  for e, u: U where u.n % 5 == T.frame % 5 { e.destroy() }
+  for i in 0..6 {
+    spawn { U { k: ((T.next * 3) % 4) as Kind, n: T.next, age: 0 } }
+    T.next += 1
+  }
+  T.frame += 1
+}
+
+schedule go() { show() churn() }
+main { loop { go() } until T.frame >= 6 }

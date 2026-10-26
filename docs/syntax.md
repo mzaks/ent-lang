@@ -420,8 +420,9 @@ last one, whose draw from a stream of numbers comes when), it is said
 after the filters, where `top down` stands for a tree:
 
 - `by name.field` visits the entities one after another by a field they
-  all have, the smallest value first: a whole number or a fraction (`f32`,
-  `f64`), of a component the `for` binds (`t.born`) or names after `with`
+  all have, the smallest value first: a whole number, a fraction (`f32`,
+  `f64`), an enum (by its cases' order) or a bool (false first), of a
+  component the `for` binds (`t.born`) or names after `with`
   (`Thing.born`). Entities with the same value (`==`: nought below nought
   as nought) come in the storage's order. A NaN has no place of its own.
 - After it, a slice of that order: `from a` and `to b` (the entities
@@ -2010,7 +2011,8 @@ system follow() {
 ```
 
 An index is the entities that have its components in the order of a
-number of the first one's (its key: a whole number or a fraction), as the rows of a buffer that
+number of the first one's (its key: a whole number or a fraction; of a
+partition an enum, a bool or a u8, see Partitions), as the rows of a buffer that
 the program keeps and the systems only read: `examples/traffic/lanes.ent`
 finds the car ahead and the cars beside each car so.
 
@@ -2145,6 +2147,63 @@ entities of a key, by a hash of it, in place of an order.
 - `hash_of(x)` and `hash_of(x, seed)`, built in: the hash it takes, of a
   whole number, an enum, an entity or a text, as a `u64` (rapidhash's
   mix: one 64 by 64 bit multiply, the halves of the product xored).
+
+#### Partitions
+
+```
+enum Stage { Susceptible, Exposed, Ill, Recovered }
+component Person { stage: Stage, age: i32 } capacity 100000
+
+index Stages of Person by stage partition
+
+system day() {
+  let ill = Stages.count(Stage.Ill)          // how many are ill
+  for v in Stages.parts { put("{v}: {Stages.count(v)}") }
+  for p: mut Person where p.stage == Stage.Ill { ... }
+  for p: Person where p.stage == Stage.Exposed || p.stage == Stage.Ill { ... }
+  for p: Person where p.stage != Stage.Recovered && p.age > 60 { ... }
+}
+```
+
+`by field partition` after the components makes an index of a field of
+few values: an enum, a bool or a u8 (256 values at most).
+
+- `Name.count(value)` is how many entities have the value (an i32), in a
+  system.
+- `for v in Name.parts { }` goes over the values that some entity has,
+  smallest first (an enum's in its cases' order, false before true), in
+  a system.
+- A `for` whose `where` asks for values of the field, the same for all
+  its entities (as of a hash index: literals, consts, cases, locals not
+  `var`), visits only the entities that have them: `x.f == a`, any of
+  some (`x.f == a || x.f == b`), or none of some (`x.f != a && x.f !=
+  b`), alone or among the conditions `&&` joins. As of a hash index:
+  the index holding those entities or more, and nothing in the system
+  before the `for`, nor in it of other entities, changing the field or
+  which entities there are. It visits them in the order they are stored
+  and asks the `where` still: the same as without the index. Not a `for`
+  that goes `by` a field, in turn, by what changed, along a tree, nor
+  one whose body gives rows to a buffer, keeps a running sum, takes a
+  window or spawns, nor in a `gpu` system: those look at every entity.
+- How it is kept the compiler chooses. Where one archetype holds its
+  entities (which no sorted tree nor another clustered index keeps in
+  order), no system changes the field, and rows move anyway (entities
+  are destroyed, or given and taken an `apart` component), it keeps the
+  archetype's rows by its values (as `clustered` does, made again where
+  entities came or went), and such a `for` goes through the rows of the
+  values it asks for. Else it keeps a set of entities for each value
+  (`Name_bits`), mended from those whose value changed (a reactive `for`
+  finds them; each entity keeps which set it is in, `part_in_Name`), and
+  made anew where entities came or went or where a `gpu` system changes
+  the field: such a `for` goes through the sets' words, 64 entities a
+  word, those of the values it asks for at once, on many threads where
+  the program is built with `--parallel`. A plain `for` over a dense
+  column costs a fraction of a nanosecond an entity, where one through
+  the sets costs a few for each entity it visits: it pays where few of
+  the entities have the values, or the `where` asks more than that.
+- Besides the names above, `Name_bits`, `Name_parts`, `Name_kept`,
+  `Name_upto`, `Name_count` and `Name_update_bits` are taken. Not
+  `clustered` (the compiler's choice) nor `hash`.
 
 #### Grids
 

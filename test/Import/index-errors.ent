@@ -417,3 +417,45 @@ index Tree of Dot kdtree (x, y) incremental
 component Dot { x: f64, y: bool } capacity 8
 // expected-error @+1 {{a grid is over places, f32, f64, i32 or i64; 'y' is}}
 index Tree of Dot kdtree (x, y)
+
+// -----
+
+component Ship { team: i32 } capacity 8
+// expected-error @+1 {{a partition is by an enum, a bool or a u8 (of 256 values at most); 'team' is}}
+index ByTeam of Ship by team partition
+
+// -----
+
+enum Side { Red, Blue }
+component Ship { side: Side } capacity 8
+// expected-error @+1 {{whether a partition keeps the archetype's rows by its values is the compiler's choice: no 'clustered'}}
+index BySide of Ship by side partition clustered
+
+// -----
+
+component Ship { team: i64 } capacity 8
+index ByTeam of Ship by team
+system count() {
+  // expected-error @+1 {{'ByTeam.count' is of a partition ('by field partition'): how many have a value}}
+  let n = ByTeam.count(3)
+}
+
+// -----
+
+enum Side { Red, Blue }
+component Ship { side: Side } capacity 8
+index BySide of Ship by side partition
+system sides() {
+  // expected-error @+1 {{a 'for' over the values of a partition has one name, the value's: 'for v in BySide.parts'}}
+  for i, v in BySide.parts { }
+}
+
+// -----
+
+enum Side { Red, Blue }
+component Ship { side: Side } capacity 8
+index BySide of Ship by side partition
+fn reds() -> i32 {
+  // expected-error @+1 {{'BySide.count' is asked of the world's partition, in a system}}
+  BySide.count(Side.Red)
+}

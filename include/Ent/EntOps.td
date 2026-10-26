@@ -314,11 +314,34 @@ def Ent_SetAddOp
     holds in the end does not depend on the order. A query does not both
     put entities into a set and take them out, nor read the set it
     changes, but in turn.
+
+    ```mlir
+    ent.set.add @Stages_bits %e part %v
+    ```
+    Of a family of sets (`ent.set_parts`, K sets of the same entities, one
+    after another in the buffer's words), into the set `part` (0 to K-1;
+    an index's own, see a partition's bits).
   }];
   let arguments = (ins FlatSymbolRefAttr:$buffer, Ent_EntityType:$entity,
-      UnitAttr:$remove);
-  let assemblyFormat = "$buffer $entity (`remove` $remove^)? attr-dict";
+      Optional<I32>:$part, UnitAttr:$remove);
+  let assemblyFormat =
+      "$buffer $entity (`part` $part^)? (`remove` $remove^)? attr-dict";
   let hasVerifier = 1;
+}
+
+def Ent_SetCountOp
+    : Ent_Op<"set.count", [DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "How many entities a set of a family holds";
+  let description = [{
+    ```mlir
+    %n = ent.set.count @Stages_bits part %v
+    ```
+    Of a family of sets (`ent.set_parts`), how many the set `part` holds:
+    its bits that are set.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$buffer, I32:$part);
+  let results = (outs I32:$result);
+  let assemblyFormat = "$buffer `part` $part attr-dict";
 }
 
 def Ent_SetHasOp
@@ -900,7 +923,10 @@ def Ent_QueryOp : Ent_Op<"query", [
 
     A query whose `where` compares a field with a value that is the same
     for all its entities has that value as `equals` (`key_equals` names
-    the field), which a hash index by the field may answer (`via_hash`):
+    the field), which a hash index by the field may answer (`via_hash`),
+    or a partition (`via_partition`); of an enum, a bool or a u8, values
+    it is one of (`where x.f == a || x.f == b`, `equals_among`) or none of
+    (`where x.f != a && x.f != b`, `equals_except`) too:
     ```mlir
     ent.query (%p: !ent.ref<@Player>) equals %n : i64
         {key_equals = [@Player, "team"]} { ... }
@@ -928,6 +954,21 @@ def Ent_QueryOp : Ent_Op<"query", [
     ::mlir::FlatSymbolRefAttr getViaHash() {
       return (*this)->getAttrOfType<::mlir::FlatSymbolRefAttr>(kViaHashAttr);
     }
+    /// Set by --ent-indexes: the partition by that field, over the same
+    /// entities, whose entities of the values asked for the query visits
+    /// (the `where` still asked): the archetype's rows of those values,
+    /// where it keeps the rows by its values; else those its sets of the
+    /// values hold (its bits, `in_set`), a word of each at once. The
+    /// values are `equals`, or `equals_among` (any of them) or
+    /// `equals_except` (none of them).
+    static constexpr ::llvm::StringLiteral kViaPartitionAttr =
+        "via_partition";
+    ::mlir::FlatSymbolRefAttr getViaPartition() {
+      return (*this)->getAttrOfType<::mlir::FlatSymbolRefAttr>(
+          kViaPartitionAttr);
+    }
+    /// Every slice operand named `part`, in their order.
+    ::llvm::SmallVector<::mlir::Value> getSliceParts(::llvm::StringRef part);
     /// Forgets the value a key is compared with (`key_equals`, and its
     /// slice operands), where no index says which entities have it.
     void dropEquals();

@@ -3,6 +3,41 @@
 `examples/epidemic` against its reference, OpenABM-Covid19 (commit
 367a0d3, built from its C with `cc -O3 -march=native` and GSL 2.8).
 
+## 2026-10-26: the stages in a partition
+
+`bench/epidemic/run.py 100000 1000000 [--apart | --partition]`, built
+natively, on mains: `--partition` adds `index Stages of Disease, Person
+by stage partition` (docs/indexes.md, 5.4), the tally counts by
+`Stages.count`, and `workplace` and `chance` ask `where d.stage ==
+Presymptomatic || .. || d.stage == Severe`, which it answers (a set of
+people for each stage, mended from those whose stage changed; the `for`
+goes through the words of the four sets at once). Against no index and
+the hand-kept `tag Ill apart`; ms a day, one core / four threads on the
+fast cores / all the cores:
+
+| | 100,000 | infected | a million | infected |
+|---|---|---|---|---|
+| no index | 5.4 / 2.3 / 1.7 | 85,658 | 79.7 / 19.6 / 10.3 | 857,886 |
+| `tag Ill apart` | 7.9 / 4.0 / 3.1 | 85,944 | 160.8 / 47.4 / 35.1 | 857,191 |
+| partition | 5.1 / 2.2 / 1.5 | 85,658 | 71.4 / 19.7 / 10.1 | 857,886 |
+
+The same people fall ill with the partition as without (an `apart` tag
+moves rows, which changes the order of some draws). Its keeping is in
+`tally`: 0.04 ms a day at 100,000, 0.81 / 0.36 / 0.31 at a million (the
+stage changes of a day, about 34,000, out of one set and into another);
+`workplace` and `chance` gain the rest, on one core (36.4 ms where they
+were 44.1, a million). A first way, runs of rows made anew from every
+person each day and a serial `for` through them, was 5.6 / 5.0 at
+100,000.
+
+On the GPU (`BENCH_ONE_CPU=4 BENCH_CPUS=4-7 BENCH_ALL=0 ... 1000000
+--gpu workplace,infectiousness,chance,lay,infect,progress,symptoms,tests,household`,
+`tally` on the CPU as it reads the counts): 5.6 ms a day with the
+partition, 4.4 / 3.9 without. `progress` changes the stage on the GPU,
+whose changes are not kept on the CPU, so the sets are made anew every
+day (`tally` 2.1 ms), and the `for`s it would answer are `gpu` systems',
+which do not go through sets yet: there it only costs.
+
 ## 2026-10-18, after the end: `workplace`, a tie two edges
 
 The loops for the GPU that do a lot for few rows list those rows first

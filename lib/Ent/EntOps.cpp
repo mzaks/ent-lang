@@ -599,19 +599,44 @@ BufferCopyOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return success();
 }
 
+/// What makes a set a family of sets: how many (an index's, see
+/// WorldLayout::kSetPartsAttr).
+static constexpr StringLiteral kSetPartsMark = "ent.set_parts";
+
 LogicalResult SetAddOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  return verifySetUse(symbolTable, *this, getBufferAttr(), /*writes=*/true,
-                      getRemove() ? "takes an entity out of "
-                                  : "puts an entity into ")
-             ? success()
-             : failure();
+  BufferOp set = verifySetUse(symbolTable, *this, getBufferAttr(),
+                              /*writes=*/true,
+                              getRemove() ? "takes an entity out of "
+                                          : "puts an entity into ");
+  if (!set)
+    return failure();
+  if (set->hasAttr(kSetPartsMark) != bool(getPart()))
+    return emitOpError(getPart() ? "names a set of a family, and "
+                                 : "names no set of the family ")
+           << getBufferAttr() << (getPart() ? " is one set" : "");
+  return success();
+}
+
+LogicalResult SetCountOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  BufferOp set = verifySetUse(symbolTable, *this, getBufferAttr(),
+                              /*writes=*/false, "counts ");
+  if (!set)
+    return failure();
+  if (!set->hasAttr(kSetPartsMark))
+    return emitOpError("counts a set of a family, and ")
+           << getBufferAttr() << " is one set";
+  return success();
 }
 
 LogicalResult SetHasOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
-  return verifySetUse(symbolTable, *this, getBufferAttr(), /*writes=*/false,
-                      "reads ")
-             ? success()
-             : failure();
+  BufferOp set = verifySetUse(symbolTable, *this, getBufferAttr(),
+                              /*writes=*/false, "reads ");
+  if (!set)
+    return failure();
+  if (set->hasAttr(kSetPartsMark))
+    return emitOpError("reads a family of sets, ")
+           << getBufferAttr() << ", as one";
+  return success();
 }
 
 LogicalResult SetAddOp::verify() {
@@ -1476,7 +1501,7 @@ notForGpu(SymbolTableCollection &symbolTable, Operation *op) {
   if (isa<SpawnOp, DespawnOp>(op))
     return std::string("changes which entities there are: that is done "
                        "on the CPU");
-  if (isa<SetAddOp, SetHasOp>(op))
+  if (isa<SetAddOp, SetHasOp, SetCountOp>(op))
     return std::string("reads or changes a set: not on the GPU yet");
   FlatSymbolRefAttr changed;
   if (auto add = dyn_cast<AddOp>(op))
@@ -1520,7 +1545,7 @@ static LogicalResult verifyGpuQueries(SymbolTableCollection &symbolTable,
           return WalkResult::skip();
         if (isa<SpawnOp, DespawnOp, LookupOp, ApplyOp, ConnectOp, DisconnectOp,
                 AppendOp, BufferSetOp, BufferAtOp, BufferOfOp, TableAtOp,
-                BufferCopyOp, SetAddOp, SetHasOp>(op)) {
+                BufferCopyOp, SetAddOp, SetHasOp, SetCountOp>(op)) {
           op->emitOpError("is in a 'gpu' system, outside its 'for's, where "
                           "its code only reads and writes uniques and empties "
                           "a buffer, keeps its first rows, gives it rows "
@@ -2109,16 +2134,22 @@ ParseResult QueryOp::parse(OpAsmParser &parser, OperationState &result) {
       }
     }
     // The value a key is compared with: `equals %v : t` (and a text's
-    // hashes, `equals_hash %h : i64`, `equals_check %c : i64`).
-    for (StringRef part : {"equals", "equals_hash", "equals_check"}) {
-      if (failed(parser.parseOptionalKeyword(part)))
-        continue;
-      OpAsmParser::UnresolvedOperand operand;
-      Type type;
-      if (parser.parseOperand(operand) || parser.parseColonType(type) ||
-          parser.resolveOperand(operand, type, result.operands))
-        return failure();
-      parts.push_back(b.getStringAttr(part));
+    // hashes, `equals_hash %h : i64`, `equals_check %c : i64`); or the
+    // values it is one of, `equals_among %v : t` each, or none of,
+    // `equals_except %v : t` each.
+    for (StringRef part : {"equals", "equals_hash", "equals_check",
+                           "equals_among", "equals_except"}) {
+      bool many = part == "equals_among" || part == "equals_except";
+      while (succeeded(parser.parseOptionalKeyword(part))) {
+        OpAsmParser::UnresolvedOperand operand;
+        Type type;
+        if (parser.parseOperand(operand) || parser.parseColonType(type) ||
+            parser.resolveOperand(operand, type, result.operands))
+          return failure();
+        parts.push_back(b.getStringAttr(part));
+        if (!many)
+          break;
+      }
     }
     if (!parts.empty())
       result.addAttribute(kSliceAttr, b.getArrayAttr(parts));
@@ -2269,6 +2300,15 @@ Value QueryOp::getSlicePart(StringRef part) {
   return Value();
 }
 
+SmallVector<Value> QueryOp::getSliceParts(StringRef part) {
+  SmallVector<Value> values;
+  if (auto parts = (*this)->getAttrOfType<ArrayAttr>(kSliceAttr))
+    for (auto [name, value] : llvm::zip(parts, getSlice()))
+      if (cast<StringAttr>(name).getValue() == part)
+        values.push_back(value);
+  return values;
+}
+
 /// `attr` as a list of components, or failure if it is not one.
 static FailureOr<SmallVector<FlatSymbolRefAttr>>
 componentList(Attribute attr) {
@@ -2334,7 +2374,9 @@ LogicalResult QueryOp::verify() {
     if (sliced && !hasByField())
       return emitOpError("has a slice (from, to, first, last) but does not "
                          "go by a field");
-    if (getSlicePart("equals") && !(*this)->getAttr(kKeyEqualsAttr))
+    if ((getSlicePart("equals") || getSlicePart("equals_among") ||
+         getSlicePart("equals_except")) &&
+        !(*this)->getAttr(kKeyEqualsAttr))
       return emitOpError("has a value a key equals but no '")
              << kKeyEqualsAttr << "'";
     if (sliced && isTurn())
@@ -2734,11 +2776,12 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
       return emitOpError("goes by '")
              << getByField().getValue() << "', which " << getByComponent()
              << " has no field of";
-    if ((!type.isIntOrIndex() || type.isInteger(1)) && !type.isF32() &&
-        !type.isF64())
+    if (!type.isIntOrIndex() && !type.isF32() && !type.isF64() &&
+        !isa<EnumType>(type))
       return emitOpError("goes by '")
              << getByField().getValue() << "' of type " << type
-             << "; the order is that of a whole number or a fraction";
+             << "; the order is that of a whole number, a fraction, an "
+                "enum or a bool";
     for (StringRef part : {"from", "to"})
       if (Value bound = getSlicePart(part); bound && bound.getType() != type)
         return emitOpError("'")

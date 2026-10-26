@@ -2,8 +2,8 @@
 """Measures the city's epidemic (examples/epidemic) and its reference.
 
   examples/epidemic/reference/fetch.sh               once
-  python3 bench/epidemic/run.py [sizes] [--reference] [--apart] [--tracing]
-                                [--days n]
+  python3 bench/epidemic/run.py [sizes] [--reference] [--apart | --partition]
+                                [--tracing] [--days n]
 
 For each size (people: 100000 1000000 by default) a copy of the model is
 made that holds so many and notes the time after every system: built for
@@ -30,6 +30,12 @@ meet is told (500 are infected at the start).
 
 With --apart the model's tag for who is ill is stored apart (`tag Ill
 apart`): the ill in an archetype of their own.
+
+With --partition the people are in a partition by their stage (`index
+Stages of Disease, Person by stage partition`): the loops over the ill go over
+the four stages of the ill (`where d.stage == Stage.Presymptomatic ||
+..`), which it answers, in place of the tag `Ill`, and the day's tally
+of each stage is its count.
 
 With --gpu a,b the systems named are `gpu system`s and the model is built
 with `--gpu` (docs/gpu.md), on one core and on the fast cores as above
@@ -174,14 +180,54 @@ def measure(command, folder, environment=None, cpus=None):
     return seconds, usage.ru_maxrss / 1024, said
 
 
+# The four stages of the ill, who give something off (`tag Ill`).
+ILL = ("(d.stage == Stage.Presymptomatic || d.stage == Stage.Asymptomatic || "
+       "d.stage == Stage.Mild || d.stage == Stage.Severe)")
+STAGES = ["Susceptible", "Presymptomatic", "Asymptomatic", "Mild", "Severe",
+          "Hospitalised", "Critical", "Recovering", "Recovered", "Dead"]
+
+
+def partitioned(name, text):
+    """The model with a partition by stage (--partition)."""
+    changes = []
+    if name == "disease.ent":
+        tally = text[text.index("  for d: Disease {\n    let s = d.stage"):]
+        tally = tally[:tally.index("\n  }\n") + 5]
+        counts = "".join(
+            f"  Tally.{stage.lower()} = Stages.count(Stage.{stage})\n"
+            for stage in STAGES)
+        ill = " + ".join(f"Stages.count(Stage.{stage})" for stage in STAGES
+                         if stage not in ("Susceptible", "Recovered", "Dead"))
+        changes = [
+            ("tag Ill\n", "tag Ill\nindex Stages of Disease, Person by stage partition\n"),
+            (tally, "  for d: Disease where d.infected == Clock.day {\n"
+                    "    Tally.new_infections += one(d.path != Path.None)\n"
+                    "  }\n" + counts + f"  Tally.infected = {ill}\n")]
+    if name == "transmission.ent":
+        changes = [
+            ("for p: Person, i: Infectious, n: Work, q: Quarantine with Ill\n"
+             "      where i.rate > 0.0",
+             "for p: Person, i: Infectious, n: Work, q: Quarantine, d: Disease\n"
+             f"      where {ILL} && i.rate > 0.0"),
+            ("for me, i: Infectious, c: Chance with Ill where i.rate > 0.0",
+             f"for me, i: Infectious, c: Chance, d: Disease where {ILL} && i.rate > 0.0")]
+    for old, new in changes:
+        if old not in text:
+            sys.exit(f"{name} has no `{old}` to partition")
+        text = text.replace(old, new)
+    return text
+
+
 def build_model(people, parallel, apart, gpu=()):
-    folder = os.path.join(BENCH, f"model_{people}{'_apart' if apart else ''}"
+    folder = os.path.join(BENCH, f"model_{people}{'_' + apart if apart else ''}"
                                  f"{'_gpu' if gpu else ''}")
     os.makedirs(folder, exist_ok=True)
     for name in os.listdir(MODEL):
         if name.endswith(".ent"):
             text = open(os.path.join(MODEL, name)).read()
-            if apart and name == "disease.ent":
+            if apart == "partition":
+                text = partitioned(name, text)
+            elif apart and name == "disease.ent":
                 changed = text.replace("tag Ill\n", "tag Ill apart\n")
                 if changed == text:
                     sys.exit("disease.ent has no `tag Ill` to store apart")
@@ -296,7 +342,8 @@ def main():
         days = int(arguments[arguments.index("--days") + 1])
         del arguments[arguments.index("--days"):arguments.index("--days") + 2]
     sizes = [int(a) for a in arguments if a.isdigit()] or [100000, 1000000]
-    apart = "--apart" in arguments
+    apart = ("apart" if "--apart" in arguments else
+             "partition" if "--partition" in arguments else "")
     gpu = ()
     if "--gpu" in arguments:
         gpu = tuple(arguments[arguments.index("--gpu") + 1].split(","))
@@ -310,7 +357,9 @@ def main():
     fast = os.environ.get("BENCH_CPUS", "0-3")
     threads = os.environ.get("BENCH_THREADS", "4")
     for people in sizes:
-        print(f"{people} people, {days} days{', the ill apart' if apart else ''}"
+        print(f"{people} people, {days} days"
+              f"{', the ill apart' if apart == 'apart' else ''}"
+              f"{', by stage in a partition' if apart == 'partition' else ''}"
               f"{', with tracing' if MEASURES else ''}")
         runs = [("one core", run_model(people, days, False, apart, one, None)),
                 (f"{threads} threads on the fast cores",

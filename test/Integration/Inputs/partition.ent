@@ -1,0 +1,94 @@
+// Partitions (docs/indexes.md, section 5.4), kept as a set of entities
+// for each value: how many have each value, the values that have any,
+// and the `for`s whose `where` asks for values of the field, as the
+// entities change their values, come and go. Lines ending in //I are
+// the indexes' own; those starting //P say the same without them.
+import console
+enum Stage { A, B, C, D, E }
+component U { s: Stage, ok: bool, k: u8, n: i32 } capacity 256
+component Got { sum: i64 } capacity 256
+component W { s: Stage, n: i32 } capacity 64
+unique T { frame: i32, sum: i64, next: i32, c: i32, a: i32, b: i32, d: i32, e: i32 }
+index Stages of U by s partition //I
+index Oks of U by ok partition //I
+index Ks of U by k partition //I
+index Ws of W by s partition //I
+
+world {
+  for i in 0..40 {
+    spawn { U { s: ((i * 7) % 4) as Stage, ok: i % 3 == 0, k: (i % 5 * 50) as u8, n: i }, Got { sum: 0 } }
+  }
+  for i in 0..15 { spawn { W { s: ((i * 3) % 5) as Stage, n: i } } }
+  T.next = 40
+}
+
+system counts() {
+  put("A {Stages.count(Stage.A)} B {Stages.count(Stage.B)} D {Stages.count(Stage.D)} E {Stages.count(Stage.E)}") //I
+  for v in Stages.parts { put("part {v} {Stages.count(v)}") } //I
+  for v in Oks.parts { put("ok {v} {Oks.count(v)}") } //I
+  for v in Ks.parts { put("k {v} {Ks.count(v)}") } //I
+  //P T.a = 0
+  //P T.b = 0
+  //P T.d = 0
+  //P T.e = 0
+  //P for u: U {
+  //P   if u.s == Stage.A { T.a += 1 }
+  //P   if u.s == Stage.B { T.b += 1 }
+  //P   if u.s == Stage.D { T.d += 1 }
+  //P   if u.s == Stage.E { T.e += 1 }
+  //P }
+  //P put("A {T.a} B {T.b} D {T.d} E {T.e}")
+  //P for i in 0..5 {
+  //P   T.c = 0
+  //P   for u: U where u.s == i as Stage { T.c += 1 }
+  //P   let v = i as Stage
+  //P   if T.c > 0 { put("part {v} {T.c}") }
+  //P }
+  //P for i in 0..2 {
+  //P   T.c = 0
+  //P   for u: U where u.ok == (i == 1) { T.c += 1 }
+  //P   let v = i == 1
+  //P   if T.c > 0 { put("ok {v} {T.c}") }
+  //P }
+  //P for i in 0..256 {
+  //P   T.c = 0
+  //P   for u: U where u.k == i as u8 { T.c += 1 }
+  //P   if T.c > 0 { put("k {i} {T.c}") }
+  //P }
+}
+
+system show() {
+  let b = Stage.B
+  T.sum = 0
+  for u: U where u.s == b { T.sum += u.n as i64 }
+  put("B {T.sum}")
+  for u: U where u.s == Stage.A || u.s == Stage.D { put("AD {u.s} {u.n}") }
+  T.sum = 0
+  for u: U where u.s != Stage.A && u.s != Stage.E && u.n > 3 { T.sum += (u.n * u.n) as i64 }
+  put("not AE {T.sum}")
+  for u: U, g: mut Got where u.ok == true { g.sum += u.n as i64 }
+  for u: U where u.k == 100 as u8 || u.k == 200 as u8 { put("k {u.k} {u.n}") }
+  for w: W where w.s != Stage.B { put("W not B {w.s} {w.n}") }
+  T.sum = 0
+  for g: Got { T.sum += g.sum }
+  put("got {T.sum}")
+}
+
+system change() {
+  for u: mut U where u.n % 2 == T.frame % 2 { u.s = Stage.E }
+  for u: mut U where u.n % 3 == T.frame % 3 { u.ok = !u.ok }
+  for u: mut U where u.n % 4 == T.frame % 4 { u.k = (u.k as i32 + 50) as u8 }
+  for w: mut W where w.n % 3 == T.frame % 3 { w.s = Stage.D }
+}
+
+system churn() {
+  for e, u: U where u.n % 5 == T.frame % 5 { e.destroy() }
+  for i in 0..6 {
+    spawn { U { s: ((T.next * 3) % 4) as Stage, ok: T.next % 2 == 0, k: (T.next % 3 * 50) as u8, n: T.next }, Got { sum: 0 } }
+    T.next += 1
+  }
+  T.frame += 1
+}
+
+schedule go() { counts() show() change() churn() }
+main { loop { go() } until T.frame >= 4 }

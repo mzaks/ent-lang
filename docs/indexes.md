@@ -287,6 +287,55 @@ Two ways; the compiler picks one, or the program says which:
 For: alive and dead, the states of units, satisfied and unsatisfied SAT
 clauses, resting and refractory neurons.
 
+Built (2026-10-26, `docs/syntax.md`, Partitions): `index Stages of
+Person by stage partition`, of an enum, a bool or a u8; `Name.count(v)`,
+`for v in Name.parts`, and a `for` whose `where` asks `x.f == a`, any of
+some values (`||`) or none of some (`!=` and `&&`) visits only those
+entities. Both ways, the compiler choosing:
+
+- **In the archetype** (clustered: the archetype's rows by value, a
+  `for` going through the rows of its values) only where no system
+  changes the field and rows move anyway: otherwise every change of the
+  value moves the entity, and where nothing else moves rows, every entity
+  is found through a table where it was found by its number as a row (an
+  `apart` tag costs the epidemic twice as much so, below).
+- **A set of entities for each value** (`Name_bits`, a family of sets in
+  one buffer, `ent.set.add .. part`): mended by two reactive `for`s, out
+  of the set of the old value (each entity keeps it, `part_in_Name`) and
+  into that of the new one, on many threads (atomically); made anew where
+  entities came or went. A `for` goes through the words of the sets of
+  the values it asks for, or'ed, as a `for .. in Set` does, on many
+  threads. Counts are popcounts of each set's words, left out where
+  nothing reads them.
+
+A first way kept the runs of each value as rows of the index, sorted by
+value and found by halving, and a `for` went through them by places, as
+through a hash index's list. Made anew from all the entities each time a
+value changed (O(n)), with the `for` serial (by places): the epidemic at
+100,000 was 5.6 ms a day on one core and 5.0 on four threads (5.4 and 2.3
+without), and a synthetic million (1% hunting, one in 1,000 changing a
+frame) 21 ms a frame against 0.64. Mended from the changed entities only,
+the sets cost what changed: 0.019 ms a frame there.
+
+Measured (bench/epidemic/RESULTS.md, 2026-10-26): the stages of the
+epidemic as a partition against no index and against `tag Ill apart`,
+100,000 and a million people, one core, four threads, all of them: 5.1,
+2.2, 1.5 ms a day (no index 5.4, 2.3, 1.7; apart 7.9, 4.0, 3.1); a
+million, 71.4, 19.7, 10.1 (79.7, 19.6, 10.3; apart 160.8, 47.4, 35.1).
+On the GPU it costs: `progress`, a `gpu` system, changes the stage,
+whose changes are not kept on the CPU, so the sets are made anew every
+day (2.1 ms), and the `for`s it would answer are `gpu` systems', which
+do not go through sets yet (5.6 ms a day, 3.9 without). The synthetic
+million: 0.91 ms a frame on one core, 0.19 on all (0.65 and 0.10
+without): four `for`s that each visit 10,000 entities at random rows
+(0.037 ms each) against one fused, vectorised pass over a byte column
+(0.058 for all four). A partition pays where its `for`s' bodies or
+`where`s cost more than the scan.
+
+Open: the sets made on the GPU, and `gpu` systems' `for`s through them;
+a `for` through them that gives rows to a buffer or keeps a running sum
+(as of a set); worlds on many ranks (a set is not yet).
+
 ### 5.5 Spatial indexes
 
 All take a position (2D or 3D, `f32` or whole numbers) and answer at
@@ -462,7 +511,7 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 | 4 | Sorted index (secondary), then clustered | Ordered iteration, ranges, top-k | built: secondary (5.2); ties, float keys, query forms (`by` with `from`, `to`, `first`, `last`) and `clustered` (2026-10-23) |
 | 5 | Morton linear quadtree and octree | Keys made of fields, ranges of prefixes | designed (2026-10-25, below): `morton`, `bits`, `leaf`, `cells { }` sums, `for c in Name.cells` with `open`; references PBBS `octTree` (`bench/points`) and Barnes's treecode |
 | 6 | Relation indexes by source and target everywhere, indexes on edge fields | | built: copies in the index's order, kept in order in place, `by` and `where` on edge loops and `index .. of Relation` (2026-10-24, see 5.6) |
-| 7 | Partitions by value | | |
+| 7 | Partitions by value | Two ways, the compiler choosing | built: `by field partition` of an enum, bool or u8; `count`, `parts`, `where` `==`, `\|\|`, `!=`; a set for each value or the archetype's rows (2026-10-26, see 5.4) |
 | 8 | k-d tree and `nearest k` | | built: `nearest k` on grids (2026-10-23); `kdtree (..)`, made on one core, many and the GPU (2026-10-26, see below) |
 | 9 | Embeddings by brute force (int8 and binary, ranked again) | The recall to measure against | needs a vector type |
 | 10 | IVF with k-means in ent-lang | | |
