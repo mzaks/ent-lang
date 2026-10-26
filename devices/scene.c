@@ -62,6 +62,9 @@ void ent_scene_begin_scene(float eye_x, float eye_y, float eye_z, float at_x,
   rlDisableBackfaceCulling();
 }
 
+// The eye, for the mesh device (devices/mesh.c).
+Camera3D ent_scene_camera(void) { return ent_scene_eye; }
+
 void ent_scene_end_scene(void) {
   EndMode3D();
   rlEnableBackfaceCulling();

@@ -1,0 +1,68 @@
+// Meshes of blocks, kept on the GPU and drawn into a scene (see
+// devices/scene.ent): the stuff of a world of blocks too big to draw
+// box by box. A program says which faces of its blocks are seen (those
+// next to air, say) for a part of its world, and the device makes them
+// a mesh in a slot of its own, once; then draws every slot it has, each
+// frame, as long as it is not made again or dropped:
+//
+//   import window
+//   import scene
+//   import mesh
+//   capacity Pixels 65536
+//   system paint() { .. Pixels .. make_atlas(Pixels, 256, 256, 16) }
+//   system chunk() {
+//     Faces += { x: 0, y: 0, z: 0, side: Side.Top, tile: 1, light: 15, clear: false }
+//     set_mesh(0, Faces)
+//     Faces = []
+//   }
+//   system world3d() {
+//     begin_scene(..)
+//     draw_meshes(96.0, 0x9ec8f0)
+//     end_scene()
+//   }
+//
+// A block is a cube a unit wide from its corner (x, y, z) (the scene's
+// axes: y up). Its faces are textured with tiles of one picture, the
+// atlas: so many tiles a row, square, the first at the top left. Its
+// colours are the window's (0xRRGGBB, or 0xAARRGGBB with some alpha);
+// a texel of 0x01RRGGBB, or of an alpha below a tenth, is not drawn at
+// all (the gaps between leaves, say); one half clear lets what is behind
+// show through,
+// for faces marked `clear` (water, glass), which are drawn after the
+// others. The faces are shaded by their side (the top brightest, as the
+// scene's boxes are) and by their `light`, 0 to 15; and fade into the
+// fog colour as far as `draw_meshes` says the eye sees.
+//
+// Implemented with raylib (devices/mesh.c, devices/mesh.link).
+import window
+import scene
+
+// The sides of a block: where its face looks.
+enum Side { East, West, Top, Bottom, South, North }
+
+// The faces of a mesh: of which block, which side, which tile of the
+// atlas, how lit (0 dark, 15 full); `clear` for one that lets what is
+// behind show through.
+transient buffer Faces {
+  x: i32, y: i32, z: i32, side: Side, tile: i32, light: i32, clear: bool
+} capacity 262144
+
+// The atlas: a picture of `width` by `height` pixels (`Pixels`, see
+// devices/window.ent, row under row), `per_row` tiles a row; or one read
+// from a file (a PNG, say; one the program declares as an asset may be
+// in it). Before the first mesh is drawn.
+extern proc make_atlas(them: Pixels, width: i32, height: i32, per_row: i32)
+extern proc load_atlas(file: text[126], per_row: i32)
+
+// Mesh `slot` (0 to 4095) made anew of the faces; with none, dropped.
+extern proc set_mesh(slot: i32, them: Faces)
+extern proc drop_mesh(slot: i32)
+extern proc drop_meshes()
+
+// Every mesh in view, between `begin_scene` and `end_scene`: as far as
+// `far` from the eye, fading into `fog` (0xRRGGBB) towards it.
+extern proc draw_meshes(far: f32, fog: i32)
+
+// Of the last `draw_meshes`: how many meshes it drew, and how many faces.
+extern proc meshes_drawn() -> i32
+extern proc faces_drawn() -> i32
