@@ -67,12 +67,16 @@ static const char *ent_mesh_fragment =
     "uniform vec3 day;\n"
     "out vec4 finalColor;\n"
     "void main() {\n"
-    "  vec4 c = texture(texture0, uv) * tint * colDiffuse;\n"
+    "  vec4 c = texture(texture0, uv) * colDiffuse;\n"
     "  if (c.a < 0.1) discard;\n"
-    "  c.rgb *= day;\n"
+    "  // (The sky's light, by the day; a lamp's, warm; the brighter.)\n"
+    "  vec3 lit = max(tint.r * day, tint.g * vec3(1.0, 0.84, 0.6));\n"
+    "  c.rgb *= max(lit, vec3(0.02));\n"
     "  float f = clamp((distance(at, eye) - far * 0.55) / (far * 0.45), 0.0, 1.0);\n"
     "  finalColor = vec4(mix(c.rgb, fog, f * f), c.a);\n"
     "}\n";
+
+static void ent_mesh_steps(void);
 
 // (The shader and the material, once there is a window.)
 static void ent_mesh_start(void) {
@@ -84,6 +88,7 @@ static void ent_mesh_start(void) {
   ent_mesh_far_at = GetShaderLocation(ent_mesh_shader, "far");
   ent_mesh_day_at = GetShaderLocation(ent_mesh_shader, "day");
   ent_mesh_material = LoadMaterialDefault();
+  ent_mesh_steps();
   ent_mesh_material.shader = ent_mesh_shader;
   ent_mesh_ready = true;
 }
@@ -148,6 +153,13 @@ static const float ent_mesh_corners[6][4][3] = {
     {{1, 0, 0}, {0, 0, 0}, {0, 1, 0}, {1, 1, 0}}};
 // (Lit from above, and a little from one side, as the scene's boxes.)
 static const float ent_mesh_shade[6] = {0.90f, 0.70f, 1.0f, 0.45f, 0.82f, 0.62f};
+// How bright a step of light is (0 to 15): each a fifth less than the
+// one above it, as eyes see it.
+static float ent_mesh_bright[16];
+static void ent_mesh_steps(void) {
+  for (int l = 0; l < 16; l++)
+    ent_mesh_bright[l] = powf(0.8f, (float)(15 - l));
+}
 // How much light a corner keeps, by how hidden it is (0 to 3).
 static const float ent_mesh_hidden[4] = {1.0f, 0.78f, 0.6f, 0.44f};
 // The two triangles of a face, by its corners: cut from the first corner
@@ -167,8 +179,9 @@ static void ent_mesh_free(Mesh *m, bool *has) {
 static bool ent_mesh_build(Mesh *m, int32_t count, const int32_t *x,
                            const int32_t *y, const int32_t *z,
                            const ent_mesh_Side *side, const int32_t *tile,
-                           const int32_t *light, const int32_t *hidden,
-                           const bool *clear, bool want) {
+                           const int32_t *light, const int32_t *glow,
+                           const int32_t *hidden, const bool *clear,
+                           bool want) {
   int32_t n = 0;
   for (int32_t i = 0; i < count; i++)
     if (clear[i] == want && side[i] < 6)
@@ -193,24 +206,28 @@ static bool ent_mesh_build(Mesh *m, int32_t count, const int32_t *x,
     int s = side[i];
     float u0 = (float)(tile[i] % ent_mesh_per_row) / per;
     float v0 = (float)(tile[i] / ent_mesh_per_row) / per;
-    float lit = 0.12f + 0.88f * (float)(light[i] < 0 ? 0 : light[i] > 15 ? 15 : light[i]) / 15.0f;
     int h[4];
     for (int c = 0; c < 4; c++)
       h[c] = (hidden[i] >> (2 * c)) & 3;
     const int *order = ent_mesh_order[h[0] + h[2] > h[1] + h[3]];
     for (int k = 0; k < 6; k++) {
       int c = order[k];
-      unsigned char shade =
-          (unsigned char)(255.0f * lit * ent_mesh_shade[s] * ent_mesh_hidden[h[c]]);
+      // (In the colour: red the sky's light, green the lamps'.)
+      float shade = 255.0f * ent_mesh_shade[s] * ent_mesh_hidden[h[c]];
+      unsigned char sky =
+          (unsigned char)(shade * ent_mesh_bright[(light[i] >> (4 * c)) & 15]);
+      unsigned char lamp =
+          (unsigned char)(shade * ent_mesh_bright[(glow[i] >> (4 * c)) & 15] *
+                          (((glow[i] >> (4 * c)) & 15) > 0));
       m->vertices[v * 3 + 0] = (float)x[i] + ent_mesh_corners[s][c][0];
       m->vertices[v * 3 + 1] = (float)y[i] + ent_mesh_corners[s][c][1];
       m->vertices[v * 3 + 2] = (float)z[i] + ent_mesh_corners[s][c][2];
       float cu = corner_uv[c][0], cv = corner_uv[c][1];
       m->texcoords[v * 2 + 0] = u0 + (cu == 0 ? inset : 1.0f / per - inset);
       m->texcoords[v * 2 + 1] = v0 + (cv == 0 ? inset : 1.0f / per - inset);
-      m->colors[v * 4 + 0] = shade;
-      m->colors[v * 4 + 1] = shade;
-      m->colors[v * 4 + 2] = shade;
+      m->colors[v * 4 + 0] = sky;
+      m->colors[v * 4 + 1] = lamp;
+      m->colors[v * 4 + 2] = 0;
       m->colors[v * 4 + 3] = 255;
       v++;
     }
@@ -229,8 +246,8 @@ static bool ent_mesh_build(Mesh *m, int32_t count, const int32_t *x,
 void ent_mesh_set_mesh(int32_t slot, int32_t count, const int32_t *x,
                        const int32_t *y, const int32_t *z,
                        const ent_mesh_Side *side, const int32_t *tile,
-                       const int32_t *light, const int32_t *hidden,
-                       const bool *clear) {
+                       const int32_t *light, const int32_t *glow,
+                       const int32_t *hidden, const bool *clear) {
   if (slot < 0 || slot >= ENT_MESH_SLOTS)
     return;
   ent_mesh_start();
@@ -247,8 +264,8 @@ void ent_mesh_set_mesh(int32_t slot, int32_t count, const int32_t *x,
     s->hi = Vector3Max(s->hi, (Vector3){(float)x[i], (float)y[i], (float)z[i]});
   }
   s->hi = Vector3Add(s->hi, (Vector3){1, 1, 1});
-  s->has_solid = ent_mesh_build(&s->solid, count, x, y, z, side, tile, light, hidden, clear, false);
-  s->has_clear = ent_mesh_build(&s->clear, count, x, y, z, side, tile, light, hidden, clear, true);
+  s->has_solid = ent_mesh_build(&s->solid, count, x, y, z, side, tile, light, glow, hidden, clear, false);
+  s->has_clear = ent_mesh_build(&s->clear, count, x, y, z, side, tile, light, glow, hidden, clear, true);
 }
 
 void ent_mesh_drop_mesh(int32_t slot) {
