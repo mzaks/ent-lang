@@ -1,0 +1,62 @@
+// A world with indexes saved and read back (test/Integration/
+// save_indexes.test): a grid of whole numbers and a hash index over the
+// same entities. Saved, the entities moved and some gone, read back:
+// the indexes are made again of the entities as they were, and find
+// them as they did.
+import console
+import world
+
+component Dot { x: i32, y: i32, z: i32, tag: i32 } capacity 256
+component Look { x: i32, y: i32, z: i32 } capacity 4
+index Cells of Dot grid (x, y, z) cell 4
+index ByTag of Dot by tag hash
+
+// (Transient: a world read back keeps the steps as they are.)
+transient unique Step { n: i32, near: i32, save: bool, load: bool }
+
+world {
+  Saved.file = "indexes.sav"
+  for i in 0..100 { spawn { Dot { x: i % 10, y: (i / 10) % 5, z: i / 50, tag: i } } }
+  spawn { Look { x: 2, y: 2, z: 0 } }
+}
+
+system near() {
+  Step.near = 0
+  for me, l: Look {
+    var n = 0
+    for o, d: Dot near (l.x, l.y, l.z) within 2 in Cells { n += 1 }
+    Step.near += n
+  }
+}
+system tell() {
+  var line: text[126] = "step {Step.n}:"
+  let dots = for d: Dot { }
+  line += " {dots} dots, {Step.near} near"
+  let e = ByTag.get(42)
+  if let x = Dot(e).x { line += ", tag 42 at x {x}" } else { line += ", no tag 42" }
+  line += " ok {Saved.ok}"
+  put(line)
+}
+// (After it is saved: every dot moved far off, and those of tags 40 to
+// 49 gone.)
+system scatter() {
+  for e, d: mut Dot {
+    d.x += 100
+    if d.tag >= 40 && d.tag < 50 { e.destroy() }
+  }
+}
+system plan() {
+  Step.save = Step.n == 0
+  Step.load = Step.n == 1
+}
+system step() { Step.n += 1 }
+schedule go() {
+  plan()
+  near()
+  tell()
+  save_world() run_if Step.save
+  scatter() run_if Step.save
+  load_world() run_if Step.load
+  step()
+}
+main { loop { go() } until Step.n >= 3 }

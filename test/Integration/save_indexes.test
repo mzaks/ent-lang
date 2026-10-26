@@ -1,0 +1,16 @@
+// A world with indexes (a grid and a hash index) is saved and read back:
+// the world's header (ent_world.h, which devices/world.c saves by) lays
+// the world out as the program does, the indexes' own parts too (before,
+// it was made of the program as imported, and laid it out bigger: a save
+// wrote past the world), and the indexes are made again of the entities
+// read back. On one core and on many.
+// RUN: rm -rf %t && mkdir -p %t && cd %t
+// RUN: %ent run %S/Inputs/save_indexes.ent | FileCheck %s
+// RUN: rm -f indexes.sav
+// RUN: env ENT_PARALLEL_MIN=4 %ent run --parallel %S/Inputs/save_indexes.ent | FileCheck %s
+
+// CHECK:      step 0: 100 dots, 22 near, tag 42 at x 2 ok false
+// (Moved far off, and some gone.)
+// CHECK-NEXT: step 1: 90 dots, 0 near, no tag 42 ok true
+// (Read back: as it was saved.)
+// CHECK-NEXT: step 2: 100 dots, 22 near, tag 42 at x 2 ok true
