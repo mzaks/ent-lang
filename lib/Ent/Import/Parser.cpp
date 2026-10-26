@@ -1142,6 +1142,8 @@ private:
   bool inSystemLoop = false;
   bool hasMain = false;
   bool hadError = false;
+  /// Reading the indexes found for the program (--inferred).
+  bool inferring = false;
   /// Every module of the program, in the order their parsing finished: a
   /// module after the ones it imports, the root last.
   std::vector<std::unique_ptr<SourceModule>> modules;
@@ -1216,8 +1218,10 @@ OwningOpRef<ModuleOp> Parser::parseModule() {
     sourceMgr.AddNewSourceBuffer(std::move(*read), llvm::SMLoc());
     lexer = Lexer(bytes);
     advance();
+    inferring = true;
     if (failed(parseDeclarations()) || hadError)
       return nullptr;
+    inferring = false;
   }
   for (auto &entry : functions)
     if (entry.second.later) {
@@ -5915,6 +5919,10 @@ LogicalResult Parser::parseIndex() {
       }));
   {
     NamedAttrList info(declared->getAttrOfType<DictionaryAttr>("ent.index"));
+    // (Found by the compiler, not declared: a `for ... by` its key takes
+    // its order from it though nothing else reads it, as it was found for.)
+    if (inferring)
+      info.set("inferred", builder.getUnitAttr());
     if (clustered)
       info.set("clustered", builder.getUnitAttr());
     if (eager)

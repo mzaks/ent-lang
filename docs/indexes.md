@@ -511,7 +511,13 @@ lazy and incremental or anew); an index no system reads is not made
 ask for a field's values (`key_equals`) which `--ent-indexes` would
 answer by an index the program does not declare, as it would answer
 them (the same conditions): a partition of an enum, a bool or a u8, a
-hash index of another whole number or a text; it says each in a remark
+hash index of another whole number or a text; and the `for ... by`s
+over every entity of a component, where more such `for`s run (in loops)
+than systems change their key or which entities there are: a sorted
+index, marked `inferred` so that the `for`s take their order from it
+though nothing else reads it (200,000 entities, a `for` by the key and
+one taking the last 5, one in 1,000 keys changed a frame: 610 to 242 ms
+for 200 frames, the same sums); it says each in a remark
 at the `for`s and writes the declarations to a file, which
 `ent-translate --inferred=` reads after the program's own (`ent build
 --infer-indexes`). Given a trace's times (`times=`, from `ent build
@@ -549,7 +555,7 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 | 9 | Embeddings by brute force (int8 and binary, ranked again) | The recall to measure against | needs a vector type |
 | 10 | IVF with k-means in ent-lang | | |
 | 11 | LSH families | | |
-| 12 | `--ent-infer-indexes` | Policies, unread indexes, indexes found | in progress (2026-10-26): remarks and `--infer-indexes` for partitions and hash indexes, unread indexes not made, a trace's times; next sorted, grids |
+| 12 | `--ent-infer-indexes` | Policies, unread indexes, indexes found | in progress (2026-10-26): remarks and `--infer-indexes` for partitions and hash indexes, unread indexes not made, a trace's times, sorted indexes for `for ... by`; next grids |
 | 13 | B+ tree, BVH, HNSW from outside (where measurements or programs need them) | | |
 
 **Step 1, as it stands** (2026-10-22). The sort that every `for ...

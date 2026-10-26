@@ -31,6 +31,15 @@
 // RUN: cd %t.dir && %ent build ii.ent --tune trace.json 2> %t.tuned.err
 // RUN: FileCheck %s --check-prefix=TUNED --input-file=%t.tuned.err
 
+// Sorted: `for ... by` a field more often than systems change it.
+// RUN: %ent run %S/Inputs/infer_sorted.ent > %t.sorted 2> %t.sorted.err
+// RUN: FileCheck %s --check-prefix=SORTED --input-file=%t.sorted.err
+// RUN: %ent run %S/Inputs/infer_sorted.ent --infer-indexes > %t.sorted.inferred
+// RUN: cmp %t.sorted %t.sorted.inferred
+// RUN: echo 'index DotByKey of Dot by key' > %t.sorted.found
+// RUN: ent-translate --import-ent %S/Inputs/infer_sorted.ent --inferred=%t.sorted.found \
+// RUN:   -I %S/../../devices | ent-opt --ent-indexes | FileCheck %s --check-prefix=BYINDEX
+
 // REMARK-DAG: index Unread is read by nothing: it is not made
 // REMARK-DAG: :25:{{[0-9]+}}: remark: visits every entity to find those whose kind is of some values; an index would find them: 'index BugByKind of Bug by kind partition'
 // REMARK-DAG: :26:{{[0-9]+}}: remark: visits every entity to find those whose kind is of some values; an index would find them: 'index BugByKind of Bug by kind partition'
@@ -50,3 +59,8 @@
 // TIMED-FOUND: index BugByTeam of Bug by team hash
 // TIMED-FOUND-NOT: BugByKind
 // TUNED: ii.ent:29:{{[0-9]+}}: remark: visits every entity to find those whose team is one value ({{[0-9.]+}} ms of the {{[0-9.]+}} traced)
+// SORTED: infer_sorted.ent:14:7: remark: sorts the entities by key each time it runs, and more such 'for's run than systems change them; an index would keep them in order: 'index DotByKey of Dot by key'
+// SORTED: infer_sorted.ent:17:7: remark: sorts the entities by key
+// SORTED-NOT: by at
+// BYINDEX-COUNT-2: by_index = @DotByKey
+// BYINDEX-NOT: by_index

@@ -685,7 +685,9 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
     // for such a `for`, the index costs more than the sort it saves where
     // keys change much (made anew, and its rows written and told), and
     // where few change it is made again on one thread where the sort runs
-    // on many (bench/RESULTS.md, 2026-10-23).
+    // on many (bench/RESULTS.md, 2026-10-23). Or where the compiler found
+    // it for such `for`s (`inferred`, --ent-infer-indexes), where their
+    // key changes less often than they run.
     // (Not in what makes an index: one is made of the entities as they
     // are, not of another index, which may be out of date then.)
     llvm::DenseSet<Attribute> making;
@@ -703,7 +705,7 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
           continue;
         read |= touches(computeAccess(system, archetypes).reads, kept.readBy);
       }
-      if (!read)
+      if (!read && !info.get("inferred"))
         continue;
       SmallVector<StringAttr> key = strings(info, "key");
       SmallVector<StringAttr> of = strings(info, "of");
@@ -899,6 +901,8 @@ struct EntInferIndexes
     FlatSymbolRefAttr component;
     StringAttr field;
     bool partition = false;
+    /// A sorted index, for `for ... by` the field (else by a value).
+    bool sorted = false;
     std::string name;
     SmallVector<QueryOp> serves;
   };
@@ -909,30 +913,42 @@ struct EntInferIndexes
       return signalPassFailure();
     SymbolTable symbols(module);
     SmallVector<ArchetypeOp> archetypes(module.getOps<ArchetypeOp>());
-    // What the indexes declared are by, and the systems that make them.
-    llvm::DenseSet<std::pair<Attribute, Attribute>> declared;
+    // What the indexes declared are by (those in order apart), and the
+    // systems that make them.
+    llvm::DenseSet<std::pair<Attribute, Attribute>> declared, ordered;
     llvm::DenseSet<Attribute> making;
     for (BufferOp buffer : module.getOps<BufferOp>()) {
       auto info = buffer->getAttrOfType<DictionaryAttr>("ent.index");
       if (!info)
         continue;
-      if (auto key = info.getAs<ArrayAttr>("key"); key && key.size() >= 2)
+      if (auto key = info.getAs<ArrayAttr>("key"); key && key.size() >= 2) {
         declared.insert({key[0], key[1]});
+        if (!info.get("hash"))
+          ordered.insert({key[0], key[1]});
+      }
       for (NamedAttribute named : info)
         if (auto system = dyn_cast<StringAttr>(named.getValue());
             system && isa_and_nonnull<SystemOp>(symbols.lookup(system)))
           making.insert(system);
     }
+    // (An index holds a row for each entity of its component: as many as
+    // the component's capacity, or the program's default.)
+    bool roomy = module->hasAttr("ent.default_capacity");
+    auto room = [&](ComponentOp component) {
+      return component && (roomy || component.getCapacityAttr());
+    };
     SmallVector<Found> found;
     auto findOrAdd = [&](FlatSymbolRefAttr component, StringAttr field,
-                         bool partition) -> Found & {
+                         bool partition, bool sorted = false) -> Found & {
       for (Found &one : found)
-        if (one.component == component && one.field == field)
+        if (one.component == component && one.field == field &&
+            one.sorted == sorted)
           return one;
       Found &made = found.emplace_back();
       made.component = component;
       made.field = field;
       made.partition = partition;
+      made.sorted = sorted;
       // (A name of its own: the component's and the field's.)
       std::string base = component.getValue().rsplit('.').second.empty()
                              ? component.getValue().str()
@@ -961,7 +977,7 @@ struct EntInferIndexes
       if (declared.contains({component.getAttr(), field}))
         return;
       auto declaredComponent = symbols.lookup<ComponentOp>(component.getAttr());
-      if (!declaredComponent)
+      if (!room(declaredComponent))
         return;
       Type type = declaredComponent.getFieldType(field.getValue());
       auto whole = dyn_cast_or_null<IntegerType>(type);
@@ -986,6 +1002,85 @@ struct EntInferIndexes
       }
       findOrAdd(component, field, partitioned).serves.push_back(query);
     });
+
+    // A `for ... by` a field, over every entity that has its component,
+    // sorts them each time it runs; a sorted index keeps them in order
+    // (and the `for` takes its order from it, as --ent-indexes would give
+    // it: see the `for`s by an index's key). Made again where the key or
+    // the entities change, it pays where more such `for`s run than
+    // systems change those (bench/RESULTS.md, 2026-10-23): counted in the
+    // program, systems run once (by the world, or by main outside its
+    // loops) not counted. (A wrong guess costs time, not what the program
+    // does: the index is kept up to date.)
+    llvm::DenseSet<Attribute> repeated;
+    module.walk([&](CallOp call) {
+      if (!isa<MainOp>(call->getParentOp()))
+        repeated.insert(call.getScheduleAttr().getAttr());
+    });
+    llvm::DenseSet<Attribute> often;
+    module.walk([&](RunOp run) {
+      auto schedule = run->getParentOfType<ScheduleOp>();
+      if (!schedule || repeated.contains(schedule.getSymNameAttr()))
+        often.insert(run.getSystemAttr().getAttr());
+    });
+    llvm::DenseMap<std::pair<Attribute, Attribute>, SmallVector<QueryOp>> byKey;
+    module.walk([&](QueryOp query) {
+      auto system = query->getParentOfType<SystemOp>();
+      if (!system || making.contains(system.getSymNameAttr()) ||
+          system.getGpu() || !query.hasByField() || query.getByIndex())
+        return;
+      FlatSymbolRefAttr component = query.getByComponent();
+      StringAttr field = query.getByField();
+      if (ordered.contains({component.getAttr(), field}))
+        return;
+      auto declaredComponent = symbols.lookup<ComponentOp>(component.getAttr());
+      if (!room(declaredComponent))
+        return;
+      Type type = declaredComponent.getFieldType(field.getValue());
+      if (!isa_and_nonnull<IntegerType, FloatType>(type) || isa<EnumType>(type))
+        return;
+      llvm::SmallDenseSet<Attribute> held =
+          holdersOf(archetypes, {component.getAttr()});
+      SmallVector<ArchetypeOp> matched = getMatchedArchetypes(query);
+      if (matched.size() != held.size() ||
+          !llvm::all_of(matched, [&](ArchetypeOp archetype) {
+            return held.contains(archetype.getSymNameAttr());
+          }))
+        return;
+      if (changesOrderOutside(system, query, component, field) ||
+          query.getBody()
+              .walk([](SpawnOp) { return WalkResult::interrupt(); })
+              .wasInterrupted())
+        return;
+      byKey[{component.getAttr(), field}].push_back(query);
+    });
+    for (auto &[key, queries] : byKey) {
+      auto component = FlatSymbolRefAttr::get(cast<StringAttr>(key.first));
+      auto field = cast<StringAttr>(key.second);
+      llvm::SmallDenseSet<Attribute> held =
+          holdersOf(archetypes, {component.getAttr()});
+      StringAttr none = StringAttr::get(module.getContext(), "");
+      unsigned changing = 0, going = 0;
+      for (SystemOp system : module.getOps<SystemOp>()) {
+        if (!often.contains(system.getSymNameAttr()))
+          continue;
+        SystemAccess access = computeAccess(system, archetypes);
+        if (llvm::any_of(held, [&](Attribute archetype) {
+              auto name = cast<StringAttr>(archetype);
+              return access.writes.contains(
+                         {name, component.getAttr(), field}) ||
+                     access.writes.contains({name, none, none});
+            }))
+          ++changing;
+      }
+      for (QueryOp query : queries)
+        going +=
+            often.contains(query->getParentOfType<SystemOp>().getSymNameAttr());
+      if (going <= changing)
+        continue;
+      Found &one = findOrAdd(component, field, false, /*sorted=*/true);
+      one.serves = queries;
+    }
 
     // (Of a trace: how long each `for`'s loops took, by its place, and
     // the run; those that took less than `worth` of it are left.)
@@ -1034,18 +1129,30 @@ struct EntInferIndexes
     std::string text;
     llvm::raw_string_ostream lines(text);
     for (Found &one : found) {
-      std::string declaration = "index " + one.name + " of " +
-                                one.component.getValue().str() + " by " +
-                                one.field.getValue().str() +
-                                (one.partition ? " partition" : " hash");
+      // (A component of another module by its name there: `circuit::And`.)
+      SmallVector<StringRef> parts;
+      one.component.getValue().split(parts, '.');
+      std::string component = llvm::join(parts, "::");
+      std::string declaration = "index " + one.name + " of " + component +
+                                " by " + one.field.getValue().str() +
+                                (one.sorted      ? ""
+                                 : one.partition ? " partition"
+                                                 : " hash");
       lines << declaration << "\n";
       if (!remarks)
         continue;
       for (QueryOp query : one.serves) {
         InFlightDiagnostic remark =
-            query.emitRemark("visits every entity to find those whose ");
-        remark << one.field.getValue()
-               << (one.partition ? " is of some values" : " is one value");
+            one.sorted
+                ? query.emitRemark("sorts the entities by ")
+                : query.emitRemark("visits every entity to find those whose ");
+        if (one.sorted)
+          remark << one.field.getValue()
+                 << " each time it runs, and more such 'for's run than "
+                    "systems change them";
+        else
+          remark << one.field.getValue()
+                 << (one.partition ? " is of some values" : " is one value");
         if (!times.empty()) {
           std::string spent;
           llvm::raw_string_ostream said(spent);
@@ -1055,7 +1162,9 @@ struct EntInferIndexes
                << " traced)";
           remark << spent;
         }
-        remark << "; an index would find them: '" << declaration << "'";
+        remark << (one.sorted ? "; an index would keep them in order: '"
+                              : "; an index would find them: '")
+               << declaration << "'";
       }
     }
     if (out.empty())

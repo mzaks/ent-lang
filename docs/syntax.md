@@ -2507,7 +2507,13 @@ field has a value the same for the whole `for` (`where b.team == t`,
 an index the program does not declare would find them as it finds them
 for a declared one, `ent build` says so in a remark at the `for`, naming
 the declaration: a partition (`by f partition`) of an enum, a bool or a
-u8, else a hash index of a whole number or a text (`by f hash`). An
+u8, else a hash index of a whole number or a text (`by f hash`). So too
+at a `for ... by f` over every entity with f's component, where more
+such `for`s run (in the schedules `main` runs in its loops) than systems
+change f or which entities there are: a sorted index (`by f`), which
+keeps them in order, and the `for`s take their order from it instead of
+sorting (as they do from a declared one only where the program reads it
+itself). An
 index that nothing reads is not made, and a remark says so. With `ent
 build --infer-indexes` the indexes named are made, as if the program
 declared them at its end; what the program does is the same, as with any

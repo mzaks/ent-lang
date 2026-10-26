@@ -1,0 +1,25 @@
+// `for ... by` a field more often than systems change it (infer_indexes.test):
+// a sorted index found, and made with --infer-indexes; by a field changed
+// as often as such `for`s run, none.
+import console
+component Dot { key: i32, value: i64, at: i32 } capacity 5000
+unique T { frame: i32, sum: i64 }
+world {
+  for i in 0..5000 { spawn { Dot { key: (i * 7919) % 10007, value: i as i64, at: i % 97 } } }
+}
+system nudge() {
+  for d: mut Dot where d.value % 100 == T.frame as i64 % 100 { d.key += 3 d.at += 1 }
+}
+system walk() {
+  for d: Dot in turn by d.key { T.sum = (T.sum * 31 + d.value) % 1000000007 }
+}
+system top() {
+  for d: Dot by d.key last 5 { T.sum += d.value }
+  for d: Dot in turn by d.at { T.sum = (T.sum * 7 + d.value) % 1000000007 }
+}
+system tell() {
+  T.frame += 1
+  put("frame {T.frame}: {T.sum}")
+}
+schedule frame() { nudge() walk() top() tell() }
+main { loop { frame() } until T.frame == 5 }
