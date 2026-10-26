@@ -2648,13 +2648,15 @@ search as GAP's, keeps the pages reached last in one).
   as a `for` does any: on all the cores, what it sends combined as it
   is anyway, and what it gives buffers, sums as it goes (`let x = U.f
   += ..`), the windows it takes and what it spawns in the order of its
-  entities' rows. Not in turn, by a field or along a tree. Of row ids (no entity is ever destroyed or moved),
-  a word of the set's bits is read for 64 rows, and a word of noughts
-  costs no more: a frontier of 3 pages of 262,143 is 4,096 words looked
-  at. Otherwise each row's bit is asked.
+  entities' rows. Not in turn, by a field or along a tree. Of row ids
+  (no entity is ever destroyed or moved), a word of the set's bits is
+  read for 64 rows, and a word of noughts costs no more: a frontier of 3
+  pages of 262,143 is 4,096 words looked at. Otherwise each row's bit is
+  asked.
+- On many ranks each rank keeps the whole set, put together when a `for`
+  over distributed entities that changes it ends (docs/ranks.md).
 - Not on the GPU, nor where entities are destroyed (an entity's place
-  is given again) or live on many ranks, yet; and a fn or proc does not
-  read or change a set.
+  is given again), yet; and a fn or proc does not read or change a set.
 
 ## Prefabs
 

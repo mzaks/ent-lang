@@ -332,11 +332,14 @@ without): four `for`s that each visit 10,000 entities at random rows
 (0.058 for all four). A partition pays where its `for`s' bodies or
 `where`s cost more than the scan.
 
-Open: the sets made on the GPU, and `gpu` systems' `for`s through them;
-worlds on many ranks (a set is not yet). A `for` through them that gives
-rows to a buffer, keeps a running sum, takes windows or spawns: done
-(2026-10-26, as of any set: the rows given and the sums in the rows'
-order).
+Open: the sets made on the GPU, and `gpu` systems' `for`s through them.
+Done (2026-10-26): a `for` through them that gives rows to a buffer,
+keeps a running sum, takes windows or spawns (as of any set: the rows
+given and the sums in the rows' order); worlds on many ranks, where each
+rank keeps the sets whole, put together when a `for` that changes them
+ends, and a partition is made anew every time (docs/ranks.md). The
+epidemic at 100,000 by stage in a partition on 4 ranks infects whom it
+does on one process.
 
 ### 5.5 Spatial indexes
 

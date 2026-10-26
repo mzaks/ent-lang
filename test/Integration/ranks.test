@@ -134,6 +134,26 @@
 // RUN: not %ent build %S/Inputs/ranks_extern.ent --ranks 2 -o %t.extern 2>&1 | FileCheck %s --check-prefix=EXTERN
 // EXTERN: runs the extern system @world.save_world, which works on the whole world
 //
+// Sets that `for`s over distributed cells change, from their own cells
+// and along links to any rank's, and a partition of the cells by a
+// field they change: each rank keeps every set whole, put together when
+// such a `for` ends. A set changed in a `for` that takes turns is
+// refused.
+// RUN: %ent run %S/Inputs/ranks_sets.ent > %t.sets.one
+// RUN: %ent run %S/Inputs/ranks_sets.ent --ranks 3 > %t.sets.three
+// RUN: diff %t.sets.one %t.sets.three
+// RUN: env ENT_BLOCK=500 %ent run %S/Inputs/ranks_sets.ent --ranks 4 --partitions > %t.sets.p4
+// RUN: diff %t.sets.one %t.sets.p4
+// RUN: %ent build %S/Inputs/ranks_sets.ent --ranks 4 --partitions -o %t.sets.exe
+// RUN: mpirun -n 2 --oversubscribe -x ENT_BLOCK=750 %t.sets.exe > %t.sets.in2
+// RUN: diff %t.sets.one %t.sets.in2
+// RUN: FileCheck %s --check-prefix=SETS --input-file=%t.sets.in2
+// SETS: day 3: hot 342 next 594 n 594 sum 46518445 at 31265
+// SETS-NEXT: calm 1064 busy 1303 cross 633
+// SETS-NEXT: moods 18426082
+// RUN: not %ent build %S/Inputs/ranks_set_turn.ent --ranks 2 -o %t.set_turn 2>&1 | FileCheck %s --check-prefix=SETTURN
+// SETTURN: takes turns and puts entities into a set or takes them out
+//
 // A build for 4 partitions run by fewer processes: each runs several, as
 // threads (one at a time, ENT_RUNNING=1).
 // RUN: %ent build %S/Inputs/ranks_trace.ent --ranks 4 --partitions -o %t.trace.exe

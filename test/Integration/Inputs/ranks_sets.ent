@@ -1,0 +1,69 @@
+// On many ranks: sets that `for`s over distributed cells fill, from their
+// own entities and along links to cells any rank may have, and take
+// entities out of; asked of (`in`, `len`) and gone through (`for .. in`);
+// and a partition of the cells by a field the cells change. Each rank
+// keeps every set whole, so it says what it says on one process
+// (ranks.test).
+import console
+enum Mood { Calm, Busy, Cross }
+component Cell { number: i32, value: i64, mood: Mood, got: i64 } capacity 3000
+relation (Cell)-[Link]->(Cell) capacity 6000
+distribute Cell by number
+buffer Ids { who: entity } capacity 3000
+unique T { day: i32, sum: i64, n: i32, at: i64 }
+set Hot
+set Next
+index Moods of Cell by mood partition
+
+world {
+  for i in 0..3000 {
+    let e = spawn { Cell { number: i, value: (i * 37 % 101) as i64, mood: (i % 3) as Mood, got: 0 } }
+    Ids += { who: e }
+  }
+  for i in 0..3000 {
+    connect (Ids[i].who)-[Link]->(Ids[(i * 7 + 3) % 3000].who)
+    connect (Ids[i].who)-[Link]->(Ids[(i * 13 + 1000) % 3000].who)
+  }
+}
+
+system mark() {
+  Hot = []
+  Next = []
+  for e, c: Cell where (c.value + T.day as i64) % 9 == 2 { Hot += e }
+  for e, c: Cell in Hot {
+    for (e)-[Link]->(v) { Next += v }
+  }
+  for e, c: Cell where c.number % 11 == T.day % 11 { Next -= e }
+}
+
+system use() {
+  T.sum = 0
+  T.n = 0
+  T.at = 0
+  for e, c: mut Cell in Next {
+    c.got += c.value
+    T.sum += c.value * c.number as i64
+    T.n += 1
+    let r = T.at += c.value
+    c.value = (c.value * 5 + r) % 101
+    if c.number % 97 == 0 { put("next {c.number}: {c.value} {r}") }
+  }
+  for e, c: mut Cell {
+    if e in Hot && !(e in Next) { c.mood = Mood.Cross }
+    else if e in Next { c.mood = Mood.Busy }
+    else if c.number % 5 == T.day % 5 { c.mood = Mood.Calm }
+  }
+  put("day {T.day}: hot {len(Hot)} next {len(Next)} n {T.n} sum {T.sum} at {T.at}")
+}
+
+system moods() {
+  put("calm {Moods.count(Mood.Calm)} busy {Moods.count(Mood.Busy)} cross {Moods.count(Mood.Cross)}")
+  T.sum = 0
+  for c: Cell where c.mood == Mood.Cross { T.sum += c.got * c.number as i64 }
+  for c: Cell where c.mood != Mood.Calm { T.sum += c.value }
+  put("moods {T.sum}")
+  T.day += 1
+}
+
+schedule day() { mark() use() moods() }
+main { loop { day() } until T.day == 4 }

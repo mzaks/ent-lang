@@ -297,11 +297,19 @@ def EntIndexes : Pass<"ent-indexes", "ModuleOp"> {
     a Morton index's) is made so where all that reads it are gpu systems
     and no system on the CPU writes its key or what it copies: then its
     rows are not copied over.
+
+    With `ranks`, a partition is kept as a set for each value (each rank
+    keeps them whole), made anew every time: not the archetype's rows by
+    its values, which would move entities between ranks, nor mended by
+    reactive `for`s, which a `for` over distributed entities is not yet.
   }];
   let options = [
     Option<"gpu", "gpu", "bool", /*default=*/"false",
            "Make an index on the GPU where only gpu systems read it and "
            "write what it is made of">,
+    Option<"ranks", "ranks", "bool", /*default=*/"false",
+           "Built for many ranks: a partition is kept as sets, made anew "
+           "every time">,
   ];
 }
 

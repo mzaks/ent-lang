@@ -182,14 +182,25 @@ to the same on any number of ranks:
   given the rows the others wrote: each rank's from the least to the most
   row its entities wrote, field by field (`Allgatherv`). Where the
   stretches of two ranks overlap (a rank's entities wrote rows apart,
-  with another's between them) the program stops.
+  with another's between them) the program stops;
+- sets (`Hot += e`, `Next -= v`), each rank its own entities or any
+  rank's (along edges): every rank keeps every set whole, and when the
+  `for` ends the ranks' words are put together, or'ed where it put
+  entities in, and'ed where it took some out (`Allreduce`), so `e in
+  Set` and `len(Set)` are as on one process anywhere. A `for .. in Set`
+  goes through the rank's own stretch of the set's bits. A partition
+  (`index .. partition`) is kept as such sets, made anew every time it is
+  read after a change (built for many ranks the index is not mended from
+  the entities that changed, which takes reactive `for`s, nor kept as the
+  archetype's rows, which would move entities between ranks).
 
 Not yet, in a `for` of a system that runs in the loop, and refused when
 the program is built: `=` into uniques, running sums of
 fractions or over several archetypes of values that differ, a buffer
 given its rows anew or fewer of them, spawns and destroys, moves to
-another archetype, reactive `for`s, a `for` inside a `for`; in a `for`
-that takes turns anything written to a unique or a buffer, or sent; in
+another archetype, reactive `for`s, a `for` inside a `for`, a set
+emptied or given another's entities; in a `for` that takes turns
+anything written to a unique, a buffer or a set, or sent; in
 one along a tree anything but what each entity does to itself and its
 ancestors. Not yet, and the program stops when it happens: a lookup of an entity another rank has from a `for` over
 entities every rank has or outside a `for`, a send to one of a fraction,

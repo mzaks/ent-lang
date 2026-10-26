@@ -204,6 +204,40 @@ static void ent_allgather(const void *mine, int64_t bytes, void *all) {
   ent_meet(&args, ent_allgather_work);
 }
 
+// -- The words of a set (`count` at `words`) as all the partitions' put
+// together: or'ed where they put entities in, and'ed where they took some
+// out (each partition its own entities, in its own copy, or in the one
+// they share).
+typedef struct {
+  uint64_t *words;
+  int64_t count;
+  int32_t remove;
+} ent_set_args;
+static void ent_set_combine_work(void **args) {
+  ent_set_args *first = args[0];
+  uint64_t *all = first->words;
+  int64_t count = first->count;
+  int remove = first->remove;
+  for (int l = 1; l < ent_locals; ++l) {
+    const uint64_t *words = ((ent_set_args *)args[l])->words;
+    if (words == all)
+      continue;
+    for (int64_t i = 0; i < count; ++i)
+      all[i] = remove ? all[i] & words[i] : all[i] | words[i];
+  }
+  if (ent_procs > 1)
+    for (int64_t at = 0; at < count; at += 1 << 27) {
+      int64_t n = count - at < (1 << 27) ? count - at : (1 << 27);
+      MPI_Allreduce(MPI_IN_PLACE, all + at, (int)n, MPI_UINT64_T,
+                    remove ? MPI_BAND : MPI_BOR, MPI_COMM_WORLD);
+    }
+  for (int l = 1; l < ent_locals; ++l) {
+    uint64_t *words = ((ent_set_args *)args[l])->words;
+    if (words != all)
+      memcpy(words, all, count * sizeof(uint64_t));
+  }
+}
+
 // -- Each partition's piece, `counts[r]` bytes at `displs[r]` (by rank):
 // from its `send` into every partition's `recv` (or, where `send` is 0,
 // from its own `recv`, in place).
@@ -574,9 +608,9 @@ void ent_ranks_distribute(void) { ent_distributed = 1; }
 
 // (ENT_RANKS_LOG: the time each rank spent in each kind of call, which is
 // where it waited for the others too, said as it ends.)
-static const char *ent_kinds[] = {"bcast", "sum", "min", "max", "before", "release", "share_begin", "share_column", "exchange", "gather_column"};
-static _Thread_local double ent_spent[10];
-static _Thread_local int64_t ent_calls[10];
+static const char *ent_kinds[] = {"bcast", "sum", "min", "max", "before", "release", "share_begin", "share_column", "exchange", "gather_column", "set_combine"};
+static _Thread_local double ent_spent[11];
+static _Thread_local int64_t ent_calls[11];
 static _Thread_local int64_t ent_posted = 0, ent_received = 0;
 static _Thread_local int64_t ent_rounds = 0, ent_asked_rows = 0, ent_most_stretches = 0;
 // (ENT_RANKS_LOG=2: for each place the program calls from, the time it
@@ -1688,6 +1722,21 @@ void ent_ranks_gather_column(int32_t archetype, void *column, int64_t each) {
   ent_spent[9] += end - start;
   ent_note_place(__builtin_return_address(0), start, end);
   ++ent_calls[9];
+}
+
+// What a `for` over distributed entities put into a set (or took out of
+// it), every rank its own entities: the set as all of them made it, on
+// every rank.
+void ent_ranks_set_combine(void *words, int64_t count, int32_t remove) {
+  if (!ent_distributed)
+    return;
+  double start = MPI_Wtime();
+  ent_set_args args = {words, count, remove};
+  ent_meet(&args, ent_set_combine_work);
+  double end = MPI_Wtime();
+  ent_spent[10] += end - start;
+  ent_note_place(__builtin_return_address(0), start, end);
+  ++ent_calls[10];
 }
 
 // ---------------------------------------------------------------------------

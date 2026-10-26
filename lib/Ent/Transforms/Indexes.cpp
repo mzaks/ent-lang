@@ -399,8 +399,9 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
           if (!making.contains(system.getSymNameAttr()) &&
               writesValues(system, made))
             ++changing;
-        bool clustered = moving && changing == 0 && held.size() == 1 &&
-                         !kept.contains(*held.begin()) && !answered.empty();
+        bool clustered = !ranks && moving && changing == 0 &&
+                         held.size() == 1 && !kept.contains(*held.begin()) &&
+                         !answered.empty();
         auto bitsName = FlatSymbolRefAttr::get(
             module.getContext(), (buffer.getSymName() + "_bits").str());
         for (QueryOp query : answered) {
@@ -435,22 +436,23 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
           auto update = cast<SystemOp>(symbols.lookup(bits));
           // (Where no system changes the field, no entity's value does:
           // the reactive `for`s that find them are left out. Nor where a
-          // `gpu` system does, whose changes are not kept on the CPU: then
-          // its bits are made anew every time.)
-          bool onGpu =
+          // `gpu` system does, whose changes are not kept on the CPU, nor
+          // on many ranks: then its bits are made anew every time.)
+          bool anew =
+              ranks ||
               llvm::any_of(module.getOps<SystemOp>(), [&](SystemOp system) {
                 return system.getGpu() &&
                        !making.contains(system.getSymNameAttr()) &&
                        writesValues(system, made);
               });
-          if (changing == 0 || onGpu) {
+          if (changing == 0 || anew) {
             SmallVector<Operation *> reactive;
             update.walk([&](QueryOp query) {
               if (query->hasAttr(QueryOp::kTriggersAttr))
                 reactive.push_back(query);
             });
             std::string whole = (buffer.getSymName() + "_whole").str();
-            if (onGpu)
+            if (anew)
               update.walk([&](WriteOp write) {
                 if (write.getResource() == whole)
                   reactive.push_back(write);

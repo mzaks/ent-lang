@@ -1775,18 +1775,25 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
       emitBody(rowsOf.getInductionVar(), count, /*parallel=*/true);
       return loop;
     }
-    // (Of a set's entities: a word of its bits each turn, 64 rows.)
+    // (Of a set's entities: a word of its bits each turn, 64 rows; from
+    // `zero`, a rank's first row, on.)
     if (byWords) {
       Value sixtyFour = arith::ConstantIndexOp::create(rewriter, loc, 64);
-      Value wordsOf =
-          arith::CeilDivUIOp::create(rewriter, loc, count, sixtyFour);
+      Value wordsOf = arith::CeilDivUIOp::create(
+          rewriter, loc,
+          arith::SubIOp::create(
+              rewriter, loc, arith::MaxUIOp::create(rewriter, loc, count, zero),
+              zero),
+          sixtyFour);
       auto loop = scf::ParallelOp::create(
           rewriter, sited,
           ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)},
           ValueRange{wordsOf}, ValueRange{one});
       rewriter.setInsertionPoint(loop.getBody()->getTerminator());
-      Value first = arith::MulIOp::create(
-          rewriter, loc, loop.getInductionVars().front(), sixtyFour);
+      Value first = arith::AddIOp::create(
+          rewriter, loc, zero,
+          arith::MulIOp::create(rewriter, loc, loop.getInductionVars().front(),
+                                sixtyFour));
       Value end = arith::MinUIOp::create(
           rewriter, loc, count,
           arith::AddIOp::create(rewriter, loc, first, sixtyFour));
@@ -2990,9 +2997,12 @@ static void markSplitBuffers(ModuleOp module, const WorldLayout &layout) {
           reads.insert(of.getBufferAttr().getAttr());
         }
   });
+  // (Nor a set: each partition empties its own, at its own time, and
+  // they are put together when a `for` ends, see combineSetsOverRanks.)
   for (BufferOp buffer : module.getOps<BufferOp>())
     if (!(sets.contains(buffer.getSymNameAttr()) &&
-          reads.contains(buffer.getSymNameAttr())))
+          reads.contains(buffer.getSymNameAttr())) &&
+        !buffer->hasAttr(WorldLayout::kSetAttr))
       rankSharedBuffers.insert(buffer.getSymNameAttr());
   if (getenv("ENT_LAYOUT_MAP"))
     for (StringAttr buffer : rankSharedBuffers)
@@ -3461,6 +3471,30 @@ static void noteSpreadCells(IRRewriter &rewriter, Location loc,
           ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)});
       cells.push_back({field, before, accumulate.getRule(), type});
     });
+}
+
+/// What each rank's rows of `queries` put into sets or took out of them,
+/// the sets as all the ranks made them, on every rank (devices/ranks.c):
+/// each rank keeps every set whole. (A `for` does not both put entities
+/// into a set and take them out.)
+static void combineSetsOverRanks(IRRewriter &rewriter, Location loc,
+                                 ModuleOp module, const WorldLayout &layout,
+                                 WorldAccess &world,
+                                 ArrayRef<QueryOp> queries) {
+  llvm::MapVector<StringAttr, bool> changed;
+  for (QueryOp query : queries)
+    query.getBody().walk([&](SetAddOp add) {
+      changed[add.getBufferAttr().getAttr()] = bool(add.getRemove());
+    });
+  for (auto [name, remove] : changed) {
+    const WorldBuffer &set = layout.getBuffer(name);
+    callGpu(rewriter, loc, module, "ent_ranks_set_combine",
+            ValueRange{
+                worldPointer(rewriter, loc,
+                             world.bufferField(set, set.fields.front())),
+                arith::ConstantIntOp::create(rewriter, loc, set.capacity, 64),
+                arith::ConstantIntOp::create(rewriter, loc, remove, 32)});
+  }
 }
 
 /// What each rank's rows accumulated into `cells`, combined over the ranks
@@ -22563,6 +22597,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     rewriter.setInsertionPoint(query);
     reduceOverRanks(rewriter, loc, module, spreadCells);
     shareOverRanks(rewriter, loc, module, world, sharedBuffers);
+    combineSetsOverRanks(rewriter, loc, module, layout, world, {query});
     deliverOverRanks(rewriter, loc, module, layout, world);
     deliverEdges(rewriter, loc, module, layout, world);
     if (asked)
@@ -23282,6 +23317,7 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
     rewriter.setInsertionPoint(insertionPoint);
     reduceOverRanks(rewriter, loc, module, spreadCells);
     shareOverRanks(rewriter, loc, module, world, sharedBuffers);
+    combineSetsOverRanks(rewriter, loc, module, layout, world, queries);
     deliverOverRanks(rewriter, loc, module, layout, world);
     deliverEdges(rewriter, loc, module, layout, world);
     if (partitionCount > 0)
@@ -26081,6 +26117,11 @@ static LogicalResult checkRanks(ModuleOp module, const WorldLayout &layout) {
                         "several ranks");
       if (isa<BufferFillOp, BufferKeepOp>(op))
         return fail(op, "gives a buffer its rows anew or fewer of them");
+      if (isa<ClearOp, BufferCopyOp>(op))
+        return fail(op, "empties a set or gives it another's entities");
+      if (turn && isa<SetAddOp>(op))
+        return fail(op, "takes turns and puts entities into a set or takes "
+                        "them out: the turns would be on several ranks");
       if (turn && isa<BufferSetOp, BufferClaimOp>(op))
         return fail(op, "takes turns and writes rows of a buffer: the turns "
                         "would be on several ranks");

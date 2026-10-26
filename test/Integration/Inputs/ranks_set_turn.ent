@@ -1,0 +1,15 @@
+// On many ranks: a `for` over distributed cells that takes turns and
+// puts entities into a set as it goes: refused when the program is built
+// (ranks.test), as the turns would be on several ranks.
+import console
+component Cell { number: i32 } capacity 100
+distribute Cell by number
+unique Days: i32
+set Seen
+system mark() {
+  for e, c: Cell in turn by c.number { if !(e in Seen) { Seen += e } }
+  Days += 1
+}
+schedule frame() { mark() }
+world { for i in 0..10 { spawn { Cell { number: i } } } }
+main { loop { frame() } until Days > 1 }

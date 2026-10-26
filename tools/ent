@@ -689,9 +689,12 @@ def build(arguments, output, directory):
     # world's header is written: what the indexes add and change is part
     # of the world as the program has it, which the header must say as
     # the lowering lays it out.
-    indexes = "--ent-indexes" + (
-        "=gpu=1" if arguments.gpu and not os.environ.get("ENT_INDEXES_ON_CPU")
-        else "")
+    choices = []
+    if arguments.gpu and not os.environ.get("ENT_INDEXES_ON_CPU"):
+        choices.append("gpu=1")
+    if arguments.ranks:
+        choices.append("ranks=1")
+    indexes = "--ent-indexes" + ("=" + " ".join(choices) if choices else "")
     run([optimise, imported, indexes, "--mlir-print-debuginfo", "-o", module])
     header = os.path.join(directory, "ent_world.h")
     run([translate, "--ent-to-c-header", module, "-o", header])
