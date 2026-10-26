@@ -9221,16 +9221,21 @@ static void callSort(IRRewriter &rewriter, Location loc,
 /// columns, the entity table following; and a tree that keeps a slot for
 /// its entities has their locations to read again. Only the rows that
 /// move are copied (where few keys changed, few move), each by a turn of
-/// a parallel loop (on many threads where the program is built for them).
+/// a parallel loop (on many threads where the program is built for them;
+/// for the GPU where `gpu`, `world` the GPU's copy, where no relation keeps
+/// locations: see EntIndexes).
 static void moveRows(IRRewriter &rewriter, Location loc,
                      const WorldLayout &layout, WorldAccess &world,
-                     const WorldArchetype &archetype, Value newRows) {
+                     const WorldArchetype &archetype, Value newRows,
+                     bool gpu = false) {
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
   // (Each row, where it moves.)
   auto forEach = [&](Value from, Value to, function_ref<void(Value)> body) {
     auto loop = scf::ParallelOp::create(rewriter, loc, ValueRange{from},
                                         ValueRange{to}, ValueRange{one});
+    if (gpu)
+      loop->setAttr(kGpuLoopAttr, rewriter.getUnitAttr());
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
     Value row = loop.getInductionVars().front();
@@ -9278,7 +9283,7 @@ static void moveRows(IRRewriter &rewriter, Location loc,
     world.setLocation(loc, world.idSlot(loc, id), archetype, to);
   });
   for (const WorldRelation &other : layout.relations)
-    if (other.hasLocations() && canHoldEnd(archetype, other)) {
+    if (!gpu && other.hasLocations() && canHoldEnd(archetype, other)) {
       memref::StoreOp::create(
           rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 64),
           world.treeStale(other), ValueRange{zero});
@@ -10251,9 +10256,14 @@ static void lowerKdTrees(IRRewriter &rewriter, func::FuncOp func,
 /// clustered index keeps in its order move there (see moveRows), the
 /// entity of the index's row r to row r; and so each one's place among
 /// the entities as stored (`place_in_Name`, and its index row's `place`)
-/// is that row, and so is its row of the index (`row_in_Name`).
+/// is that row, and so is its row of the index (`row_in_Name`). In a `gpu`
+/// system (`device` its copy of the world; `host` the CPU's, which keeps
+/// the buffers' counts), on the GPU, every row moved.
 static void lowerClusters(IRRewriter &rewriter, func::FuncOp func,
-                          const WorldLayout &layout, WorldAccess &world) {
+                          const WorldLayout &layout, WorldAccess &host,
+                          WorldAccess *device = nullptr) {
+  WorldAccess &world = device ? *device : host;
+  bool gpu = device;
   SmallVector<ClusterOp> clusters;
   func.walk([&](ClusterOp cluster) { clusters.push_back(cluster); });
   for (ClusterOp cluster : clusters) {
@@ -10286,7 +10296,7 @@ static void lowerClusters(IRRewriter &rewriter, func::FuncOp func,
       Value newRows =
           world.array(archetype.newRowOffset, archetype.capacity, i32);
       Value rows = world.toIndex(
-          loc, memref::LoadOp::create(rewriter, loc, world.bufferCount(index),
+          loc, memref::LoadOp::create(rewriter, loc, host.bufferCount(index),
                                       ValueRange{zero}));
       Value who = world.bufferField(index, fieldOf("who"));
       // (Whether any row moves: where none does, as where the index was
@@ -10301,6 +10311,8 @@ static void lowerClusters(IRRewriter &rewriter, func::FuncOp func,
       {
         auto each = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
                                             ValueRange{rows}, ValueRange{one});
+        if (gpu)
+          each->setAttr(kGpuLoopAttr, rewriter.getUnitAttr());
         OpBuilder::InsertionGuard guard(rewriter);
         rewriter.setInsertionPoint(each.getBody()->getTerminator());
         Value r = each.getInductionVars().front();
@@ -10311,16 +10323,21 @@ static void lowerClusters(IRRewriter &rewriter, func::FuncOp func,
         memref::StoreOp::create(
             rewriter, loc, arith::IndexCastOp::create(rewriter, loc, i32, r),
             newRows, ValueRange{row});
-        auto moved = scf::IfOp::create(
-            rewriter, loc,
-            arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne, row,
-                                  r));
-        rewriter.setInsertionPoint(moved.thenBlock()->getTerminator());
-        memref::StoreOp::create(
-            rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 1),
-            moves);
+        if (!gpu) {
+          auto moved = scf::IfOp::create(
+              rewriter, loc,
+              arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne,
+                                    row, r));
+          rewriter.setInsertionPoint(moved.thenBlock()->getTerminator());
+          memref::StoreOp::create(
+              rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 1),
+              moves);
+        }
       }
-      {
+      if (gpu) {
+        moveRows(rewriter, loc, layout, world, archetype, newRows,
+                 /*gpu=*/true);
+      } else {
         auto ifMoves = scf::IfOp::create(
             rewriter, loc, memref::LoadOp::create(rewriter, loc, moves));
         OpBuilder::InsertionGuard guard(rewriter);
@@ -10332,6 +10349,8 @@ static void lowerClusters(IRRewriter &rewriter, func::FuncOp func,
       Value placeColumn = world.column(archetype, first, place);
       auto each = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
                                           ValueRange{rows}, ValueRange{one});
+      if (gpu)
+        each->setAttr(kGpuLoopAttr, rewriter.getUnitAttr());
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPoint(each.getBody()->getTerminator());
       Value r = each.getInductionVars().front();
@@ -27445,7 +27464,8 @@ struct EntLowerToLoops
       }
       lowerKdTrees(rewriter, func, *layout, world, options.parallelEntities,
                    device ? &*device : nullptr);
-      lowerClusters(rewriter, func, *layout, world);
+      lowerClusters(rewriter, func, *layout, world,
+                    device ? &*device : nullptr);
       lowerSpawns(rewriter, func, *layout, world);
       lowerConnects(rewriter, func, *layout, world);
       lowerBuffers(rewriter, func, *layout, world, symbols, defined,

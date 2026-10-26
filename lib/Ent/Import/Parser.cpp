@@ -5153,11 +5153,11 @@ LogicalResult Parser::parseIndex() {
         out << "    c_ -= 1\n  }\n";
       }
       // The same made on the GPU, where the compiler chooses so (see
-      // EntIndexes; not clustered): the tree (`N_split` there tells where
-      // each place's row went, `N_at`), each entity told its row from it;
-      // then what each cell keeps, level by level from the deepest up,
-      // each entity a few cells of a level.
-      if (!clustered) {
+      // EntIndexes): the tree (`N_split` there tells where each place's
+      // row went, `N_at`), each entity told its row from it; then what
+      // each cell keeps, level by level from the deepest up, each entity a
+      // few cells of a level (clustered, its rows then moved: see below).
+      {
         out.flush();
         size_t gpuFrom = text.size();
         out << "gpu system " << n << "_update_gpu() {\n"
@@ -5782,6 +5782,14 @@ LogicalResult Parser::parseIndex() {
     });
     ClusterOp::create(builder, loc(at),
                       FlatSymbolRefAttr::get(context, bufferName));
+    // (And at the end of its making on the GPU, which works by the rows of
+    // the index, not of the archetype.)
+    if (auto onGpu = dyn_cast_or_null<SystemOp>(SymbolTable::lookupSymbolIn(
+            module, builder.getStringAttr(resolve(n + "_update_gpu"))))) {
+      builder.setInsertionPoint(onGpu.getBody().front().getTerminator());
+      ClusterOp::create(builder, loc(at),
+                        FlatSymbolRefAttr::get(context, bufferName));
+    }
   }
   return success();
 }

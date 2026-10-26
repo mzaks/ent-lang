@@ -864,7 +864,8 @@ Steps:
 4. The choice: a pass that keeps the GPU's form where the rule above
    holds, the CPU's elsewhere.
    **Built**: `--ent-indexes=gpu=1` (`ent build --gpu`) runs the GPU's
-   form where the index is not clustered, every run that reads it is of
+   form where the index is not clustered (2026-10-26: or the program
+   has no relation; see 7 below), every run that reads it is of
    a `gpu system`, and no system on the CPU writes its key or what it
    copies (`set`, `apply`, sends; a proc given its component) nor is an
    extern one that declares nothing; spawns do not count, nor uniques it
@@ -913,6 +914,15 @@ Steps:
    sort, and no clustered order). The LJ melt the same on the GPU but
    slower (f64, 32,000 atoms); the epidemic declares no index.
    `bench/moving/run.py`, `bench/points/run.py --gpu`.
+7. Clustered on the GPU (2026-10-26). **Built**: a clustered index's
+   GPU form ends with `ent.cluster`, lowered for the GPU (lowerClusters
+   with the GPU's copy of the world: each entity's new row from the
+   index's `who`, every column and the ids through the scratch columns,
+   the entity table following, each place its row), every row moved
+   (the CPU's form moves only where one does). Not where the program has
+   a relation, whose trees may keep where entities are and are sorted
+   again on the CPU. `gpu.test` runs the k-d trees of
+   `Inputs/kdtree_gpu.ent`, a Morton index and a grid clustered so.
 
 **Step 8, as it stands** (2026-10-26, the user's choices: the median
 of the widest side, lists presorted by each side, nanoflann, octTree
@@ -946,7 +956,11 @@ place of the index text's `N_split`:
   has on one core, 3 to 3.5 times nanoflann's on a million points; its
   making 90 ms on one core, 35 on all, 5 to 8 on the GPU (the Morton
   index's 16, 9 and 16). On all cores the Morton index stays the
-  faster in all.
+  faster in all: of the k-d tree's 35 ms, its three sorts and listing
+  take some 31; numbering a cell's tree anew and sorting by 32 bits were
+  tried and did not pay (bench/RESULTS.md, 2026-10-26). Clustered on
+  the GPU too (step 7 of "Made on the GPU"); the GPU's queries are
+  bound by the points' `f64`.
 
 ## 9. When it is done
 

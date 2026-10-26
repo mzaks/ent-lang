@@ -928,3 +928,16 @@ first place, the others from its median. Its arrays are scratch slots
 from 48 (there are now 64). A million points in three sides: made in
 about 8 ms, against 35 on all cores. `Inputs/kdtree_gpu.ent`
 (`gpu.test`).
+
+## Clustered indexes made on the GPU (2026-10-26)
+
+A clustered index's form for the GPU ends with `ent.cluster`, which
+lowerClusters lowers for the GPU where it is in a `gpu system`: each
+entity's new row from the index's `who`, then every column of the
+archetype and its ids through the scratch columns, the entity table
+following (moveRows with its loops for the GPU), and each place its row;
+every row moved, where the CPU's form first looks whether any does.
+EntIndexes chooses it where the program has no relation (a tree that
+keeps where its entities are is sorted again on the CPU). The k nearest
+of a million points on the GPU: 5 to 25% faster clustered (bench/
+RESULTS.md).

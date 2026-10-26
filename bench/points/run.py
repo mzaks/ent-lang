@@ -39,8 +39,8 @@ the index.
 --gpu adds a third: `knn` a `gpu system` (built --gpu --parallel), the
 index made on the GPU (EntIndexes chooses so: only gpu systems read it),
 its making timed by a `gpu system` that reads it before the CPU takes
-the time; the Morton index not clustered (a clustered one is made on the
-CPU). Held against octTree on all cores.
+the time, clustered as on the CPU (the rows moved on the GPU). Held
+against octTree on all cores.
 
 Usage: bench/points/run.py [--size 1000000] [--clustered 100000]
                            [--rounds 3] [--samples 200]
@@ -155,8 +155,7 @@ def build_ent(size, modes):
             for par in modes:
                 source, flags = program, (["--parallel"] if par else [])
                 if par == "gpu":
-                    gpu_text = text.replace(
-                        grid, line.format(sides=sides).replace(" clustered", ""))
+                    gpu_text = text.replace(grid, line.format(sides=sides))
                     for old, new in ON_GPU:
                         assert old in gpu_text
                         gpu_text = gpu_text.replace(old, new)

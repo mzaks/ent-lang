@@ -351,6 +351,19 @@
 // RUN: %ent run %t.kdnearest.ent > %t.kdnearest.cpu
 // RUN: %ent run %t.kdnearest.ent --gpu | diff %t.kdnearest.cpu -
 
+// Clustered indexes made on the GPU, their archetype's rows moved there
+// into their order (a CPU system reads the rows' other component after):
+// k-d trees, a Morton index and a grid, the same as on the CPU.
+// RUN: sed -e 's/leaf 4 cells/leaf 4 clustered cells/' -e 's/kdtree (u, v) leaf 1$/kdtree (u, v) leaf 1 clustered/' %S/Inputs/kdtree_gpu.ent > %t.kdcl.ent
+// RUN: %ent build %t.kdcl.ent --gpu -o %t.kdcl
+// RUN: %t.kdcl | diff %t.kd.cpu -
+// RUN: env ENT_GPU_PROTECT=1 %t.kdcl | diff %t.kd.cpu -
+// RUN: nm %t.kdcl | FileCheck %s --check-prefix=KDGPU
+// RUN: sed -E -e 's/^(index Tree .*)$/\1 clustered/' -e 's/^system count\(\)/gpu system count()/' -e 's/^system move\(\)/gpu system move()/' %S/Inputs/morton_moving.ent > %t.mcl.ent
+// RUN: %ent run %t.mcl.ent --gpu | diff %t.mgpu.cpu -
+// RUN: sed -E -e 's/^(index Grid .*)$/\1 clustered/' -e 's/^system count\(\)/gpu system count()/' -e 's/^system move\(\)/gpu system move()/' %S/Inputs/morton_moving.ent > %t.gcl.ent
+// RUN: %ent run %t.gcl.ent --gpu --parallel | diff %t.mgpu.cpu -
+
 // The k nearest of every dot in a grid and a Morton index, in a `gpu`
 // system, k a unique's: each dot's list a part of an array made before
 // the kernel, not of the GPU's heap; both indexes made on the GPU.

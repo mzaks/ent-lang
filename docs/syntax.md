@@ -2376,9 +2376,9 @@ Morton index's, the same entities visited:
   orders at its median, those below it first, in their order still;
   each row's key is its number.
 - Built for a GPU (`--gpu`), where every system that reads it is a `gpu
-  system` and no system on the CPU writes its places, and it is not
-  `clustered`, it is made on the GPU, as a Morton index and a grid are
-  (docs/indexes.md, "Made on the GPU").
+  system` and no system on the CPU writes its places, it is made on the
+  GPU, as a Morton index and a grid are, `clustered` too where the
+  program has no relation (docs/indexes.md, "Made on the GPU").
 - `nearest k` goes down from the root as a Morton index's does, without
   the rows around a key first (a k-d tree has no key of a place).
 - What it pays, against a Morton index, PBBS's octTree and nanoflann:

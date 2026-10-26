@@ -203,13 +203,17 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
     // gpu systems, and no system on the CPU writes its key or what it
     // copies (spawns do not: those are new entities, which the GPU's form
     // makes anew anyway): its rows are then never wanted on the CPU, nor
-    // copied there and back. The other form is left out.
+    // copied there and back. The other form is left out. (Clustered, its
+    // rows moved on the GPU, where the program has no relation, whose
+    // trees may keep where their entities are: those are sorted again on
+    // the CPU.)
+    bool relations = !module.getOps<RelationOp>().empty();
     for (auto &[buffer, info] : indexes) {
       auto onGpu = info.getAs<StringAttr>("gpu_update");
       if (!onGpu)
         continue;
       Kept kept = keptOf(buffer, info, archetypes, symbols);
-      bool chosen = gpu && !info.get("clustered");
+      bool chosen = gpu && (!info.get("clustered") || !relations);
       bool read = false;
       if (chosen)
         module.walk([&](RunOp run) {

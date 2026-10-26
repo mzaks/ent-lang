@@ -4610,3 +4610,52 @@ The GPU (the index made there):
   first list, so that a cell's would be near in memory, cost more than
   it saved on one core, and was taken out.
 - `leaf 16` was the best of 8, 16 and 32 on 3DinCube k 10.
+
+## 2026-10-26: clustered indexes made on the GPU; the k-d tree's making
+
+A clustered index whose readers are all `gpu system`s is now made on the
+GPU too, the archetype's rows moved there into its order (docs/
+indexes.md, "Made on the GPU", step 7); `bench/points/run.py --gpu` now
+keeps `clustered`. ms of a run (of it the making), median of 3, before
+(not clustered) in brackets; on mains power, native builds, RTX 4050.
+
+| points | n | k | Morton, GPU | k-d tree, GPU | grid, GPU | octTree, all cores |
+|---|---|---|---|---|---|---|
+| 2DinCube | 1M | 1 | 31.0 (11.1) (33.5) | 33.2 (4.8) (38.9) | 18.2 (6.5) | 23.9 |
+| 2Dkuzmin | 100k | 1 | 8.3 (5.6) (9.3) | 3.7 (1.1) (4.2) | 951.8 | 2.7 |
+| 3DinCube | 1M | 1 | 77.5 (10.3) (88.3) | 78.2 (8.0) (83.9) | 49.1 (6.9) | 37.0 |
+| 3DonSphere | 1M | 1 | 40.3 (10.8) (52.9) | 48.0 (8.0) (54.7) | 128.5 (7.0) | 28.7 |
+| 3DinCube | 1M | 10 | 149.0 (10.3) (175.8) | 147.0 (8.0) (165.7) | 96.7 (6.3) | 96.4 |
+| 3Dplummer | 100k | 10 | 19.5 (4.5) (22.4) | 15.6 (1.7) (17.5) | 3825 (18.2) | 20.4 |
+
+- Clustered, the queries are 5 to 25% faster: each warp's points are
+  near each other and walk the same cells. Moving the rows costs little
+  (the k-d tree's making 8.0 ms where 8.0; the Morton index's 10.3
+  where 16.2, its own making by the entities as workers now in order).
+- What holds the GPU's queries back is the points' `f64`, which this GPU
+  runs at a 64th of `f32`'s rate: the same program with `f32` places,
+  3DinCube k 10, the k-d tree on the GPU: 90 ms not clustered, 58 with
+  the points in Z order (octTree on all cores 96). A matter of the
+  program's types, not of the index.
+
+**The k-d tree's making on all cores** (35 ms of a million in three
+sides, 92 on one core), taken apart by capping its levels: without any
+level 32 ms on all cores, 48 on one; so the levels cost some 4 ms on
+all cores and 44 on one, and the rest is listing the rows, three radix
+sorts of 64-bit keys (eight passes each) and moving the rows into
+order. Tried, and not kept:
+
+- Each cell's tree below 32,768 rows made by a turn of its own, its
+  points numbered anew so that what its levels read is near: 34.6 ms
+  where 35, 957 where 947 on one core.
+- Sorting by keys of 32 bits (four passes): the top 32 bits of the
+  keys' range, or the keys of the values rounded to `f32` (stored in 32
+  bits), then each run of keys alike in 32 bits put in order by the
+  whole keys (a sort of all of them where a run is longer than 64): on
+  one core 87 to 98 ms where 92, on all cores 35 to 37. The passes
+  saved are paid for by those that make and check the keys; on all
+  cores the sorts are bound by memory, as Morton's single sort is.
+
+So the k-d tree's making stays three sorts and its levels; the Morton
+index (one sort) is made in a quarter of the time, and on all cores it
+stays the faster in all.
