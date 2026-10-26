@@ -889,3 +889,19 @@ turn (scratch slots from 32, kept from run to run as the running sums'
 are). The same million points: 11.8 ms. `Inputs/gpu_nearest.ent`
 (`gpu.test`): the k nearest in a grid and in a Morton index, k a
 unique's, the same as on the CPU, with no `malloc` in the kernels.
+
+## Windows counted, not each row claimed (2026-10-26)
+
+Each entity's window of a buffer had each of its rows say whose it is
+(an atomic exchange a row, its old value compared at once), so that two
+windows over a row are found. On the GPU each such exchange is waited
+for before the next: filling the LJ melt's lists (32,000 atoms, some 80
+rows each) took 57 ms, counting them with the same walk 8. Where the
+`for` does not also read the buffer by its name (then the owners are
+needed: see takeWindowsFirst), each window now adds 1 to a count at its
+start and takes 1 at its end (scratch slots 40 to 47, zeroed before the
+query); after it a scan of the counts gives how many windows each row
+is in, and a row in two stops the program, as before. The lists are
+filled in 8.6 ms. `Inputs/gpu_window_clash.ent` (`gpu.test`): windows
+of their own on the first day, overlapping on the second, which stops
+the program on the GPU as on the CPU.

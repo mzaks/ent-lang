@@ -34,7 +34,8 @@ static int32_t ent_mesh_per_row = 1;
 static Shader ent_mesh_shader;
 static Material ent_mesh_material;
 static bool ent_mesh_ready;
-static int ent_mesh_eye_at, ent_mesh_fog_at, ent_mesh_far_at;
+static int ent_mesh_eye_at, ent_mesh_fog_at, ent_mesh_far_at, ent_mesh_day_at;
+static float ent_mesh_day[3] = {1, 1, 1};
 static int32_t ent_mesh_drawn, ent_mesh_faces_seen;
 
 // Fog by how far a point is from the eye; texels that are clear left out.
@@ -63,10 +64,12 @@ static const char *ent_mesh_fragment =
     "uniform vec3 eye;\n"
     "uniform vec3 fog;\n"
     "uniform float far;\n"
+    "uniform vec3 day;\n"
     "out vec4 finalColor;\n"
     "void main() {\n"
     "  vec4 c = texture(texture0, uv) * tint * colDiffuse;\n"
     "  if (c.a < 0.1) discard;\n"
+    "  c.rgb *= day;\n"
     "  float f = clamp((distance(at, eye) - far * 0.55) / (far * 0.45), 0.0, 1.0);\n"
     "  finalColor = vec4(mix(c.rgb, fog, f * f), c.a);\n"
     "}\n";
@@ -79,6 +82,7 @@ static void ent_mesh_start(void) {
   ent_mesh_eye_at = GetShaderLocation(ent_mesh_shader, "eye");
   ent_mesh_fog_at = GetShaderLocation(ent_mesh_shader, "fog");
   ent_mesh_far_at = GetShaderLocation(ent_mesh_shader, "far");
+  ent_mesh_day_at = GetShaderLocation(ent_mesh_shader, "day");
   ent_mesh_material = LoadMaterialDefault();
   ent_mesh_material.shader = ent_mesh_shader;
   ent_mesh_ready = true;
@@ -144,8 +148,13 @@ static const float ent_mesh_corners[6][4][3] = {
     {{1, 0, 0}, {0, 0, 0}, {0, 1, 0}, {1, 1, 0}}};
 // (Lit from above, and a little from one side, as the scene's boxes.)
 static const float ent_mesh_shade[6] = {0.90f, 0.70f, 1.0f, 0.45f, 0.82f, 0.62f};
-// The two triangles of a face, by its corners.
-static const int ent_mesh_order[6] = {0, 1, 2, 0, 2, 3};
+// How much light a corner keeps, by how hidden it is (0 to 3).
+static const float ent_mesh_hidden[4] = {1.0f, 0.78f, 0.6f, 0.44f};
+// The two triangles of a face, by its corners: cut from the first corner
+// to the third, or (where the second and fourth are the lighter, so that
+// the shade runs along the cut and not across it) from the second to
+// the fourth.
+static const int ent_mesh_order[2][6] = {{0, 1, 2, 0, 2, 3}, {1, 2, 3, 1, 3, 0}};
 
 static void ent_mesh_free(Mesh *m, bool *has) {
   if (*has)
@@ -158,8 +167,8 @@ static void ent_mesh_free(Mesh *m, bool *has) {
 static bool ent_mesh_build(Mesh *m, int32_t count, const int32_t *x,
                            const int32_t *y, const int32_t *z,
                            const ent_mesh_Side *side, const int32_t *tile,
-                           const int32_t *light, const bool *clear,
-                           bool want) {
+                           const int32_t *light, const int32_t *hidden,
+                           const bool *clear, bool want) {
   int32_t n = 0;
   for (int32_t i = 0; i < count; i++)
     if (clear[i] == want && side[i] < 6)
@@ -185,9 +194,14 @@ static bool ent_mesh_build(Mesh *m, int32_t count, const int32_t *x,
     float u0 = (float)(tile[i] % ent_mesh_per_row) / per;
     float v0 = (float)(tile[i] / ent_mesh_per_row) / per;
     float lit = 0.12f + 0.88f * (float)(light[i] < 0 ? 0 : light[i] > 15 ? 15 : light[i]) / 15.0f;
-    unsigned char shade = (unsigned char)(255.0f * lit * ent_mesh_shade[s]);
+    int h[4];
+    for (int c = 0; c < 4; c++)
+      h[c] = (hidden[i] >> (2 * c)) & 3;
+    const int *order = ent_mesh_order[h[0] + h[2] > h[1] + h[3]];
     for (int k = 0; k < 6; k++) {
-      int c = ent_mesh_order[k];
+      int c = order[k];
+      unsigned char shade =
+          (unsigned char)(255.0f * lit * ent_mesh_shade[s] * ent_mesh_hidden[h[c]]);
       m->vertices[v * 3 + 0] = (float)x[i] + ent_mesh_corners[s][c][0];
       m->vertices[v * 3 + 1] = (float)y[i] + ent_mesh_corners[s][c][1];
       m->vertices[v * 3 + 2] = (float)z[i] + ent_mesh_corners[s][c][2];
@@ -215,7 +229,8 @@ static bool ent_mesh_build(Mesh *m, int32_t count, const int32_t *x,
 void ent_mesh_set_mesh(int32_t slot, int32_t count, const int32_t *x,
                        const int32_t *y, const int32_t *z,
                        const ent_mesh_Side *side, const int32_t *tile,
-                       const int32_t *light, const bool *clear) {
+                       const int32_t *light, const int32_t *hidden,
+                       const bool *clear) {
   if (slot < 0 || slot >= ENT_MESH_SLOTS)
     return;
   ent_mesh_start();
@@ -232,8 +247,8 @@ void ent_mesh_set_mesh(int32_t slot, int32_t count, const int32_t *x,
     s->hi = Vector3Max(s->hi, (Vector3){(float)x[i], (float)y[i], (float)z[i]});
   }
   s->hi = Vector3Add(s->hi, (Vector3){1, 1, 1});
-  s->has_solid = ent_mesh_build(&s->solid, count, x, y, z, side, tile, light, clear, false);
-  s->has_clear = ent_mesh_build(&s->clear, count, x, y, z, side, tile, light, clear, true);
+  s->has_solid = ent_mesh_build(&s->solid, count, x, y, z, side, tile, light, hidden, clear, false);
+  s->has_clear = ent_mesh_build(&s->clear, count, x, y, z, side, tile, light, hidden, clear, true);
 }
 
 void ent_mesh_drop_mesh(int32_t slot) {
@@ -277,6 +292,7 @@ void ent_mesh_draw_meshes(float far, int32_t fog) {
   SetShaderValue(ent_mesh_shader, ent_mesh_eye_at, eye_at, SHADER_UNIFORM_VEC3);
   SetShaderValue(ent_mesh_shader, ent_mesh_fog_at, fog_rgb, SHADER_UNIFORM_VEC3);
   SetShaderValue(ent_mesh_shader, ent_mesh_far_at, &far, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(ent_mesh_shader, ent_mesh_day_at, ent_mesh_day, SHADER_UNIFORM_VEC3);
   // (Faces only from their front; the scene draws its boxes from both.)
   rlDrawRenderBatchActive();
   rlEnableBackfaceCulling();
@@ -297,6 +313,13 @@ void ent_mesh_draw_meshes(float far, int32_t fog) {
     }
   }
   rlDisableBackfaceCulling();
+}
+
+void ent_mesh_mesh_daylight(float part, int32_t tint) {
+  float p = part < 0 ? 0 : part > 1 ? 1 : part;
+  ent_mesh_day[0] = p * (float)((tint >> 16) & 255) / 255.0f;
+  ent_mesh_day[1] = p * (float)((tint >> 8) & 255) / 255.0f;
+  ent_mesh_day[2] = p * (float)(tint & 255) / 255.0f;
 }
 
 int32_t ent_mesh_meshes_drawn(void) { return ent_mesh_drawn; }

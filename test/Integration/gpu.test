@@ -337,3 +337,17 @@
 // RUN: %ent run %S/Inputs/gpu_by_carry.ent --gpu | diff %t.carry.cpu -
 // RUN: FileCheck %s --check-prefix=CARRY --input-file=%t.carry.cpu
 // CARRY: rows 3000 unsorted 0 sum 6761301124
+
+// Windows a `gpu` system only writes, counted where they start and end:
+// rows of their own on the first day, two windows over a row on the
+// second, which stops the program, on the GPU as on the CPU.
+// RUN: %ent build %S/Inputs/gpu_window_clash.ent -o %t.wclash.cpu
+// RUN: %ent build %S/Inputs/gpu_window_clash.ent --gpu -o %t.wclash.gpu
+// (Unbuffered: what the program says before it stops is kept.)
+// RUN: not --crash stdbuf -o0 %t.wclash.cpu > %t.wclash.cpu.out
+// RUN: not --crash stdbuf -o0 %t.wclash.gpu > %t.wclash.gpu.out
+// RUN: diff %t.wclash.cpu.out %t.wclash.gpu.out
+// RUN: FileCheck %s --check-prefix=WCLASH --input-file=%t.wclash.gpu.out
+// WCLASH: day 0: 35986500500
+// WCLASH-NEXT: window of the buffer @Marks
+// WCLASH-NOT: day 1

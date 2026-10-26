@@ -11,7 +11,7 @@
 //   capacity Pixels 65536
 //   system paint() { .. Pixels .. make_atlas(Pixels, 256, 256, 16) }
 //   system chunk() {
-//     Faces += { x: 0, y: 0, z: 0, side: Side.Top, tile: 1, light: 15, clear: false }
+//     Faces += { x: 0, y: 0, z: 0, side: Side.Top, tile: 1, light: 15, hidden: 0, clear: false }
 //     set_mesh(0, Faces)
 //     Faces = []
 //   }
@@ -30,8 +30,12 @@
 // show through,
 // for faces marked `clear` (water, glass), which are drawn after the
 // others. The faces are shaded by their side (the top brightest, as the
-// scene's boxes are) and by their `light`, 0 to 15; and fade into the
-// fog colour as far as `draw_meshes` says the eye sees.
+// scene's boxes are), by their `light`, 0 to 15, and at each corner by
+// how hidden it is (`hidden`: 0 to 3 a corner, two bits each, the first
+// corner lowest: the blocks next to the corner that keep light from it,
+// as a program works it out with `corners`); then all of them by the
+// daylight (`mesh_daylight`); and they fade into the fog colour as far
+// as `draw_meshes` says the eye sees.
 //
 // Implemented with raylib (devices/mesh.c, devices/mesh.link).
 import window
@@ -40,11 +44,27 @@ import scene
 // The sides of a block: where its face looks.
 enum Side { East, West, Top, Bottom, South, North }
 
+// The corners of each side's face, as the device makes them, from the
+// corner (x, y, z) of the block (0 or 1 on each axis): the order of the
+// two bits each has in a face's `hidden`; and which way the side looks.
+table corners[Side] {
+  x0: i32, y0: i32, z0: i32, x1: i32, y1: i32, z1: i32,
+  x2: i32, y2: i32, z2: i32, x3: i32, y3: i32, z3: i32,
+  nx: i32, ny: i32, nz: i32
+} = [
+  East:   { x0: 1, y0: 0, z0: 1, x1: 1, y1: 0, z1: 0, x2: 1, y2: 1, z2: 0, x3: 1, y3: 1, z3: 1, nx: 1, ny: 0, nz: 0 },
+  West:   { x0: 0, y0: 0, z0: 0, x1: 0, y1: 0, z1: 1, x2: 0, y2: 1, z2: 1, x3: 0, y3: 1, z3: 0, nx: -1, ny: 0, nz: 0 },
+  Top:    { x0: 0, y0: 1, z0: 1, x1: 1, y1: 1, z1: 1, x2: 1, y2: 1, z2: 0, x3: 0, y3: 1, z3: 0, nx: 0, ny: 1, nz: 0 },
+  Bottom: { x0: 0, y0: 0, z0: 0, x1: 1, y1: 0, z1: 0, x2: 1, y2: 0, z2: 1, x3: 0, y3: 0, z3: 1, nx: 0, ny: -1, nz: 0 },
+  South:  { x0: 0, y0: 0, z0: 1, x1: 1, y1: 0, z1: 1, x2: 1, y2: 1, z2: 1, x3: 0, y3: 1, z3: 1, nx: 0, ny: 0, nz: 1 },
+  North:  { x0: 1, y0: 0, z0: 0, x1: 0, y1: 0, z1: 0, x2: 0, y2: 1, z2: 0, x3: 1, y3: 1, z3: 0, nx: 0, ny: 0, nz: -1 }
+]
+
 // The faces of a mesh: of which block, which side, which tile of the
-// atlas, how lit (0 dark, 15 full); `clear` for one that lets what is
-// behind show through.
+// atlas, how lit (0 dark, 15 full), how hidden each corner is (see
+// above); `clear` for one that lets what is behind show through.
 transient buffer Faces {
-  x: i32, y: i32, z: i32, side: Side, tile: i32, light: i32, clear: bool
+  x: i32, y: i32, z: i32, side: Side, tile: i32, light: i32, hidden: i32, clear: bool
 } capacity 262144
 
 // The atlas: a picture of `width` by `height` pixels (`Pixels`, see
@@ -62,6 +82,10 @@ extern proc drop_meshes()
 // Every mesh in view, between `begin_scene` and `end_scene`: as far as
 // `far` from the eye, fading into `fog` (0xRRGGBB) towards it.
 extern proc draw_meshes(far: f32, fog: i32)
+// How bright the day is, 0 (no light but the stars') to 1 (noon, as
+// they are made: the default), and the colour the light has (0xRRGGBB:
+// 0xffffff white, a dusk's warmer, a night's bluer).
+extern proc mesh_daylight(part: f32, tint: i32)
 
 // Of the last `draw_meshes`: how many meshes it drew, and how many faces.
 extern proc meshes_drawn() -> i32

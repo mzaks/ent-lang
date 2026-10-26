@@ -2573,6 +2573,12 @@ static constexpr llvm::StringLiteral kOwnedAttr = "ent.owned";
 /// owner it writes to the rows it takes: that and the entity's id.
 static llvm::DenseMap<uint64_t, Value> ownerRuns;
 static llvm::DenseMap<Operation *, Value> ownerTags;
+/// On the GPU, of a query that does not read the buffer by its name: for
+/// each claim, the counts it adds 1 to at its window's start and takes 1
+/// from at its end, in place of owners for each row (see lowerQuery).
+static llvm::DenseMap<Operation *, Value> windowCounts;
+/// Those counts, for the query being lowered, by the buffer's owners.
+static llvm::DenseMap<uint64_t, Value> windowCountsOf;
 /// A query whose windows of a buffer are taken before its entities' bodies
 /// run, by a pass of their own (`ent.takes`: that pass, a copy of the query
 /// with only the windows), since it also reads the buffer by its name
@@ -3530,6 +3536,8 @@ static void lowerAccesses(IRRewriter &rewriter, ArrayRef<Operation *> roots,
                                                  64))
                     .getResult();
       ownerTags[claim] = arith::OrIOp::create(rewriter, loc, run, bits);
+      if (Value counts = windowCountsOf.lookup(buffer.ownerOffset))
+        windowCounts[claim] = counts;
     });
   for (Operation *root : roots)
     root->walk([&](BufferAtOp at) {
@@ -20901,6 +20909,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
       claimed.push_back(&buffer);
   });
   llvm::SaveAndRestore keepRuns(ownerRuns);
+  llvm::SaveAndRestore keepCounts(windowCountsOf);
   // (The windows of a query that reads the buffer by its name too, taken
   // first: in this run, numbered by the query itself.)
   if (!claimed.empty() && !query->hasAttr(kTakesAttr)) {
@@ -20933,6 +20942,66 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
       else
         memref::StoreOp::create(rewriter, loc, none,
                                 world.bufferClash(*buffer), ValueRange{zero});
+    }
+  }
+  // On the GPU, the windows of a buffer the body does not read by its
+  // name: each adds 1 to a count at its start and takes 1 at its end,
+  // two atomics where marking each of its rows was one a row, each
+  // waited for (filling the LJ melt's lists took 63 ms, of 32,000 atoms
+  // of some 80 rows each); after the query a scan of the counts says how
+  // many windows each row is in, more than one a clash. (Where the body
+  // reads it by its name, the owners say whose a row is: see
+  // takeWindowsFirst.)
+  struct Counted {
+    const WorldBuffer *buffer;
+    Value counts, rows;
+    int64_t slot;
+  };
+  SmallVector<Counted> counted;
+  if (options.gpu && !query->hasAttr(kTakesAttr)) {
+    llvm::SmallDenseSet<StringAttr> read;
+    query.getBody().walk([&](BufferAtOp at) {
+      if (!at->hasAttr(kWindowAttr))
+        read.insert(at.getBufferAttr().getAttr());
+    });
+    ModuleOp program = query->getParentOfType<ModuleOp>();
+    int64_t slot = 40;
+    for (const WorldBuffer *buffer : claimed) {
+      auto name = BufferOp(buffer->op).getSymNameAttr();
+      if (read.contains(name) || slot >= 48)
+        continue;
+      rewriter.setInsertionPoint(query);
+      Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+      Value rows = arith::AddIOp::create(
+          rewriter, loc,
+          arith::IndexCastOp::create(
+              rewriter, loc, rewriter.getIndexType(),
+              memref::LoadOp::create(rewriter, loc,
+                                     world.cpu().bufferCount(*buffer),
+                                     ValueRange{zero})),
+          arith::ConstantIndexOp::create(rewriter, loc, 1));
+      // (With room after them for the levels of the scan.)
+      int64_t mine = slot++;
+      Value counts = gpuScratch(
+          rewriter, loc, program, mine, rewriter.getI32Type(),
+          arith::AddIOp::create(
+              rewriter, loc, rows,
+              arith::AddIOp::create(
+                  rewriter, loc,
+                  arith::DivUIOp::create(
+                      rewriter, loc, rows,
+                      arith::ConstantIndexOp::create(rewriter, loc,
+                                                     runningChunk(true) - 1)),
+                  arith::ConstantIndexOp::create(rewriter, loc, 64))));
+      {
+        OpBuilder::InsertionGuard guard(rewriter);
+        Value row = parallelTurns(rewriter, loc, rows, /*gpu=*/true);
+        memref::StoreOp::create(
+            rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 32),
+            counts, ValueRange{row});
+      }
+      windowCountsOf[buffer->ownerOffset] = counts;
+      counted.push_back({buffer, counts, rows, mine});
     }
   }
   takeWindowsFirst(rewriter, query, layout, world, given);
@@ -21291,6 +21360,51 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // may not use.)
   // An entity that wrote outside its rows stops the program.
   rewriter.setInsertionPoint(query);
+  // (Rows in more than one window: the counts scanned, each row's
+  // windows those that started before it less those that ended; a row
+  // in two marks the first count, which is nought after the scan.)
+  for (auto [buffer, counts, rows, slot] : counted) {
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
+    (void)emitRunningScan(rewriter, loc, counts, rows,
+                          arith::ConstantIntOp::create(rewriter, loc, 0, 32),
+                          "add", rewriter.getI32Type(), /*gpu=*/true,
+                          [](Value) { return Value(); });
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      Value row = arith::AddIOp::create(
+          rewriter, loc,
+          parallelTurns(rewriter, loc,
+                        arith::SubIOp::create(rewriter, loc, rows, one),
+                        /*gpu=*/true),
+          one);
+      auto twice = scf::IfOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::sgt,
+              memref::LoadOp::create(rewriter, loc, counts, ValueRange{row}),
+              arith::ConstantIntOp::create(rewriter, loc, 1, 32)));
+      rewriter.setInsertionPointToStart(twice.thenBlock());
+      memref::StoreOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 1, 32),
+          counts, ValueRange{zero});
+    }
+    Value seen =
+        callGpu(
+            rewriter, loc, query->getParentOfType<ModuleOp>(),
+            "ent_gpu_scratch_get",
+            ValueRange{arith::ConstantIntOp::create(rewriter, loc, slot, 64),
+                       arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+                       arith::ConstantIntOp::create(rewriter, loc, 4, 64)},
+            TypeRange{rewriter.getI64Type()})
+            .getResult(0);
+    cf::AssertOp::create(
+        rewriter, loc,
+        arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::eq, seen,
+            arith::ConstantIntOp::create(rewriter, loc, 0, 64)),
+        rewriter.getStringAttr(windowClash(*buffer)));
+  }
   for (const WorldBuffer *buffer : owned) {
     Value clash;
     if (options.gpu)
@@ -22980,13 +23094,16 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
       // The rows of the window are the entity's for this run: each says so
       // (run and id), and where it said another entity of the same run,
       // or the window is not rows the buffer has, the query's end stops
-      // the program. (Atomically on the GPU, where that costs little. On
+      // the program. (Atomically on the GPU, where the query reads the
+      // buffer by its name; else its window counted, see lowerQuery. On
       // the CPU a load and a store, also on many threads, where a locked
       // exchange would cost more: one after another every clash is found,
       // at once on threads one that two of them make at the same moment
       // may not be.)
       Value tag = ownerTags.lookup(op);
       ownerTags.erase(op);
+      Value counts = windowCounts.lookup(op);
+      windowCounts.erase(op);
       Type i64 = rewriter.getI64Type();
       Value start = arith::ExtSIOp::create(rewriter, loc, i64, claim.getStart());
       Value end = arith::AddIOp::create(
@@ -23020,7 +23137,24 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
         noteRankWrite(rewriter, loc, world, buffer, start,
                       arith::SubIOp::create(rewriter, loc, end, one));
       }
-      if (tag) {
+      if (counts && onGpu) {
+        // (Its window counted: one more from its start, one less from its
+        // end. See lowerQuery.)
+        auto some = scf::IfOp::create(
+            rewriter, loc,
+            arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::slt,
+                                  start, end));
+        rewriter.setInsertionPointToStart(some.thenBlock());
+        Type i32 = rewriter.getI32Type();
+        memref::AtomicRMWOp::create(
+            rewriter, loc, arith::AtomicRMWKind::addi,
+            arith::ConstantIntOp::create(rewriter, loc, 1, 32), counts,
+            ValueRange{world.toIndex(loc, start)});
+        memref::AtomicRMWOp::create(
+            rewriter, loc, arith::AtomicRMWKind::addi,
+            arith::ConstantIntOp::create(rewriter, loc, i32, -1), counts,
+            ValueRange{world.toIndex(loc, end)});
+      } else if (tag) {
         Value owners = world.bufferOwners(buffer);
         auto rows = scf::ForOp::create(
             rewriter, loc, world.toIndex(loc, start), world.toIndex(loc, end),
@@ -25627,6 +25761,7 @@ struct EntLowerToLoops
     // Rows of buffers written in queries (not those that take turns).
     ownerRuns.clear();
     ownerTags.clear();
+    windowCounts.clear();
     ranksMode = ranks;
     explainingStateAccess = explainStateAccess;
     partitionCount = ranks ? partitions : 0;

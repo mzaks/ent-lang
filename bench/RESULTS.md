@@ -4501,6 +4501,10 @@ made on the GPU (about 0.3 ms a making), but 1.22 s against 0.18 on all
 cores: the forces alone take 1.7 ms a step on the GPU, in f64, which
 this GPU does at a 64th of its f32 rate, of 32,000 threads; filling the
 lists 63 ms a making. Not a workload for this GPU.
+(2026-10-26: the lists filled in 8.6 ms, their windows counted rather
+than each row claimed, docs/gpu.md; the melt 0.70 s. Of it the forces
+1.48 ms a step on the GPU, 149 ms in all, and the lists 8.6 and 8.0 ms
+a making.)
 
 **The epidemic** has no index declared: its `Order` and `Index` are
 made by hand with running sums for the last eight days of stubs (a

@@ -1,0 +1,42 @@
+// Windows of a buffer taken in a `gpu system` that only writes them (not
+// read by its name): counted where they start and end, a row in two of
+// them a clash (test/Integration/gpu.test). On the first day each takes
+// rows of its own; on the second they overlap, which stops the program
+// as on the CPU.
+import console
+
+component Item { id: i32, start: i32 } capacity 4096
+buffer Marks { by: i32 } capacity 16384
+unique Day: i32
+unique Sum: i64
+
+world {
+  for i in 0..3000 { spawn { Item { id: i, start: 0 } } }
+}
+
+system ready() {
+  Marks = [{ by: 0 - 1 }; 6000]
+}
+
+gpu system place() {
+  for it: mut Item {
+    it.start = if Day == 0 { it.id * 2 } else { it.id }
+  }
+}
+
+gpu system mark() {
+  for it: Item, w: mut Marks[it.start, 2] {
+    w[0].by = it.id
+    w[1].by = it.id
+  }
+}
+
+system report() {
+  Sum = 0
+  for r in 0..len(Marks) { Sum += (Marks[r].by as i64) * (r as i64) }
+  put("day {Day}: {Sum}")
+  Day += 1
+}
+
+schedule day() { ready() place() mark() report() }
+main { loop { day() } until Day >= 2 }
