@@ -381,3 +381,39 @@ index Tree of Dot morton (x, y) cell 1.0
 component Dot { x: f64, y: f64 } capacity 8
 // expected-error @+1 {{a Morton index's keys are worked out for every entity each time: it is not 'incremental'}}
 index Tree of Dot morton (x, y) incremental
+
+// -----
+
+component Dot { x: f64 } capacity 8
+// expected-error @+1 {{a k-d tree is of two places or of three}}
+index Tree of Dot kdtree (x)
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+// expected-error @+1 {{a k-d tree's cells are split at their medians: no 'bits' ('leaf' says how many a cell holds)}}
+index Tree of Dot kdtree (x, y) bits 10
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+// expected-error @+1 {{a k-d tree's cells are split at their medians: no 'cell' ('leaf' says how many a cell holds)}}
+index Tree of Dot kdtree (x, y) cell 1.0
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+// expected-error @+1 {{a cell holds 1 entity or more before it is split}}
+index Tree of Dot kdtree (x, y) leaf 0
+
+// -----
+
+component Dot { x: f64, y: f64 } capacity 8
+// expected-error @+1 {{a k-d tree's medians are worked out for every entity each time: it is not 'incremental'}}
+index Tree of Dot kdtree (x, y) incremental
+
+// -----
+
+component Dot { x: f64, y: bool } capacity 8
+// expected-error @+1 {{a grid is over places, f32, f64, i32 or i64; 'y' is}}
+index Tree of Dot kdtree (x, y)

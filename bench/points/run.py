@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """The k nearest neighbours of every point (bench/points/knn2.ent and
-knn3.ent, by the grid index and by a Morton one) against the Problem Based Benchmark Suite's
-nearestNeighbors (github.com/cmuparlay/pbbsbench) and its octTree: a
-kd-tree split by the Morton order of the points (Blelloch and Dobson,
-ALENEX 2022), on the same points.
+knn3.ent, by the grid index, a Morton one and a k-d tree) against the
+Problem Based Benchmark Suite's nearestNeighbors
+(github.com/cmuparlay/pbbsbench) and its octTree: a kd-tree split by the
+Morton order of the points (Blelloch and Dobson, ALENEX 2022); and
+against nanoflann (github.com/jlblancoc/nanoflann, a k-d tree of splits
+at the middle of the widest spread, bench/points/nanoflann.cc), on the
+same points.
 
 PBBS is fetched at a fixed commit and built into build/bench/points/pbbsbench
 with the machine's own instruction set; its generator (randPoints) makes
@@ -20,11 +23,15 @@ run is held against a scan by bench/points/check.cc (all k of --samples
 points), and octTree's once (PBBS leaves its last point out).
 
 The Morton index is `morton (..) leaf 32 clustered`: its points kept in
-its order, as octTree asks its points in the order of its tree.
+its order, as octTree asks its points in the order of its tree; the k-d
+tree `kdtree (..) leaf 16 clustered` (16 the best of 8, 16 and 32 on
+3DinCube k 10). nanoflann is fetched at a fixed tag into
+build/bench/points/nanoflann-src, its tree of leaves of 10 (its own
+default), made on as many threads as it asks.
 
-Variants, each its own process, round-robin: ent and octTree on one core
-(CPU 2, taskset; PARLAY_NUM_THREADS=1) and on all (whatever ent-lang and
-ParlayLib take). A run of ent makes the index anew and asks every point;
+Variants, each its own process, round-robin: ent, octTree and nanoflann
+on one core (CPU 2, taskset; PARLAY_NUM_THREADS=1, OMP_NUM_THREADS=1) and
+on all (whatever ent-lang, ParlayLib and OpenMP take). A run of ent makes the index anew and asks every point;
 octTree's makes its tree and asks every point. Reports the median over
 --rounds of each process's best run, in ms, and of ent's the making of
 the index.
@@ -37,7 +44,7 @@ CPU). Held against octTree on all cores.
 
 Usage: bench/points/run.py [--size 1000000] [--clustered 100000]
                            [--rounds 3] [--samples 200]
-                           [--indexes grid,morton] [--gpu]
+                           [--indexes grid,morton,kdtree] [--gpu]
 """
 
 import argparse
@@ -52,6 +59,9 @@ OUT = os.path.join(ROOT, "build", "bench", "points")
 PBBS = os.path.join(OUT, "pbbsbench")
 PBBS_URL = "https://github.com/cmuparlay/pbbsbench.git"
 PBBS_COMMIT = "3932578"
+NANOFLANN = os.path.join(OUT, "nanoflann-src")
+NANOFLANN_URL = "https://github.com/jlblancoc/nanoflann.git"
+NANOFLANN_TAG = "2.0.1"
 ENT = os.path.join(ROOT, "tools", "ent")
 FLAGS = "CCFLAGS=-mcx16 -O3 -march=native -std=c++17 -DNDEBUG -I ."
 NN = os.path.join(PBBS, "benchmarks", "nearestNeighbors")
@@ -81,6 +91,14 @@ def fetch_pbbs():
                            ("benchmarks/nearestNeighbors/octTree", "neighbors")):
         if not os.path.exists(os.path.join(PBBS, folder, target)):
             run(["make", "-s", "-C", os.path.join(PBBS, folder), target, FLAGS])
+    if not os.path.isdir(NANOFLANN):
+        run(["git", "clone", "-q", NANOFLANN_URL, NANOFLANN])
+        run(["git", "-C", NANOFLANN, "checkout", "-q", NANOFLANN_TAG])
+    flann = os.path.join(OUT, "nanoflann")
+    if not os.path.exists(flann):
+        run(["g++", "-O3", "-march=native", "-fopenmp", "-std=c++17", "-DNDEBUG",
+             "-I", os.path.join(NANOFLANN, "include"),
+             os.path.join(HERE, "nanoflann.cc"), "-o", flann])
     check = os.path.join(OUT, "check")
     if not os.path.exists(check):
         run(["g++", "-O2", "-std=c++17", os.path.join(HERE, "check.cc"), "-o", check])
@@ -100,7 +118,8 @@ def make_points(name, flags, dims, n):
 # The index of each variant: the line knn2.ent and knn3.ent declare it
 # with, and what takes its place.
 GRID = "grid ({sides}) cell G.cell"
-INDEXES = {"grid": GRID, "morton": "morton ({sides}) leaf 32 clustered"}
+INDEXES = {"grid": GRID, "morton": "morton ({sides}) leaf 32 clustered",
+           "kdtree": "kdtree ({sides}) leaf 16 clustered"}
 
 
 # What makes knn2.ent and knn3.ent run on the GPU (see --gpu).
@@ -155,6 +174,11 @@ def ent_times(output):
     runs = [(float(a), float(b)) for a, b in
             re.findall(r"knn ([0-9.]+) ms, made ([0-9.]+) ms", output)]
     return min(runs)
+
+
+def flann_times(output):
+    return min((float(a), float(b)) for a, b in
+               re.findall(r"nanoflann ([0-9.]+) ms, made ([0-9.]+) ms", output))
 
 
 def pbbs_time(output):
@@ -214,21 +238,37 @@ def main():
                                           capture_output=True, text=True)
                     if said.returncode:
                         raise SystemExit(f"octTree {name} k {k}: {said.stdout}")
+                env = dict(os.environ)
+                if not par:
+                    env["OMP_NUM_THREADS"] = "1"
+                out = run(([] if par else one) + [os.path.join(OUT, "nanoflann"),
+                                                  "points.pts", str(k), "3"],
+                          cwd=folder, env=env)
+                results.setdefault(key + ("flann", par), []).append(flann_times(out))
+                if round_ == 0:
+                    said = subprocess.run([check, "points.pts", "found.out", str(k),
+                                           str(args.samples)], cwd=folder,
+                                          capture_output=True, text=True)
+                    if said.returncode:
+                        raise SystemExit(f"nanoflann {name} k {k}: {said.stdout}")
 
     for par in modes:
         print({False: "one core", True: "all cores",
-               "gpu": "GPU (octTree on all cores)"}[par])
-        print(f"{'points':<12} {'n':>9} {'k':>3} | {'grid':>9} {'(made)':>8} "
-              f"| {'morton':>9} {'(made)':>8} | {'octTree':>9}")
+               "gpu": "GPU (octTree and nanoflann on all cores)"}[par])
+        columns = list(INDEXES) + ["nanoflann"]
+        print(f"{'points':<12} {'n':>9} {'k':>3} | " +
+              " | ".join(f"{c:>9} {'(made)':>8}" for c in columns) +
+              f" | {'octTree':>9}")
         for name, dims, k, n, folder in tests:
-            row = []
-            for index in ("grid", "morton"):
-                ent = results.get((name, k, index, par), [(0.0, 0.0)])
-                row += [statistics.median(t for t, _ in ent),
-                        statistics.median(m for _, m in ent)]
-            row.append(statistics.median(results[(name, k, "oct", bool(par))]))
-            print(f"{name:<12} {n:>9} {k:>3} | {row[0]:9.2f} {row[1]:8.2f} "
-                  f"| {row[2]:9.2f} {row[3]:8.2f} | {row[4]:9.2f}")
+            cells = []
+            for index in columns:
+                ran = results.get((name, k, index, par) if index != "nanoflann"
+                                  else (name, k, "flann", bool(par)), [(0.0, 0.0)])
+                cells.append(f"{statistics.median(t for t, _ in ran):9.2f} "
+                             f"{statistics.median(m for _, m in ran):8.2f}")
+            oct = statistics.median(results[(name, k, "oct", bool(par))])
+            print(f"{name:<12} {n:>9} {k:>3} | " + " | ".join(cells) +
+                  f" | {oct:9.2f}")
 
 
 if __name__ == "__main__":

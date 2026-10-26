@@ -5,7 +5,7 @@
 // in c`; docs/syntax.md): what cannot be.
 
 component Dot { x: f64, y: f64, m: f64 } capacity 8
-// expected-error @+1 {{only a Morton index has cells that keep values of their entities ('index N of C morton (x, y) cells { m: sum C.m }')}}
+// expected-error @+1 {{only a Morton index and a k-d tree have cells that keep values of their entities ('index N of C morton (x, y) cells { m: sum C.m }')}}
 index Cells of Dot grid (x, y) cell 1.0 cells { m: sum Dot.m }
 
 // -----

@@ -1,0 +1,84 @@
+// K-d trees whose readers are all `gpu` systems, made on the GPU where the
+// program is built for one (test/Integration/gpu.test): of 3000 dots most
+// near the middle, in three sides, with their cells' masses, a walk for
+// every dot (opening the cells near it, the mass of the others) and the
+// dots near it; and of whole numbers in two sides with a leaf of one (some
+// leaves of none), the nearest 3 to each. Frame by frame as the dots move
+// and spots come; the same on the CPU.
+import console
+import wyhash
+component Dot { x: f64, y: f64, z: f64, m: f64 } capacity 4096
+component Got { n: i64, m: f64, near: i64 } capacity 4096
+component Spot { u: i32, v: i32, sum: i64 } capacity 64
+unique T { n: i64, m: f64, near: i64, spots: i64, frame: i32 }
+index Tree of Dot kdtree (x, y, z) leaf 4 cells { m: sum Dot.m }
+index Flat of Spot kdtree (u, v) leaf 1
+
+world {
+  for i in 0..3000 {
+    let r = wyrand_unit(7, i as i64 * 4)
+    let s = r * r * r
+    spawn { Dot { x: (wyrand_unit(7, i as i64 * 4 + 1) - 0.5) * s, y: (wyrand_unit(7, i as i64 * 4 + 2) - 0.5) * s,
+                  z: (wyrand_unit(7, i as i64 * 4 + 3) - 0.5) * s, m: wyrand_unit(8, i as i64) },
+            Got { n: 0, m: 0.0, near: 0 } }
+  }
+}
+
+gpu system each() {
+  for me, a: Dot, g: mut Got {
+    var n: i64 = 0
+    var m: f64 = 0.0
+    for c in Tree.cells {
+      let dx = c.x - a.x
+      let dy = c.y - a.y
+      let dz = c.z - a.z
+      if c.leaf { n += c.count as i64 }
+      if dx * dx + dy * dy + dz * dz < 4.0 * c.size * c.size { open }
+      if !c.leaf { m = m + c.m }
+    }
+    var near: i64 = 0
+    for o, b: Dot near (a.x, a.y, a.z) within 0.05 in Tree { near += 1 }
+    g.n = n
+    g.m = m
+    g.near = near
+  }
+}
+
+gpu system spots() {
+  for s: mut Spot {
+    var sum: i64 = 0
+    for o, t: Spot nearest 3 to (s.u, s.v) in Flat { sum += (t.u * 10 + t.v) as i64 }
+    s.sum = sum
+  }
+}
+
+gpu system move() {
+  for me, a: mut Dot {
+    a.x = a.x * 0.97 + 0.01
+    a.y = a.y * 1.02
+  }
+}
+
+system more() {
+  for i in 0..7 {
+    let k = T.frame * 7 + i
+    spawn { Spot { u: (k * 37) % 23 - 11, v: (k * 13) % 17 - 8, sum: 0 } }
+  }
+}
+
+system show() {
+  T.n = 0
+  T.m = 0.0
+  T.near = 0
+  T.spots = 0
+  for g: Got {
+    T.n += g.n
+    T.m += g.m
+    T.near += g.near
+  }
+  for s: Spot { T.spots += s.sum }
+  put("frame {T.frame}: leaf rows {T.n} far mass {T.m} near {T.near} spots {T.spots}")
+  T.frame += 1
+}
+schedule go() { more() each() spots() show() move() }
+main { loop { go() } until T.frame >= 4 }

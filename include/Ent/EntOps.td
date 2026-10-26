@@ -137,6 +137,34 @@ def Ent_ClusterOp
   let assemblyFormat = "$index attr-dict";
 }
 
+def Ent_KdTreeOp
+    : Ent_Op<"kdtree", [DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
+  let summary = "Make a k-d tree of an index's rows";
+  let description = [{
+    ```mlir
+    ent.kdtree @Sites cells @Sites_cells positions ["x", "y"] leaf 16
+    ```
+    `@Sites` is a k-d tree index (`kdtree (x, y)`), its rows just listed:
+    they are put in the order of its leaves, and its cells (`@Sites_cells`,
+    laid out as a Morton index's) made: each cell's rows split at their
+    median on the side its box is widest, the half below first (half its
+    rows, rounded down), until a cell holds `leaf` rows at most, every leaf
+    at one level (so of `leaf 1` some may hold none); children two
+    to a cell, side by side, level after level (a cell `c`'s at `2c + 1`);
+    each cell's box its rows' on every side. Each row's `key` is its own
+    number. With `at` (a buffer of a field `row`, i32), the row of each
+    row's `place` there, of as many rows: where each entity's row went (as
+    the GPU's making of the index tells them). In a system, outside its
+    queries: the index's own update.
+  }];
+  let arguments = (ins FlatSymbolRefAttr:$index, FlatSymbolRefAttr:$cells,
+      StrArrayAttr:$positions, I64Attr:$leaf,
+      OptionalAttr<FlatSymbolRefAttr>:$at);
+  let assemblyFormat =
+      "$index `cells` $cells `positions` $positions `leaf` $leaf (`at` $at^)? "
+      "attr-dict";
+}
+
 def Ent_BufferLenOp : Ent_Op<"buffer.len", [
     DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
   let summary = "How many rows a buffer has";

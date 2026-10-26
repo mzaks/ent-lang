@@ -2324,7 +2324,7 @@ system gravity() {
 - `cells { name: sum e | min e | max e, .. }`, after the rest of the
   declaration: what each cell keeps, `e` an expression of the fields of
   the index's component (`Star.m * Star.x`), all of one type, a number;
-  so of a Morton index only. The leaves' are worked out from their rows,
+  so of a Morton index or a k-d tree only. The leaves' are worked out from their rows,
   in the order of the rows, the others' from their cells, when the
   index is made: the same on one core and on many.
 - `for c in Name.cells { .. }` visits the cells depth first from the
@@ -2347,6 +2347,42 @@ system gravity() {
   bodies, a level after another, from them.
 - Gravity against Barnes's treecode 1.4: `bench/treecode/run.py`
   (bench/RESULTS.md).
+
+#### k-d trees
+
+```
+index Sites of Site kdtree (x, y, z) leaf 16 clustered
+```
+
+`kdtree (x, y)` or `kdtree (x, y, z)` in place of `morton (..)` holds the
+entities in the order of a k-d tree's leaves: each cell's split in two
+at the median of its entities on the side its box is widest, the half
+below first (half of them, rounded down), until a cell has `leaf` (16
+by default) or fewer, every leaf at one level. Its places, its queries
+(`near`, `between`, `nearest k`, `after me`), its cells (`Name_cells`,
+laid out as a Morton index's), `cells { }` and the walk over them are a
+Morton index's, the same entities visited:
+
+- Its cells are as even as the entities are many, wherever they bunch,
+  and each cell's box is its entities' (a Morton cell's is a cube of
+  the box, cut in halves); a cell's `size` is its box's widest side and
+  its middle the box's.
+- A cell `c`'s two cells are at `2c + 1` and `2c + 2`, a level after the
+  other. Of `leaf 1`, where the entities are not a power of two, some
+  leaves have none (each leaf is at the same level).
+- It is made anew each time (lazy or eager, `clustered`; no `bits`, not
+  `incremental`): the entities in order by each side (`for ... by`'s
+  radix sort), then level by level each cell's split in each of those
+  orders at its median, those below it first, in their order still;
+  each row's key is its number.
+- Built for a GPU (`--gpu`), where every system that reads it is a `gpu
+  system` and no system on the CPU writes its places, and it is not
+  `clustered`, it is made on the GPU, as a Morton index and a grid are
+  (docs/indexes.md, "Made on the GPU").
+- `nearest k` goes down from the root as a Morton index's does, without
+  the rows around a key first (a k-d tree has no key of a place).
+- What it pays, against a Morton index, PBBS's octTree and nanoflann:
+  `bench/points/run.py` (bench/RESULTS.md).
 
 #### Indexes of a relation
 

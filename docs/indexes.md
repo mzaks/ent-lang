@@ -463,7 +463,7 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 | 5 | Morton linear quadtree and octree | Keys made of fields, ranges of prefixes | designed (2026-10-25, below): `morton`, `bits`, `leaf`, `cells { }` sums, `for c in Name.cells` with `open`; references PBBS `octTree` (`bench/points`) and Barnes's treecode |
 | 6 | Relation indexes by source and target everywhere, indexes on edge fields | | built: copies in the index's order, kept in order in place, `by` and `where` on edge loops and `index .. of Relation` (2026-10-24, see 5.6) |
 | 7 | Partitions by value | | |
-| 8 | k-d tree and `nearest k` | | `nearest k` built on grids (2026-10-23); k-d tree to do |
+| 8 | k-d tree and `nearest k` | | built: `nearest k` on grids (2026-10-23); `kdtree (..)`, made on one core, many and the GPU (2026-10-26, see below) |
 | 9 | Embeddings by brute force (int8 and binary, ranked again) | The recall to measure against | needs a vector type |
 | 10 | IVF with k-means in ent-lang | | |
 | 11 | LSH families | | |
@@ -913,6 +913,40 @@ Steps:
    sort, and no clustered order). The LJ melt the same on the GPU but
    slower (f64, 32,000 atoms); the epidemic declares no index.
    `bench/moving/run.py`, `bench/points/run.py --gpu`.
+
+**Step 8, as it stands** (2026-10-26, the user's choices: the median
+of the widest side, lists presorted by each side, nanoflann, octTree
+and the Morton index as references, made on the GPU too). `index N of C
+kdtree (x, y[, z]) [leaf l] [wrap s] [clustered] [cells { .. }]` (docs/
+syntax.md, "k-d trees"). Its cells are laid out as a Morton index's
+(`first`, `count`, `level`, `child`, `kids`, `next`, `inside`, `size`,
+a box and a middle on each side), so `near`, `between`, `nearest k`,
+`after me`, `cells { }` and the walk with `open` are the Morton
+index's, unchanged; only the making is new, `ent.kdtree` (KdTreeOp) in
+place of the index text's `N_split`:
+
+- The rows' numbers in a list for each side, each by the radix sort of
+  `for ... by`; then level by level each cell's box (the first and the
+  last of each list), its side, its two children (half its rows, rounded
+  down, then the rest; every leaf at one level, a cell `c`'s at `2c + 1`
+  and `2c + 2`), and each list split stably at the cell's median into
+  its other: on one core and many a cell to a turn (two pointers),
+  levels of fewer than 64 cells by pieces of them on many threads; on
+  the GPU every place at once, each place's cell kept, one running sum
+  over all the lists of how many below come first (lowerKdTreeOnGpu).
+- On the GPU (`N_update_gpu`, where EntIndexes chooses it as for a
+  Morton index): the rows listed, the tree (with `at N_at`, where each
+  place's row went, from which each entity takes its row), and the
+  cells' values level by level from the deepest up.
+- Tests: `kdtree.test` (the Morton programs with a k-d tree in its
+  place, against a grid's answers, and the cells as laid out, one core
+  and all), `gpu.test` (`Inputs/kdtree_gpu.ent` and the same programs
+  made on the GPU), errors in `test/Import/index-errors.ent`.
+- Measured (bench/RESULTS.md, 2026-10-26): its queries the fastest ent
+  has on one core, 3 to 3.5 times nanoflann's on a million points; its
+  making 90 ms on one core, 35 on all, 5 to 8 on the GPU (the Morton
+  index's 16, 9 and 16). On all cores the Morton index stays the
+  faster in all.
 
 ## 9. When it is done
 

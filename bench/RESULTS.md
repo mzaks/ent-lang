@@ -4546,3 +4546,67 @@ making), the GPU's:
 The makings of a million keys are 7 to 9 ms less; the Morton queries on
 the GPU are still about twice the CPU's (walks without the clustered
 order), which the sort does not change.
+
+## 2026-10-26: a k-d tree against nanoflann, octTree and the Morton index
+
+`index N of C kdtree (..) leaf 16` (docs/indexes.md, step 8): each
+cell split at the median of its rows on its widest side, the rows kept
+in a list by each side (one radix sort each) and split stably level by
+level; the cells laid out as a Morton index's, so every query is its.
+nanoflann 2.0.1 (`bench/points/nanoflann.cc`, fetched by run.py, leaves
+of 10, its queries on all cores by OpenMP, the tree made on as many
+threads). `bench/points/run.py --gpu`, ms of a run (of it the making),
+median of 3; on mains power, native builds, RTX 4050 laptop GPU. The k-d
+tree and the Morton index clustered on the CPU, not on the GPU.
+
+One core:
+
+| points | n | k | Morton | k-d tree | nanoflann | octTree |
+|---|---|---|---|---|---|---|
+| 2DinCube | 1M | 1 | 198.8 (12.2) | 225.3 (65.2) | 681.9 (115.4) | 237.0 |
+| 2Dkuzmin | 100k | 1 | 23.7 (0.7) | 18.5 (4.5) | 38.2 (10.4) | 20.3 |
+| 3DinCube | 1M | 1 | 358.5 (16.3) | 358.0 (89.7) | 1073.2 (124.8) | 362.3 |
+| 3DonSphere | 1M | 1 | 256.2 (15.0) | 271.4 (89.9) | 857.5 (129.1) | 279.4 |
+| 3DinCube | 1M | 10 | 972.8 (17.7) | 921.8 (90.8) | 2779.7 (127.1) | 1098.3 |
+| 3Dplummer | 100k | 10 | 101.5 (1.1) | 92.6 (6.9) | 118.2 (9.8) | 136.0 |
+
+All cores:
+
+| points | n | k | Morton | k-d tree | nanoflann | octTree |
+|---|---|---|---|---|---|---|
+| 2DinCube | 1M | 1 | 25.7 (7.0) | 40.4 (21.8) | 67.9 (31.5) | 24.9 |
+| 2Dkuzmin | 100k | 1 | 2.9 (0.6) | 4.3 (2.5) | 9.5 (6.7) | 3.0 |
+| 3DinCube | 1M | 1 | 45.3 (9.3) | 67.2 (35.1) | 100.6 (34.9) | 36.7 |
+| 3DonSphere | 1M | 1 | 33.6 (8.5) | 57.8 (35.5) | 86.7 (37.4) | 29.4 |
+| 3DinCube | 1M | 10 | 100.8 (9.3) | 119.2 (34.6) | 229.6 (36.2) | 96.8 |
+| 3Dplummer | 100k | 10 | 10.7 (0.8) | 13.4 (4.0) | 16.4 (5.3) | 20.7 |
+
+The GPU (the index made there):
+
+| points | n | k | Morton | k-d tree | grid |
+|---|---|---|---|---|---|
+| 2DinCube | 1M | 1 | 33.5 (14.3) | 38.9 (4.8) | 18.2 (6.5) |
+| 2Dkuzmin | 100k | 1 | 9.3 (5.5) | 4.2 (1.1) | 950.9 (22.6) |
+| 3DinCube | 1M | 1 | 88.3 (16.2) | 83.9 (7.9) | 45.9 (7.0) |
+| 3DonSphere | 1M | 1 | 52.9 (16.0) | 54.7 (8.0) | 128.5 (7.0) |
+| 3DinCube | 1M | 10 | 175.8 (16.3) | 165.7 (8.1) | 96.7 (6.2) |
+| 3Dplummer | 100k | 10 | 22.4 (4.3) | 17.5 (1.7) | 3846 (18.2) |
+
+- The k-d tree's queries alone are the fastest ent has on one core
+  (3DinCube k 10: 831 ms against the Morton index's 955, octTree's
+  1098 in all); against nanoflann's queries 3 to 3.5 times as fast on
+  the million points, 1.3 on Plummer's 100,000. Its making is what it costs: 90 ms of a million in three sides
+  on one core (three sorts, 16 levels), 35 on all cores, against the
+  Morton index's 16 and 9.
+- On all cores the making (35 ms) is most of what the k-d tree loses:
+  each level splits each cell's three lists, a cell to a thread (levels
+  of fewer than 64 cells by pieces of them); 16 levels of 3 million
+  moves.
+- On the GPU the making is 5 to 8 ms (each level all places at once:
+  one running sum over the three lists, then each place written where
+  it goes), half the Morton index's there and a fifth of all cores'.
+  The queries there, not clustered, are as slow as the Morton index's.
+- Numbering the points anew every few levels by their place in the
+  first list, so that a cell's would be near in memory, cost more than
+  it saved on one core, and was taken out.
+- `leaf 16` was the best of 8, 16 and 32 on 3DinCube k 10.

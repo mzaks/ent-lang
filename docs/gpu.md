@@ -913,3 +913,18 @@ is in, and a row in two stops the program, as before. The lists are
 filled in 8.6 ms. `Inputs/gpu_window_clash.ent` (`gpu.test`): windows
 of their own on the first day, overlapping on the second, which stops
 the program on the GPU as on the CPU.
+
+## A k-d tree made on the GPU (2026-10-26)
+
+`ent.kdtree` in a `gpu system` (the k-d tree's `N_update_gpu`, chosen
+as a Morton index's is) is lowered to loops for the GPU
+(lowerKdTreeOnGpu): each side's list sorted by the GPU's radix sort
+(emitGpuRadixSort, which a `for ... by` uses too), then at each level
+the cells' boxes and children by a turn to a cell, and every place of
+the lists at once: its cell (kept from level to level), whether its row
+is below the cell's median, one running sum over all the lists of how
+many below come before it, and so where it goes, below from the cell's
+first place, the others from its median. Its arrays are scratch slots
+from 48 (there are now 64). A million points in three sides: made in
+about 8 ms, against 35 on all cores. `Inputs/kdtree_gpu.ent`
+(`gpu.test`).

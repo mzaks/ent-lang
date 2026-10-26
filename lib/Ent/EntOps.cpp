@@ -532,6 +532,32 @@ LogicalResult ClusterOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
   return success();
 }
 
+LogicalResult KdTreeOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
+  auto index =
+      symbolTable.lookupNearestSymbolFrom<BufferOp>(*this, getIndexAttr());
+  if (!index || !index->getAttrOfType<DictionaryAttr>("ent.index"))
+    return emitOpError("names ") << getIndexAttr() << ", which is no index";
+  if (!symbolTable.lookupNearestSymbolFrom<BufferOp>(*this, getCellsAttr()))
+    return emitOpError("names ") << getCellsAttr() << ", which is no buffer";
+  if (getAtAttr()) {
+    auto at = symbolTable.lookupNearestSymbolFrom<BufferOp>(*this, getAtAttr());
+    if (!at)
+      return emitOpError("names ") << getAtAttr() << ", which is no buffer";
+    auto fields = at.getFieldNames();
+    if (fields.size() != 1 || cast<StringAttr>(fields[0]).getValue() != "row" ||
+        !cast<TypeAttr>(at.getFieldTypes()[0]).getValue().isInteger(32))
+      return emitOpError("is told where rows went in ")
+             << getAtAttr() << ", which has more than a 'row' of i32";
+  }
+  if (getPositions().size() < 2 || getPositions().size() > 3)
+    return emitOpError("is of two places or of three");
+  if (getLeaf() < 1)
+    return emitOpError("has leaves of no rows");
+  if ((*this)->getParentOfType<QueryOp>())
+    return emitOpError("is in a 'for': it is made between them");
+  return success();
+}
+
 /// What marks a buffer a set (WorldLayout::kSetAttr).
 static constexpr StringLiteral kSetMark = "ent.set";
 

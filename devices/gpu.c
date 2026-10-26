@@ -691,16 +691,17 @@ int64_t ent_gpu_cell_get(int64_t offset, int64_t bytes) {
 // running sum of a query, in the GPU's memory, kept from run to run and
 // made bigger where a run needs more. (Queries run one after another on
 // the stream: one's kernels are done with them before the next's start.)
-static CUdeviceptr scratches[48];
-static int64_t scratchBytes[48];
+static CUdeviceptr scratches[64];
+static int64_t scratchBytes[64];
 
 void _mlir_ciface_ent_gpu_scratch(ent_gpu_memref *scratch, int64_t slot,
                                   int64_t size) {
   // (0 to 15 the running sums' values, a list's at 15; from 16 the bits
   // of those that count; from 32 what a loop's turns allocate, each its
   // part: see scratchForAllocations; from 40 how many windows of a
-  // buffer start and end at each row: see lowerQuery.)
-  if (slot < 0 || slot >= 48) {
+  // buffer start and end at each row: see lowerQuery; from 48 a k-d
+  // tree's making: see lowerKdTreeOnGpu.)
+  if (slot < 0 || slot >= 64) {
     fprintf(stderr, "ent: the GPU: more than 15 running sums in a 'for'\n");
     exit(3);
   }

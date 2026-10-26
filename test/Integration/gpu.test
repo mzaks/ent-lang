@@ -318,6 +318,39 @@
 // RUN: %ent run %t.mwhole.ent --gpu | diff %t.mwhole.cpu -
 // RUN: %ent run %t.mwrap.ent --gpu --parallel | diff %t.mwrap.cpu -
 
+// K-d trees whose readers are all `gpu` systems, made on the GPU
+// (`N_update_gpu`): a walk with the cells' masses, `near` and `nearest`,
+// and leaves of none, the same as on the CPU frame by frame; and the
+// Morton index's programs with a k-d tree in its place.
+// RUN: %ent run %S/Inputs/kdtree_gpu.ent > %t.kd.cpu
+// RUN: %ent build %S/Inputs/kdtree_gpu.ent --gpu -o %t.kd
+// RUN: %t.kd | diff %t.kd.cpu -
+// RUN: env ENT_GPU_PROTECT=1 %t.kd | diff %t.kd.cpu -
+// RUN: %ent run %S/Inputs/kdtree_gpu.ent --gpu --parallel | diff %t.kd.cpu -
+// RUN: nm %t.kd > %t.kd.nm
+// RUN: FileCheck %s --check-prefix=KDGPU --input-file=%t.kd.nm
+// RUN: not grep -q "_update$" %t.kd.nm
+// RUN: FileCheck %s --check-prefix=KD --input-file=%t.kd.cpu
+// KDGPU-DAG: Tree_update_gpu
+// KDGPU-DAG: Flat_update_gpu
+// KD: frame 0: leaf rows 3066158 far mass 2887343.474397 near 2106786 spots -19
+// KD: frame 3: leaf rows 2874158 far mass 2998383.13915 near 2124106 spots -84
+// RUN: sed -E -e 's/morton \(([^)]*)\)( bits [0-9]+)?/kdtree (\1)/' -e 's/^system count\(\)/gpu system count()/' -e 's/^system move\(\)/gpu system move()/' %S/Inputs/morton_moving.ent > %t.kdmove.ent
+// RUN: %ent run %t.kdmove.ent > %t.kdmove.cpu
+// RUN: %ent run %t.kdmove.ent --gpu | diff %t.kdmove.cpu -
+// RUN: sed -E -e 's/morton \(([^)]*)\)( bits [0-9]+)?/kdtree (\1)/' %t.m3.ent > %t.kd3.ent
+// RUN: sed -E -e 's/morton \(([^)]*)\)( bits [0-9]+)?/kdtree (\1)/' %t.mwhole.ent > %t.kdwhole.ent
+// RUN: sed -E -e 's/morton \(([^)]*)\)( bits [0-9]+)?/kdtree (\1)/' %t.mwrap.ent > %t.kdwrap.ent
+// RUN: %ent run %t.kd3.ent > %t.kd3.cpu
+// RUN: %ent run %t.kd3.ent --gpu | diff %t.kd3.cpu -
+// RUN: %ent run %t.kdwhole.ent > %t.kdwhole.cpu
+// RUN: %ent run %t.kdwhole.ent --gpu | diff %t.kdwhole.cpu -
+// RUN: %ent run %t.kdwrap.ent > %t.kdwrap.cpu
+// RUN: %ent run %t.kdwrap.ent --gpu --parallel | diff %t.kdwrap.cpu -
+// RUN: sed -E -e 's/morton \(([^)]*)\)( bits [0-9]+)?/kdtree (\1)/' %S/Inputs/gpu_nearest.ent > %t.kdnearest.ent
+// RUN: %ent run %t.kdnearest.ent > %t.kdnearest.cpu
+// RUN: %ent run %t.kdnearest.ent --gpu | diff %t.kdnearest.cpu -
+
 // The k nearest of every dot in a grid and a Morton index, in a `gpu`
 // system, k a unique's: each dot's list a part of an array made before
 // the kernel, not of the GPU's heap; both indexes made on the GPU.

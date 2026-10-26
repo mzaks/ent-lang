@@ -9383,6 +9383,870 @@ static void lowerDuplicates(IRRewriter &rewriter, ModuleOp module,
   }
 }
 
+static void emitRadixSort(IRRewriter &rewriter, Location loc, Value keys,
+                          Value ids, Value count, bool parallel);
+static Value orderKey(OpBuilder &builder, Location loc, Value stored,
+                      Type type);
+
+/// Below how many cells a level of a k-d tree's making on many threads
+/// goes by pieces of its cells, not cell by cell; and how many pieces of
+/// a level at least (see lowerKdTrees).
+static constexpr int64_t kFewCells = 64;
+static constexpr int64_t kPieces = 256;
+
+static Value parallelTurns(IRRewriter &rewriter, Location loc, Value count,
+                           bool gpu);
+static int64_t runningChunk(bool gpu);
+static Value emitRunningScan(IRRewriter &rewriter, Location loc, Value scratch,
+                             Value count, Value start, StringRef rule,
+                             Type valueType, bool gpu,
+                             function_ref<Value(Value at)> total);
+static Value gpuScratch(IRRewriter &rewriter, Location loc, ModuleOp program,
+                        int64_t slot, Type element, Value count);
+static Value emitGpuRadixSort(IRRewriter &rewriter, Location loc,
+                              ModuleOp program, ArrayRef<Value> keys,
+                              ArrayRef<Value> whose, Value listed);
+
+/// The GPU's scratch arrays of a k-d tree's making (see devices/gpu.c):
+/// each side's two lists from 48, then those below, the cells' sides,
+/// each place's cell, the scan, and the rows as they move.
+static constexpr int64_t kKdSlots = 48;
+
+/// Lower `tree`, in a `gpu` system, to loops for the GPU (`device` its
+/// copy of the world; `world` the CPU's, which keeps the buffers' counts,
+/// given to the GPU's as they change): made as on the CPU (see
+/// lowerKdTrees), the lists sorted by the GPU's radix sort; but at each
+/// level every place of the lists at once, not a cell at a time: each
+/// place's cell (`owner`), whether each row is below its cell's median,
+/// and, of all the lists one after another, a running sum of how many
+/// below come before each place, which says where it goes: those below
+/// from the cell's first place, the others from its median.
+static void lowerKdTreeOnGpu(IRRewriter &rewriter, KdTreeOp tree,
+                             const WorldLayout &layout, WorldAccess &world,
+                             WorldAccess &device) {
+  Location loc = tree.getLoc();
+  ModuleOp program = tree->getParentOfType<ModuleOp>();
+  rewriter.setInsertionPoint(tree);
+  const WorldBuffer &index = layout.getBuffer(tree.getIndexAttr().getAttr());
+  const WorldBuffer &cells = layout.getBuffer(tree.getCellsAttr().getAttr());
+  Type i32 = rewriter.getI32Type();
+  Type i64 = rewriter.getI64Type();
+  Type f64 = rewriter.getF64Type();
+  Type indexType = rewriter.getIndexType();
+  auto constant = [&](int64_t value) -> Value {
+    return arith::ConstantIndexOp::create(rewriter, loc, value);
+  };
+  auto whole = [&](int64_t value, Type type) -> Value {
+    return arith::ConstantIntOp::create(rewriter, loc, type, value);
+  };
+  Value zero = constant(0), one = constant(1), two = constant(2);
+  auto load = [&](Value from, Value at) -> Value {
+    return memref::LoadOp::create(rewriter, loc, from, ValueRange{at});
+  };
+  auto store = [&](Value value, Value to, Value at) {
+    memref::StoreOp::create(rewriter, loc, value, to, ValueRange{at});
+  };
+  auto add = [&](Value a, Value b) -> Value {
+    return arith::AddIOp::create(rewriter, loc, a, b);
+  };
+  auto sub = [&](Value a, Value b) -> Value {
+    return arith::SubIOp::create(rewriter, loc, a, b);
+  };
+  auto mul = [&](Value a, Value b) -> Value {
+    return arith::MulIOp::create(rewriter, loc, a, b);
+  };
+  auto less = [&](Value a, Value b) -> Value {
+    return arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult, a,
+                                 b);
+  };
+  auto toIndex = [&](Value value) -> Value {
+    return arith::IndexCastOp::create(rewriter, loc, indexType, value);
+  };
+  auto to32 = [&](Value value) -> Value {
+    return arith::IndexCastOp::create(rewriter, loc, i32, value);
+  };
+  auto to64 = [&](Value value) -> Value {
+    return arith::IndexCastOp::create(rewriter, loc, i64, value);
+  };
+  auto scratch = [&](int64_t slot, Type element, Value count) -> Value {
+    return gpuScratch(rewriter, loc, program, slot, element, count);
+  };
+  // A loop for the GPU over [0, count).
+  auto each = [&](Value count, function_ref<void(Value)> body) {
+    OpBuilder::InsertionGuard guard(rewriter);
+    body(parallelTurns(rewriter, loc, count, /*gpu=*/true));
+  };
+  auto column = [&](const WorldBuffer &buffer, StringRef field) -> Value {
+    return device.bufferField(buffer, *buffer.find(field));
+  };
+  // A buffer's count, the CPU's and the GPU's.
+  auto setCount = [&](const WorldBuffer &buffer, Value rows) {
+    store(to64(rows), world.bufferCount(buffer), zero);
+    callGpu(
+        rewriter, loc, program, "ent_gpu_cell_set",
+        ValueRange{whole(buffer.countOffset, i64), to64(rows), whole(8, i64)});
+  };
+  Value n = toIndex(load(world.bufferCount(index), zero));
+  auto any = scf::IfOp::create(rewriter, loc, less(zero, n),
+                               /*withElseRegion=*/true);
+  {
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(any.elseBlock());
+    setCount(cells, zero);
+    if (tree.getAtAttr())
+      setCount(layout.getBuffer(tree.getAtAttr().getAttr()), zero);
+  }
+  rewriter.setInsertionPointToStart(any.thenBlock());
+
+  // How many levels split (as on the CPU).
+  Value leaf = constant(tree.getLeaf());
+  auto deep = scf::WhileOp::create(
+      rewriter, loc, TypeRange{indexType, indexType}, ValueRange{n, zero},
+      [&](OpBuilder &, Location, ValueRange state) {
+        scf::ConditionOp::create(rewriter, loc, less(leaf, state[0]), state);
+      },
+      [&](OpBuilder &, Location, ValueRange state) {
+        scf::YieldOp::create(
+            rewriter, loc,
+            ValueRange{
+                arith::DivUIOp::create(rewriter, loc, add(state[0], one), two),
+                add(state[1], one)});
+      });
+  Value levels = deep.getResult(1);
+  auto shifted = [&](Value by) -> Value {
+    return arith::ShLIOp::create(rewriter, loc, one, by);
+  };
+  Value leaves = shifted(levels);
+  Value total = sub(mul(leaves, two), one);
+  setCount(cells, total);
+
+  // Each side's list, sorted by the GPU's sort (in its scratch arrays 0 to
+  // 3), into the first of its two.
+  SmallVector<Value> places, lists, others;
+  for (Attribute position : tree.getPositions())
+    places.push_back(column(index, cast<StringAttr>(position).getValue()));
+  Type placeType = cast<MemRefType>(places.front().getType()).getElementType();
+  unsigned sides = places.size();
+  Value keys[2] = {scratch(0, i64, n), scratch(2, i64, n)};
+  Value whose[2] = {scratch(1, i64, n), scratch(3, i64, n)};
+  for (auto [d, position] : llvm::enumerate(tree.getPositions())) {
+    Value side = places[d];
+    Type declared = index.find(cast<StringAttr>(position).getValue())->type;
+    each(n, [&](Value i) {
+      store(orderKey(rewriter, loc, load(side, i), declared), keys[0], i);
+      store(to64(i), whose[0], i);
+    });
+    Value flipped = emitGpuRadixSort(rewriter, loc, program, keys, whose, n);
+    Value sorted =
+        arith::SelectOp::create(rewriter, loc, flipped, whose[1], whose[0]);
+    Value rows = scratch(kKdSlots + 2 * d, i32, n);
+    each(n, [&](Value i) {
+      store(arith::TruncIOp::create(rewriter, loc, i32, load(sorted, i)), rows,
+            i);
+    });
+    lists.push_back(rows);
+    others.push_back(scratch(kKdSlots + 2 * d + 1, i32, n));
+  }
+  auto read = [&](Value flipped, unsigned d) -> Value {
+    return arith::SelectOp::create(rewriter, loc, flipped, others[d], lists[d]);
+  };
+  auto written = [&](Value flipped, unsigned d) -> Value {
+    return arith::SelectOp::create(rewriter, loc, flipped, lists[d], others[d]);
+  };
+
+  Value cellFirst = column(cells, "first"), cellRows = column(cells, "count");
+  Value cellLevel = column(cells, "level"), child = column(cells, "child");
+  Value kids = column(cells, "kids"), next = column(cells, "next");
+  Value inside = column(cells, "inside"), size = column(cells, "size");
+  SmallVector<Value> lows, highs, mids;
+  for (unsigned d = 0; d < sides; ++d) {
+    std::string side = std::to_string(d);
+    lows.push_back(column(cells, "lo" + side));
+    highs.push_back(column(cells, "hi" + side));
+    mids.push_back(column(cells, "mid" + side));
+  }
+  auto toF64 = [&](Value value) -> Value {
+    if (placeType.isF64())
+      return value;
+    if (isa<FloatType>(placeType))
+      return arith::ExtFOp::create(rewriter, loc, f64, value);
+    return arith::SIToFPOp::create(rewriter, loc, f64, value);
+  };
+  // A cell's box and the side it splits on (as on the CPU).
+  auto box = [&](Value flipped, Value c, Value first, Value count) -> Value {
+    first = arith::MinUIOp::create(rewriter, loc, first, sub(n, one));
+    Value last =
+        sub(add(first, arith::MaxUIOp::create(rewriter, loc, count, one)), one);
+    Value widest, side;
+    for (unsigned d = 0; d < sides; ++d) {
+      Value from = read(flipped, d);
+      Value lo = load(places[d], toIndex(load(from, first)));
+      Value hi = load(places[d], toIndex(load(from, last)));
+      store(lo, lows[d], c);
+      store(hi, highs[d], c);
+      Value lo64 = toF64(lo), hi64 = toF64(hi);
+      store(arith::MulFOp::create(
+                rewriter, loc, arith::AddFOp::create(rewriter, loc, lo64, hi64),
+                arith::ConstantOp::create(rewriter, loc,
+                                          rewriter.getF64FloatAttr(0.5))),
+            mids[d], c);
+      Value span = arith::SubFOp::create(rewriter, loc, hi64, lo64);
+      if (d == 0) {
+        widest = span;
+        side = whole(0, i32);
+        continue;
+      }
+      Value wider = arith::CmpFOp::create(
+          rewriter, loc, arith::CmpFPredicate::OGT, span, widest);
+      side = arith::SelectOp::create(rewriter, loc, wider, whole(d, i32), side);
+      widest = arith::SelectOp::create(rewriter, loc, wider, span, widest);
+    }
+    store(widest, size, c);
+    return side;
+  };
+
+  Value axes = scratch(kKdSlots + 6, i32, total);
+  Value below = scratch(kKdSlots + 7, i32, n);
+  Value owner = scratch(kKdSlots + 8, i32, n);
+  // (All the lists' places, and room after them for the scan's levels.)
+  Value listed = mul(constant(sides), n);
+  Value sums = scratch(
+      kKdSlots + 9, i32,
+      add(listed, add(arith::DivUIOp::create(rewriter, loc, listed,
+                                             constant(runningChunk(true) - 1)),
+                      constant(64))));
+  // The root, and every place in it.
+  each(one, [&](Value) {
+    store(whole(0, i32), cellFirst, zero);
+    store(to32(n), cellRows, zero);
+    store(whole(0, i32), cellLevel, zero);
+    store(to32(total), next, zero);
+  });
+  each(n, [&](Value i) { store(whole(0, i32), owner, i); });
+  Value no = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
+  Value yes = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+  auto levelLoop =
+      scf::ForOp::create(rewriter, loc, zero, levels, one, ValueRange{no});
+  {
+    OpBuilder::InsertionGuard inner(rewriter);
+    rewriter.setInsertionPointToStart(levelLoop.getBody());
+    Value l = levelLoop.getInductionVar();
+    Value flipped = levelLoop.getRegionIterArg(0);
+    Value many = shifted(l);
+    Value from = sub(many, one);
+    Value deeper = add(to32(l), whole(1, i32));
+    // Each cell's box, side and children (as on the CPU).
+    each(many, [&](Value j) {
+      Value c = add(from, j);
+      Value first = toIndex(load(cellFirst, c));
+      Value count = toIndex(load(cellRows, c));
+      store(box(flipped, c, first, count), axes, c);
+      Value half = arith::DivUIOp::create(rewriter, loc, count, two);
+      Value low = add(mul(c, two), one), high = add(low, one);
+      store(to32(low), child, c);
+      store(whole(2, i32), kids, c);
+      store(to32(sub(arith::ShLIOp::create(rewriter, loc, two, sub(levels, l)),
+                     two)),
+            inside, c);
+      store(to32(first), cellFirst, low);
+      store(to32(half), cellRows, low);
+      store(to32(add(first, half)), cellFirst, high);
+      store(to32(sub(count, half)), cellRows, high);
+      store(deeper, cellLevel, low);
+      store(deeper, cellLevel, high);
+      store(to32(high), next, low);
+      store(load(next, c), next, high);
+    });
+    // (A place's cell, and that cell's median.)
+    auto cellOf = [&](Value i) -> Value { return toIndex(load(owner, i)); };
+    auto median = [&](Value c) -> Value {
+      return toIndex(load(cellFirst, add(mul(c, two), two)));
+    };
+    // Whether each row is below its cell's median, from the list of the
+    // cell's side.
+    each(n, [&](Value i) {
+      Value c = cellOf(i);
+      Value axis = load(axes, c);
+      Value chosen = read(flipped, 0);
+      for (unsigned d = 1; d < sides; ++d)
+        chosen = arith::SelectOp::create(
+            rewriter, loc,
+            arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq, axis,
+                                  whole(d, i32)),
+            read(flipped, d), chosen);
+      store(arith::ExtUIOp::create(rewriter, loc, i32, less(i, median(c))),
+            below, toIndex(load(chosen, i)));
+    });
+    // Of each list, how many below come before each place.
+    each(n, [&](Value i) {
+      for (unsigned d = 0; d < sides; ++d)
+        store(load(below, toIndex(load(read(flipped, d), i))), sums,
+              add(mul(constant(d), n), i));
+    });
+    (void)emitRunningScan(rewriter, loc, sums, listed, whole(0, i32), "add",
+                          i32, /*gpu=*/true, [](Value) { return Value(); });
+    // Each list's places split into its other.
+    each(n, [&](Value i) {
+      Value c = cellOf(i);
+      Value first = toIndex(load(cellFirst, c));
+      Value middle = median(c);
+      for (unsigned d = 0; d < sides; ++d) {
+        Value base = mul(constant(d), n);
+        Value point = load(read(flipped, d), i);
+        Value before = toIndex(
+            sub(load(sums, add(base, i)), load(sums, add(base, first))));
+        Value isBelow =
+            arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne,
+                                  load(below, toIndex(point)), whole(0, i32));
+        Value to =
+            arith::SelectOp::create(rewriter, loc, isBelow, add(first, before),
+                                    add(middle, sub(sub(i, first), before)));
+        store(point, written(flipped, d), to);
+      }
+    });
+    // Each place's cell of the next level.
+    each(n, [&](Value i) {
+      Value c = cellOf(i);
+      Value low = add(mul(c, two), one);
+      Value lower = less(i, median(c));
+      store(to32(arith::SelectOp::create(rewriter, loc, lower, low,
+                                         add(low, one))),
+            owner, i);
+    });
+    flipped = arith::XOrIOp::create(rewriter, loc, flipped, yes);
+    scf::YieldOp::create(rewriter, loc, ValueRange{flipped});
+  }
+  Value flipped = levelLoop.getResult(0);
+  // The leaves' boxes.
+  {
+    Value from = sub(leaves, one);
+    each(leaves, [&](Value j) {
+      Value c = add(from, j);
+      (void)box(flipped, c, toIndex(load(cellFirst, c)),
+                toIndex(load(cellRows, c)));
+      store(whole(-1, i32), child, c);
+      store(whole(0, i32), kids, c);
+      store(whole(0, i32), inside, c);
+    });
+  }
+  // The rows in the leaves' order, each's key its number; and where each
+  // place's row went.
+  Value order = read(flipped, 0);
+  for (const WorldColumn &field : index.fields) {
+    Value values = device.bufferField(index, field);
+    if (field.field.getValue() == "key") {
+      each(n, [&](Value i) { store(to64(i), values, i); });
+      continue;
+    }
+    Value moved = scratch(
+        kKdSlots + 10, cast<MemRefType>(values.getType()).getElementType(), n);
+    each(n, [&](Value i) {
+      store(load(values, toIndex(load(order, i))), moved, i);
+    });
+    each(n, [&](Value i) { store(load(moved, i), values, i); });
+  }
+  if (FlatSymbolRefAttr atName = tree.getAtAttr()) {
+    const WorldBuffer &at = layout.getBuffer(atName.getAttr());
+    setCount(at, n);
+    Value rows = column(at, "row");
+    Value placed = column(index, "place");
+    each(n, [&](Value i) { store(to32(i), rows, toIndex(load(placed, i))); });
+  }
+  rewriter.eraseOp(tree);
+}
+
+/// Lower the `ent.kdtree`s of `func` (see KdTreeOp). The rows' numbers are
+/// put in order by each side (the radix sort of `for ... by`), and each
+/// level splits every cell's rows in each of those lists at the cell's
+/// median, those below it first, in their order still: a cell's rows are
+/// then the same run of every list, so its box is the first and the last
+/// of each, and its median on a side the middle of that side's list. A
+/// level: each cell's box, side and children; then cell by cell, whether
+/// each row is below its cell's median on that side (from that side's
+/// list), and each list split by those into its other, in one pass (of a
+/// level of few cells on many threads, by pieces of them, see byPieces).
+/// The rows of the index are then put in
+/// the order of the first list (the leaves', of any), each's key its
+/// number. The lists swap with their others each level (no copy back).
+/// (Numbering the points anew every few levels by their place in the
+/// first list, so that a cell's are near each other, cost more than it
+/// saved: bench/RESULTS.md, 2026-10-26.) In a `gpu` system (`device` its
+/// copy of the world), on the GPU: lowerKdTreeOnGpu.
+static void lowerKdTrees(IRRewriter &rewriter, func::FuncOp func,
+                         const WorldLayout &layout, WorldAccess &world,
+                         bool parallel, WorldAccess *device) {
+  SmallVector<KdTreeOp> trees;
+  func.walk([&](KdTreeOp tree) { trees.push_back(tree); });
+  for (KdTreeOp tree : trees) {
+    if (device) {
+      lowerKdTreeOnGpu(rewriter, tree, layout, world, *device);
+      continue;
+    }
+    Location loc = tree.getLoc();
+    rewriter.setInsertionPoint(tree);
+    const WorldBuffer &index = layout.getBuffer(tree.getIndexAttr().getAttr());
+    const WorldBuffer &cells = layout.getBuffer(tree.getCellsAttr().getAttr());
+    Type i32 = rewriter.getI32Type();
+    Type i64 = rewriter.getI64Type();
+    Type f64 = rewriter.getF64Type();
+    Type indexType = rewriter.getIndexType();
+    auto constant = [&](int64_t value) -> Value {
+      return arith::ConstantIndexOp::create(rewriter, loc, value);
+    };
+    auto whole = [&](int64_t value, Type type) -> Value {
+      return arith::ConstantIntOp::create(rewriter, loc, type, value);
+    };
+    Value zero = constant(0), one = constant(1), two = constant(2);
+    auto load = [&](Value from, Value at) -> Value {
+      return memref::LoadOp::create(rewriter, loc, from, ValueRange{at});
+    };
+    auto store = [&](Value value, Value to, Value at) {
+      memref::StoreOp::create(rewriter, loc, value, to, ValueRange{at});
+    };
+    auto add = [&](Value a, Value b) -> Value {
+      return arith::AddIOp::create(rewriter, loc, a, b);
+    };
+    auto sub = [&](Value a, Value b) -> Value {
+      return arith::SubIOp::create(rewriter, loc, a, b);
+    };
+    auto mul = [&](Value a, Value b) -> Value {
+      return arith::MulIOp::create(rewriter, loc, a, b);
+    };
+    auto less = [&](Value a, Value b) -> Value {
+      return arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult, a,
+                                   b);
+    };
+    auto toIndex = [&](Value value) -> Value {
+      return arith::IndexCastOp::create(rewriter, loc, indexType, value);
+    };
+    auto to32 = [&](Value value) -> Value {
+      return arith::IndexCastOp::create(rewriter, loc, i32, value);
+    };
+    auto list = [&](Type type, Value count) -> Value {
+      return memref::AllocOp::create(
+          rewriter, loc, MemRefType::get({ShapedType::kDynamic}, type),
+          ValueRange{count});
+    };
+    // A loop over [0, count) whose turns are independent.
+    auto each = [&](Value count, function_ref<void(Value)> body) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      auto loop = scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
+                                          ValueRange{count}, ValueRange{one});
+      rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+      body(loop.getInductionVars().front());
+    };
+    auto column = [&](const WorldBuffer &buffer, StringRef field) -> Value {
+      return world.bufferField(buffer, *buffer.find(field));
+    };
+    Value n = toIndex(load(world.bufferCount(index), zero));
+    Value cellCount = world.bufferCount(cells);
+    auto any = scf::IfOp::create(rewriter, loc, less(zero, n),
+                                 /*withElseRegion=*/true);
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(any.elseBlock());
+      store(whole(0, i64), cellCount, zero);
+      if (FlatSymbolRefAttr at = tree.getAtAttr())
+        store(whole(0, i64), world.bufferCount(layout.getBuffer(at.getAttr())),
+              zero);
+    }
+    rewriter.setInsertionPointToStart(any.thenBlock());
+
+    // How many levels split: until a cell holds `leaf` rows at most (the
+    // greater half of one that splits holds its half rounded up).
+    Value leaf = constant(tree.getLeaf());
+    auto deep = scf::WhileOp::create(
+        rewriter, loc, TypeRange{indexType, indexType}, ValueRange{n, zero},
+        [&](OpBuilder &, Location, ValueRange state) {
+          scf::ConditionOp::create(rewriter, loc, less(leaf, state[0]), state);
+        },
+        [&](OpBuilder &, Location, ValueRange state) {
+          scf::YieldOp::create(
+              rewriter, loc,
+              ValueRange{arith::DivUIOp::create(rewriter, loc,
+                                                add(state[0], one), two),
+                         add(state[1], one)});
+        });
+    Value levels = deep.getResult(1);
+    auto shifted = [&](Value by) -> Value {
+      return arith::ShLIOp::create(rewriter, loc, one, by);
+    };
+    Value leaves = shifted(levels);
+    Value total = sub(mul(leaves, two), one);
+    store(arith::IndexCastOp::create(rewriter, loc, i64, total), cellCount,
+          zero);
+
+    // Each side's places, and the rows' numbers in order by each, in two
+    // of each list: one the level reads, the other the one it writes.
+    SmallVector<Value> places, lists, others;
+    for (Attribute position : tree.getPositions())
+      places.push_back(column(index, cast<StringAttr>(position).getValue()));
+    Type placeType =
+        cast<MemRefType>(places.front().getType()).getElementType();
+    Value keys = list(i64, n);
+    for (auto [d, position] : llvm::enumerate(tree.getPositions())) {
+      Value rows = list(i32, n);
+      Value side = places[d];
+      Type declared = index.find(cast<StringAttr>(position).getValue())->type;
+      each(n, [&](Value i) {
+        store(orderKey(rewriter, loc, load(side, i), declared), keys, i);
+        store(to32(i), rows, i);
+      });
+      if (parallel) {
+        auto ifMany = scf::IfOp::create(rewriter, loc, less(constant(4095), n),
+                                        /*withElseRegion=*/true);
+        OpBuilder::InsertionGuard inner(rewriter);
+        rewriter.setInsertionPointToStart(ifMany.thenBlock());
+        emitRadixSort(rewriter, loc, keys, rows, n, /*parallel=*/true);
+        rewriter.setInsertionPointToStart(ifMany.elseBlock());
+        emitRadixSort(rewriter, loc, keys, rows, n, /*parallel=*/false);
+      } else {
+        emitRadixSort(rewriter, loc, keys, rows, n, /*parallel=*/false);
+      }
+      lists.push_back(rows);
+      others.push_back(list(i32, n));
+    }
+    memref::DeallocOp::create(rewriter, loc, keys);
+    // (Of the two of each list, the one read: the other where `flipped`.)
+    auto read = [&](Value flipped, unsigned d) -> Value {
+      return arith::SelectOp::create(rewriter, loc, flipped, others[d],
+                                     lists[d]);
+    };
+    auto written = [&](Value flipped, unsigned d) -> Value {
+      return arith::SelectOp::create(rewriter, loc, flipped, lists[d],
+                                     others[d]);
+    };
+
+    Value cellFirst = column(cells, "first"), cellRows = column(cells, "count");
+    Value cellLevel = column(cells, "level"), child = column(cells, "child");
+    Value kids = column(cells, "kids"), next = column(cells, "next");
+    Value inside = column(cells, "inside"), size = column(cells, "size");
+    SmallVector<Value> lows, highs, mids;
+    for (unsigned d = 0; d < places.size(); ++d) {
+      std::string side = std::to_string(d);
+      lows.push_back(column(cells, "lo" + side));
+      highs.push_back(column(cells, "hi" + side));
+      mids.push_back(column(cells, "mid" + side));
+    }
+    auto toF64 = [&](Value value) -> Value {
+      if (placeType.isF64())
+        return value;
+      if (isa<FloatType>(placeType))
+        return arith::ExtFOp::create(rewriter, loc, f64, value);
+      return arith::SIToFPOp::create(rewriter, loc, f64, value);
+    };
+    // A cell's box, of its rows from `first`, `count` of them: the first
+    // and the last of each side's list; its size the widest side, its
+    // middle the box's. Gives that side (the lowest of those as wide).
+    // (A leaf of no rows, of `leaf 1` where the rows are not a power of
+    // two, has the place of the row at its first: no row to visit.)
+    auto box = [&](Value flipped, Value c, Value first, Value count) -> Value {
+      first = arith::MinUIOp::create(rewriter, loc, first, sub(n, one));
+      Value last = sub(
+          add(first, arith::MaxUIOp::create(rewriter, loc, count, one)), one);
+      Value widest, side;
+      for (unsigned d = 0; d < places.size(); ++d) {
+        Value from = read(flipped, d);
+        Value lo = load(places[d], toIndex(load(from, first)));
+        Value hi = load(places[d], toIndex(load(from, last)));
+        store(lo, lows[d], c);
+        store(hi, highs[d], c);
+        Value lo64 = toF64(lo), hi64 = toF64(hi);
+        store(arith::MulFOp::create(
+                  rewriter, loc,
+                  arith::AddFOp::create(rewriter, loc, lo64, hi64),
+                  arith::ConstantOp::create(rewriter, loc,
+                                            rewriter.getF64FloatAttr(0.5))),
+              mids[d], c);
+        Value span = arith::SubFOp::create(rewriter, loc, hi64, lo64);
+        if (d == 0) {
+          widest = span;
+          side = whole(0, i32);
+          continue;
+        }
+        Value wider = arith::CmpFOp::create(
+            rewriter, loc, arith::CmpFPredicate::OGT, span, widest);
+        side =
+            arith::SelectOp::create(rewriter, loc, wider, whole(d, i32), side);
+        widest = arith::SelectOp::create(rewriter, loc, wider, span, widest);
+      }
+      store(widest, size, c);
+      return side;
+    };
+
+    // The root, and the rows all in it.
+    store(whole(0, i32), cellFirst, zero);
+    store(to32(n), cellRows, zero);
+    store(whole(0, i32), cellLevel, zero);
+    store(to32(total), next, zero);
+    Value axes = list(i32, total);
+    Value below = list(i32, n);
+    // (Of each list, how many of each piece are below: see byPieces.)
+    Value belowPieces = list(i32, constant(2 * kPieces * places.size()));
+    Value no = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
+    Value yes = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+    auto levelLoop =
+        scf::ForOp::create(rewriter, loc, zero, levels, one, ValueRange{no});
+    {
+      OpBuilder::InsertionGuard inner(rewriter);
+      rewriter.setInsertionPointToStart(levelLoop.getBody());
+      Value l = levelLoop.getInductionVar();
+      Value flipped = levelLoop.getRegionIterArg(0);
+      Value many = shifted(l);
+      Value from = sub(many, one);
+      Value deeper = add(to32(l), whole(1, i32));
+      // Each cell's box, the side it splits on, and its two children: the
+      // rows below the median, half of them, then the rest.
+      each(many, [&](Value j) {
+        Value c = add(from, j);
+        Value first = toIndex(load(cellFirst, c));
+        Value count = toIndex(load(cellRows, c));
+        store(box(flipped, c, first, count), axes, c);
+        Value half = arith::DivUIOp::create(rewriter, loc, count, two);
+        Value low = add(mul(c, two), one), high = add(low, one);
+        store(to32(low), child, c);
+        store(whole(2, i32), kids, c);
+        store(
+            to32(sub(arith::ShLIOp::create(rewriter, loc, two, sub(levels, l)),
+                     two)),
+            inside, c);
+        store(to32(first), cellFirst, low);
+        store(to32(half), cellRows, low);
+        store(to32(add(first, half)), cellFirst, high);
+        store(to32(sub(count, half)), cellRows, high);
+        store(deeper, cellLevel, low);
+        store(deeper, cellLevel, high);
+        store(to32(high), next, low);
+        store(load(next, c), next, high);
+      });
+      // (A cell's median: where its second child starts.)
+      auto median = [&](Value c) -> Value {
+        return toIndex(load(cellFirst, add(mul(c, two), two)));
+      };
+      // (Of the lists, that of the side a cell splits on.)
+      auto ofSide = [&](Value side) -> Value {
+        Value chosen = read(flipped, 0);
+        for (unsigned d = 1; d < lists.size(); ++d)
+          chosen = arith::SelectOp::create(
+              rewriter, loc,
+              arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
+                                    side, whole(d, i32)),
+              read(flipped, d), chosen);
+        return chosen;
+      };
+      // Cell by cell, each on a thread of its own: whether each of its
+      // points is below its median, from the list of its side; then each
+      // list split into its other, those below from the cell's first row,
+      // the others from the median, each in the order they were.
+      auto byCells = [&] {
+        each(many, [&](Value j) {
+          Value c = add(from, j);
+          Value first = toIndex(load(cellFirst, c));
+          Value end = add(first, toIndex(load(cellRows, c)));
+          Value middle = median(c);
+          Value side = ofSide(load(axes, c));
+          auto mark = scf::ForOp::create(rewriter, loc, first, end, one);
+          {
+            OpBuilder::InsertionGuard g(rewriter);
+            rewriter.setInsertionPoint(mark.getBody()->getTerminator());
+            Value i = mark.getInductionVar();
+            store(arith::ExtUIOp::create(rewriter, loc, i32, less(i, middle)),
+                  below, toIndex(load(side, i)));
+          }
+          for (unsigned d = 0; d < lists.size(); ++d) {
+            Value points = read(flipped, d), to = written(flipped, d);
+            auto split = scf::ForOp::create(rewriter, loc, first, end, one,
+                                            ValueRange{first, middle});
+            OpBuilder::InsertionGuard g(rewriter);
+            rewriter.setInsertionPointToStart(split.getBody());
+            Value i = split.getInductionVar();
+            Value low = split.getRegionIterArg(0);
+            Value high = split.getRegionIterArg(1);
+            Value point = load(points, i);
+            Value isBelow = arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::ne,
+                load(below, toIndex(point)), whole(0, i32));
+            store(point, to,
+                  arith::SelectOp::create(rewriter, loc, isBelow, low, high));
+            Value step = arith::IndexCastOp::create(
+                rewriter, loc, indexType,
+                arith::ExtUIOp::create(rewriter, loc, i32, isBelow));
+            scf::YieldOp::create(
+                rewriter, loc,
+                ValueRange{add(low, step), add(high, sub(one, step))});
+          }
+        });
+      };
+      // On many threads, of a level of few cells: each cell's rows in
+      // pieces (kPieces of all of them at least), each piece on a thread:
+      // whether each of its points is below its cell's median; how many
+      // in each list are; where each piece's go of those of its cell (on
+      // one thread, a cell's pieces one after another); and each piece's
+      // points there.
+      auto byPieces = [&] {
+        Value per = arith::MaxUIOp::create(
+            rewriter, loc, one,
+            arith::DivUIOp::create(
+                rewriter, loc, add(constant(kPieces), sub(many, one)), many));
+        Value pieces = mul(many, per);
+        // (The rows of piece `p`: its cell, the cell's median, where it
+        // starts and ends.)
+        auto piece = [&](Value p) {
+          Value c = add(from, arith::DivUIOp::create(rewriter, loc, p, per));
+          Value k = arith::RemUIOp::create(rewriter, loc, p, per);
+          Value first = toIndex(load(cellFirst, c));
+          Value count = toIndex(load(cellRows, c));
+          Value span = arith::DivUIOp::create(rewriter, loc,
+                                              add(count, sub(per, one)), per);
+          Value start = arith::MinUIOp::create(
+              rewriter, loc, add(first, mul(k, span)), add(first, count));
+          Value end = arith::MinUIOp::create(rewriter, loc, add(start, span),
+                                             add(first, count));
+          return std::make_tuple(c, first, start, end);
+        };
+        auto rows =
+            [&](Value start, Value end, ValueRange init,
+                function_ref<SmallVector<Value>(Value, ValueRange)> body)
+            -> SmallVector<Value> {
+          auto loop = scf::ForOp::create(rewriter, loc, start, end, one, init);
+          OpBuilder::InsertionGuard g(rewriter);
+          rewriter.setInsertionPointToStart(loop.getBody());
+          SmallVector<Value> next =
+              body(loop.getInductionVar(), loop.getRegionIterArgs());
+          if (!init.empty())
+            scf::YieldOp::create(rewriter, loc, next);
+          return SmallVector<Value>(loop.getResults());
+        };
+        each(pieces, [&](Value p) {
+          auto [c, first, start, end] = piece(p);
+          Value middle = median(c);
+          Value side = ofSide(load(axes, c));
+          rows(start, end, {}, [&](Value i, ValueRange) {
+            store(arith::ExtUIOp::create(rewriter, loc, i32, less(i, middle)),
+                  below, toIndex(load(side, i)));
+            return SmallVector<Value>{};
+          });
+        });
+        Value room = constant(2 * kPieces);
+        each(pieces, [&](Value p) {
+          auto [c, first, start, end] = piece(p);
+          for (unsigned d = 0; d < lists.size(); ++d) {
+            Value points = read(flipped, d);
+            Value counted =
+                rows(start, end, {whole(0, i32)}, [&](Value i, ValueRange sum) {
+                  return SmallVector<Value>{
+                      add(sum[0], load(below, toIndex(load(points, i))))};
+                })[0];
+            store(counted, belowPieces, add(mul(constant(d), room), p));
+          }
+        });
+        // (Each piece's count, of each list, those of its cell's pieces
+        // before it.)
+        for (unsigned d = 0; d < lists.size(); ++d) {
+          Value base = mul(constant(d), room);
+          (void)rows(
+              zero, pieces, {whole(0, i32)}, [&](Value p, ValueRange sum) {
+                Value k = arith::RemUIOp::create(rewriter, loc, p, per);
+                Value before = arith::SelectOp::create(
+                    rewriter, loc,
+                    arith::CmpIOp::create(rewriter, loc,
+                                          arith::CmpIPredicate::eq, k, zero),
+                    whole(0, i32), sum[0]);
+                Value counted = load(belowPieces, add(base, p));
+                store(before, belowPieces, add(base, p));
+                return SmallVector<Value>{add(before, counted)};
+              });
+        }
+        each(pieces, [&](Value p) {
+          auto [c, first, start, end] = piece(p);
+          Value middle = median(c);
+          for (unsigned d = 0; d < lists.size(); ++d) {
+            Value points = read(flipped, d), to = written(flipped, d);
+            Value before =
+                toIndex(load(belowPieces, add(mul(constant(d), room), p)));
+            Value low = add(first, before);
+            Value high = add(middle, sub(sub(start, first), before));
+            (void)rows(start, end, {low, high}, [&](Value i, ValueRange at) {
+              Value point = load(points, i);
+              Value isBelow = arith::CmpIOp::create(
+                  rewriter, loc, arith::CmpIPredicate::ne,
+                  load(below, toIndex(point)), whole(0, i32));
+              store(point, to,
+                    arith::SelectOp::create(rewriter, loc, isBelow, at[0],
+                                            at[1]));
+              Value step = arith::IndexCastOp::create(
+                  rewriter, loc, indexType,
+                  arith::ExtUIOp::create(rewriter, loc, i32, isBelow));
+              return SmallVector<Value>{add(at[0], step),
+                                        add(at[1], sub(one, step))};
+            });
+          }
+        });
+      };
+      if (parallel) {
+        auto few =
+            scf::IfOp::create(rewriter, loc, less(many, constant(kFewCells)),
+                              /*withElseRegion=*/true);
+        OpBuilder::InsertionGuard g(rewriter);
+        rewriter.setInsertionPointToStart(few.thenBlock());
+        byPieces();
+        rewriter.setInsertionPointToStart(few.elseBlock());
+        byCells();
+      } else {
+        byCells();
+      }
+      flipped = arith::XOrIOp::create(rewriter, loc, flipped, yes);
+      scf::YieldOp::create(rewriter, loc, ValueRange{flipped});
+    }
+    Value flipped = levelLoop.getResult(0);
+    // The leaves' boxes.
+    {
+      Value from = sub(leaves, one);
+      each(leaves, [&](Value j) {
+        Value c = add(from, j);
+        (void)box(flipped, c, toIndex(load(cellFirst, c)),
+                  toIndex(load(cellRows, c)));
+        store(whole(-1, i32), child, c);
+        store(whole(0, i32), kids, c);
+        store(whole(0, i32), inside, c);
+      });
+    }
+    // The rows in the leaves' order (the first list's), each's key its
+    // number.
+    Value order = read(flipped, 0);
+    for (const WorldColumn &field : index.fields) {
+      Value values = world.bufferField(index, field);
+      if (field.field.getValue() == "key") {
+        each(n, [&](Value i) {
+          store(arith::IndexCastOp::create(rewriter, loc, i64, i), values, i);
+        });
+        continue;
+      }
+      Value moved =
+          list(cast<MemRefType>(values.getType()).getElementType(), n);
+      each(n, [&](Value i) {
+        store(load(values, toIndex(load(order, i))), moved, i);
+      });
+      each(n, [&](Value i) { store(load(moved, i), values, i); });
+      memref::DeallocOp::create(rewriter, loc, moved);
+    }
+    // (Where each place's row went, where asked.)
+    if (FlatSymbolRefAttr atName = tree.getAtAttr()) {
+      const WorldBuffer &at = layout.getBuffer(atName.getAttr());
+      store(arith::IndexCastOp::create(rewriter, loc, i64, n),
+            world.bufferCount(at), zero);
+      Value rows = column(at, "row");
+      Value placed = column(index, "place");
+      each(n, [&](Value i) { store(to32(i), rows, toIndex(load(placed, i))); });
+    }
+    for (Value temporary : {axes, below, belowPieces})
+      memref::DeallocOp::create(rewriter, loc, temporary);
+    for (Value temporary : llvm::concat<Value>(lists, others))
+      memref::DeallocOp::create(rewriter, loc, temporary);
+    rewriter.eraseOp(tree);
+  }
+}
+
 /// Lower the `ent.cluster`s of `func`: the rows of the archetype a
 /// clustered index keeps in its order move there (see moveRows), the
 /// entity of the index's row r to row r; and so each one's place among
@@ -17747,28 +18611,14 @@ appendsOnly(QueryOp query) {
   return rows;
 }
 
-/// A query of a `gpu` system that goes by a field (a body that only gives
-/// rows to buffers, see appendsOnly; the verifier sees to that), on the
-/// GPU: the entities listed with their keys, each with its archetype's
-/// place among those matched and its row (no rows move while it runs, so
-/// no entity table is needed); put in the order of their keys by a radix
-/// sort of the GPU's, the same passes as the CPU's (and so the same
-/// order); and each visited at its place in the order, writing its rows
-/// where they go, after those the buffer had: the place times the rows
-/// it gives. The buffers' counts are the CPU's, as the archetypes' are
-/// (see placeGpuCopies), which asks whether there is room, as the CPU's
-/// form of this does.
-static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
-                              const WorldLayout &layout, WorldAccess &world,
-                              ArrayRef<const WorldArchetype *> matched,
-                              int64_t capacity, Value tick) {
-  Location loc = query.getLoc();
-  ModuleOp program = query->getParentOfType<ModuleOp>();
-  StringAttr byComponent = query.getByComponent().getAttr();
-  StringAttr byField = query.getByField();
-  std::optional<SmallVector<std::pair<StringAttr, int64_t>>> appended =
-      appendsOnly(query);
-  assert(appended && "a gpu system's 'by' only gives rows (the verifier)");
+/// Sort `count` keys of `keys[0]` (i64, signed) and what goes with each
+/// of `whose[0]` (i64), on the GPU: a radix sort of their bytes, stable,
+/// in the order the CPU's gives (emitRadixSort), each pass from one of the
+/// two arrays of each into the other. Gives whether they end in the second
+/// (`keys[1]`, `whose[1]`). Uses the GPU's scratch arrays 4 and 6.
+static Value emitGpuRadixSort(IRRewriter &rewriter, Location loc,
+                              ModuleOp program, ArrayRef<Value> keys,
+                              ArrayRef<Value> whose, Value listed) {
   Type i32 = rewriter.getI32Type();
   Type i64 = rewriter.getI64Type();
   auto constant = [&](int64_t value) -> Value {
@@ -17793,91 +18643,11 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
     return arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
                                       value);
   };
-  Value zero = constant(0);
-  Value one = constant(1);
-  // In the GPU's memory (a query that goes by a field keeps no running
-  // sums, whose those arrays are).
   auto scratch = [&](int64_t slot, Type element, Value count) -> Value {
     return gpuScratch(rewriter, loc, program, slot, element, count);
   };
-  Value room = constant(capacity);
-  Value keys[2] = {scratch(0, i64, room), scratch(2, i64, room)};
-  Value whose[2] = {scratch(1, i64, room), scratch(3, i64, room)};
-
-  // A slice is of the entities the query goes over by their components
-  // (`with`, `without`, `any`; see lowerOrdered): where an archetype holds
-  // some of them optionally, its rows without what is asked get the
-  // greatest key, after every other in the order, and only those that
-  // have it are counted (`passed`), among which the slice is found. (A
-  // key of an i64 at its very greatest is as great: such entities and
-  // those left out go in the order they were listed.)
-  bool sifting = !query.getSlice().empty() &&
-                 llvm::any_of(matched, [&](const WorldArchetype *archetype) {
-                   return !getPresenceTest(query, ArchetypeOp(archetype->op))
-                               .empty();
-                 });
-  Value passed;
-  if (sifting) {
-    passed = scratch(9, i64, one);
-    OpBuilder::InsertionGuard guard(rewriter);
-    (void)parallelTurns(rewriter, loc, one, /*gpu=*/true);
-    store(whole(0, i64), passed, zero);
-  }
-
-  // The entities there are now, each archetype's after those before it: a
-  // key and, in the 32 bits above its row, the archetype's place.
-  Value listed = zero;
-  for (auto [number, archetype] : llvm::enumerate(matched)) {
-    Value rows = world.count(loc, *archetype);
-    Value before = listed;
-    {
-      OpBuilder::InsertionGuard guard(rewriter);
-      Value row = parallelTurns(rewriter, loc, rows, /*gpu=*/true);
-      Value stored = load(world.column(*archetype, byComponent, byField), row);
-      Value key = orderKey(rewriter, loc, stored,
-                           archetype->find(byComponent, byField)->type);
-      if (sifting) {
-        PresenceTest test =
-            getPresenceTest(query, ArchetypeOp(archetype->op));
-        auto has = [&](FlatSymbolRefAttr component) -> Value {
-          Value byte = load(world.column(*archetype, component.getAttr(),
-                                         rewriter.getStringAttr("")),
-                            row);
-          return arith::CmpIOp::create(rewriter, loc,
-                                       arith::CmpIPredicate::ne, byte,
-                                       whole(0, rewriter.getI8Type()));
-        };
-        Value keep = whole(1, rewriter.getI1Type());
-        auto also = [&](Value term) {
-          keep = arith::AndIOp::create(rewriter, loc, keep, term);
-        };
-        for (FlatSymbolRefAttr component : test.present)
-          also(has(component));
-        for (FlatSymbolRefAttr component : test.absent)
-          also(arith::XOrIOp::create(rewriter, loc, has(component),
-                                     whole(1, rewriter.getI1Type())));
-        for (const auto &group : test.anyPresent) {
-          Value any = whole(0, rewriter.getI1Type());
-          for (FlatSymbolRefAttr component : group)
-            any = arith::OrIOp::create(rewriter, loc, any, has(component));
-          also(any);
-        }
-        key = arith::SelectOp::create(rewriter, loc, keep, key,
-                                      whole(INT64_MAX, i64));
-        memref::AtomicRMWOp::create(
-            rewriter, loc, arith::AtomicRMWKind::addi,
-            arith::ExtUIOp::create(rewriter, loc, i64, keep), passed,
-            ValueRange{zero});
-      }
-      Value at = add(before, row);
-      store(key, keys[0], at);
-      store(add(arith::ShLIOp::create(rewriter, loc, whole(number, i64),
-                                      whole(32, i64)),
-                arith::IndexCastOp::create(rewriter, loc, i64, row)),
-            whose[0], at);
-    }
-    listed = add(listed, rows);
-  }
+  Value zero = constant(0);
+  Value one = constant(1);
 
   // A radix sort of their bytes, the lowest first, on the GPU (as the
   // CPU's, emitRadixSort, and so in the same order), of each key less the
@@ -18102,6 +18872,143 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
     }
     flipped = arith::XOrIOp::create(rewriter, loc, flipped, differ);
   }
+  return flipped;
+}
+
+/// A query of a `gpu` system that goes by a field (a body that only gives
+/// rows to buffers, see appendsOnly; the verifier sees to that), on the
+/// GPU: the entities listed with their keys, each with its archetype's
+/// place among those matched and its row (no rows move while it runs, so
+/// no entity table is needed); put in the order of their keys by a radix
+/// sort of the GPU's, the same passes as the CPU's (and so the same
+/// order); and each visited at its place in the order, writing its rows
+/// where they go, after those the buffer had: the place times the rows
+/// it gives. The buffers' counts are the CPU's, as the archetypes' are
+/// (see placeGpuCopies), which asks whether there is room, as the CPU's
+/// form of this does.
+static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
+                              const WorldLayout &layout, WorldAccess &world,
+                              ArrayRef<const WorldArchetype *> matched,
+                              int64_t capacity, Value tick) {
+  Location loc = query.getLoc();
+  ModuleOp program = query->getParentOfType<ModuleOp>();
+  StringAttr byComponent = query.getByComponent().getAttr();
+  StringAttr byField = query.getByField();
+  std::optional<SmallVector<std::pair<StringAttr, int64_t>>> appended =
+      appendsOnly(query);
+  assert(appended && "a gpu system's 'by' only gives rows (the verifier)");
+  Type i32 = rewriter.getI32Type();
+  Type i64 = rewriter.getI64Type();
+  auto constant = [&](int64_t value) -> Value {
+    return arith::ConstantIndexOp::create(rewriter, loc, value);
+  };
+  auto whole = [&](int64_t value, Type type) -> Value {
+    return arith::ConstantIntOp::create(rewriter, loc, type, value);
+  };
+  auto load = [&](Value from, Value at) -> Value {
+    return memref::LoadOp::create(rewriter, loc, from, ValueRange{at});
+  };
+  auto store = [&](Value value, Value to, Value at) {
+    memref::StoreOp::create(rewriter, loc, value, to, ValueRange{at});
+  };
+  auto add = [&](Value a, Value b) -> Value {
+    return arith::AddIOp::create(rewriter, loc, a, b);
+  };
+  auto mul = [&](Value a, Value b) -> Value {
+    return arith::MulIOp::create(rewriter, loc, a, b);
+  };
+  auto toIndex = [&](Value value) -> Value {
+    return arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
+                                      value);
+  };
+  Value zero = constant(0);
+  Value one = constant(1);
+  // In the GPU's memory (a query that goes by a field keeps no running
+  // sums, whose those arrays are).
+  auto scratch = [&](int64_t slot, Type element, Value count) -> Value {
+    return gpuScratch(rewriter, loc, program, slot, element, count);
+  };
+  Value room = constant(capacity);
+  Value keys[2] = {scratch(0, i64, room), scratch(2, i64, room)};
+  Value whose[2] = {scratch(1, i64, room), scratch(3, i64, room)};
+
+  // A slice is of the entities the query goes over by their components
+  // (`with`, `without`, `any`; see lowerOrdered): where an archetype holds
+  // some of them optionally, its rows without what is asked get the
+  // greatest key, after every other in the order, and only those that
+  // have it are counted (`passed`), among which the slice is found. (A
+  // key of an i64 at its very greatest is as great: such entities and
+  // those left out go in the order they were listed.)
+  bool sifting =
+      !query.getSlice().empty() &&
+      llvm::any_of(matched, [&](const WorldArchetype *archetype) {
+        return !getPresenceTest(query, ArchetypeOp(archetype->op)).empty();
+      });
+  Value passed;
+  if (sifting) {
+    passed = scratch(9, i64, one);
+    OpBuilder::InsertionGuard guard(rewriter);
+    (void)parallelTurns(rewriter, loc, one, /*gpu=*/true);
+    store(whole(0, i64), passed, zero);
+  }
+
+  // The entities there are now, each archetype's after those before it: a
+  // key and, in the 32 bits above its row, the archetype's place.
+  Value listed = zero;
+  for (auto [number, archetype] : llvm::enumerate(matched)) {
+    Value rows = world.count(loc, *archetype);
+    Value before = listed;
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      Value row = parallelTurns(rewriter, loc, rows, /*gpu=*/true);
+      Value stored = load(world.column(*archetype, byComponent, byField), row);
+      Value key = orderKey(rewriter, loc, stored,
+                           archetype->find(byComponent, byField)->type);
+      if (sifting) {
+        PresenceTest test = getPresenceTest(query, ArchetypeOp(archetype->op));
+        auto has = [&](FlatSymbolRefAttr component) -> Value {
+          Value byte = load(world.column(*archetype, component.getAttr(),
+                                         rewriter.getStringAttr("")),
+                            row);
+          return arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne,
+                                       byte, whole(0, rewriter.getI8Type()));
+        };
+        Value keep = whole(1, rewriter.getI1Type());
+        auto also = [&](Value term) {
+          keep = arith::AndIOp::create(rewriter, loc, keep, term);
+        };
+        for (FlatSymbolRefAttr component : test.present)
+          also(has(component));
+        for (FlatSymbolRefAttr component : test.absent)
+          also(arith::XOrIOp::create(rewriter, loc, has(component),
+                                     whole(1, rewriter.getI1Type())));
+        for (const auto &group : test.anyPresent) {
+          Value any = whole(0, rewriter.getI1Type());
+          for (FlatSymbolRefAttr component : group)
+            any = arith::OrIOp::create(rewriter, loc, any, has(component));
+          also(any);
+        }
+        key = arith::SelectOp::create(rewriter, loc, keep, key,
+                                      whole(INT64_MAX, i64));
+        memref::AtomicRMWOp::create(
+            rewriter, loc, arith::AtomicRMWKind::addi,
+            arith::ExtUIOp::create(rewriter, loc, i64, keep), passed,
+            ValueRange{zero});
+      }
+      Value at = add(before, row);
+      store(key, keys[0], at);
+      store(add(arith::ShLIOp::create(rewriter, loc, whole(number, i64),
+                                      whole(32, i64)),
+                arith::IndexCastOp::create(rewriter, loc, i64, row)),
+            whose[0], at);
+    }
+    listed = add(listed, rows);
+  }
+
+  Value flipped = emitGpuRadixSort(rewriter, loc, program, keys, whose, listed);
+  auto pick = [&](Value which, Value a, Value b) -> Value {
+    return arith::SelectOp::create(rewriter, loc, which, b, a);
+  };
   Value sorted = pick(flipped, whose[0], whose[1]);
   Value sortedKeys = pick(flipped, keys[0], keys[1]);
 
@@ -26536,6 +27443,8 @@ struct EntLowerToLoops
              op && op != after; op = op->getNextNode())
           op->setAttr(kScopeAttr, rewriter.getI64IntegerAttr(scope));
       }
+      lowerKdTrees(rewriter, func, *layout, world, options.parallelEntities,
+                   device ? &*device : nullptr);
       lowerClusters(rewriter, func, *layout, world);
       lowerSpawns(rewriter, func, *layout, world);
       lowerConnects(rewriter, func, *layout, world);

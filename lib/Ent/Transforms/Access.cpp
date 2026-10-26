@@ -484,6 +484,15 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
           writeStructure(archetype);
       return;
     }
+    // A k-d tree made: its rows and its cells.
+    if (auto tree = dyn_cast<KdTreeOp>(op)) {
+      for (FlatSymbolRefAttr buffer :
+           {tree.getIndexAttr(), tree.getCellsAttr(), tree.getAtAttr()})
+        if (buffer)
+          access.writes.insert({StringAttr(), buffer.getAttr(),
+                                StringAttr::get(context, "rows")});
+      return;
+    }
     if (isa<DespawnOp>(op)) {
       for (ArchetypeOp archetype :
            matchedArchetypes(op->getParentOfType<QueryOp>())) {

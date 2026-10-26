@@ -1067,6 +1067,9 @@ private:
     /// have, and how many entities a cell holds at most before it is split;
     /// `cells` its cells in preorder (`N_box` its box, as `gridUnique`).
     bool morton = false;
+    /// A k-d tree (`kdtree (x, y)`): its cells as a Morton index's, `morton`
+    /// too, but no keys of places.
+    bool kd = false;
     int bits = 0, leaf = 0;
     /// What each of its cells keeps of its entities (`cells { m: sum
     /// Star.m }`): by name, of what type (fields of `N_cells`).
@@ -3344,6 +3347,8 @@ LogicalResult Parser::parseIndex() {
   // grid they are in, its key a field of the index's own; else `by` a
   // field of the first component.
   bool grid = false, morton = false;
+  // (`kdtree (x, y)`: a grid's places, its cells split at their medians.)
+  bool kd = false;
   // (Of `morton`: bits a side, and how many a cell holds unsplit.)
   int64_t mortonBits = 0, mortonLeaf = 16;
   bool hashed = false, unique = false;
@@ -3364,9 +3369,14 @@ LogicalResult Parser::parseIndex() {
   // (`morton (x, y)`: a grid's places, its cells split where the
   // entities are many.)
   morton = token.isKeyword("morton");
-  if (consumeKeyword("grid") || consumeKeyword("morton")) {
+  kd = token.isKeyword("kdtree");
+  if (consumeKeyword("grid") || consumeKeyword("morton") ||
+      consumeKeyword("kdtree")) {
     grid = true;
-    std::string kindWord = morton ? "morton" : "grid";
+    std::string kindWord = morton ? "morton" : kd ? "kdtree" : "grid";
+    std::string kindWords = morton ? "a Morton index"
+                            : kd   ? "a k-d tree"
+                                   : "a grid";
     if (failed(expect(Token::LParen, "'(' and the fields of '" + of.front() +
                                          "' that say where an entity is: '" +
                                          kindWord + " (x, y)'")))
@@ -3397,14 +3407,13 @@ LogicalResult Parser::parseIndex() {
     if (failed(expect(Token::RParen, "')'")))
       return failure();
     if (positions.size() < 2 || positions.size() > 3)
-      return error(at, std::string(morton ? "a Morton index" : "a grid") +
-                           " is of two places or of three");
-    if (morton) {
+      return error(at, kindWords + " is of two places or of three");
+    if (morton || kd) {
       // A key of 63 bits at most, so it is in order as an i64.
       int64_t most = positions.size() == 2 ? 31 : 21;
       mortonBits = most;
       bool bitsSaid = false, leafSaid = false;
-      while (token.isKeyword("bits") || token.isKeyword("leaf") ||
+      while ((token.isKeyword("bits") && !kd) || token.isKeyword("leaf") ||
              token.isKeyword("wrap")) {
         llvm::SMLoc optionAt = token.loc;
         std::string option = token.spelling.str();
@@ -3446,8 +3455,14 @@ LogicalResult Parser::parseIndex() {
         }
       }
       if (token.isKeyword("cell"))
-        return error("a Morton index's cells are split where the entities "
-                     "are many: no 'cell' ('bits' says how fine they go)");
+        return error(kd ? "a k-d tree's cells are split at their medians: "
+                          "no 'cell' ('leaf' says how many a cell holds)"
+                        : "a Morton index's cells are split where the "
+                          "entities are many: no 'cell' ('bits' says how "
+                          "fine they go)");
+      if (kd && token.isKeyword("bits"))
+        return error("a k-d tree's cells are split at their medians: no "
+                     "'bits' ('leaf' says how many a cell holds)");
       key = "key_in_" + *name;
     } else {
       if (!consumeKeyword("cell"))
@@ -3524,6 +3539,7 @@ LogicalResult Parser::parseIndex() {
                                 "' or '" + way + "'");
       if (grid && way == "incremental")
         return error(wayAt, std::string(morton ? "a Morton index's keys"
+                                        : kd   ? "a k-d tree's medians"
                                                : "a grid's cells") +
                                 " are worked out for every entity each "
                                 "time: it is not 'incremental'");
@@ -3603,10 +3619,10 @@ LogicalResult Parser::parseIndex() {
   SmallVector<CellValue> cellValues;
   if (token.isKeyword("cells") && peek().is(Token::LBrace)) {
     llvm::SMLoc cellsAt = token.loc;
-    if (!morton)
-      return error(cellsAt, "only a Morton index has cells that keep "
-                            "values of their entities ('index N of C "
-                            "morton (x, y) cells { m: sum C.m }')");
+    if (!morton && !kd)
+      return error(cellsAt, "only a Morton index and a k-d tree have cells "
+                            "that keep values of their entities ('index N "
+                            "of C morton (x, y) cells { m: sum C.m }')");
     advance();
     advance(); // {
     SmallVector<std::string> taken{"count", "first", "level", "leaf",
@@ -4329,7 +4345,7 @@ LogicalResult Parser::parseIndex() {
     auto side = [&](const char *what, unsigned d) {
       return std::string(what) + std::to_string(d);
     };
-    if (grid && !morton) {
+    if (grid && !morton && !kd) {
       out << "transient unique " << n << "_grid { cells: i64";
       for (unsigned d = 0; d < dims; ++d)
         out << ", " << side("n", d) << ": i64, " << side("w", d) << ": " << ts
@@ -4763,13 +4779,49 @@ LogicalResult Parser::parseIndex() {
           << "    }\n"
           << "  }\n}\n";
     }
+    // Of a k-d tree: its box (`N_box`, as a Morton index's: of a box that
+    // wraps its size) and its cells (`N_cells`, laid out as a Morton
+    // index's, see KdTreeOp), which `N_split` makes (`ent.kdtree` in its
+    // place, put in where the index is made).
+    if (kd) {
+      out << "transient unique " << n << "_box { side: f64, scale: f64, "
+          << "size: " << ts;
+      for (unsigned d = 0; d < dims; ++d)
+        out << ", " << side("lo", d) << ": " << ts << ", " << side("hi", d)
+            << ": " << ts;
+      out << " }\n"
+          << "transient buffer " << n << "_cells { first: i32, count: i32, "
+          << "level: i32, child: i32, kids: i32, next: i32, inside: i32, "
+          << "size: f64";
+      for (unsigned d = 0; d < dims; ++d)
+        out << ", " << side("lo", d) << ": " << ts << ", " << side("hi", d)
+            << ": " << ts << ", " << side("mid", d) << ": f64";
+      for (const CellValue &value : cellValues)
+        out << ", " << value.name << ": " << numberSpelling(value.type);
+      out << " } capacity 1\n"
+          // (Where each place's row went, of the GPU's making.)
+          << "transient buffer " << n << "_at { row: i32 } capacity 1\n"
+          << "proc " << n << "_split(order: mut " << n << ", cells: mut " << n
+          << "_cells) {\n}\n"
+          // Where `x` is seen from `p`: the image nearest it.
+          << "fn " << n << "_image(x: " << ts << ", p: " << ts
+          << ", size: " << ts << ") -> " << ts << " {\n";
+      if (wrap)
+        out << "  let d = x - p\n"
+            << (whole ? "  if d + d > size { x - size } else if d + d < 0 - "
+                        "size { x + size } else { x }\n}\n"
+                      : "  if d > size * 0.5 { x - size } else if d < 0.0 - "
+                        "size * 0.5 { x + size } else { x }\n}\n");
+      else
+        out << "  x\n}\n";
+    }
     // (A Morton index's making on the GPU, put after the rest.)
     std::string gpuForm;
     out << "system " << n << "_update() {\n";
     // (The box and the keys, which the GPU's form makes the same way.)
     out.flush();
     size_t keysFrom = text.size();
-    if (grid && !morton) {
+    if (grid && !morton && !kd) {
       // The grid as the entities are now: its cells at least `cell` wide,
       // round the box where it wraps (`size` on every side), else over
       // where the entities are; no more cells than entities can be (the
@@ -4857,6 +4909,14 @@ LogicalResult Parser::parseIndex() {
       out << "  for c0: mut " << of.front() << " {\n    c0." << *key << " = "
           << number << "\n  }\n";
     }
+    if (kd && wrap) {
+      out << "  var size_: " << ts << " = " << wrapText << "\n"
+          << "  " << n << "_box.size = size_\n";
+      for (unsigned d = 0; d < dims; ++d)
+        out << "  " << n << "_box." << side("lo", d) << " = "
+            << (whole ? "0" : "0.0") << "\n"
+            << "  " << n << "_box." << side("hi", d) << " = size_\n";
+    }
     if (morton) {
       // The box as the entities are now: the box that wraps, else from the
       // lowest of them on each side, as wide as they are on the widest (so
@@ -4934,7 +4994,22 @@ LogicalResult Parser::parseIndex() {
       if (!clustered && numbered)
         out << indent << n << "_number(" << n << ", " << of.front() << ")\n";
     };
-    if (how == "rebuild") {
+    if (kd) {
+      // (Every time anew: the entities listed as they are stored, then put
+      // in the order of the tree's leaves, below.)
+      out << "  " << n << "_places = 0\n"
+          << "  for c0: mut " << of.front() << " {\n"
+          << "    let place_ = " << n << "_places += 1\n"
+          << "    c0." << placeField << " = place_\n"
+          << "  }\n"
+          << "  " << n << " = []\n"
+          << "  for e" << bindings << " {\n"
+          << "    " << n << " += { key: 0, who: e, place: c0." << placeField;
+      for (const Copy &copy : copies)
+        out << ", " << copy.name << ": " << through(copy);
+      out << " }\n  }\n"
+          << "  " << n << "_whole = true\n";
+    } else if (how == "rebuild") {
       // (Every time anew.)
       anew("  ", /*counted=*/true);
       out << "  " << n << "_whole = true\n";
@@ -5007,7 +5082,7 @@ LogicalResult Parser::parseIndex() {
           << "  while low < len(order) && order[low].who != e { low += 1 }\n"
           << "  low\n}\n";
     };
-    if (grid && !morton) {
+    if (grid && !morton && !kd) {
       out << "  " << n << "_bounds(" << n << ", " << n << "_cells, " << n
           << "_grid.cells)\n";
       // The same made on the GPU, where the compiler chooses so (see
@@ -5046,6 +5121,108 @@ LogicalResult Parser::parseIndex() {
       gpuForm = text.substr(gpuFrom);
       text.resize(gpuFrom);
       gpuMade = true;
+    }
+    if (kd) {
+      // The tree, each entity told its row (clustered, as the rows move),
+      // and what each cell keeps: a leaf's of its rows, another's of its
+      // cells, from the last back (those inside a cell are after it).
+      out << "  " << n << "_split(" << n << ", " << n << "_cells)\n";
+      if (!clustered)
+        out << "  " << n << "_number(" << n << ", " << of.front() << ")\n";
+      if (!cellValues.empty()) {
+        std::string cell = n + "_cells[c_]";
+        out << "  var c_ = len(" << n << "_cells) - 1\n"
+            << "  while c_ >= 0 {\n";
+        for (const CellValue &value : cellValues)
+          out << "    " << valueStart(value) << "\n";
+        out << "    if " << cell << ".child < 0 {\n"
+            << "      for r in " << cell << ".first.." << cell << ".first + "
+            << cell << ".count {\n";
+        for (const CellValue &value : cellValues)
+          out << "        " << valueStep(value, value.text) << "\n";
+        out << "      }\n    } else {\n"
+            << "      for k in " << cell << ".child.." << cell << ".child + "
+            << cell << ".kids {\n";
+        for (const CellValue &value : cellValues)
+          out << "        " << valueStep(value, n + "_cells[k]." + value.name)
+              << "\n";
+        out << "      }\n    }\n";
+        for (const CellValue &value : cellValues)
+          out << "    " << cell << "." << value.name << " = v_" << value.name
+              << "\n";
+        out << "    c_ -= 1\n  }\n";
+      }
+      // The same made on the GPU, where the compiler chooses so (see
+      // EntIndexes; not clustered): the tree (`N_split` there tells where
+      // each place's row went, `N_at`), each entity told its row from it;
+      // then what each cell keeps, level by level from the deepest up,
+      // each entity a few cells of a level.
+      if (!clustered) {
+        out.flush();
+        size_t gpuFrom = text.size();
+        out << "gpu system " << n << "_update_gpu() {\n"
+            << keysText << "  " << n << "_places = 0\n"
+            << "  for c0: mut " << of.front() << " {\n"
+            << "    let place_ = " << n << "_places += 1\n"
+            << "    c0." << placeField << " = place_\n"
+            << "  }\n"
+            << "  " << n << " = []\n"
+            << "  for e" << bindings << " {\n"
+            << "    " << n << " += { key: 0, who: e, place: c0." << placeField;
+        for (const Copy &copy : copies)
+          out << ", " << copy.name << ": " << through(copy);
+        out << " }\n  }\n"
+            << "  " << n << "_whole = true\n"
+            << "  " << n << "_split(" << n << ", " << n << "_cells)\n"
+            << "  for c0: mut " << of.front() << " {\n"
+            << "    c0." << rowField << " = " << n << "_at[c0." << placeField
+            << " as i32].row\n"
+            << "  }\n";
+        if (!cellValues.empty()) {
+          std::string cell = "w[j]";
+          out << "  var deep_ = 0\n"
+              << "  var rows_ = len(" << n << ")\n"
+              << "  while rows_ > " << mortonLeaf << " {\n"
+              << "    rows_ = (rows_ + 1) / 2\n"
+              << "    deep_ += 1\n"
+              << "  }\n"
+              << "  if len(" << n << ") == 0 { deep_ = 0 - 1 }\n"
+              << "  while deep_ >= 0 {\n"
+              << "    let many_ = 1 << deep_\n"
+              << "    let per_ = (many_ + len(" << n << ") - 1) / len(" << n
+              << ")\n";
+          std::string at = "c0." + rowField + " * per_";
+          std::string has = "if " + at + " < many_";
+          out << "    for c0: " << of.front() << ", w: mut " << n << "_cells["
+              << has << " { many_ - 1 + " << at << " } else { 0 }, " << has
+              << " { min(per_, many_ - " << at << ") } else { 0 }] {\n"
+              << "      for j in 0..len(w) {\n";
+          for (const CellValue &value : cellValues)
+            out << "        " << valueStart(value) << "\n";
+          out << "        if " << cell << ".child < 0 {\n"
+              << "          for r in " << cell << ".first.." << cell
+              << ".first + " << cell << ".count {\n";
+          for (const CellValue &value : cellValues)
+            out << "            " << valueStep(value, value.text) << "\n";
+          out << "          }\n        } else {\n"
+              << "          for k in " << cell << ".child.." << cell
+              << ".child + " << cell << ".kids {\n";
+          for (const CellValue &value : cellValues)
+            out << "            "
+                << valueStep(value, n + "_cells[k]." + value.name) << "\n";
+          out << "          }\n        }\n";
+          for (const CellValue &value : cellValues)
+            out << "        " << cell << "." << value.name << " = v_"
+                << value.name << "\n";
+          out << "      }\n    }\n"
+              << "    deep_ -= 1\n  }\n";
+        }
+        out << "  " << n << "_fresh = true\n}\n";
+        out.flush();
+        gpuForm = text.substr(gpuFrom);
+        text.resize(gpuFrom);
+        gpuMade = true;
+      }
     }
     if (morton) {
       std::string lead = n + "_lead[c0." + rowField + "]";
@@ -5476,12 +5653,15 @@ LogicalResult Parser::parseIndex() {
           builder.getNamedAttr(
               "own",
               strings(
-                  morton
-                      ? SmallVector<
-                            std::string>{resolve(n),
-                                         resolve(n + "_cells"),
-                                         resolve(n + "_box"),
-                                         resolve(n + "_lead")}
+                  morton || kd
+                      ? kd
+                            ? SmallVector<std::string>{resolve(n), resolve(n + "_cells"),
+                                                       resolve(n + "_box")}
+                            : SmallVector<
+                                  std::string>{resolve(n),
+                                               resolve(n + "_cells"),
+                                               resolve(n + "_box"),
+                                               resolve(n + "_lead")}
                   : grid   ? SmallVector<std::string>{resolve(n),
                                                       resolve(n + "_cells"),
                                                       resolve(n + "_grid")}
@@ -5525,9 +5705,11 @@ LogicalResult Parser::parseIndex() {
     kept.positions.assign(positions.begin(), positions.end());
     kept.positionType = positionType;
     kept.wrap = !wrapText.empty();
-    kept.gridUnique = resolve(n + (morton ? "_box" : "_grid"));
+    kept.gridUnique = resolve(n + (morton || kd ? "_box" : "_grid"));
     kept.cells = resolve(n + "_cells");
-    kept.morton = morton;
+    // (A k-d tree's cells are walked as a Morton index's.)
+    kept.morton = morton || kd;
+    kept.kd = kd;
     kept.bits = mortonBits;
     kept.leaf = mortonLeaf;
     for (const CellValue &value : cellValues)
@@ -5546,6 +5728,46 @@ LogicalResult Parser::parseIndex() {
     if (query->hasAttr(QueryOp::kTriggersAttr))
       query->setAttr("ent.index_changes", builder.getUnitAttr());
   });
+  // A k-d tree: made by `ent.kdtree` where `N_split` is called (the proc
+  // says what it writes, and is gone after).
+  if (kd) {
+    SmallVector<InvokeOp> splits;
+    auto onGpu = dyn_cast_or_null<SystemOp>(SymbolTable::lookupSymbolIn(
+        module, builder.getStringAttr(resolve(n + "_update_gpu"))));
+    for (SystemOp system : {update, onGpu})
+      if (system)
+        system.walk([&](InvokeOp invoke) {
+          if (invoke.getCallee() == (bufferName.getValue() + "_split").str())
+            splits.push_back(invoke);
+        });
+    for (InvokeOp invoke : splits) {
+      OpBuilder::InsertionGuard guard(builder);
+      builder.setInsertionPoint(invoke);
+      SmallVector<Attribute> places;
+      for (const std::string &position : positions)
+        places.push_back(builder.getStringAttr(position));
+      KdTreeOp::create(
+          builder, loc(at), FlatSymbolRefAttr::get(context, bufferName),
+          FlatSymbolRefAttr::get(context, resolve(n + "_cells")),
+          builder.getArrayAttr(places), builder.getI64IntegerAttr(mortonLeaf),
+          invoke->getParentOfType<SystemOp>() == onGpu
+              ? FlatSymbolRefAttr::get(context, resolve(n + "_at"))
+              : FlatSymbolRefAttr());
+      // (And what named its buffers: in a `gpu` system outside its
+      // `for`s nothing may.)
+      SmallVector<Operation *> named;
+      for (Value arg : invoke->getOperands())
+        if (Operation *def = arg.getDefiningOp())
+          named.push_back(def);
+      invoke->erase();
+      for (Operation *def : named)
+        if (def->use_empty())
+          def->erase();
+    }
+    if (Operation *split = SymbolTable::lookupSymbolIn(
+            module, builder.getStringAttr(resolve(n + "_split"))))
+      split->erase();
+  }
   // Clustered: made, the rows move into its order.
   if (clustered) {
     OpBuilder::InsertionGuard guard(builder);
@@ -5625,6 +5847,13 @@ LogicalResult Parser::finishIndexOrders() {
     };
     // A Morton index: a leaf for each entity at most, and cells split, of
     // more than `leaf` each and apart, as many as fit at each level.
+    // A k-d tree: every leaf at one level, of `leaf` entities or more
+    // than half that, so fewer than four cells for each `leaf` of them.
+    if (const Index &index = found->second; index.kd) {
+      setCapacity(index.cells, 4 * (capacity.getInt() / index.leaf + 1));
+      setCapacity(buffer.getSymName().str() + "_at", capacity.getInt());
+      continue;
+    }
     if (const Index &index = found->second; index.morton) {
       int64_t entities = capacity.getInt();
       setCapacity(index.cells,
@@ -8891,24 +9120,28 @@ Parser::parseNear(llvm::SMLoc at, const std::string &entity,
                                      cap);
     };
     SmallVector<VarState> varsBefore = captureVars();
-    // The place's key, and the first row whose key is not below it.
-    SmallVector<mlir::Value> keyArgs(at_.begin(), at_.end());
-    for (unsigned d = 0; d < dims; ++d)
-      keyArgs.push_back(read("lo" + std::to_string(d), t));
-    keyArgs.push_back(read("scale", builder.getF64Type()));
-    mlir::Value placeKey = call("_key", keyArgs, i64);
-    Function &find = functions.ofSymbol(index.find);
-    mlir::Value held =
-        BufferOfOp::create(builder, where, find.params.front(), rows)
-            .getResult();
-    mlir::Value own =
-        InvokeOp::create(builder, where, i32,
-                         FlatSymbolRefAttr::get(context, index.find),
-                         ValueRange{held, placeKey}, UnitAttr())
-            ->getResult(0);
+    // The place's key, and the first row whose key is not below it. (A
+    // k-d tree has no keys of places: none, its walk finds them.)
+    mlir::Value own = integer(where, i32, 0);
+    mlir::Value wantedRows = own;
+    if (!index.kd) {
+      SmallVector<mlir::Value> keyArgs(at_.begin(), at_.end());
+      for (unsigned d = 0; d < dims; ++d)
+        keyArgs.push_back(read("lo" + std::to_string(d), t));
+      keyArgs.push_back(read("scale", builder.getF64Type()));
+      mlir::Value placeKey = call("_key", keyArgs, i64);
+      Function &find = functions.ofSymbol(index.find);
+      mlir::Value held =
+          BufferOfOp::create(builder, where, find.params.front(), rows)
+              .getResult();
+      own = InvokeOp::create(builder, where, i32,
+                             FlatSymbolRefAttr::get(context, index.find),
+                             ValueRange{held, placeKey}, UnitAttr())
+                ->getResult(0);
+      wantedRows =
+          arith::MaxSIOp::create(builder, where, k, integer(where, i32, 0));
+    }
     mlir::Value many_ = BufferLenOp::create(builder, where, i32, rows);
-    mlir::Value wantedRows =
-        arith::MaxSIOp::create(builder, where, k, integer(where, i32, 0));
     mlir::Value seedFrom = arith::IndexCastOp::create(
         builder, where, indexType,
         arith::MaxSIOp::create(

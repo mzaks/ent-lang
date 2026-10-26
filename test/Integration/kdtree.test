@@ -1,0 +1,60 @@
+// `index N of C kdtree (x, y, z) [leaf l] [wrap s]`: the Morton index's
+// programs with a k-d tree in its place, its queries against a grid's on
+// the same dots (clustered, in a box that wraps, of whole numbers in two
+// sides, made again of dots that move), its cells walked and summed, and
+// gravity by a walk against the direct sum; and its cells as laid out.
+// The same on one core and on all.
+// RUN: sed -e 's/morton (x, y, z) leaf 4/kdtree (x, y, z) leaf 4/' %S/Inputs/morton.ent > %t.kd.ent
+// RUN: %ent run %t.kd.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel %t.kd.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --check-prefix=SAME --input-file=%t.one
+// RUN: sed -E -e 's/morton \(([^)]*)\)( bits [0-9]+)?/kdtree (\1)/' %S/Inputs/morton_wrap.ent > %t.wrap.ent
+// RUN: %ent run %t.wrap.ent 2>/dev/null > %t.wrap
+// RUN: %ent run --parallel %t.wrap.ent 2>/dev/null > %t.wrap.all
+// RUN: cmp %t.wrap %t.wrap.all
+// RUN: FileCheck %s --check-prefix=WRAP --input-file=%t.wrap
+// RUN: sed -E -e 's/morton \(([^)]*)\)( bits [0-9]+)?/kdtree (\1)/' %S/Inputs/morton_whole.ent > %t.whole.ent
+// RUN: %ent run %t.whole.ent 2>/dev/null > %t.whole
+// RUN: %ent run --parallel %t.whole.ent 2>/dev/null > %t.whole.all
+// RUN: cmp %t.whole %t.whole.all
+// RUN: FileCheck %s --check-prefix=WHOLE --input-file=%t.whole
+// RUN: sed -E -e 's/morton \(([^)]*)\)( bits [0-9]+)?/kdtree (\1)/' %S/Inputs/morton_moving.ent > %t.moving.ent
+// RUN: %ent run %t.moving.ent 2>/dev/null > %t.moving
+// RUN: %ent run --parallel %t.moving.ent 2>/dev/null > %t.moving.all
+// RUN: cmp %t.moving %t.moving.all
+// RUN: FileCheck %s --check-prefix=MOVING --input-file=%t.moving
+// RUN: sed -E -e 's/morton \(([^)]*)\)( bits [0-9]+)?/kdtree (\1)/' %S/Inputs/morton_sums.ent > %t.sums.ent
+// RUN: %ent run %t.sums.ent 2>/dev/null > %t.sums
+// RUN: %ent run --parallel %t.sums.ent 2>/dev/null > %t.sums.all
+// RUN: cmp %t.sums %t.sums.all
+// RUN: FileCheck %s --check-prefix=SUMS --input-file=%t.sums
+// RUN: sed -E -e 's/morton \(([^)]*)\)( bits [0-9]+)?/kdtree (\1)/' %S/Inputs/morton_walk.ent > %t.walk.ent
+// RUN: %ent run %t.walk.ent 2>/dev/null > %t.walk
+// RUN: %ent run --parallel %t.walk.ent 2>/dev/null > %t.walk.all
+// RUN: cmp %t.walk %t.walk.all
+// RUN: FileCheck %s --check-prefix=WALK --input-file=%t.walk
+// RUN: sed -E -e 's/morton \(([^)]*)\)( bits [0-9]+)?/kdtree (\1)/' %S/Inputs/morton_forces.ent > %t.forces.ent
+// RUN: %ent run %t.forces.ent 2>/dev/null > %t.forces
+// RUN: %ent run --parallel %t.forces.ent 2>/dev/null > %t.forces.all
+// RUN: cmp %t.forces %t.forces.all
+// RUN: FileCheck %s --check-prefix=FORCES --input-file=%t.forces
+// RUN: %ent run %S/Inputs/kdtree_cells.ent 2>/dev/null > %t.cells
+// RUN: %ent run --parallel %S/Inputs/kdtree_cells.ent 2>/dev/null > %t.cells.all
+// RUN: cmp %t.cells %t.cells.all
+// RUN: FileCheck %s --check-prefix=CELLS --input-file=%t.cells
+
+// SAME:  near 0 differ, between 0, nearest 0; pairs 2636028, after me 1318014
+// WRAP:  near 0 differ, between 0, nearest 0; pairs 321288, after me 160644
+// WHOLE: near 0 differ, between 0, nearest 0; pairs 121676, after me 60838
+// MOVING: frame 0: 0 differ, pairs 174858
+// MOVING: frame 5: 0 differ, pairs 173938
+// SUMS: 2047 cells, 0 bad sums, 0 outside their cube; root size 0.984082 m 1465.797615
+// WALK: cells 2047 leaves 1024 rows 3000 mass 1465.797615 root 1465.797615
+// WALK-NEXT: level 2 rows 3000 top 0 broke at 10 past level 1 1
+// WALK-NEXT: each: leaf rows 3066158 far mass 2887343.474397
+// FORCES: mean error 0.001339 worst 0.005588; opened 396586, interactions 2761455 of 3998000
+// CELLS: 3000 rows, 2047 cells, 1024 leaves at levels 10 to 10, 0 bad, 0 out of order, 0 lost
+// CELLS: spots 0: 0 cells, 0 leaves (0 empty), 0 bad, nearest 3 to the middle 0
+// CELLS: spots 1: 1 cells, 1 leaves (0 empty), 0 bad, nearest 3 to the middle 32
+// CELLS: spots 7: 15 cells, 8 leaves (1 empty), 0 bad, nearest 3 to the middle 77
