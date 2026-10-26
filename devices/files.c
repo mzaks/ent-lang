@@ -3,8 +3,13 @@
 #include "ent_files.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+#endif
 
 int32_t ent_files_read_file(const ent_text126 *name, int32_t *count,
                             int32_t capacity, uint8_t *value) {
@@ -71,6 +76,38 @@ int32_t ent_files_read_bytes(const ent_text126 *name, int32_t *count,
 
 static int ent_files_by_name(const void *a, const void *b) {
   return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+// (One folder, there or made; false where it could not be.)
+static bool ent_files_one_folder(const char *path) {
+#ifdef _WIN32
+  int made = _mkdir(path);
+#else
+  int made = mkdir(path, 0777);
+#endif
+  if (made == 0 || errno == EEXIST)
+    return true;
+  return false;
+}
+
+bool ent_files_make_folder(const ent_text126 *name) {
+  char path[127];
+  memcpy(path, name->bytes, name->length);
+  path[name->length] = 0;
+  if (path[0] == 0)
+    return false;
+  // (Each folder on the way, then the folder itself.)
+  for (char *at = path + 1; *at; at++) {
+    if (*at == '/' || *at == '\\') {
+      char was = *at;
+      *at = 0;
+      bool ok = ent_files_one_folder(path);
+      *at = was;
+      if (!ok)
+        return false;
+    }
+  }
+  return ent_files_one_folder(path);
 }
 
 int32_t ent_files_list_files(const ent_text126 *folder, int32_t *count,
