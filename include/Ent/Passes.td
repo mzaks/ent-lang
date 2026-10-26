@@ -313,4 +313,24 @@ def EntIndexes : Pass<"ent-indexes", "ModuleOp"> {
   ];
 }
 
+def EntInferIndexes : Pass<"ent-infer-indexes", "ModuleOp"> {
+  let summary = "Find the indexes that would serve the program's `for`s";
+  let description = [{
+    Before `--ent-indexes`: of each `for` that visits every entity of its
+    archetypes where an index the program does not declare would visit
+    only some, a remark naming the declaration that would (`index Name of
+    C by f partition`, `.. hash`). Only an index `--ent-indexes` would
+    use for it (the same conditions), and one for each field. With
+    `out`, the declarations are written to that file, one a line, which
+    `ent-translate --import-ent --inferred=<file>` reads as if the
+    program declared them (`ent build --infer-indexes`).
+  }];
+  let options = [
+    Option<"out", "out", "std::string", /*default=*/"\"\"",
+           "Write the declarations of the indexes found to this file">,
+    Option<"remarks", "remarks", "bool", /*default=*/"true",
+           "Say each, a remark at the `for` it would serve">,
+  ];
+}
+
 #endif // ENT_PASSES

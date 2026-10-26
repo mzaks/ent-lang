@@ -2499,6 +2499,20 @@ far; `ENT_EDGES_ANEW=1` in the environment sorts anew every time, to
 hold the two against each other. (A program run by a C host keeps its
 edges side by side, as its header says.)
 
+#### Indexes found by the compiler
+
+Where a `for` visits every entity of its archetypes to find those whose
+field has a value the same for the whole `for` (`where b.team == t`,
+`where b.kind == Kind.Bee`, `||` of such, `!=` and `&&` of such), and
+an index the program does not declare would find them as it finds them
+for a declared one, `ent build` says so in a remark at the `for`, naming
+the declaration: a partition (`by f partition`) of an enum, a bool or a
+u8, else a hash index of a whole number or a text (`by f hash`). An
+index that nothing reads is not made, and a remark says so. With `ent
+build --infer-indexes` the indexes named are made, as if the program
+declared them at its end; what the program does is the same, as with any
+index (docs/indexes.md, step 12).
+
 ### Entities given to a fn or proc
 
 ```

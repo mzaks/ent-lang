@@ -7,9 +7,12 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/IRMapping.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/raw_ostream.h"
 
 namespace mlir::ent {
 #define GEN_PASS_DEF_ENTINDEXES
+#define GEN_PASS_DEF_ENTINFERINDEXES
 #include "Ent/Passes.h.inc"
 } // namespace mlir::ent
 
@@ -789,6 +792,24 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
       Kept kept = keptOf(buffer, info, archetypes, symbols);
       SmallVector<RunOp> runs;
       module.walk([&](RunOp run) { runs.push_back(run); });
+      // (One that nothing reads is not made, nor said out of date: a
+      // remark says so.)
+      bool read = info.get("clustered") || llvm::any_of(runs, [&](RunOp run) {
+                    StringAttr system = run.getSystemAttr().getAttr();
+                    if (system == kept.update || system == kept.stale ||
+                        system == kept.moved || keepers.contains(system))
+                      return false;
+                    const SystemAccess &access = accessOf(run);
+                    return (access.isOpaque() &&
+                            isa<ExternOp>(symbols.lookup(run.getSystem()))) ||
+                           touches(access.reads, kept.readBy);
+                  });
+      if (!read && !runs.empty()) {
+        buffer.emitRemark("index ")
+            << buffer.getSymName()
+            << " is read by nothing: it is not made (docs/indexes.md)";
+        continue;
+      }
       for (RunOp run : runs) {
         StringAttr system = run.getSystemAttr().getAttr();
         if (system == kept.update || system == kept.stale ||
@@ -858,6 +879,135 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
         }
       }
     }
+  }
+};
+
+/// The indexes a program does not declare that would serve its `for`s
+/// (see EntInferIndexes in Passes.td).
+struct EntInferIndexes
+    : public mlir::ent::impl::EntInferIndexesBase<EntInferIndexes> {
+  using EntInferIndexesBase::EntInferIndexesBase;
+
+  /// One index found: what it is by, its kind, its declaration, and the
+  /// `for`s it would serve.
+  struct Found {
+    FlatSymbolRefAttr component;
+    StringAttr field;
+    bool partition = false;
+    std::string name;
+    SmallVector<QueryOp> serves;
+  };
+
+  void runOnOperation() override {
+    ModuleOp module = getOperation();
+    if (failed(inferArchetypes(module)))
+      return signalPassFailure();
+    SymbolTable symbols(module);
+    SmallVector<ArchetypeOp> archetypes(module.getOps<ArchetypeOp>());
+    // What the indexes declared are by, and the systems that make them.
+    llvm::DenseSet<std::pair<Attribute, Attribute>> declared;
+    llvm::DenseSet<Attribute> making;
+    for (BufferOp buffer : module.getOps<BufferOp>()) {
+      auto info = buffer->getAttrOfType<DictionaryAttr>("ent.index");
+      if (!info)
+        continue;
+      if (auto key = info.getAs<ArrayAttr>("key"); key && key.size() >= 2)
+        declared.insert({key[0], key[1]});
+      for (NamedAttribute named : info)
+        if (auto system = dyn_cast<StringAttr>(named.getValue());
+            system && isa_and_nonnull<SystemOp>(symbols.lookup(system)))
+          making.insert(system);
+    }
+    SmallVector<Found> found;
+    auto findOrAdd = [&](FlatSymbolRefAttr component, StringAttr field,
+                         bool partition) -> Found & {
+      for (Found &one : found)
+        if (one.component == component && one.field == field)
+          return one;
+      Found &made = found.emplace_back();
+      made.component = component;
+      made.field = field;
+      made.partition = partition;
+      // (A name of its own: the component's and the field's.)
+      std::string base = component.getValue().rsplit('.').second.empty()
+                             ? component.getValue().str()
+                             : component.getValue().rsplit('.').second.str();
+      base += "By";
+      base += llvm::toUpper(field.getValue().front());
+      base += field.getValue().drop_front().str();
+      made.name = base;
+      for (int n = 2; symbols.lookup(made.name) ||
+                      llvm::any_of(found,
+                                   [&](const Found &other) {
+                                     return &other != &made &&
+                                            other.name == made.name;
+                                   });
+           ++n)
+        made.name = base + std::to_string(n);
+      return made;
+    };
+    module.walk([&](QueryOp query) {
+      auto equals = query->getAttrOfType<ArrayAttr>(QueryOp::kKeyEqualsAttr);
+      auto system = query->getParentOfType<SystemOp>();
+      if (!equals || !system || making.contains(system.getSymNameAttr()))
+        return;
+      auto component = cast<FlatSymbolRefAttr>(equals[0]);
+      auto field = cast<StringAttr>(equals[1]);
+      if (declared.contains({component.getAttr(), field}))
+        return;
+      auto declaredComponent = symbols.lookup<ComponentOp>(component.getAttr());
+      if (!declaredComponent)
+        return;
+      Type type = declaredComponent.getFieldType(field.getValue());
+      auto whole = dyn_cast_or_null<IntegerType>(type);
+      bool partitioned =
+          isa_and_nonnull<EnumType>(type) ||
+          (whole && (whole.getWidth() == 1 ||
+                     (whole.getWidth() == 8 && whole.isUnsigned())));
+      SmallVector<StringAttr> key{component.getAttr(), field};
+      llvm::SmallDenseSet<Attribute> held =
+          holdersOf(archetypes, {component.getAttr()});
+      // (As --ent-indexes would answer it: see answerable, overBits, and
+      // the hash index's.)
+      if (!answerable(query, key, held, making, /*gpu=*/partitioned))
+        return;
+      if (partitioned) {
+        if (!overBits(query))
+          return;
+      } else if (!query.getSlicePart("equals") ||
+                 combinesIntoWhatItReads(query) || system.getGpu() ||
+                 !(whole || isa<StringType>(type))) {
+        return;
+      }
+      findOrAdd(component, field, partitioned).serves.push_back(query);
+    });
+
+    std::string text;
+    llvm::raw_string_ostream lines(text);
+    for (Found &one : found) {
+      std::string declaration = "index " + one.name + " of " +
+                                one.component.getValue().str() + " by " +
+                                one.field.getValue().str() +
+                                (one.partition ? " partition" : " hash");
+      lines << declaration << "\n";
+      if (!remarks)
+        continue;
+      for (QueryOp query : one.serves)
+        query.emitRemark("visits every entity to find those whose ")
+            << one.field.getValue()
+            << (one.partition ? " is of some values" : " is one value")
+            << "; an index would find them: '" << declaration << "'";
+    }
+    if (out.empty())
+      return;
+    std::error_code error;
+    llvm::raw_fd_ostream file(out, error, llvm::sys::fs::OF_Text);
+    if (error) {
+      module.emitError("cannot write the indexes found to ")
+          << out << ": " << error.message();
+      return signalPassFailure();
+    }
+    file << text;
   }
 };
 

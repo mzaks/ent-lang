@@ -504,6 +504,21 @@ and staged by `--ent-schedule`). Order of ties: see 5.2. GPU: not yet.
      and order: sorted; `near`: grid or Morton), as remarks first, made
      by themselves only behind a flag.
 
+**Built** of 4 (2026-10-26): the policy is chosen as fits (section 4,
+lazy and incremental or anew); an index no system reads is not made
+(its update never runs, nor is it said out of date), with a remark;
+`--ent-infer-indexes` (before `--ent-indexes`) finds the `for`s that
+ask for a field's values (`key_equals`) which `--ent-indexes` would
+answer by an index the program does not declare, as it would answer
+them (the same conditions): a partition of an enum, a bool or a u8, a
+hash index of another whole number or a text; it says each in a remark
+at the `for`s and writes the declarations to a file, which
+`ent-translate --inferred=` reads after the program's own (`ent build
+--infer-indexes`). The user chose (2026-10-26): suggested always, made
+behind the flag; from the code, refined by a trace; partitions, hash,
+sorted and grids; shown on programs with their indexes taken out and on
+a new one.
+
 **Built**, otherwise: no `ent.index` op. The parser declares a buffer
 with an `ent.index` attribute (what it holds and is made of), a field
 for each entity's row, and, as ent-lang, the systems and the unique that
@@ -531,7 +546,7 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 | 9 | Embeddings by brute force (int8 and binary, ranked again) | The recall to measure against | needs a vector type |
 | 10 | IVF with k-means in ent-lang | | |
 | 11 | LSH families | | |
-| 12 | `--ent-infer-indexes` | | |
+| 12 | `--ent-infer-indexes` | Policies, unread indexes, indexes found | in progress (2026-10-26): remarks and `--infer-indexes` for partitions and hash indexes, unread indexes not made; next a trace's times, sorted, grids |
 | 13 | B+ tree, BVH, HNSW from outside (where measurements or programs need them) | | |
 
 **Step 1, as it stands** (2026-10-22). The sort that every `for ...
@@ -1050,6 +1065,8 @@ place of the index text's `N_split`:
    (`component Player { name: text @hash unique }`)? **A declaration of
    its own** (`index Name of ...`), as built.
 2. Should the compiler ever add an index by itself, or only suggest one?
+   **Both**: it suggests each in a remark, and makes them with
+   `--infer-indexes` (2026-10-26).
 3. May a clustered order conflict with a `tree sorted` order, one of
    them winning, or is that an error? (Two sorted trees with their
    entities in one archetype are an error.)

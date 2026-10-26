@@ -1,0 +1,38 @@
+// No index declared but one read by nothing: the compiler says which
+// indexes would serve the `for`s that ask for a field's values (a
+// partition of a field of few values, a hash index of a number), and
+// with --infer-indexes makes them, the program saying the same
+// (infer_indexes.test). Lines ending in //D declare them by hand.
+import console
+enum Kind { Ant, Bee, Cat }
+component Bug { kind: Kind, id: i64, team: i32, n: i32 } capacity 4000
+unique T { frame: i32, sum: i64 }
+index Unread of Bug by n
+index ByKind of Bug by kind partition //D
+index ByTeam of Bug by team hash //D
+
+world {
+  for i in 0..4000 {
+    spawn { Bug { kind: (i % 7 % 3) as Kind, id: i as i64, team: i % 97, n: i } }
+  }
+}
+
+system change() {
+  for b: mut Bug where b.n % 5 == T.frame % 5 { b.kind = ((b.n + T.frame) % 3) as Kind }
+  for b: mut Bug where b.n % 7 == T.frame % 7 { b.team = (b.team + 13) % 97 }
+}
+
+system ask() {
+  T.sum = 0
+  for b: Bug where b.kind == Kind.Bee { T.sum += b.id }
+  for b: Bug where b.kind != Kind.Ant { T.sum += b.id * 3 }
+  for t in 0..5 {
+    let team = (t * 17 + T.frame) % 97
+    for b: Bug where b.team == team { T.sum += b.id * (t as i64 + 1) }
+  }
+  put("frame {T.frame}: {T.sum}")
+  T.frame += 1
+}
+
+schedule go() { change() ask() }
+main { loop { go() } until T.frame >= 6 }

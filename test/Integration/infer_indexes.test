@@ -1,0 +1,34 @@
+// Indexes the program does not declare (docs/indexes.md, step 12): a
+// remark at each `for` one would serve, naming its declaration, and one
+// of a declared index nothing reads; with --infer-indexes they are made,
+// the program saying the same as with them declared by hand.
+// RUN: sed -e '/\/\/D$/d' %S/Inputs/infer_indexes.ent > %t.ent
+// RUN: sed -e 's|//D$||' %S/Inputs/infer_indexes.ent > %t.declared.ent
+// RUN: %ent run %t.declared.ent > %t.declared 2> %t.declared.err
+// RUN: %ent run %t.ent > %t.plain 2> %t.err
+// RUN: FileCheck %s --check-prefix=REMARK --input-file=%t.err
+// RUN: %ent run %t.ent --infer-indexes > %t.inferred
+// RUN: cmp %t.plain %t.inferred
+// RUN: cmp %t.plain %t.declared
+// RUN: FileCheck %s --input-file=%t.inferred
+// RUN: FileCheck %s --check-prefix=UNREAD --input-file=%t.declared.err
+// RUN: ent-translate --import-ent %t.ent -I %S/../../devices \
+// RUN:   | ent-opt --ent-infer-indexes="out=%t.found remarks=0" -o /dev/null
+// RUN: FileCheck %s --check-prefix=FOUND --input-file=%t.found
+// RUN: ent-translate --import-ent %t.ent --inferred=%t.found -I %S/../../devices \
+// RUN:   | ent-opt --ent-indexes | FileCheck %s --check-prefix=VIA
+
+// REMARK-DAG: index Unread is read by nothing: it is not made
+// REMARK-DAG: :25:{{[0-9]+}}: remark: visits every entity to find those whose kind is of some values; an index would find them: 'index BugByKind of Bug by kind partition'
+// REMARK-DAG: :26:{{[0-9]+}}: remark: visits every entity to find those whose kind is of some values; an index would find them: 'index BugByKind of Bug by kind partition'
+// REMARK-DAG: :29:{{[0-9]+}}: remark: visits every entity to find those whose team is one value; an index would find them: 'index BugByTeam of Bug by team hash'
+// UNREAD: index Unread is read by nothing: it is not made
+// UNREAD-NOT: an index would find them
+// UNREAD-NOT: see current operation
+// FOUND: index BugByKind of Bug by kind partition
+// FOUND-NEXT: index BugByTeam of Bug by team hash
+// VIA-LABEL: ent.system @ask(
+// VIA: via_partition = @BugByKind
+// VIA: via_partition = @BugByKind
+// VIA: via_hash = @BugByTeam
+// CHECK: frame 5:

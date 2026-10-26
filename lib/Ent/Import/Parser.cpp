@@ -47,6 +47,13 @@ static llvm::cl::list<std::string> importDirs(
                         "after the importing file's own"),
     llvm::cl::value_desc("dir"), llvm::cl::Prefix);
 
+static llvm::cl::opt<std::string> inferredIndexes(
+    "inferred",
+    llvm::cl::desc("Declarations of indexes the program does not declare, "
+                   "read after its own as if it did (`--ent-infer-indexes "
+                   "out=..`, `ent build --infer-indexes`)"),
+    llvm::cl::value_desc("file"), llvm::cl::init(""));
+
 static llvm::cl::opt<bool> parallelProgram(
     "parallel",
     llvm::cl::desc("The program runs on many threads (`ent build "
@@ -1196,6 +1203,22 @@ OwningOpRef<ModuleOp> Parser::parseModule() {
     files->sources.push_back(path.empty() ? file.str() : path.str().str());
   if (failed(parseDeclarations()) || hadError)
     return nullptr;
+  // (The indexes found for it, as if it declared them at its end.)
+  if (!inferredIndexes.empty()) {
+    auto read = llvm::MemoryBuffer::getFile(inferredIndexes);
+    if (!read) {
+      emitError(loc(token.loc))
+          << "cannot read the indexes found, " << inferredIndexes.getValue()
+          << ": " << read.getError().message();
+      return nullptr;
+    }
+    StringRef bytes = (*read)->getBuffer();
+    sourceMgr.AddNewSourceBuffer(std::move(*read), llvm::SMLoc());
+    lexer = Lexer(bytes);
+    advance();
+    if (failed(parseDeclarations()) || hadError)
+      return nullptr;
+  }
   for (auto &entry : functions)
     if (entry.second.later) {
       emitError(loc(entry.second.laterAt))

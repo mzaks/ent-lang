@@ -133,6 +133,15 @@ each value in the trace, one group after another where fewer, without
 timing the two ways as it runs. What the program does is the same
 either way.
 
+Where a `for` visits every entity to find those whose field has a value
+(`where b.team == t`, `where d.stage == Stage.Mild || ..`) and an index
+the program does not declare would find them, a remark at the `for`
+names the index (`index BugByTeam of Bug by team hash`, a partition of
+an enum, a bool or a u8); and one at an index nothing reads, which is
+not made. With --infer-indexes those indexes are made, as if the
+program declared them (docs/indexes.md, step 12); --no-index-remarks
+leaves the remarks out.
+
 A module that needs libraries says so in `m.link`: the linker's arguments
 for them, as on a command line (`-lraylib`, `-L/opt/x/lib -lx`).
 
@@ -290,6 +299,7 @@ def cache_key(arguments):
         note_tool(shutil.which(compiler) or compiler)
     note_tool(os.path.abspath(__file__))
     note("embed", arguments.embed)
+    note("infer-indexes", arguments.infer_indexes)
     note("trace", arguments.trace)
     if arguments.trace:
         note_file(os.path.join(ROOT, "devices", "trace.c"))
@@ -683,6 +693,17 @@ def build(arguments, output, directory):
     run([translate, "--import-ent", program, "--mlir-print-debuginfo",
          "-o", imported] + (["--parallel"] if arguments.parallel else [])
         + includes)
+    # (The indexes that would serve its `for`s, which it does not declare:
+    # each said, at the `for`s; with --infer-indexes made, as if declared.)
+    if arguments.infer_indexes or not arguments.no_index_remarks:
+        found = os.path.join(directory, stem + ".indexes.ent")
+        run([optimise, imported, "--ent-infer-indexes=out=" + found
+             + (" remarks=0" if arguments.no_index_remarks else ""),
+             "--mlir-print-op-on-diagnostic=false", "-o", os.devnull])
+        if arguments.infer_indexes and os.path.getsize(found):
+            run([translate, "--import-ent", program, "--inferred=" + found,
+                 "--mlir-print-debuginfo", "-o", imported]
+                + (["--parallel"] if arguments.parallel else []) + includes)
     # (Each index made again before what reads it, where what it is made
     # of changed: before the systems are staged and lowered; where built
     # for a GPU, an index may be made there: EntIndexes.) Before the
@@ -695,7 +716,8 @@ def build(arguments, output, directory):
     if arguments.ranks:
         choices.append("ranks=1")
     indexes = "--ent-indexes" + ("=" + " ".join(choices) if choices else "")
-    run([optimise, imported, indexes, "--mlir-print-debuginfo", "-o", module])
+    run([optimise, imported, indexes, "--mlir-print-debuginfo",
+         "--mlir-print-op-on-diagnostic=false", "-o", module])
     header = os.path.join(directory, "ent_world.h")
     run([translate, "--ent-to-c-header", module, "-o", header])
     # What the C of extern fns and procs gets: their declarations, without
@@ -1130,6 +1152,13 @@ def main():
                         "runs on many threads, and how it shares its pieces "
                         "out, by how it ran in a trace of the program "
                         "(program.trace.json of a build with --trace)")
+    parser.add_argument("--infer-indexes", action="store_true",
+                        help="make the indexes the compiler finds would "
+                        "serve the program's `for`s, as if it declared "
+                        "them (each said in a remark either way)")
+    parser.add_argument("--no-index-remarks", action="store_true",
+                        help="do not say which indexes would serve the "
+                        "program's `for`s")
     parser.add_argument("--keep", metavar="dir", help="keep the generated "
                         "files (IR, header) in this directory")
     parser.add_argument("--no-cache", action="store_true",
