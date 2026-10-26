@@ -295,19 +295,10 @@ bool answerable(QueryOp query, ArrayRef<StringAttr> key,
 
 /// Whether a `for` a partition answers may visit the entities of its bits
 /// (as `for .. in Set` does: QueryOp::kInSetAttr): not one by a field,
-/// in turn or by what changed, nor one whose body gives rows to a buffer,
-/// keeps a running sum or takes a window (see QueryOp's verifier).
+/// in turn, by what changed or along a tree (see QueryOp's verifier).
 bool overBits(QueryOp query) {
-  if (query.hasBy() || query.getCascade() || query.isTurn() ||
-      query->hasAttr(QueryOp::kTriggersAttr))
-    return false;
-  return !query.getBody()
-              .walk([](Operation *op) {
-                return isa<AppendOp, RunningOp, BufferClaimOp, SpawnOp>(op)
-                           ? WalkResult::interrupt()
-                           : WalkResult::advance();
-              })
-              .wasInterrupted();
+  return !query.hasBy() && !query.getCascade() && !query.isTurn() &&
+         !query->hasAttr(QueryOp::kTriggersAttr);
 }
 
 struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {

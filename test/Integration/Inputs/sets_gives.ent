@@ -1,0 +1,49 @@
+// A `for` over a set's entities that gives a buffer rows, sums as it
+// goes, takes windows of a buffer and spawns: all in the order of its
+// entities' rows, as a `for` over all of them with the same `where`
+// (lines ending in //S are the set's; //P lines say it without one).
+import console
+component U { n: i32, hot: bool, first: i32, k: i32, at: i32 } capacity 70000
+component Kid { of: i32 } capacity 70000
+unique T { frame: i32, sum: i64, c: i32, d: i64 }
+buffer Log { n: i32, twice: i32 } capacity 70000
+buffer Out { v: i64 } capacity 200000
+set Hot //S
+
+world { for i in 0..66000 { spawn { U { n: i, hot: false, first: 0, k: 0, at: 0 } } } }
+
+system mark() {
+  Hot = [] //S
+  for u: mut U { u.hot = (u.n + T.frame * 3) % 7 == 3 || (u.n + T.frame * 100) % 1000 < 40 }
+  for e, u: U where u.hot { Hot += e } //S
+  T.c = 0
+  for u: mut U where u.hot {
+    u.k = u.n % 3 + 1
+    let at = T.c += u.k
+    u.first = at
+  }
+}
+
+system gives() {
+  Log = []
+  Out = [{ v: 0 }; 200000]
+  T.d = 0
+  for e, u: mut U, w: mut Out[u.first, u.k] in Hot { //S
+  //P for e, u: mut U, w: mut Out[u.first, u.k] where u.hot {
+    Log += { n: u.n, twice: u.n * 2 }
+    let r = T.d += u.n as i64
+    u.at = r as i32
+    for j in 0..len(w) { w[j].v = (u.n * 10 + j) as i64 }
+    if u.n % 5 == 0 { spawn { Kid { of: u.n } } }
+  }
+  T.sum = 0
+  for k in 0..len(Log) { T.sum += (Log[k].n as i64) * (k as i64 + 1) }
+  for k in 0..T.c { T.sum += Out[k].v * (k as i64 + 1) }
+  for u: U { T.sum += (u.at as i64) * (u.n as i64) }
+  for c: Kid { T.sum += c.of as i64 }
+  put("frame {T.frame}: rows {len(Log)} summed {T.d} all {T.sum}")
+  T.frame += 1
+}
+
+schedule go() { mark() gives() }
+main { loop { go() } until T.frame >= 4 }

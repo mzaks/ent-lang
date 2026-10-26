@@ -2730,17 +2730,6 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
     if (hasBy() || getCascade() || isTurn() || (*this)->hasAttr(kTriggersAttr))
       return emitOpError("visits the entities of a set: not by a field, "
                          "along a tree, in turn or by what changed");
-    // (It visits only those, so what waits in a place of each entity of
-    // the `for` until it ends, for all at once, is not there yet.)
-    Operation *refused = nullptr;
-    getBody().walk([&](Operation *op) {
-      if (!refused && isa<AppendOp, RunningOp, BufferClaimOp, SpawnOp>(op))
-        refused = op;
-    });
-    if (refused)
-      return refused->emitOpError("in a 'for' over the entities of a set: "
-                                  "not yet (rows given to a buffer, a "
-                                  "running sum, a window, a spawn)");
   }
   if (isListed()) {
     auto buffer =

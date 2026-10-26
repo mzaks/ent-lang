@@ -55,17 +55,6 @@ system s() {
   }
 }
 
-// -----
-
-component N { id: i32 }
-set S
-buffer B { n: i32 } capacity 4
-system s() {
-  for n: N in S {
-    // expected-error @+1 {{in a 'for' over the entities of a set: not yet}}
-    B += { n: n.id }
-  }
-}
 
 // -----
 

@@ -2182,9 +2182,8 @@ few values: an enum, a bool or a u8 (256 values at most).
   before the `for`, nor in it of other entities, changing the field or
   which entities there are. It visits them in the order they are stored
   and asks the `where` still: the same as without the index. Not a `for`
-  that goes `by` a field, in turn, by what changed, along a tree, nor
-  one whose body gives rows to a buffer, keeps a running sum, takes a
-  window or spawns, nor in a `gpu` system: those look at every entity.
+  that goes `by` a field, in turn, by what changed or along a tree, nor
+  in a `gpu` system: those look at every entity.
 - How it is kept the compiler chooses. Where one archetype holds its
   entities (which no sorted tree nor another clustered index keeps in
   order), no system changes the field, and rows move anyway (entities
@@ -2647,9 +2646,9 @@ search as GAP's, keeps the pages reached last in one).
   outside a `for`.
 - `for e, n: Node in Name` visits those of its entities the set holds,
   as a `for` does any: on all the cores, what it sends combined as it
-  is anyway. Not in turn, by a field or along a tree, and not yet where
-  it gives buffers rows, sums as it goes (`let x = U.f += ..`), takes
-  windows or spawns. Of row ids (no entity is ever destroyed or moved),
+  is anyway, and what it gives buffers, sums as it goes (`let x = U.f
+  += ..`), the windows it takes and what it spawns in the order of its
+  entities' rows. Not in turn, by a field or along a tree. Of row ids (no entity is ever destroyed or moved),
   a word of the set's bits is read for 64 rows, and a word of noughts
   costs no more: a frontier of 3 pages of 262,143 is 4,096 words looked
   at. Otherwise each row's bit is asked.

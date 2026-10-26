@@ -1,0 +1,13 @@
+// A `for` over a set's entities (the set other every frame) that gives a
+// buffer rows, sums as it goes, takes windows and spawns: the same as a
+// `for` over all of them asking the same, on one core and on many.
+// RUN: sed -e '/\/\/S$/d' -e 's|^\( *\)//P |\1|' %S/Inputs/sets_gives.ent > %t.plain.ent
+// RUN: %ent run %t.plain.ent > %t.plain
+// RUN: %ent run %S/Inputs/sets_gives.ent 2>&1 > %t.one | count 0
+// RUN: cmp %t.one %t.plain
+// RUN: env ENT_PARALLEL_MIN=1 %ent run --parallel %S/Inputs/sets_gives.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+
+// CHECK: frame 0: rows 11692 summed 384754542 all 74132626540346622
+// CHECK: frame 3: rows 11691 summed 386290080 all 269244988206342048

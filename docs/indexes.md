@@ -333,8 +333,10 @@ without): four `for`s that each visit 10,000 entities at random rows
 `where`s cost more than the scan.
 
 Open: the sets made on the GPU, and `gpu` systems' `for`s through them;
-a `for` through them that gives rows to a buffer or keeps a running sum
-(as of a set); worlds on many ranks (a set is not yet).
+worlds on many ranks (a set is not yet). A `for` through them that gives
+rows to a buffer, keeps a running sum, takes windows or spawns: done
+(2026-10-26, as of any set: the rows given and the sums in the rows'
+order).
 
 ### 5.5 Spatial indexes
 

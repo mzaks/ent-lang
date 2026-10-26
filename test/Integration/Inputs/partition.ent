@@ -9,6 +9,7 @@ component U { s: Stage, ok: bool, k: u8, n: i32 } capacity 256
 component Got { sum: i64 } capacity 256
 component W { s: Stage, n: i32 } capacity 64
 unique T { frame: i32, sum: i64, next: i32, c: i32, a: i32, b: i32, d: i32, e: i32 }
+buffer Log { n: i32, k: u8 } capacity 256
 index Stages of U by s partition //I
 index Oks of U by ok partition //I
 index Ks of U by k partition //I
@@ -69,6 +70,11 @@ system show() {
   for u: U, g: mut Got where u.ok == true { g.sum += u.n as i64 }
   for u: U where u.k == 100 as u8 || u.k == 200 as u8 { put("k {u.k} {u.n}") }
   for w: W where w.s != Stage.B { put("W not B {w.s} {w.n}") }
+  Log = []
+  for u: U where u.s == Stage.D || u.s == Stage.E { Log += { n: u.n, k: u.k } }
+  T.sum = 0
+  for k in 0..len(Log) { T.sum += (Log[k].n as i64) * (Log[k].k as i64 + k as i64) }
+  put("log {len(Log)} {T.sum}")
   T.sum = 0
   for g: Got { T.sum += g.sum }
   put("got {T.sum}")

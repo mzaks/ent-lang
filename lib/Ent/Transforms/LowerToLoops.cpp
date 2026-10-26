@@ -9253,6 +9253,11 @@ static void appendAppended(IRRewriter &rewriter, SaPlaceOp place,
           values.push_back(
               memref::LoadOp::create(rewriter, loc, column, ValueRange{row}));
         storeRow(rewriter, loc, world, buffer, at, values);
+        // (Taken: a `for` over a set's entities does not visit the others'
+        // places to say they gave none, see emitSetRows.)
+        memref::StoreOp::create(
+            rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 8),
+            slots.sent, ValueRange{row});
         scf::YieldOp::create(
             rewriter, loc,
             ValueRange{arith::AddIOp::create(rewriter, loc, at, one)});
@@ -21263,9 +21268,12 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
   // A whole number added for every entity, from the body itself (not an
   // `if` of it): the row's place among the query's rows times it, which
   // needs no pass of its own.
+  // (Not of a `for` over a set's entities: its rows' places are among
+  // all the archetype's rows, of which it visits some.)
   auto counts = [&](RunningOp running) {
     APInt step;
-    return running->getParentOp() == query.getOperation() &&
+    return !query.getInSet() &&
+           running->getParentOp() == query.getOperation() &&
            running.getRule() == "add" &&
            matchPattern(running.getValue(), m_ConstantInt(&step));
   };
