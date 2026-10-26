@@ -1,0 +1,11 @@
+import console
+unique T { x: f64, y: f32 }
+system s() {
+  T.x = 7.5
+  T.x = T.x % 2.0
+  T.y = -7.25
+  T.y = T.y % 2.0
+  put("{T.x} {T.y}")
+}
+schedule t() { s() }
+main { t() }

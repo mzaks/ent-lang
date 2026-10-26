@@ -40,6 +40,12 @@
 // RUN: ent-translate --import-ent %S/Inputs/infer_sorted.ent --inferred=%t.sorted.found \
 // RUN:   -I %S/../../devices | ent-opt --ent-indexes | FileCheck %s --check-prefix=BYINDEX
 
+// Grids: a `for` inside a `for` by how far, read with `near`.
+// RUN: %ent run %S/Inputs/infer_near.ent > %t.near 2> %t.near.err
+// RUN: FileCheck %s --check-prefix=NEAR --input-file=%t.near.err
+// RUN: %ent run %S/Inputs/infer_near.ent --infer-indexes > %t.near.inferred
+// RUN: cmp %t.near %t.near.inferred
+
 // REMARK-DAG: index Unread is read by nothing: it is not made
 // REMARK-DAG: :25:{{[0-9]+}}: remark: visits every entity to find those whose kind is of some values; an index would find them: 'index BugByKind of Bug by kind partition'
 // REMARK-DAG: :26:{{[0-9]+}}: remark: visits every entity to find those whose kind is of some values; an index would find them: 'index BugByKind of Bug by kind partition'
@@ -64,3 +70,5 @@
 // SORTED-NOT: by at
 // BYINDEX-COUNT-2: by_index = @DotByKey
 // BYINDEX-NOT: by_index
+// NEAR: infer_near.ent:24:9: remark: visits every entity to find those within Box.r of a place; an index would find them: 'index PNear of P grid (x, y) cell Box.r', and 'near (a.x, a.y) within Box.r * 1.000001 in PNear'
+// NEAR-NOT: within

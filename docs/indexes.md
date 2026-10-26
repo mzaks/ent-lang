@@ -517,10 +517,18 @@ than systems change their key or which entities there are: a sorted
 index, marked `inferred` so that the `for`s take their order from it
 though nothing else reads it (200,000 entities, a `for` by the key and
 one taking the last 5, one in 1,000 keys changed a frame: 610 to 242 ms
-for 200 frames, the same sums); it says each in a remark
+for 200 frames, the same sums); and the `for`s inside `for`s that find
+the entities within a radius of a place, where the grid's order cannot
+change what they do (their bodies only read and gather whole numbers by
+`+`, `|`, `&`, `^`, min or max) and the system does not move them: a
+grid by those fields, its cell the radius, and the `near` the `for`
+reads (`at file:line:col` lines in the file, which `ent-translate
+--inferred=` reads in at that `for`; 20,000 entities, 10 steps: 490 to
+35 ms, the same counts); it says each in a remark
 at the `for`s and writes the declarations to a file, which
-`ent-translate --inferred=` reads after the program's own (`ent build
---infer-indexes`). Given a trace's times (`times=`, from `ent build
+`ent-translate --inferred=` reads as if each stood before the first
+code after its component's declaration, in that component's module
+(`ent build --infer-indexes`). Given a trace's times (`times=`, from `ent build
 --tune`: each place's loops on all their threads, and the run), a `for`
 whose loops took less than `worth` of the run (1%) is left out, and the
 remarks say how long each took. The user chose (2026-10-26): suggested always, made
@@ -555,7 +563,7 @@ benchmark in `bench/` with its numbers in a `RESULTS.md`.
 | 9 | Embeddings by brute force (int8 and binary, ranked again) | The recall to measure against | needs a vector type |
 | 10 | IVF with k-means in ent-lang | | |
 | 11 | LSH families | | |
-| 12 | `--ent-infer-indexes` | Policies, unread indexes, indexes found | in progress (2026-10-26): remarks and `--infer-indexes` for partitions and hash indexes, unread indexes not made, a trace's times, sorted indexes for `for ... by`; next grids |
+| 12 | `--ent-infer-indexes` | Policies, unread indexes, indexes found | in progress (2026-10-26): remarks and `--infer-indexes` for partitions and hash indexes, unread indexes not made, a trace's times, sorted indexes for `for ... by`, grids for `for`s by how far; next the gates |
 | 13 | B+ tree, BVH, HNSW from outside (where measurements or programs need them) | | |
 
 **Step 1, as it stands** (2026-10-22). The sort that every `for ...

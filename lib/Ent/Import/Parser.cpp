@@ -49,8 +49,9 @@ static llvm::cl::list<std::string> importDirs(
 
 static llvm::cl::opt<std::string> inferredIndexes(
     "inferred",
-    llvm::cl::desc("Declarations of indexes the program does not declare, "
-                   "read after its own as if it did (`--ent-infer-indexes "
+    llvm::cl::desc("Indexes the program does not declare, read as if it "
+                   "declared each after its component, and the `near` "
+                   "clauses of the `for`s they serve (`--ent-infer-indexes "
                    "out=..`, `ent build --infer-indexes`)"),
     llvm::cl::value_desc("file"), llvm::cl::init(""));
 
@@ -77,6 +78,9 @@ struct SourceModule {
   /// The schedule that runs its `world` block, if it has one.
   std::string worldSchedule;
   llvm::StringSet<> reported;
+  /// The indexes found by the compiler of the components it declared so
+  /// far, read before the code that comes next (see Parser::splice).
+  std::string found;
 };
 
 /// What the declarations of one kind (components, uniques, ...) are known
@@ -449,6 +453,27 @@ private:
   void advance() {
     previousEnd = token.spelling.end();
     token = lexer.next();
+    // (At the end of text spliced in, the token it stood before; not at
+    // the end of other text read meanwhile, as an index's own code.)
+    while (token.is(Token::Eof) && !splices.empty() &&
+           lexer.holds(splices.back().text)) {
+      Splice resumed = splices.pop_back_val();
+      lexer = resumed.lexer;
+      token = resumed.token;
+    }
+  }
+  /// Reads `text` as if it stood before the current token, then that
+  /// token again: the indexes found by the compiler, and the `near` of a
+  /// `for` they serve (--inferred).
+  void splice(StringRef text) {
+    auto copy =
+        llvm::MemoryBuffer::getMemBufferCopy(text, "<found by the compiler>");
+    StringRef bytes = copy->getBuffer();
+    foundBuffers.insert(
+        sourceMgr.AddNewSourceBuffer(std::move(copy), llvm::SMLoc()));
+    splices.push_back({lexer, token, bytes.begin()});
+    lexer = Lexer(bytes);
+    advance();
   }
   /// Whether the current token is the first of its line: a bracket there
   /// starts something new, and is no call of what ends the line before.
@@ -465,7 +490,11 @@ private:
   LogicalResult parseRunning(llvm::SMLoc at);
   Token peek() {
     Lexer ahead = lexer;
-    return ahead.next();
+    Token next = ahead.next();
+    return next.is(Token::Eof) && !splices.empty() &&
+                   lexer.holds(splices.back().text)
+               ? splices.back().token
+               : next;
   }
   /// Whether a statement on the buffer named here starts: `name = ..`,
   /// `name += ..`, or `name[i].field` with an assignment after it (and
@@ -1142,8 +1171,20 @@ private:
   bool inSystemLoop = false;
   bool hasMain = false;
   bool hadError = false;
-  /// Reading the indexes found for the program (--inferred).
-  bool inferring = false;
+  /// Text spliced in, and what to go on with after it (see splice).
+  struct Splice {
+    Lexer lexer;
+    Token token;
+    const char *text;
+  };
+  SmallVector<Splice> splices;
+  /// The indexes found for the program (--inferred): their declarations
+  /// by the IR symbol of their component, the `near` clauses of the
+  /// `for`s they serve by the place of the `for`, and the buffers of the
+  /// source manager they were read from.
+  llvm::StringMap<std::string> foundOf;
+  llvm::StringMap<std::string> foundNear;
+  llvm::DenseSet<unsigned> foundBuffers;
   /// Every module of the program, in the order their parsing finished: a
   /// module after the ones it imports, the root last.
   std::vector<std::unique_ptr<SourceModule>> modules;
@@ -1203,25 +1244,47 @@ OwningOpRef<ModuleOp> Parser::parseModule() {
     modulesByPath[path] = root;
   if (files)
     files->sources.push_back(path.empty() ? file.str() : path.str().str());
-  if (failed(parseDeclarations()) || hadError)
-    return nullptr;
-  // (The indexes found for it, as if it declared them at its end.)
+  // (The indexes found for it: `index Name of C ..` lines, each read as
+  // if it stood after C's declaration, in C's module and by C's name
+  // there; and `at file:line:col<tab>near ..` lines, the clause read as if
+  // it stood in that `for` before its `where`.)
   if (!inferredIndexes.empty()) {
     auto read = llvm::MemoryBuffer::getFile(inferredIndexes);
     if (!read) {
-      emitError(loc(token.loc))
+      emitError(FileLineColLoc::get(context, file, 1, 1))
           << "cannot read the indexes found, " << inferredIndexes.getValue()
           << ": " << read.getError().message();
       return nullptr;
     }
-    StringRef bytes = (*read)->getBuffer();
-    sourceMgr.AddNewSourceBuffer(std::move(*read), llvm::SMLoc());
-    lexer = Lexer(bytes);
-    advance();
-    inferring = true;
-    if (failed(parseDeclarations()) || hadError)
-      return nullptr;
-    inferring = false;
+    SmallVector<StringRef> lines;
+    (*read)->getBuffer().split(lines, '\n', -1, /*KeepEmpty=*/false);
+    for (StringRef line : lines) {
+      if (line.consume_front("at ")) {
+        auto [place, clause] = line.split('\t');
+        foundNear[place] = clause.str();
+        continue;
+      }
+      SmallVector<StringRef> words;
+      line.split(words, ' ');
+      if (words.size() < 4 || words[0] != "index" || words[2] != "of")
+        continue;
+      SmallVector<StringRef> parts;
+      words[3].split(parts, "::");
+      std::string declaration =
+          (Twine("index ") + words[1] + " of " + parts.back() + " " +
+           line.drop_front((words[0].size() + words[1].size() +
+                            words[2].size() + words[3].size() + 4)))
+              .str();
+      foundOf[llvm::join(parts, ".")] += declaration + "\n";
+    }
+  }
+  if (failed(parseDeclarations()) || hadError)
+    return nullptr;
+  if (!foundOf.empty()) {
+    emitError(FileLineColLoc::get(context, file, 1, 1))
+        << "an index found is of '" << foundOf.begin()->getKey()
+        << "', which the program does not declare";
+    return nullptr;
   }
   for (auto &entry : functions)
     if (entry.second.later) {
@@ -1283,7 +1346,19 @@ void Parser::finishIndexes() {
 
 // The declarations of one file, up to its end.
 LogicalResult Parser::parseDeclarations() {
-  while (!token.is(Token::Eof)) {
+  while (true) {
+    // (The indexes found of components declared before, read before the
+    // first code after them: where what they are made of is declared.)
+    if (!current->found.empty() && !buildingIndex &&
+        (token.is(Token::Eof) ||
+         llvm::any_of(std::initializer_list<StringRef>{"system", "gpu", "fn",
+                                                       "proc", "extern",
+                                                       "schedule", "world",
+                                                       "main", "prefab"},
+                      [&](StringRef word) { return token.isKeyword(word); })))
+      splice(std::exchange(current->found, ""));
+    if (token.is(Token::Eof))
+      break;
     LogicalResult result = success();
     // `transient unique`, `transient buffer`: not part of a saved world.
     transientNext = false;
@@ -1345,11 +1420,18 @@ LogicalResult Parser::parseDeclarations() {
       consumeIf(Token::Semicolon);
       continue;
     }
-    if (consumeKeyword("component"))
-      result = parseComponent(/*tag=*/false);
-    else if (consumeKeyword("tag"))
-      result = parseComponent(/*tag=*/true);
-    else if (consumeKeyword("unique"))
+    if (token.isKeyword("component") || token.isKeyword("tag")) {
+      bool tag = token.isKeyword("tag");
+      advance();
+      std::string name = (current->prefix + token.spelling).str();
+      result = parseComponent(tag);
+      // (The indexes found of it, read before the code after it.)
+      if (auto found = foundOf.find(name);
+          succeeded(result) && found != foundOf.end()) {
+        current->found += found->second;
+        foundOf.erase(found);
+      }
+    } else if (consumeKeyword("unique"))
       result = parseUnique();
     else if (token.isKeyword("buffer") && peek().is(Token::Identifier)) {
       advance();
@@ -5921,7 +6003,7 @@ LogicalResult Parser::parseIndex() {
     NamedAttrList info(declared->getAttrOfType<DictionaryAttr>("ent.index"));
     // (Found by the compiler, not declared: a `for ... by` its key takes
     // its order from it though nothing else reads it, as it was found for.)
-    if (inferring)
+    if (foundBuffers.contains(sourceMgr.FindBufferContainingLoc(at)))
       info.set("inferred", builder.getUnitAttr());
     if (clustered)
       info.set("clustered", builder.getUnitAttr());
@@ -8101,6 +8183,16 @@ LogicalResult Parser::parseEach(llvm::SMLoc at) {
   // place, in a box, or nearest it.
   // `in c`: the entities of a cell a walk is at.
   bool inCell = false;
+  // (Of a `for` the compiler found an index for: its `near`, read here.)
+  if (!foundNear.empty())
+    if (auto place = dyn_cast<FileLineColLoc>(loc(at))) {
+      auto found = foundNear.find((place.getFilename().getValue() + ":" +
+                                   Twine(place.getLine()) + ":" +
+                                   Twine(place.getColumn()))
+                                      .str());
+      if (found != foundNear.end())
+        splice(found->second);
+    }
   if (token.isKeyword("in") && peek().is(Token::Identifier)) {
     Lexer ahead = lexer;
     Token named = ahead.next();

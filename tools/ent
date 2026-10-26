@@ -139,8 +139,11 @@ the program does not declare would find them, a remark at the `for`
 names the index (`index BugByTeam of Bug by team hash`, a partition of
 an enum, a bool or a u8); at a `for ... by` a field that more such
 `for`s go by than systems change (`index DotByKey of Dot by key`, a
-sorted index that keeps them in order); and one at an index nothing
-reads, which is not made. With --infer-indexes those indexes are made, as if the
+sorted index that keeps them in order); at a `for` inside a `for` that
+finds the entities within r of a place (`(b.x - a.x) * (b.x - a.x) + ..
+<= r * r`) and only counts or gathers whole numbers of them (`index
+PNear of P grid (x, y) cell r`, and the `near` it would read); and one
+at an index nothing reads, which is not made. With --infer-indexes those indexes are made, as if the
 program declared them (docs/indexes.md, step 12); --no-index-remarks
 leaves the remarks out. With --tune and a trace, only the `for`s whose
 loops took at least 1% of the traced run are named, each with its time.
@@ -1141,7 +1144,10 @@ def build(arguments, output, directory):
     # C++ brings its library; other languages' objects say what they need
     # in their module's .link.
     uses_cxx = any(path.endswith(".cpp") for path in given)
-    run([cxx if uses_cxx else cc] + objects + link + ["-o", output],
+    # (The C maths library, which a fraction's `%` calls, fmod: in libc on
+    # macOS.)
+    maths = [] if sys.platform == "darwin" else ["-lm"]
+    run([cxx if uses_cxx else cc] + objects + link + maths + ["-o", output],
         env=host)
 
 

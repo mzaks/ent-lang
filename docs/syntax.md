@@ -2513,10 +2513,21 @@ such `for`s run (in the schedules `main` runs in its loops) than systems
 change f or which entities there are: a sorted index (`by f`), which
 keeps them in order, and the `for`s take their order from it instead of
 sorting (as they do from a declared one only where the program reads it
-itself). An
+itself). And at a `for` inside a `for` over every entity of a component
+whose `where` asks how far they are from the place of the one the `for`
+around visits (`(b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y)
+<= Box.r * Box.r`, two or three fields of an f32, an f64 or an i64, the
+radius a unique's field or a number, `&&` other things): a grid (`index
+PNear of P grid (x, y) cell Box.r`), and the `near` it would read
+(`near (a.x, a.y) within Box.r in PNear`, the `where` still asked); only
+where the order the grid gives cannot change what the `for` does (its
+body only reads, and gathers into vars by `+`, `|`, `&`, `^`, `min` or
+`max` of whole numbers) and the system neither moves those entities nor
+changes which there are. Made, the grid is declared before the first
+code after the component, and the `for` reads the `near`. An
 index that nothing reads is not made, and a remark says so. With `ent
 build --infer-indexes` the indexes named are made, as if the program
-declared them at its end; what the program does is the same, as with any
+declared each before the first code after its component; what the program does is the same, as with any
 index (docs/indexes.md, step 12). Built with `--tune trace.json` (a
 trace of a run built with `--trace`), only the `for`s whose loops took
 at least 1% of the traced run are named, each with how long they took.

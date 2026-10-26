@@ -1,0 +1,52 @@
+// A `for` inside a `for` by how far entities are (infer_indexes.test): a
+// grid found where the order it visits them in cannot change what it
+// does; none where it sums fractions, nor where the system moves them.
+import console
+component P { x: f64, y: f64, n: i32, id: i32, f: f64 } capacity 3000
+unique Box { r: f64 }
+unique T { step: i32, sum: i64, f: f64 }
+world {
+  Box.r = 4.0
+  for i in 0..3000 {
+    spawn { P { x: ((i * 7919) % 1000) as f64 * 0.11, y: ((i * 104729) % 997) as f64 * 0.09, n: 0, id: i, f: 0.0 } }
+  }
+}
+system move() {
+  for p: mut P {
+    p.x += ((p.id + T.step) % 7) as f64 * 0.1
+    p.y += ((p.id * 3 + T.step) % 5) as f64 * 0.1
+  }
+}
+system count() {
+  for me, a: mut P {
+    var k = 0
+    var most = 0
+    for o, b: P where o != me && (b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y) <= Box.r * Box.r {
+      k += 1
+      most = max(most, b.id)
+    }
+    a.n = k + most % 3
+  }
+}
+system pull() {
+  for a: mut P {
+    var f: f64 = 0.0
+    for b: P where (b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y) < Box.r * Box.r { f += b.x - a.x }
+    a.f = f
+  }
+}
+system near_and_move() {
+  for p: mut P { p.y -= ((p.id + T.step) % 3) as f64 * 0.1 }
+  for a: mut P {
+    var k = 0
+    for b: P where (a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) <= 4.0 * 4.0 { k += 1 }
+    a.n += k
+  }
+}
+system tally() {
+  for p: P { T.sum += p.n as i64 T.f += p.f }
+  T.step += 1
+  put("step {T.step}: {T.sum} {T.f}")
+}
+schedule step() { move() count() pull() near_and_move() tally() }
+main { loop { step() } until T.step == 3 }
