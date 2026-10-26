@@ -34,7 +34,8 @@ static int32_t ent_mesh_per_row = 1;
 static Shader ent_mesh_shader;
 static Material ent_mesh_material;
 static bool ent_mesh_ready;
-static int ent_mesh_eye_at, ent_mesh_fog_at, ent_mesh_far_at, ent_mesh_day_at;
+static int ent_mesh_eye_at, ent_mesh_fog_at, ent_mesh_far_at, ent_mesh_day_at,
+    ent_mesh_tile_at, ent_mesh_inset_at;
 static float ent_mesh_day[3] = {1, 1, 1};
 static int32_t ent_mesh_drawn, ent_mesh_faces_seen;
 
@@ -43,13 +44,16 @@ static const char *ent_mesh_vertex =
     "#version 330\n"
     "in vec3 vertexPosition;\n"
     "in vec2 vertexTexCoord;\n"
+    "in vec2 vertexTexCoord2;\n"
     "in vec4 vertexColor;\n"
     "uniform mat4 mvp;\n"
     "out vec2 uv;\n"
+    "out vec2 origin;\n"
     "out vec4 tint;\n"
     "out vec3 at;\n"
     "void main() {\n"
     "  uv = vertexTexCoord;\n"
+    "  origin = vertexTexCoord2;\n"
     "  tint = vertexColor;\n"
     "  at = vertexPosition;\n"
     "  gl_Position = mvp * vec4(vertexPosition, 1.0);\n"
@@ -57,9 +61,12 @@ static const char *ent_mesh_vertex =
 static const char *ent_mesh_fragment =
     "#version 330\n"
     "in vec2 uv;\n"
+    "in vec2 origin;\n"
     "in vec4 tint;\n"
     "in vec3 at;\n"
     "uniform sampler2D texture0;\n"
+    "uniform float tile;\n"
+    "uniform float inset;\n"
     "uniform vec4 colDiffuse;\n"
     "uniform vec3 eye;\n"
     "uniform vec3 fog;\n"
@@ -67,7 +74,9 @@ static const char *ent_mesh_fragment =
     "uniform vec3 day;\n"
     "out vec4 finalColor;\n"
     "void main() {\n"
-    "  vec4 c = texture(texture0, uv) * colDiffuse;\n"
+    "  // (A face of many blocks: its tile again for each, `uv` in blocks.)\n"
+    "  vec2 at_tile = origin + inset + fract(uv) * (tile - 2.0 * inset);\n"
+    "  vec4 c = texture(texture0, at_tile) * colDiffuse;\n"
     "  if (c.a < 0.1) discard;\n"
     "  // (The sky's light, by the day; a lamp's, warm; the brighter.)\n"
     "  vec3 lit = max(tint.r * day, tint.g * vec3(1.0, 0.84, 0.6));\n"
@@ -87,6 +96,8 @@ static void ent_mesh_start(void) {
   ent_mesh_fog_at = GetShaderLocation(ent_mesh_shader, "fog");
   ent_mesh_far_at = GetShaderLocation(ent_mesh_shader, "far");
   ent_mesh_day_at = GetShaderLocation(ent_mesh_shader, "day");
+  ent_mesh_tile_at = GetShaderLocation(ent_mesh_shader, "tile");
+  ent_mesh_inset_at = GetShaderLocation(ent_mesh_shader, "inset");
   ent_mesh_material = LoadMaterialDefault();
   ent_mesh_steps();
   ent_mesh_material.shader = ent_mesh_shader;
@@ -180,7 +191,8 @@ static bool ent_mesh_build(Mesh *m, int32_t count, const int32_t *x,
                            const int32_t *y, const int32_t *z,
                            const ent_mesh_Side *side, const int32_t *tile,
                            const int32_t *light, const int32_t *glow,
-                           const int32_t *hidden, const bool *clear,
+                           const int32_t *hidden, const int32_t *wide,
+                           const int32_t *high, const bool *clear,
                            bool want) {
   int32_t n = 0;
   for (int32_t i = 0; i < count; i++)
@@ -193,11 +205,11 @@ static bool ent_mesh_build(Mesh *m, int32_t count, const int32_t *x,
   m->triangleCount = n * 2;
   m->vertices = MemAlloc(sizeof(float) * 3 * (size_t)m->vertexCount);
   m->texcoords = MemAlloc(sizeof(float) * 2 * (size_t)m->vertexCount);
+  m->texcoords2 = MemAlloc(sizeof(float) * 2 * (size_t)m->vertexCount);
   m->colors = MemAlloc(4 * (size_t)m->vertexCount);
   float per = (float)ent_mesh_per_row;
-  // (Half a texel in from the tile's edges, so that its neighbours do not
-  // bleed in.)
-  float inset = ent_mesh_atlas.width > 0 ? 0.5f / ent_mesh_atlas.width : 0.0f;
+  // (Where on its tile each corner is, in blocks: the shader takes the
+  // tile again for every block a face spans, from the tile's corner.)
   static const float corner_uv[4][2] = {{0, 1}, {1, 1}, {1, 0}, {0, 0}};
   int32_t v = 0;
   for (int32_t i = 0; i < count; i++) {
@@ -206,6 +218,21 @@ static bool ent_mesh_build(Mesh *m, int32_t count, const int32_t *x,
     int s = side[i];
     float u0 = (float)(tile[i] % ent_mesh_per_row) / per;
     float v0 = (float)(tile[i] / ent_mesh_per_row) / per;
+    // (How far the face goes on each axis: one block along the way it
+    // looks, `wide` along the first other axis, `high` the second. Its
+    // tile's two ways: along the axes its first corners go.)
+    float size[3] = {1, 1, 1};
+    int normal = s / 2;
+    int first = normal == 0 ? 1 : 0, second = normal == 2 ? 1 : 2;
+    size[first] = (float)(wide[i] > 0 ? wide[i] : 1);
+    size[second] = (float)(high[i] > 0 ? high[i] : 1);
+    int axis_u = 0, axis_v = 0;
+    for (int a = 0; a < 3; a++) {
+      if (ent_mesh_corners[s][0][a] != ent_mesh_corners[s][1][a])
+        axis_u = a;
+      if (ent_mesh_corners[s][1][a] != ent_mesh_corners[s][2][a])
+        axis_v = a;
+    }
     int h[4];
     for (int c = 0; c < 4; c++)
       h[c] = (hidden[i] >> (2 * c)) & 3;
@@ -219,12 +246,13 @@ static bool ent_mesh_build(Mesh *m, int32_t count, const int32_t *x,
       unsigned char lamp =
           (unsigned char)(shade * ent_mesh_bright[(glow[i] >> (4 * c)) & 15] *
                           (((glow[i] >> (4 * c)) & 15) > 0));
-      m->vertices[v * 3 + 0] = (float)x[i] + ent_mesh_corners[s][c][0];
-      m->vertices[v * 3 + 1] = (float)y[i] + ent_mesh_corners[s][c][1];
-      m->vertices[v * 3 + 2] = (float)z[i] + ent_mesh_corners[s][c][2];
-      float cu = corner_uv[c][0], cv = corner_uv[c][1];
-      m->texcoords[v * 2 + 0] = u0 + (cu == 0 ? inset : 1.0f / per - inset);
-      m->texcoords[v * 2 + 1] = v0 + (cv == 0 ? inset : 1.0f / per - inset);
+      m->vertices[v * 3 + 0] = (float)x[i] + ent_mesh_corners[s][c][0] * size[0];
+      m->vertices[v * 3 + 1] = (float)y[i] + ent_mesh_corners[s][c][1] * size[1];
+      m->vertices[v * 3 + 2] = (float)z[i] + ent_mesh_corners[s][c][2] * size[2];
+      m->texcoords[v * 2 + 0] = corner_uv[c][0] * size[axis_u];
+      m->texcoords[v * 2 + 1] = corner_uv[c][1] * size[axis_v];
+      m->texcoords2[v * 2 + 0] = u0;
+      m->texcoords2[v * 2 + 1] = v0;
       m->colors[v * 4 + 0] = sky;
       m->colors[v * 4 + 1] = lamp;
       m->colors[v * 4 + 2] = 0;
@@ -236,9 +264,11 @@ static bool ent_mesh_build(Mesh *m, int32_t count, const int32_t *x,
   // (On the GPU now: the copies here are not needed.)
   MemFree(m->vertices);
   MemFree(m->texcoords);
+  MemFree(m->texcoords2);
   MemFree(m->colors);
   m->vertices = NULL;
   m->texcoords = NULL;
+  m->texcoords2 = NULL;
   m->colors = NULL;
   return true;
 }
@@ -247,7 +277,8 @@ void ent_mesh_set_mesh(int32_t slot, int32_t count, const int32_t *x,
                        const int32_t *y, const int32_t *z,
                        const ent_mesh_Side *side, const int32_t *tile,
                        const int32_t *light, const int32_t *glow,
-                       const int32_t *hidden, const bool *clear) {
+                       const int32_t *hidden, const int32_t *wide,
+                       const int32_t *high, const bool *clear) {
   if (slot < 0 || slot >= ENT_MESH_SLOTS)
     return;
   ent_mesh_start();
@@ -264,8 +295,8 @@ void ent_mesh_set_mesh(int32_t slot, int32_t count, const int32_t *x,
     s->hi = Vector3Max(s->hi, (Vector3){(float)x[i], (float)y[i], (float)z[i]});
   }
   s->hi = Vector3Add(s->hi, (Vector3){1, 1, 1});
-  s->has_solid = ent_mesh_build(&s->solid, count, x, y, z, side, tile, light, glow, hidden, clear, false);
-  s->has_clear = ent_mesh_build(&s->clear, count, x, y, z, side, tile, light, glow, hidden, clear, true);
+  s->has_solid = ent_mesh_build(&s->solid, count, x, y, z, side, tile, light, glow, hidden, wide, high, clear, false);
+  s->has_clear = ent_mesh_build(&s->clear, count, x, y, z, side, tile, light, glow, hidden, wide, high, clear, true);
 }
 
 void ent_mesh_drop_mesh(int32_t slot) {
@@ -310,6 +341,12 @@ void ent_mesh_draw_meshes(float far, int32_t fog) {
   SetShaderValue(ent_mesh_shader, ent_mesh_fog_at, fog_rgb, SHADER_UNIFORM_VEC3);
   SetShaderValue(ent_mesh_shader, ent_mesh_far_at, &far, SHADER_UNIFORM_FLOAT);
   SetShaderValue(ent_mesh_shader, ent_mesh_day_at, ent_mesh_day, SHADER_UNIFORM_VEC3);
+  // (A tile's size on the atlas, and half a texel in from its edges, so
+  // that its neighbours do not bleed in.)
+  float tile = 1.0f / (float)ent_mesh_per_row;
+  float inset = ent_mesh_atlas.width > 0 ? 0.5f / ent_mesh_atlas.width : 0.0f;
+  SetShaderValue(ent_mesh_shader, ent_mesh_tile_at, &tile, SHADER_UNIFORM_FLOAT);
+  SetShaderValue(ent_mesh_shader, ent_mesh_inset_at, &inset, SHADER_UNIFORM_FLOAT);
   // (Faces only from their front; the scene draws its boxes from both.)
   rlDrawRenderBatchActive();
   rlEnableBackfaceCulling();

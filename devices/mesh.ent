@@ -11,7 +11,8 @@
 //   capacity Pixels 65536
 //   system paint() { .. Pixels .. make_atlas(Pixels, 256, 256, 16) }
 //   system chunk() {
-//     Faces += { x: 0, y: 0, z: 0, side: Side.Top, tile: 1, light: 0xffff, glow: 0, hidden: 0, clear: false }
+//     Faces += { x: 0, y: 0, z: 0, side: Side.Top, tile: 1, light: 0xffff, glow: 0, hidden: 0,
+//                wide: 1, high: 1, clear: false }
 //     set_mesh(0, Faces)
 //     Faces = []
 //   }
@@ -67,9 +68,14 @@ table corners[Side] {
 
 // The faces of a mesh: of which block, which side, which tile of the
 // atlas, how lit by the sky and by lamps and how hidden each corner is
-// (see above); `clear` for one that lets what is behind show through.
+// (see above); how many blocks it spans (one face for a row or a field of
+// faces alike: `wide` along the first of the other two axes, x, y, z in
+// that order, `high` along the second, 1 each for a block's own; its
+// tile again on each block); `clear` for one that lets what is behind
+// show through.
 transient buffer Faces {
-  x: i32, y: i32, z: i32, side: Side, tile: i32, light: i32, glow: i32, hidden: i32, clear: bool
+  x: i32, y: i32, z: i32, side: Side, tile: i32, light: i32, glow: i32, hidden: i32,
+  wide: i32, high: i32, clear: bool
 } capacity 262144
 
 // The atlas: a picture of `width` by `height` pixels (`Pixels`, see
