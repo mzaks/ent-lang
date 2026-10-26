@@ -332,7 +332,17 @@ without): four `for`s that each visit 10,000 entities at random rows
 (0.058 for all four). A partition pays where its `for`s' bodies or
 `where`s cost more than the scan.
 
-Open: the sets made on the GPU, and `gpu` systems' `for`s through them.
+On the GPU (2026-10-26, later): a `gpu` system's `for`s it answers go
+through the sets there, a word a thread; where a `gpu` system changes the
+field and the program is built for one, the sets are made on the GPU (the
+update a `gpu` system) and each `count` is a count of the bits of the
+value's set where it is asked (on the GPU in a `gpu` system), unless
+something lists the values that have any (`parts`), or asks a count in a
+`for`, which keep the update on the CPU. The epidemic at a million on the
+GPU: 4.4 / 4.2 ms a day with the partition (5.6 before), 3.9 / 3.7
+without: a pass over all the rows is next to nothing on the GPU, so the
+`for`s save less than the sets' making costs (bench/epidemic/RESULTS.md).
+
 Done (2026-10-26): a `for` through them that gives rows to a buffer,
 keeps a running sum, takes windows or spawns (as of any set: the rows
 given and the sums in the rows' order); worlds on many ranks, where each

@@ -3,6 +3,29 @@
 `examples/epidemic` against its reference, OpenABM-Covid19 (commit
 367a0d3, built from its C with `cc -O3 -march=native` and GSL 2.8).
 
+## 2026-10-26, later: the partition's sets made on the GPU
+
+`BENCH_ONE_CPU=4 BENCH_CPUS=4-7 BENCH_ALL=0 bench/epidemic/run.py 1000000
+[--partition] --gpu workplace,infectiousness,chance,lay,infect,progress,symptoms,tests,household[,tally]`,
+native, on mains. `progress` changes the stage on the GPU, so the sets of
+the stages are now made there (the update a `gpu` system: emptied, each
+person put in by an atomic or), the `for`s of `workplace` and `chance`
+go through them there (a word of bits a thread), and `Stages.count` is a
+count of the bits of the stage's set (on the GPU where `tally` is `gpu`,
+one wait for it each). Ms a day, one core and the GPU / four threads and
+the GPU:
+
+| a million people | a day ms | `tally` ms | infected |
+|---|---|---|---|
+| no index, `tally` on the GPU | 3.9 / 3.7 | 0.29 | 857,886 |
+| partition, `tally` on the CPU | 4.5 / 4.5 | 0.58 | 857,886 |
+| partition, `tally` on the GPU | 4.4 / 4.2 | 0.42 | 857,886 |
+
+Before, with the sets made on the CPU every day, it was 5.6 (`tally` 2.1).
+It still costs on the GPU: a pass over a million rows is next to nothing
+there, so what the `for`s save is less than the sets' making (an empty
+and a fill a day, and a count with a wait for each stage).
+
 ## 2026-10-26: the stages in a partition
 
 `bench/epidemic/run.py 100000 1000000 [--apart | --partition]`, built

@@ -240,15 +240,16 @@ bool combinesIntoWhatItReads(QueryOp query) {
 /// key or which entities there are, but in the `for` itself and there only of
 /// the entity visited (written or sent); nor where the body spawns, adds
 /// or removes, or binds another entity along a tree; nor in what makes an
-/// index (`making`), nor on the GPU.
+/// index (`making`), nor on the GPU but where `gpu` says (a partition's
+/// sets, which a loop for the GPU goes through as the CPU's does).
 bool answerable(QueryOp query, ArrayRef<StringAttr> key,
                 const llvm::SmallDenseSet<Attribute> &held,
-                const llvm::DenseSet<Attribute> &making) {
+                const llvm::DenseSet<Attribute> &making, bool gpu = false) {
   auto equals = query->getAttrOfType<ArrayAttr>(QueryOp::kKeyEqualsAttr);
   auto system = query->getParentOfType<SystemOp>();
   // (Nor one over a set's entities, which it finds by the set.)
   if (!equals || query.getViaHash() || query.getViaPartition() ||
-      query.getInSet() || !system || system.getGpu() ||
+      query.getInSet() || !system || (system.getGpu() && !gpu) ||
       making.contains(system.getSymNameAttr()))
     return false;
   auto component = cast<FlatSymbolRefAttr>(equals[0]);
@@ -299,6 +300,74 @@ bool answerable(QueryOp query, ArrayRef<StringAttr> key,
 bool overBits(QueryOp query) {
   return !query.hasBy() && !query.getCascade() && !query.isTurn() &&
          !query->hasAttr(QueryOp::kTriggersAttr);
+}
+
+/// A partition's sets (`bits`, made by `update`) made on the GPU, where
+/// nothing outside what makes indexes reads the values that have any
+/// (`values`, `N_kept`) and nothing in a `for` asks how many have one
+/// (`N_count`): the update a `gpu` system, and each `N_count` asked a
+/// count of the bits of the value's set (ent.set.count), on the GPU
+/// where it is a `gpu` system's.
+static void makeBitsOnGpu(ModuleOp module, BufferOp buffer, SystemOp update,
+                          FlatSymbolRefAttr bits, StringAttr values,
+                          const llvm::DenseSet<Attribute> &making,
+                          ArrayRef<ArchetypeOp> archetypes) {
+  std::string countName = (buffer.getSymName() + "_count").str();
+  SmallVector<InvokeOp> counts;
+  bool other = false;
+  for (SystemOp system : module.getOps<SystemOp>()) {
+    if (making.contains(system.getSymNameAttr()))
+      continue;
+    for (const Column &column : computeAccess(system, archetypes).reads)
+      other |= std::get<1>(column) == values;
+    system.walk([&](InvokeOp invoke) {
+      if (invoke.getCallee() != countName)
+        return;
+      counts.push_back(invoke);
+      other |= bool(invoke->getParentOfType<QueryOp>());
+    });
+  }
+  module.walk([&](FunctionOp fn) {
+    fn.walk([&](InvokeOp invoke) { other |= invoke.getCallee() == countName; });
+  });
+  auto counter = module.lookupSymbol<FunctionOp>(countName);
+  if (other || !counter)
+    return;
+  update.setGpu(true);
+  // (The value as the number of its set: what `N_count` makes of it
+  // before it reads its row.)
+  Block &body = counter.getBody().front();
+  for (InvokeOp invoke : counts) {
+    OpBuilder at(invoke);
+    IRMapping mapping;
+    mapping.map(body.getArgument(1), invoke->getOperand(1));
+    Value part;
+    for (Operation &op : body) {
+      if (auto row = dyn_cast<BufferAtOp>(op)) {
+        part = mapping.lookup(row.getIndex());
+        break;
+      }
+      at.clone(op, mapping);
+    }
+    if (!part)
+      continue;
+    auto counted =
+        SetCountOp::create(at, invoke.getLoc(), at.getI32Type(), bits, part);
+    invoke->getResult(0).replaceAllUsesWith(counted.getResult());
+    Operation *handed = invoke->getOperand(0).getDefiningOp();
+    invoke->erase();
+    if (handed && handed->use_empty())
+      handed->erase();
+    // (A system that says what it reads reads the bits.)
+    auto system = counted->getParentOfType<SystemOp>();
+    if (system.hasContract() && !system.canRead(bits)) {
+      SmallVector<Attribute> reads;
+      if (ArrayAttr declared = system.getReadsAttr())
+        llvm::append_range(reads, declared);
+      reads.push_back(bits);
+      system.setReadsAttr(ArrayAttr::get(module.getContext(), reads));
+    }
+  }
 }
 
 struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
@@ -384,7 +453,7 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
             holdersOf(archetypes, strings(info, "of"));
         SmallVector<QueryOp> answered;
         module.walk([&](QueryOp query) {
-          if (answerable(query, key, held, making))
+          if (answerable(query, key, held, making, /*gpu=*/true))
             answered.push_back(query);
         });
         // (What it holds as the update of its bits reads it, which hands
@@ -402,6 +471,20 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
         bool clustered = !ranks && moving && changing == 0 &&
                          held.size() == 1 && !kept.contains(*held.begin()) &&
                          !answered.empty();
+        // (Kept as the archetype's rows: not for a `gpu` system's `for`s,
+        // nor where a `gpu` system counts the bits of a value's set.)
+        if (clustered)
+          llvm::erase_if(answered, [](QueryOp query) {
+            return query->getParentOfType<SystemOp>().getGpu();
+          });
+        std::string bitsSymbol = (buffer.getSymName() + "_bits").str();
+        module.walk([&](SetCountOp count) {
+          auto system = count->getParentOfType<SystemOp>();
+          if (count.getBuffer() == bitsSymbol && system &&
+              !making.contains(system.getSymNameAttr()))
+            clustered = false;
+        });
+        clustered &= !answered.empty();
         auto bitsName = FlatSymbolRefAttr::get(
             module.getContext(), (buffer.getSymName() + "_bits").str());
         for (QueryOp query : answered) {
@@ -438,13 +521,13 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
           // the reactive `for`s that find them are left out. Nor where a
           // `gpu` system does, whose changes are not kept on the CPU, nor
           // on many ranks: then its bits are made anew every time.)
-          bool anew =
-              ranks ||
+          bool byGpu =
               llvm::any_of(module.getOps<SystemOp>(), [&](SystemOp system) {
                 return system.getGpu() &&
                        !making.contains(system.getSymNameAttr()) &&
                        writesValues(system, made);
               });
+          bool anew = ranks || byGpu;
           if (changing == 0 || anew) {
             SmallVector<Operation *> reactive;
             update.walk([&](QueryOp query) {
@@ -466,6 +549,15 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
                                        buffer.getSymName() + "_parts");
           auto values = StringAttr::get(module.getContext(),
                                         buffer.getSymName() + "_kept");
+          // (Where a `gpu` system changes the field, and the program is
+          // built for one: its sets made on the GPU, by the update as a
+          // `gpu` system; how many each value has then a count of its
+          // set's bits where it is asked (`count`), outside the `for`s
+          // (which read no set's count), and the values that have any not
+          // asked for.)
+          if (gpu && byGpu && !ranks)
+            makeBitsOnGpu(module, buffer, update, bitsName, values, making,
+                          archetypes);
           bool counted = false;
           for (SystemOp system : module.getOps<SystemOp>())
             if (!making.contains(system.getSymNameAttr()))

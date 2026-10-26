@@ -2655,8 +2655,11 @@ search as GAP's, keeps the pages reached last in one).
   asked.
 - On many ranks each rank keeps the whole set, put together when a `for`
   over distributed entities that changes it ends (docs/ranks.md).
-- Not on the GPU, nor where entities are destroyed (an entity's place
-  is given again), yet; and a fn or proc does not read or change a set.
+- In a `gpu` system (docs/gpu.md) its `for`s put entities in and take
+  them out (atomically), ask `in` and go through a set, and its code
+  outside them empties a set or counts it.
+- Not where entities are destroyed (an entity's place is given again),
+  yet; and a fn or proc does not read or change a set.
 
 ## Prefabs
 

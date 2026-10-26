@@ -397,3 +397,28 @@
 // WCLASH: day 0: 35986500500
 // WCLASH-NEXT: window of the buffer @Marks
 // WCLASH-NOT: day 1
+
+// Sets in `gpu` systems: entities put in (atomically, along links too),
+// taken out, asked of, gone through a word of bits a thread, emptied and
+// counted on the GPU; a partition whose field a `gpu` system changes made
+// on the GPU (its update a `gpu` system), its counts the bits of each
+// value's set, and its `for`s through the sets there too; the same.
+// RUN: %ent run %S/Inputs/gpu_sets.ent > %t.sets.cpu
+// RUN: %ent run %S/Inputs/gpu_sets.ent --gpu > %t.sets.gpu
+// RUN: %ent run %S/Inputs/gpu_sets.ent --gpu --parallel > %t.sets.gpupar
+// RUN: diff %t.sets.cpu %t.sets.gpu
+// RUN: diff %t.sets.cpu %t.sets.gpupar
+// RUN: FileCheck %s --check-prefix=SETS --input-file=%t.sets.gpu
+// SETS: day 3: hot 2341 next 3992 n 3992 sum 2003928553 cross 4332
+// SETS-NEXT: calm 6880 busy 8788 cross 4332
+// SETS-NEXT: moods 6663557034
+// RUN: ent-translate --import-ent %S/Inputs/gpu_sets.ent -I %S/../../devices \
+// RUN:   | ent-opt --ent-indexes=gpu=1 | FileCheck %s --check-prefix=SETSGPU
+// SETSGPU: ent.system @Moods_update_bits() gpu {
+//
+// A partition's field changed by a `gpu` system, the values that have
+// any asked for on the CPU (so its sets made there) but one's: the same.
+// RUN: sed -e 's/^system change() {/gpu system change() {/' %S/Inputs/partition.ent > %t.part.ent
+// RUN: %ent run %S/Inputs/partition.ent > %t.part.cpu
+// RUN: %ent run %t.part.ent --gpu > %t.part.gpu
+// RUN: diff %t.part.cpu %t.part.gpu

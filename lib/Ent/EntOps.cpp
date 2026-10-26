@@ -1501,8 +1501,9 @@ notForGpu(SymbolTableCollection &symbolTable, Operation *op) {
   if (isa<SpawnOp, DespawnOp>(op))
     return std::string("changes which entities there are: that is done "
                        "on the CPU");
-  if (isa<SetAddOp, SetHasOp, SetCountOp>(op))
-    return std::string("reads or changes a set: not on the GPU yet");
+  if (isa<SetCountOp>(op))
+    return std::string("counts a set's entities, a loop over its words: "
+                       "outside the 'for' it is");
   FlatSymbolRefAttr changed;
   if (auto add = dyn_cast<AddOp>(op))
     changed = add.getComponentAttr();
@@ -1534,7 +1535,8 @@ notForGpu(SymbolTableCollection &symbolTable, Operation *op) {
 /// A `gpu` system's queries: each must be one the GPU can run. Its code
 /// outside them reads and writes uniques and computes, and empties a
 /// buffer, keeps its first rows, gives it rows alike or asks how many it
-/// has (its count is the CPU's, the rows given filled on the GPU): what
+/// has (its count is the CPU's, the rows given filled on the GPU), or
+/// empties a set or counts its entities (on the GPU, by its words): what
 /// else it does to entities and buffers is for a system of its own, so
 /// that every run touches the columns from one place, the CPU or the GPU.
 static LogicalResult verifyGpuQueries(SymbolTableCollection &symbolTable,
@@ -1545,13 +1547,13 @@ static LogicalResult verifyGpuQueries(SymbolTableCollection &symbolTable,
           return WalkResult::skip();
         if (isa<SpawnOp, DespawnOp, LookupOp, ApplyOp, ConnectOp, DisconnectOp,
                 AppendOp, BufferSetOp, BufferAtOp, BufferOfOp, TableAtOp,
-                BufferCopyOp, SetAddOp, SetHasOp, SetCountOp>(op)) {
+                BufferCopyOp, SetAddOp, SetHasOp>(op)) {
           op->emitOpError("is in a 'gpu' system, outside its 'for's, where "
                           "its code only reads and writes uniques and empties "
                           "a buffer, keeps its first rows, gives it rows "
-                          "alike or asks how many it has: what it does to "
-                          "entities and buffers but that goes in a system of "
-                          "its own");
+                          "alike or asks how many it has, or empties a set or "
+                          "counts it: what it does to entities and buffers "
+                          "but that goes in a system of its own");
           return WalkResult::interrupt();
         }
         return WalkResult::advance();
@@ -2724,9 +2726,6 @@ LogicalResult QueryOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
       return emitOpError("visits the entities of ")
              << set << " but system @" << system.getSymName()
              << " does not declare it in 'reads' or 'writes'";
-    if (system && system.getGpu())
-      return emitOpError("visits the entities of a set in a 'gpu' system: "
-                         "not on the GPU yet");
     if (hasBy() || getCascade() || isTurn() || (*this)->hasAttr(kTriggersAttr))
       return emitOpError("visits the entities of a set: not by a field, "
                          "along a tree, in turn or by what changed");

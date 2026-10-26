@@ -557,8 +557,11 @@ SystemAccess mlir::ent::computeAccess(SystemOp system,
                StringAttr::get(context, index.getValue() + suffix),
                StringAttr::get(context, "rows")});
       // (A partition's rows and runs, or its bits, see kViaPartitionAttr.)
-      if (FlatSymbolRefAttr index = query.getViaPartition())
-        for (StringRef suffix : {"", "_parts", "_bits"})
+      // (Of a partition kept as the archetype's rows, the rows of each
+      // value; as sets, those, see getInSet above.)
+      if (FlatSymbolRefAttr index = query.getViaPartition();
+          index && !query.getInSet())
+        for (StringRef suffix : {"", "_parts"})
           access.reads.insert(
               {StringAttr(),
                StringAttr::get(context, index.getValue() + suffix),

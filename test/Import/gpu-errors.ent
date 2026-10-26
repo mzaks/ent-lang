@@ -211,3 +211,24 @@ gpu system mark() {
 
 // expected-error @+1 {{only a system with a body can be 'gpu'}}
 gpu extern system report()
+
+// -----
+
+component Spot { x: f32 }
+set Hot
+set Seen
+gpu system mark() {
+  for e, s: Spot { Hot += e }
+  // expected-error @+1 {{goes in a system of its own}}
+  Seen = Hot
+}
+
+// -----
+
+component Spot { x: f32 }
+set Hot
+gpu system mark(e: entity) {
+  for s: mut Spot { s.x += 1.0 }
+  // expected-error @+1 {{goes in a system of its own}}
+  Hot += e
+}

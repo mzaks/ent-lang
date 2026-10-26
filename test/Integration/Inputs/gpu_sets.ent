@@ -1,0 +1,81 @@
+// Sets in `gpu` systems: entities put in from their own `for` and along
+// links to others, taken out, asked of (`in`), gone through (`for .. in`),
+// emptied and counted outside the `for`s; and a partition of the cells by
+// a field a `gpu` system changes, its sets made on the GPU too, its
+// counts asked on the CPU and on the GPU. Says the same with --gpu as
+// without (gpu.test).
+import console
+enum Mood { Calm, Busy, Cross }
+component Cell { number: i32, value: i64, mood: Mood, got: i64 } capacity 20000
+relation (Cell)-[Link]->(Cell) capacity 40000
+buffer Ids { who: entity } capacity 20000
+unique T { day: i32, sum: i64, n: i32, hot: i32, next: i32, cross: i32 }
+set Hot
+set Next
+index Moods of Cell by mood partition
+
+world {
+  for i in 0..20000 {
+    let e = spawn { Cell { number: i, value: (i * 37 % 101) as i64, mood: (i % 3) as Mood, got: 0 } }
+    Ids += { who: e }
+  }
+  for i in 0..20000 {
+    connect (Ids[i].who)-[Link]->(Ids[(i * 7 + 3) % 20000].who)
+    connect (Ids[i].who)-[Link]->(Ids[(i * 13 + 1000) % 20000].who)
+  }
+}
+
+gpu system mark() {
+  Hot = []
+  Next = []
+  for e, c: Cell where (c.value + T.day as i64) % 9 == 2 { Hot += e }
+  T.hot = len(Hot)
+}
+
+gpu system spread() {
+  for e, c: Cell in Hot {
+    for (e)-[Link]->(v) { Next += v }
+  }
+}
+
+gpu system drop() {
+  for e, c: Cell where c.number % 11 == T.day % 11 { Next -= e }
+}
+
+gpu system use() {
+  T.sum = 0
+  T.n = 0
+  for e, c: mut Cell in Next {
+    c.got += c.value
+    T.sum += c.value * c.number as i64
+    T.n += 1
+    c.value = (c.value * 5 + c.number as i64) % 101
+  }
+  T.next = len(Next)
+}
+
+gpu system feel() {
+  for e, c: mut Cell {
+    if e in Hot && !(e in Next) { c.mood = Mood.Cross }
+    else if e in Next { c.mood = Mood.Busy }
+    else if c.number % 5 == T.day % 5 { c.mood = Mood.Calm }
+  }
+}
+
+gpu system crosses() {
+  T.cross = Moods.count(Mood.Cross)
+  for c: mut Cell where c.mood == Mood.Cross { c.got += 1 }
+}
+
+system moods() {
+  put("day {T.day}: hot {T.hot} next {T.next} n {T.n} sum {T.sum} cross {T.cross}")
+  put("calm {Moods.count(Mood.Calm)} busy {Moods.count(Mood.Busy)} cross {Moods.count(Mood.Cross)}")
+  T.sum = 0
+  for c: Cell where c.mood == Mood.Cross || c.mood == Mood.Busy { T.sum += c.got * c.number as i64 }
+  for c: Cell where c.mood != Mood.Calm { T.sum += c.value }
+  put("moods {T.sum}")
+  T.day += 1
+}
+
+schedule day() { mark() spread() drop() use() feel() crosses() moods() }
+main { loop { day() } until T.day == 4 }

@@ -1789,6 +1789,8 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
           rewriter, sited,
           ValueRange{arith::ConstantIndexOp::create(rewriter, loc, 0)},
           ValueRange{wordsOf}, ValueRange{one});
+      if (options.gpu)
+        loop->setAttr(kGpuLoopAttr, rewriter.getUnitAttr());
       rewriter.setInsertionPoint(loop.getBody()->getTerminator());
       Value first = arith::AddIOp::create(
           rewriter, loc, zero,
@@ -1805,6 +1807,8 @@ emitEntityLoops(IRRewriter &rewriter, Location loc,
     if (set) {
       auto loop = scf::ParallelOp::create(rewriter, sited, ValueRange{zero},
                                           ValueRange{count}, ValueRange{one});
+      if (options.gpu)
+        loop->setAttr(kGpuLoopAttr, rewriter.getUnitAttr());
       rewriter.setInsertionPoint(loop.getBody()->getTerminator());
       emitSetRows(
           rewriter, loc, archetype, world, *set,
@@ -23938,6 +23942,10 @@ static void noteSplitWrite(IRRewriter &rewriter, Location loc,
   });
 }
 
+/// The GPU's scratch array a set's entities are counted into, in a `gpu`
+/// system outside its loops (see ent_gpu_scratch).
+static constexpr int64_t kSetCountSlot = 63;
+
 static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
                          const WorldLayout &layout, WorldAccess &cpu,
                          SymbolTable &symbols,
@@ -24261,6 +24269,56 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
         rewriter.eraseOp(op);
         continue;
       }
+      // (In a `gpu` system, outside its loops for the GPU: the set is the
+      // GPU's, emptied and counted there.)
+      bool aroundGpu = gpu && !onGpu;
+      Value gpuWords =
+          aroundGpu ? gpu->bufferField(buffer, buffer.fields.front()) : Value();
+      // (Its words from `first` to `last` counted by a loop for the GPU,
+      // into a cell of its scratch, which is read back: one wait for the
+      // GPU.)
+      auto countOnGpu = [&](Value first, Value last) -> Value {
+        Value cell =
+            gpuScratch(rewriter, loc, program, kSetCountSlot, i64,
+                       arith::ConstantIndexOp::create(rewriter, loc, 1));
+        {
+          OpBuilder::InsertionGuard guard(rewriter);
+          auto clear =
+              scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
+                                      ValueRange{one}, ValueRange{one});
+          clear->setAttr(kGpuLoopAttr, rewriter.getUnitAttr());
+          rewriter.setInsertionPoint(clear.getBody()->getTerminator());
+          memref::StoreOp::create(rewriter, loc, nought, cell,
+                                  ValueRange{zero});
+        }
+        {
+          OpBuilder::InsertionGuard guard(rewriter);
+          auto each =
+              scf::ParallelOp::create(rewriter, loc, ValueRange{first},
+                                      ValueRange{last}, ValueRange{one});
+          each->setAttr(kGpuLoopAttr, rewriter.getUnitAttr());
+          rewriter.setInsertionPoint(each.getBody()->getTerminator());
+          Value bits = memref::LoadOp::create(
+              rewriter, loc, gpuWords,
+              ValueRange{each.getInductionVars().front()});
+          Value held = LLVM::CtPopOp::create(rewriter, loc, i64, bits);
+          auto some = scf::IfOp::create(
+              rewriter, loc,
+              arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ne,
+                                    held, nought));
+          rewriter.setInsertionPointToStart(some.thenBlock());
+          memref::AtomicRMWOp::create(rewriter, loc, arith::AtomicRMWKind::addi,
+                                      held, cell, ValueRange{zero});
+        }
+        return callGpu(rewriter, loc, program, "ent_gpu_scratch_get",
+                       ValueRange{
+                           arith::ConstantIntOp::create(rewriter, loc,
+                                                        kSetCountSlot, 64),
+                           nought,
+                           arith::ConstantIntOp::create(rewriter, loc, 8, 64)},
+                       TypeRange{i64})
+            .getResult(0);
+      };
       if (auto counted = dyn_cast<SetCountOp>(op)) {
         // (Of a family: the words of its set `part`.)
         Value first = arith::MulIOp::create(
@@ -24271,6 +24329,12 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
         Value last = arith::AddIOp::create(
             rewriter, loc, first,
             arith::ConstantIndexOp::create(rewriter, loc, perPart));
+        if (aroundGpu) {
+          rewriter.replaceOp(
+              op, arith::TruncIOp::create(rewriter, loc, rewriter.getI32Type(),
+                                          countOnGpu(first, last)));
+          continue;
+        }
         auto each = scf::ForOp::create(
             rewriter, loc, first, last, one, ValueRange{nought},
             [&](OpBuilder &, Location, Value at, ValueRange held) {
@@ -24289,11 +24353,28 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
         continue;
       }
       if (isa<ClearOp>(op)) {
+        if (aroundGpu) {
+          auto each =
+              scf::ParallelOp::create(rewriter, loc, ValueRange{zero},
+                                      ValueRange{wordCount}, ValueRange{one});
+          each->setAttr(kGpuLoopAttr, rewriter.getUnitAttr());
+          rewriter.setInsertionPoint(each.getBody()->getTerminator());
+          memref::StoreOp::create(rewriter, loc, nought, gpuWords,
+                                  each.getInductionVars());
+          rewriter.eraseOp(op);
+          continue;
+        }
         auto each = scf::ForOp::create(rewriter, loc, zero, wordCount, one);
         rewriter.setInsertionPoint(each.getBody()->getTerminator());
         memref::StoreOp::create(rewriter, loc, nought, words,
                                 ValueRange{each.getInductionVar()});
         rewriter.eraseOp(op);
+        continue;
+      }
+      if (isa<BufferLenOp>(op) && aroundGpu) {
+        rewriter.replaceOp(
+            op, arith::TruncIOp::create(rewriter, loc, rewriter.getI32Type(),
+                                        countOnGpu(zero, wordCount)));
         continue;
       }
       if (isa<BufferLenOp>(op)) {
@@ -26380,6 +26461,13 @@ struct GpuPieces {
       for (const WorldBuffer &buffer : layout.buffers) {
         if (cast<BufferOp>(buffer.op).getSymNameAttr() != component)
           continue;
+        // (A set: its words, all of them, and no count.)
+        if (buffer.set) {
+          GpuPiece words{buffer.fields.front().offset, 8, nullptr, &buffer};
+          words.fixed = buffer.capacity;
+          piece(words);
+          continue;
+        }
         piece({buffer.countOffset, 8, nullptr, &buffer, /*counter=*/true});
         for (const WorldColumn &column : buffer.fields)
           piece({column.offset, uint64_t(bytesOf(column.type)), nullptr,

@@ -117,6 +117,11 @@ entity and values every entity reads alike:
   is given;
 - running sums (`let first = Laying.stubs += s.meets`, docs/syntax.md):
   in two passes, with a scan of the values between them (below);
+- sets (docs/syntax.md): entities put in and taken out (`Hot += e`,
+  also of another entity, along an edge), by an atomic or and an atomic
+  and of the GPU's copy of the words; `e in Hot`; and `for .. in Hot`,
+  a word of its bits a thread (a set is a piece, its words whole). A
+  partition's `for`s through its sets likewise (docs/indexes.md, 5.4);
 - calling `fn`s of the program: compiled for the GPU like the body;
 - a tree kept by links (not `sorted`): a ref to the parent
   (`-[LivesIn]->(h: Household)`), read through the edge in the child's
@@ -156,7 +161,10 @@ buffer, keep its first rows, give it rows alike and ask how many it has
 (`Cells = []`, `Cells = Cells[..n]`, `Cells += [{ .. }; n]`, `len(Cells)`,
 2026-10-25): the count is the CPU's, set there and given to the GPU's
 copy at once (`ent_gpu_cell_set`) for the loops after; the rows given
-are filled by a loop for the GPU. So a `while` around `for`s can make a
+are filled by a loop for the GPU. It empties a set (`Hot = []`) by a
+loop for the GPU, and counts one (`len(Hot)`, a partition's
+`Stages.count(v)`) by a loop for the GPU that adds the bits of each word
+into a cell, read back (one wait for the GPU). So a `while` around `for`s can make a
 buffer level by level (`Inputs/gpu_buffers.ent`). What else it would do
 to entities or buffers (spawn, `Marks += { .. }`, a row read, a lookup)
 goes in a system of its own, so that every run touches the world's

@@ -6173,6 +6173,26 @@ FailureOr<mlir::Value> Parser::emitIndexCall(const Expr &expr,
       return error(expr.loc, "'" + expr.name +
                                  ".count' is asked of the "
                                  "world's partition, in a system");
+    // (In a `gpu` system: a count of the bits of the value's set, which
+    // the GPU makes; the partition is then kept as sets, see EntIndexes.)
+    Operation *around = builder.getInsertionBlock()->getParentOp();
+    auto system = isa<SystemOp>(around) ? cast<SystemOp>(around)
+                                        : around->getParentOfType<SystemOp>();
+    if (system && system.getGpu()) {
+      mlir::Value part = *value;
+      if (auto named = dyn_cast<EnumType>(part.getType()))
+        part = UnrealizedConversionCastOp::create(builder, at,
+                                                  named.getStorageType(), part)
+                   .getResult(0);
+      part = arith::ExtUIOp::create(builder, at, builder.getI32Type(), part);
+      StringRef parts = index.parts;
+      return SetCountOp::create(
+                 builder, at, builder.getI32Type(),
+                 FlatSymbolRefAttr::get(context,
+                                        (parts.drop_back(6) + "_bits").str()),
+                 part)
+          .getResult();
+    }
     Function &count = functions.ofSymbol(index.count);
     mlir::Value parts =
         BufferOfOp::create(builder, at, count.params.front(),
