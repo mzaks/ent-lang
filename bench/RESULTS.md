@@ -4510,3 +4510,39 @@ a making.)
 made by hand with running sums for the last eight days of stubs (a
 stub's owner found by them), which a declared index (of the entities
 as they are now) does not keep. Not measured.
+
+## 2026-10-26: the GPU's sort by tiles in shared memory
+
+The radix sort of a `for ... by` on the GPU (and so of the indexes made
+there) in tiles of 4096 keys, a block of 256 threads to each, counting
+and placing a tile's keys in the block's shared memory (docs/gpu.md, "A
+`for ... by` on the GPU"); it had been a thread to each piece of 256
+keys. RTX 4050 laptop GPU, on mains power, native builds, median of 3.
+
+**Moving dots** (`bench/moving/run.py`), ms a frame:
+
+| index | all cores | GPU, index made on the CPU | GPU, made there (before) |
+|---|---|---|---|
+| grid, cells 0.004 | 21.0 | 28.4 | 9.5 (11.5) |
+| Morton, leaves of 16 | 65.3 | 37.1 | 23.3 (31.1) |
+
+A pass of the Morton keys' sort (`ENT_GPU_TIMES`): 17 us counting, about
+25 the scan, 350 placing, 0.4 ms in all where it was about 1.6; the
+eight passes about 3.2 ms where 13. Now the Morton making on the GPU
+is faster than the CPU's on all cores with its rows copied over.
+
+**The k nearest** (`bench/points/run.py --gpu`), ms of a run (of it the
+making), the GPU's:
+
+| points | n | k | grid, GPU (before) | Morton, GPU (before) | octTree, all cores |
+|---|---|---|---|---|---|
+| 2DinCube | 1M | 1 | 18.3 (6.5) (21.6 (9.8)) | 39.2 (16.3) (41.3 (23.6)) | 24.8 |
+| 2Dkuzmin | 100k | 1 | 951 (22.6) | 9.3 (5.5) (9.9 (6.0)) | 2.7 |
+| 3DinCube | 1M | 1 | 43.3 (6.6) (45.8 (9.1)) | 88.3 (16.2) (96.9 (24.8)) | 37.6 |
+| 3DonSphere | 1M | 1 | 128.6 (7.0) | 52.9 (15.9) (61.2 (24.2)) | 29.1 |
+| 3DinCube | 1M | 10 | 96.7 (6.3) (99.4 (9.1)) | 175.6 (16.2) (185.6 (25.0)) | 97.2 |
+| 3Dplummer | 100k | 10 | 3807 (18.2) | 22.5 (4.4) (23.1 (5.0)) | 21.1 |
+
+The makings of a million keys are 7 to 9 ms less; the Morton queries on
+the GPU are still about twice the CPU's (walks without the clustered
+order), which the sort does not change.

@@ -883,6 +883,9 @@ Steps:
    31 ms. The sort with 1024 or 16,384 pieces in place of 4096 is slower
    (26.5, 32.5 ms): what would pay is a sort that ranks keys a block at
    a time in the GPU's shared memory.
+   2026-10-26: that sort, by tiles of 4096 keys in a block's shared
+   memory (docs/gpu.md): a pass about 0.4 ms where 1.6, the eight about
+   3.2 ms; a frame 23.3 ms where 31.1.
 5. The grid the same way: keys, the rows by `for ... by`, each cell's
    first row by the entity at it.
    **Built**: the box and the keys as the CPU's (their text is the

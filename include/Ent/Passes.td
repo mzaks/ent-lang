@@ -119,6 +119,7 @@ def EntLowerToLoops : Pass<"ent-lower-to-loops", "ModuleOp"> {
                            "::mlir::gpu::GPUDialect",
                            "::mlir::LLVM::LLVMDialect",
                            "::mlir::memref::MemRefDialect",
+                           "::mlir::NVVM::NVVMDialect",
                            "::mlir::omp::OpenMPDialect",
                            "::mlir::scf::SCFDialect",
                            "::mlir::vector::VectorDialect",

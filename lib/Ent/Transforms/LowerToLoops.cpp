@@ -9,6 +9,7 @@
 #include "mlir/Dialect/Func/Transforms/FuncConversions.h"
 #include "mlir/Dialect/GPU/Transforms/ParallelLoopMapper.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/LLVMIR/NVVMDialect.h"
 #include "mlir/Dialect/SCF/Transforms/Patterns.h"
 #include "mlir/Dialect/SCF/Transforms/Transforms.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
@@ -17879,25 +17880,23 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
   }
 
   // A radix sort of their bytes, the lowest first, on the GPU (as the
-  // CPU's, emitRadixSort, with a thread for each piece of the
-  // keys), of each key less the least, a pass for each byte up to the
-  // highest of the most less the least (keys that differ in sign differ
-  // in every byte as they are; the order is the same): each piece of
-  // at least 64 keys (at most 4096 pieces) counts its keys by their byte;
-  // a running sum over the counts, byte value by byte value and piece by
-  // piece, says where each piece's keys of a value go; and each piece
-  // puts them there in their order.
-  Value pieces = arith::MaxUIOp::create(
+  // CPU's, emitRadixSort, and so in the same order), of each key less the
+  // least, a pass for each byte up to the highest of the most less the
+  // least (keys that differ in sign differ in every byte as they are; the
+  // order is the same). The keys go in tiles of kSortTile, a block of
+  // kSortThreads threads to each: a block counts its tile's keys by their
+  // byte in its shared memory; a running sum over the counts, byte value
+  // by byte value and tile by tile, says where each tile's keys of a value
+  // go; and each block puts them there in their order, a row of a key to
+  // each thread at a time (see sortPassOnGpu).
+  constexpr int64_t kSortThreads = 256, kSortTile = kSortThreads * 16;
+  Value tiles = arith::MaxUIOp::create(
       rewriter, loc, one,
-      arith::MinUIOp::create(rewriter, loc, constant(4096),
-                             arith::DivUIOp::create(rewriter, loc,
-                                                    add(listed, constant(63)),
-                                                    constant(64))));
-  Value span = arith::DivUIOp::create(
-      rewriter, loc,
-      add(listed, arith::SubIOp::create(rewriter, loc, pieces, one)), pieces);
+      arith::DivUIOp::create(rewriter, loc,
+                             add(listed, constant(kSortTile - 1)),
+                             constant(kSortTile)));
   Value radix = constant(256);
-  Value countsMany = mul(pieces, radix);
+  Value countsMany = mul(tiles, radix);
   // (With room after them for the levels of the scan: see lowerRunning.)
   Value counts =
       scratch(4, i32,
@@ -17905,26 +17904,16 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
                   add(arith::DivUIOp::create(rewriter, loc, countsMany,
                                              constant(runningChunk(true) - 1)),
                       constant(64))));
-  // (The least key, once it is known.)
-  Value least;
-  auto digit = [&](Value key, Value shift) -> Value {
-    Value moved = arith::ShRUIOp::create(
-        rewriter, loc, arith::SubIOp::create(rewriter, loc, key, least), shift);
-    return toIndex(
-        arith::AndIOp::create(rewriter, loc, moved, whole(255, i64)));
-  };
-  auto rowsOf = [&](Value p, function_ref<void(Value)> body) {
-    Value from = arith::MinUIOp::create(rewriter, loc, mul(p, span), listed);
-    Value to = arith::MinUIOp::create(rewriter, loc, add(from, span), listed);
-    auto loop = scf::ForOp::create(rewriter, loc, from, to, one);
-    OpBuilder::InsertionGuard inner(rewriter);
-    rewriter.setInsertionPointToStart(loop.getBody());
-    body(loop.getInductionVar());
-  };
   // The least key and the most: of every so many keys from each piece's
   // number (in any order the same: a block's threads read keys next to
   // each other), each put into those of all at once (atomically), and
   // read back.
+  Value pieces = arith::MaxUIOp::create(
+      rewriter, loc, one,
+      arith::MinUIOp::create(rewriter, loc, constant(4096),
+                             arith::DivUIOp::create(rewriter, loc,
+                                                    add(listed, constant(63)),
+                                                    constant(64))));
   Value ends = scratch(6, i64, constant(2));
   {
     OpBuilder::InsertionGuard guard(rewriter);
@@ -17951,10 +17940,10 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
     memref::AtomicRMWOp::create(rewriter, loc, arith::AtomicRMWKind::maxs,
                                 every.getResult(1), ends, ValueRange{one});
   }
-  least = callGpu(rewriter, loc, program, "ent_gpu_scratch_get",
-                  ValueRange{whole(6, i64), whole(0, i64), whole(8, i64)},
-                  TypeRange{i64})
-              .getResult(0);
+  Value least = callGpu(rewriter, loc, program, "ent_gpu_scratch_get",
+                        ValueRange{whole(6, i64), whole(0, i64), whole(8, i64)},
+                        TypeRange{i64})
+                    .getResult(0);
   Value differing = arith::SubIOp::create(
       rewriter, loc,
       callGpu(rewriter, loc, program, "ent_gpu_scratch_get",
@@ -17962,6 +17951,47 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
               TypeRange{i64})
           .getResult(0),
       least);
+  auto digit = [&](Value key, Value shift) -> Value {
+    Value moved = arith::ShRUIOp::create(
+        rewriter, loc, arith::SubIOp::create(rewriter, loc, key, least), shift);
+    return arith::AndIOp::create(rewriter, loc, moved, whole(255, i64));
+  };
+  // A kernel of its own: a block of kSortThreads threads to each tile,
+  // with arrays of i32 of these sizes in its shared memory.
+  auto launch =
+      [&](ArrayRef<int64_t> sizes,
+          function_ref<void(Value block, Value thread, ValueRange shared)>
+              body) {
+        auto workgroup = gpu::AddressSpaceAttr::get(
+            rewriter.getContext(), gpu::AddressSpace::Workgroup);
+        SmallVector<Type> types;
+        for (int64_t size : sizes)
+          types.push_back(MemRefType::get(
+              {size}, i32, MemRefLayoutAttrInterface(), workgroup));
+        auto kernel = gpu::LaunchOp::create(
+            rewriter, loc, tiles, one, one, constant(kSortThreads), one, one,
+            /*dynamicSharedMemorySize=*/Value(), /*asyncTokenType=*/Type(),
+            /*asyncDependencies=*/ValueRange{}, types);
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPointToEnd(&kernel.getBody().front());
+        rewriter.setInsertionPoint(gpu::TerminatorOp::create(rewriter, loc));
+        body(kernel.getBlockIds().x, kernel.getThreadIds().x,
+             kernel.getWorkgroupAttributions());
+      };
+  // The rows of a block's tile, a row of kSortThreads at a time: each
+  // thread's, and whether it is of a key (every thread goes through each
+  // row, for the barriers).
+  auto tileRows = [&](Value block, Value thread,
+                      function_ref<void(Value i, Value valid)> body) {
+    Value from = mul(block, constant(kSortTile));
+    auto loop = scf::ForOp::create(rewriter, loc, zero, constant(kSortTile),
+                                   constant(kSortThreads));
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPoint(loop.getBody()->getTerminator());
+    Value i = add(from, add(loop.getInductionVar(), thread));
+    body(i, arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::ult, i,
+                                  listed));
+  };
   // Which of the two arrays holds the keys now, of the passes before.
   Value flipped = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
   auto pick = [&](Value which, Value a, Value b) -> Value {
@@ -17983,35 +18013,92 @@ static void lowerOrderedOnGpu(IRRewriter &rewriter, QueryOp query,
       Value fromWhose = pick(flipped, whose[0], whose[1]);
       Value toKeys = pick(flipped, keys[1], keys[0]);
       Value toWhose = pick(flipped, whose[1], whose[0]);
-      {
-        OpBuilder::InsertionGuard inner(rewriter);
-        store(whole(0, i32), counts,
-              parallelTurns(rewriter, loc, countsMany, /*gpu=*/true));
-      }
-      {
-        OpBuilder::InsertionGuard inner(rewriter);
-        Value p = parallelTurns(rewriter, loc, pieces, /*gpu=*/true);
-        rowsOf(p, [&](Value i) {
-          Value at = add(mul(digit(load(fromKeys, i), shift), pieces), p);
-          store(add(load(counts, at), whole(1, i32)), counts, at);
+      // Each tile's counts, by their byte value: a block counts in its
+      // shared memory (atomically), and writes them out where the scan
+      // after has them in order, byte value by byte value and tile by
+      // tile.
+      launch({256}, [&](Value block, Value thread, ValueRange shared) {
+        Value values = shared[0];
+        store(whole(0, i32), values, thread);
+        gpu::BarrierOp::create(rewriter, loc);
+        tileRows(block, thread, [&](Value i, Value valid) {
+          auto inside = scf::IfOp::create(rewriter, loc, valid);
+          OpBuilder::InsertionGuard inner(rewriter);
+          rewriter.setInsertionPoint(inside.thenBlock()->getTerminator());
+          memref::AtomicRMWOp::create(
+              rewriter, loc, arith::AtomicRMWKind::addi, whole(1, i32), values,
+              ValueRange{toIndex(digit(load(fromKeys, i), shift))});
         });
-      }
+        gpu::BarrierOp::create(rewriter, loc);
+        store(load(values, thread), counts, add(mul(thread, tiles), block));
+      });
       (void)emitRunningScan(rewriter, loc, counts, countsMany, whole(0, i32),
                             "add", i32, /*gpu=*/true,
                             [](Value) { return Value(); });
-      {
-        OpBuilder::InsertionGuard inner(rewriter);
-        Value p = parallelTurns(rewriter, loc, pieces, /*gpu=*/true);
-        rowsOf(p, [&](Value i) {
-          Value key = load(fromKeys, i);
-          Value at = add(mul(digit(key, shift), pieces), p);
-          Value taken = load(counts, at);
-          store(add(taken, whole(1, i32)), counts, at);
-          Value place = toIndex(taken);
-          store(key, toKeys, place);
-          store(load(fromWhose, i), toWhose, place);
+      // Each tile's keys where they go, a row of keys at a time, a key to
+      // a thread: in a warp, those of a byte value find each other
+      // (`match.sync`), and each is after those of its value of the lanes
+      // below its own; the warps' counts of each value, the first of each
+      // has, in shared memory, go into a running sum (a thread to a byte
+      // value) from where the tile's keys of that value go so far, which
+      // says where each warp's go.
+      launch({256, 8 * 256}, [&](Value block, Value thread, ValueRange shared) {
+        Value next = shared[0], warps = shared[1];
+        store(load(counts, add(mul(thread, tiles), block)), next, thread);
+        Value warp =
+            arith::DivUIOp::create(rewriter, loc, thread, constant(32));
+        tileRows(block, thread, [&](Value i, Value valid) {
+          for (int64_t w = 0; w < 8; ++w)
+            store(whole(0, i32), warps, add(constant(w * 256), thread));
+          gpu::BarrierOp::create(rewriter, loc);
+          Value key = load(
+              fromKeys, arith::SelectOp::create(rewriter, loc, valid, i, zero));
+          // (Past the keys, a value no byte has.)
+          Value value = arith::SelectOp::create(
+              rewriter, loc, valid,
+              arith::TruncIOp::create(rewriter, loc, i32, digit(key, shift)),
+              whole(256, i32));
+          Value peers =
+              NVVM::MatchSyncOp::create(rewriter, loc, i32, whole(-1, i32),
+                                        value, NVVM::MatchSyncKind::any);
+          Value below = LLVM::CtPopOp::create(
+              rewriter, loc, i32,
+              arith::AndIOp::create(
+                  rewriter, loc, peers,
+                  NVVM::LaneMaskLtOp::create(rewriter, loc, i32)));
+          Value at = add(mul(warp, constant(256)), toIndex(value));
+          Value first = arith::AndIOp::create(
+              rewriter, loc, valid,
+              arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq,
+                                    below, whole(0, i32)));
+          {
+            auto lead = scf::IfOp::create(rewriter, loc, first);
+            OpBuilder::InsertionGuard inner(rewriter);
+            rewriter.setInsertionPoint(lead.thenBlock()->getTerminator());
+            store(LLVM::CtPopOp::create(rewriter, loc, i32, peers), warps, at);
+          }
+          gpu::BarrierOp::create(rewriter, loc);
+          Value running = load(next, thread);
+          for (int64_t w = 0; w < 8; ++w) {
+            Value here = add(constant(w * 256), thread);
+            Value count = load(warps, here);
+            store(running, warps, here);
+            running = arith::AddIOp::create(rewriter, loc, running, count);
+          }
+          store(running, next, thread);
+          gpu::BarrierOp::create(rewriter, loc);
+          {
+            auto put = scf::IfOp::create(rewriter, loc, valid);
+            OpBuilder::InsertionGuard inner(rewriter);
+            rewriter.setInsertionPoint(put.thenBlock()->getTerminator());
+            Value place = toIndex(
+                arith::AddIOp::create(rewriter, loc, load(warps, at), below));
+            store(key, toKeys, place);
+            store(load(fromWhose, i), toWhose, place);
+          }
+          gpu::BarrierOp::create(rewriter, loc);
         });
-      }
+      });
     }
     flipped = arith::XOrIOp::create(rewriter, loc, flipped, differ);
   }

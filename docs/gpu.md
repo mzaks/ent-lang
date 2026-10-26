@@ -832,11 +832,19 @@ or in a loop: the form the CPU runs on many threads, docs/indexes.md step
   the most less the least (keys of both signs differ in every byte as
   they are; 2026-10-25: it was each byte of it that is not nought, which
   left keys out of order where they carry across one that is), each a
-  kernel that counts each piece's keys by their byte, a running sum over
-  all the counts byte value by byte value and piece by piece (the
+  kernel that counts each tile's keys by their byte, a running sum over
+  all the counts byte value by byte value and tile by tile (the
   running sums' own scan, `emitRunningScan`), and a kernel that puts each
-  piece's keys where those say, in their order: a stable sort, so the
-  order the CPU's gives;
+  tile's keys where those say, in their order: a stable sort, so the
+  order the CPU's gives. 2026-10-26: a tile is 4096 keys, a block of 256
+  threads to each (a `gpu.launch` of its own, with arrays in the block's
+  shared memory); the block counts its tile atomically in shared memory,
+  and puts its keys a row of 256 at a time, a key to a thread: in a
+  warp those of a byte value find each other (`match.sync`) and each
+  goes after those of the lanes below it, the warps' counts go into a
+  running sum of each byte value in shared memory, a thread to a value.
+  It had been a thread to each piece of 256 keys, writing to places all
+  over;
 - each entity is then visited at its place in the order, writing its
   rows at the place times the rows it gives, after those its buffers
   had. The buffers' counts are the CPU's, as archetypes' are: the system

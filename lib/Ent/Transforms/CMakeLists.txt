@@ -24,6 +24,7 @@ add_mlir_library(MLIREntTransforms
   MLIRLLVMDialect
   MLIRMathDialect
   MLIRMemRefDialect
+  MLIRNVVMDialect
   MLIROpenMPDialect
   MLIRSCFDialect
   MLIRSCFTransforms
