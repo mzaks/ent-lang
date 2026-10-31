@@ -93,6 +93,12 @@ void ent_window_open_window(int32_t width, int32_t height,
   // them, and everything is as big as on any other.)
   SetConfigFlags(FLAG_WINDOW_HIGHDPI | (resizable ? FLAG_WINDOW_RESIZABLE : 0));
   InitWindow(width, height, name);
+  // (No screen to open it on, one that is off, say: nothing can be drawn.)
+  if (!IsWindowReady()) {
+    fprintf(stderr, "%s: the window could not be opened: is a display on?\n",
+            name);
+    exit(1);
+  }
   // (Only where the window is told nothing of small pixels itself.)
   float asked = ent_window_asked_scale();
   if (GetWindowScaleDPI().x <= 1.01f && asked > 1.01f) {

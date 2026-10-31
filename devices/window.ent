@@ -20,7 +20,8 @@
 import text
 
 // `width`, `height` (800 by 450 if left 0) and `title` are read when the
-// window opens, and whether the user can make it another size
+// window opens (a window that cannot open, with no display on, ends the
+// program with a message), and whether the user can make it another size
 // (`resizable`); `background` and `fps` every frame. `fps` is the frames
 // per second to hold, which `present` waits for; 0 does not wait.
 // From then on `width` and `height` are how big the window is, every
