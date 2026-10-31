@@ -47,10 +47,12 @@ thread on each CPU it may run on (`taskset` says which; each hardware
 thread of a core), bound to it, but for the others of the first one's
 core, where one waiting for work would slow the first, which runs what
 the program does on one core between its loops (not with --ranks, whose
-processes would bind theirs to the same CPUs). A thread without work waits five milliseconds for
+processes would bind theirs to the same CPUs; on a Mac, where threads
+cannot be bound, a thread for each performance core). A thread without work waits five milliseconds for
 more and then sleeps, so that it is awake for the next parallel loop
 after a short stretch on one core, and what the program does on one core
-for longer (drawing, say) has the machine to itself. OMP_NUM_THREADS,
+for longer (drawing, say) has the machine to itself (on a Mac it sleeps
+at once). OMP_NUM_THREADS,
 OMP_PLACES, OMP_PROC_BIND or KMP_AFFINITY, and KMP_BLOCKTIME or
 OMP_WAIT_POLICY, where the program runs, say otherwise. A loop runs on many threads from a million entities on (fewer
 where its body calls out or has a loop of a count known as it runs, or loops
@@ -1027,7 +1029,11 @@ def build(arguments, output, directory):
             # ones. (The OpenMP runtime would have it spin for a fifth of
             # a second: through all a frame does on one core, drawing
             # say, which the spinning cores slow down; see
-            # bench/RESULTS.md, 2026-10-09 and 2026-10-21.)
+            # bench/RESULTS.md, 2026-10-09 and 2026-10-21.) On a Mac it
+            # sleeps at once: threads cannot be bound there, and with a
+            # thread for each of an M4 Max's 16 cores, waiting so, the
+            # landing check took 124 s where one core takes 63 and 12
+            # threads that sleep 37.
             #
             # And there is one thread for each CPU the program may run on
             # (each hardware thread of a core), bound to it, but for the
@@ -1100,8 +1106,13 @@ def build(arguments, output, directory):
                 "  }\n"
                 "  return count;\n"
                 "#elif defined(__APPLE__)\n"
+                "  // The performance cores (a Mac of one kind of core has\n"
+                "  // no such count).\n"
                 "  int cores = 0;\n"
                 "  size_t size = sizeof cores;\n"
+                "  if (sysctlbyname(\"hw.perflevel0.physicalcpu\", &cores, &size, 0, 0)\n"
+                "      == 0 && cores > 0) return cores;\n"
+                "  size = sizeof cores;\n"
                 "  return sysctlbyname(\"hw.physicalcpu\", &cores, &size, 0, 0) == 0\n"
                 "    ? cores : 0;\n"
                 "#else\n"
@@ -1110,8 +1121,13 @@ def build(arguments, output, directory):
                 "}\n"
                 "__attribute__((constructor)) static void "
                 "ent_threads_wait(void) {\n"
+                "#ifdef __APPLE__\n"
+                '  if (!getenv("OMP_WAIT_POLICY")) '
+                'setenv("KMP_BLOCKTIME", "0", 0);\n'
+                "#else\n"
                 '  if (!getenv("OMP_WAIT_POLICY")) '
                 'setenv("KMP_BLOCKTIME", "5", 0);\n'
+                "#endif\n"
                 f"  if (!{bind} || getenv(\"OMP_NUM_THREADS\") || "
                 'getenv("OMP_PLACES") ||\n'
                 '      getenv("OMP_PROC_BIND") || getenv("KMP_AFFINITY")) return;\n'
