@@ -24,7 +24,21 @@
 // waits before it sleeps (unless the environment says).
 // RUN: %ent build --parallel %S/Inputs/devices.ent -o %t.par.exe --keep %t.par
 // RUN: FileCheck %s --check-prefix=WAIT --input-file=%t.par/ent_folders.c
-// WAIT: setenv("KMP_BLOCKTIME", "5", 0)
+// WAIT: ent_threads_wait
+// WAIT-NEXT: #ifdef __APPLE__
+// WAIT-NEXT: setenv("KMP_BLOCKTIME", "0", 0)
+// WAIT-NEXT: #else
+// WAIT-NEXT: setenv("KMP_BLOCKTIME", "5", 0)
+
+// A program with a window (devices/window.ent) does a frame's work and
+// waits for the screen: its threads sleep at once.
+// RUN: %ent build --parallel -I %S/../../examples %S/Inputs/window_resize.ent -o %t.win.exe --keep %t.win
+// RUN: FileCheck %s --check-prefix=SLEEP --input-file=%t.win/ent_folders.c
+// SLEEP: ent_threads_wait
+// SLEEP-NEXT: #ifdef __APPLE__
+// SLEEP-NEXT: setenv("KMP_BLOCKTIME", "0", 0)
+// SLEEP-NEXT: #else
+// SLEEP-NEXT: setenv("KMP_BLOCKTIME", "0", 0)
 
 // KEPT-DAG: ent_world.h
 // KEPT-DAG: ent_extern.h

@@ -51,8 +51,8 @@ processes would bind theirs to the same CPUs; on a Mac, where threads
 cannot be bound, a thread for each performance core). A thread without work waits five milliseconds for
 more and then sleeps, so that it is awake for the next parallel loop
 after a short stretch on one core, and what the program does on one core
-for longer (drawing, say) has the machine to itself (on a Mac it sleeps
-at once). OMP_NUM_THREADS,
+for longer (drawing, say) has the machine to itself (on a Mac, and in
+a program with a window, it sleeps at once). OMP_NUM_THREADS,
 OMP_PLACES, OMP_PROC_BIND or KMP_AFFINITY, and KMP_BLOCKTIME or
 OMP_WAIT_POLICY, where the program runs, say otherwise. A loop runs on many threads from a million entities on (fewer
 where its body calls out or has a loop of a count known as it runs, or loops
@@ -1033,7 +1033,15 @@ def build(arguments, output, directory):
             # sleeps at once: threads cannot be bound there, and with a
             # thread for each of an M4 Max's 16 cores, waiting so, the
             # landing check took 124 s where one core takes 63 and 12
-            # threads that sleep 37.
+            # threads that sleep 37. And so does a program with a window
+            # (devices/window.ent), anywhere: it does a frame's work and
+            # waits for the screen, and its parallel loops come less than
+            # a millisecond apart, so threads that wait never sleep:
+            # Pixalorien on a Ryzen AI 9 HX 370 (24 hardware threads) at
+            # its title, 20 s, 247 s of the CPUs waiting 5 ms (149 waiting
+            # one), 53 sleeping at once; its landing check 22.3 and 20.8 s
+            # (447 and 163 s of the CPUs); a world run as fast as it goes
+            # (its strategies check, no drawing) 80.9 and 91.3 s.
             #
             # And there is one thread for each CPU the program may run on
             # (each hardware thread of a core), bound to it, but for the
@@ -1049,6 +1057,11 @@ def build(arguments, output, directory):
             # partitions would each bind theirs to the same CPUs. What
             # the environment says holds over all of this.
             bind = "0" if arguments.ranks else "1"
+            # (The window module: devices/window.ent, or one standing in
+            # for it, as the tests' window without a window.)
+            windowed = any(os.path.basename(path) == "window.ent"
+                           for path in made_of(arguments)[0])
+            wait = "0" if windowed else "5"
             source.write(
                 "#define _GNU_SOURCE\n"
                 "#include <stdio.h>\n"
@@ -1126,7 +1139,7 @@ def build(arguments, output, directory):
                 'setenv("KMP_BLOCKTIME", "0", 0);\n'
                 "#else\n"
                 '  if (!getenv("OMP_WAIT_POLICY")) '
-                'setenv("KMP_BLOCKTIME", "5", 0);\n'
+                f'setenv("KMP_BLOCKTIME", "{wait}", 0);\n'
                 "#endif\n"
                 f"  if (!{bind} || getenv(\"OMP_NUM_THREADS\") || "
                 'getenv("OMP_PLACES") ||\n'
