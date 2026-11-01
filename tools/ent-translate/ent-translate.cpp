@@ -290,8 +290,16 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
         "untouched pages cost\n// no memory.\n"
         "static inline ent_world *ent_world_create(void) {\n"
         "  void *arena = NULL;\n"
+        "#ifdef _WIN32\n"
+        "  // (Windows has no posix_memalign; what this gives, _aligned_free\n"
+        "  // gives back.)\n"
+        "  arena = _aligned_malloc(ENT_WORLD_BYTES, ENT_WORLD_ALIGNMENT);\n"
+        "  if (!arena)\n"
+        "    return NULL;\n"
+        "#else\n"
         "  if (posix_memalign(&arena, ENT_WORLD_ALIGNMENT, ENT_WORLD_BYTES))\n"
-        "    return NULL;\n";
+        "    return NULL;\n"
+        "#endif\n";
   os << llvm::formatv("  memset(arena, 0, {0});\n", layout->headerBytes);
   // The columns in which zero says "none" (a tree's slots and links).
   for (auto [offset, bytes] : layout->zeroed)
@@ -323,7 +331,9 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
     os << "void ent_text_drop(uint64_t held);\n";
   os << "static inline void ent_world_destroy(ent_world *world) {\n"
         "  if (!world)\n    return;\n"
-     << drops << "  free(world);\n}\n";
+     << drops
+     << "#ifdef _WIN32\n  _aligned_free(world);\n#else\n  free(world);\n"
+        "#endif\n}\n";
 
   // A world written to a file and read back: the parts of the arena that
   // are in use, in its order, after a number that says whose they are.

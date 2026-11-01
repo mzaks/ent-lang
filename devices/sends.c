@@ -19,6 +19,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#ifdef _WIN32
+#include <malloc.h>
+#endif
 
 #define ENT_SEND_SLICES 256
 #define ENT_SEND_BLOCK 1023
@@ -100,13 +103,27 @@ static ent_send_lists **ent_sends_table(int64_t world) {
 }
 #define ent_sends (ent_sends_table(world))
 
+// (Windows has no aligned_alloc, and what its _aligned_malloc gives only
+// _aligned_free gives back: ent_sends_give.)
 static void *ent_sends_take(size_t size) {
+#ifdef _WIN32
+  void *memory = _aligned_malloc((size + 63) & ~(size_t)63, 64);
+#else
   void *memory = aligned_alloc(64, (size + 63) & ~(size_t)63);
+#endif
   if (!memory) {
     fprintf(stderr, "ent: no memory for what a 'for' sends from a loop\n");
     abort();
   }
   return memory;
+}
+
+static void ent_sends_give(void *memory) {
+#ifdef _WIN32
+  _aligned_free(memory);
+#else
+  free(memory);
+#endif
 }
 
 // The lists with this number, made when they are first sent to: by
@@ -132,7 +149,7 @@ static ent_send_lists *ent_sends_of(int64_t world, int64_t number) {
   if (__atomic_compare_exchange_n(&ent_sends[number], &lists, made, 0,
                                   __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
     return made;
-  free(made);
+  ent_sends_give(made);
   return lists;
 }
 

@@ -25,6 +25,11 @@
 #include <stdint.h>
 #elif defined(__linux__)
 #include <unistd.h>
+#elif defined(_WIN32)
+// (Declared here: windows.h and raylib.h, both in window.c, name things
+// alike.)
+__declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(
+    void *module, char *name, unsigned long size);
 #endif
 
 // (What is between the folders of a list of them.)
@@ -95,6 +100,11 @@ static int ent_file_near(const char *name, char *found, size_t size) {
     length = (long)strlen(program);
 #elif defined(__linux__)
   length = (long)readlink("/proc/self/exe", program, sizeof program - 1);
+#elif defined(_WIN32)
+  length = (long)GetModuleFileNameA(0, program, sizeof program - 1);
+  for (long at = 0; at < length; at++)
+    if (program[at] == '\\')
+      program[at] = '/';
 #endif
   if (length > 0) {
     program[length] = 0;

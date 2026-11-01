@@ -13,6 +13,11 @@
 // writes the others to the file, so a world larger than the machine's
 // memory runs, slowly where it goes to much of it at once. On many ranks
 // each rank's world is a file of its own.
+//
+// On Windows the world is memory the system commits at once (VirtualAlloc):
+// committed pages count against the memory and paging file together, but
+// only those the program goes to take memory. ENT_WORLD_DIR is not read
+// there.
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -22,8 +27,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
 
 // (The world's alignment: WorldLayout::kArenaAlignment.)
 #define ENT_WORLD_ALIGNMENT 16384
@@ -32,15 +41,25 @@
 static _Thread_local void *ent_world_base = 0;
 static _Thread_local size_t ent_world_length = 0;
 
+#ifndef _WIN32
 static void ent_world_fails(const char *what) {
   fprintf(stderr, "ent: no memory for the world (%s): %s\n", what,
           strerror(errno));
   exit(1);
 }
+#endif
 
 // The memory of a world of `bytes`, aligned as the world wants it.
 void *ent_world_memory(int64_t bytes) {
   size_t length = (size_t)bytes + ENT_WORLD_ALIGNMENT;
+#ifdef _WIN32
+  void *base = VirtualAlloc(0, length, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+  if (!base) {
+    fprintf(stderr, "ent: no memory for the world (%lld bytes): error %lu\n",
+            (long long)length, (unsigned long)GetLastError());
+    exit(1);
+  }
+#else
   const char *directory = getenv("ENT_WORLD_DIR");
   void *base;
   if (directory && *directory) {
@@ -64,12 +83,22 @@ void *ent_world_memory(int64_t bytes) {
   }
   if (base == MAP_FAILED)
     ent_world_fails(directory && *directory ? directory : "mmap");
+#endif
   ent_world_base = base;
   ent_world_length = length;
   uintptr_t at = ((uintptr_t)base + ENT_WORLD_ALIGNMENT - 1) &
                  ~(uintptr_t)(ENT_WORLD_ALIGNMENT - 1);
   return (void *)at;
 }
+
+#ifdef _WIN32
+// (The compiler's `main` names aligned_alloc for a world without
+// ent_world_memory, which never is where this file is linked; Windows's C
+// library has none to name.)
+void *aligned_alloc(size_t alignment, size_t size) {
+  return _aligned_malloc(size, alignment);
+}
+#endif
 
 // The world's memory given back when `main` ends.
 // Where a unique index finds a second entity of a key (ent.index.duplicate,
@@ -94,7 +123,11 @@ void ent_index_duplicate(int64_t key, int64_t has_key, int64_t a, int64_t b) {
 void ent_world_free(void *world) {
   (void)world;
   if (ent_world_base)
+#ifdef _WIN32
+    VirtualFree(ent_world_base, 0, MEM_RELEASE);
+#else
     munmap(ent_world_base, ent_world_length);
+#endif
   ent_world_base = 0;
   ent_world_length = 0;
 }

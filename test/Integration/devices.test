@@ -25,7 +25,7 @@
 // RUN: %ent build --parallel %S/Inputs/devices.ent -o %t.par.exe --keep %t.par
 // RUN: FileCheck %s --check-prefix=WAIT --input-file=%t.par/ent_folders.c
 // WAIT: ent_threads_wait
-// WAIT-NEXT: #ifdef __APPLE__
+// WAIT-NEXT: #if defined(__APPLE__) || defined(_WIN32)
 // WAIT-NEXT: setenv("KMP_BLOCKTIME", "0", 0)
 // WAIT-NEXT: #else
 // WAIT-NEXT: setenv("KMP_BLOCKTIME", "5", 0)
@@ -35,7 +35,7 @@
 // RUN: %ent build --parallel -I %S/../../examples %S/Inputs/window_resize.ent -o %t.win.exe --keep %t.win
 // RUN: FileCheck %s --check-prefix=SLEEP --input-file=%t.win/ent_folders.c
 // SLEEP: ent_threads_wait
-// SLEEP-NEXT: #ifdef __APPLE__
+// SLEEP-NEXT: #if defined(__APPLE__) || defined(_WIN32)
 // SLEEP-NEXT: setenv("KMP_BLOCKTIME", "0", 0)
 // SLEEP-NEXT: #else
 // SLEEP-NEXT: setenv("KMP_BLOCKTIME", "0", 0)

@@ -353,7 +353,11 @@ come with the compiler, in `devices/`, and two more that need
   `asset walk = "walk/*.png"` for a list of all there are; checked when
   it is built): `ent build` copies them to where it writes the
   program, and `ent build --embed` puts them into the program itself,
-  which is then one file to take along. A font file is checked before it is used (its
+  which is then one file to take along. `ent build --windows` makes
+  the program for 64-bit Windows on Linux, an `.exe`, with llvm-mingw's
+  clang (`x86_64-w64-mingw32-clang` on the PATH) and raylib built for
+  Windows; with `--parallel` it needs llvm-mingw's `libomp.dll` next to
+  it. `ent run --windows` starts it with Wine. A font file is checked before it is used (its
   tables are all there and add up to their sums): a damaged one is no
   font, and said so.
 

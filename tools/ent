@@ -224,6 +224,27 @@ def host_compiler(variable, names, fallback):
     return find_tool(fallback, llvm_directories())
 
 
+# (The machine a --windows build is for, as clang names it.)
+WINDOWS = "x86_64-w64-windows-gnu"
+
+
+def c_compilers(arguments):
+    """The C and C++ compilers for the program's own C: the machine's
+    (host_compiler), or with --windows MinGW's clang (llvm-mingw's
+    x86_64-w64-mingw32-clang, on the PATH), which knows Windows's headers
+    and libraries."""
+    if arguments.windows:
+        return (os.environ.get("ENT_CC") or
+                shutil.which("x86_64-w64-mingw32-clang") or
+                sys.exit("ent: --windows: no x86_64-w64-mingw32-clang on the "
+                         "PATH (llvm-mingw) and no ENT_CC"),
+                os.environ.get("ENT_CXX") or
+                shutil.which("x86_64-w64-mingw32-clang++") or
+                "x86_64-w64-mingw32-clang++")
+    return (host_compiler("ENT_CC", ["cc"], "clang"),
+            host_compiler("ENT_CXX", ["c++"], "clang++"))
+
+
 def made_of(arguments, known={}):
     """What the program is made of, as the compiler finds it: the files of
     its source and of the modules it imports, the program's first; and the
@@ -304,11 +325,11 @@ def cache_key(arguments):
         note_tool(find_tool(tool, own))
     for tool in ("clang",):
         note_tool(find_tool(tool, llvm_directories()))
-    for compiler in (host_compiler("ENT_CC", ["cc"], "clang"),
-                     host_compiler("ENT_CXX", ["c++"], "clang++")):
+    for compiler in c_compilers(arguments):
         note_tool(shutil.which(compiler) or compiler)
     note_tool(os.path.abspath(__file__))
     note("embed", arguments.embed)
+    note("windows", arguments.windows)
     note("infer-indexes", arguments.infer_indexes)
     note("trace", arguments.trace)
     if arguments.trace:
@@ -790,6 +811,8 @@ def build(arguments, output, directory):
         tuning = " tune=" + choices
     # (On many ranks: devices/ranks.c, and MPI's own flags.)
     ranks = " ranks=1" if arguments.ranks else ""
+    if arguments.windows and (arguments.gpu or arguments.ranks):
+        sys.exit("ent: --windows: not with --gpu or --ranks")
     if arguments.ranks and arguments.partitions:
         ranks += " partitions=%d" % arguments.ranks
     # (The indexes are made already, above.)
@@ -826,6 +849,9 @@ def build(arguments, output, directory):
         library = os.path.join(os.path.dirname(os.path.dirname(clang)), "lib")
         runtime = "libomp.dylib" if sys.platform == "darwin" else "libomp.so"
         link = [os.path.join(library, runtime), "-Wl,-rpath," + library]
+        # (For Windows, MinGW's: llvm-mingw has one.)
+        if arguments.windows:
+            link = ["-lomp"]
 
     files, assets = made_of(arguments)
     given = [os.path.splitext(path)[0] + extension for path in files
@@ -862,8 +888,7 @@ def build(arguments, output, directory):
 
     # The program by the LLVM that made its IR; the rest, and the link, by
     # the machine's compiler. Each to an object, then one link.
-    cc = host_compiler("ENT_CC", ["cc"], "clang")
-    cxx = host_compiler("ENT_CXX", ["c++"], "clang++")
+    cc, cxx = c_compilers(arguments)
     # It runs as on its own: an LLVM on the PATH would lend it its linker,
     # and with that its idea of where libraries are.
     toolchain = [os.path.realpath(path) for path in llvm_directories()]
@@ -937,6 +962,8 @@ def build(arguments, output, directory):
     # tool to read again.
     llvm = os.path.join(directory, stem + ".bc")
     cflags = shlex.split(os.environ.get("ENT_CFLAGS", ""))
+    if arguments.windows:
+        cflags.append("--target=" + WINDOWS)
     features = machine_features(clang, cflags)
     run([optimise, module] + passes +
         # (What the lowering wrote more than once, once, and the columns
@@ -998,8 +1025,9 @@ def build(arguments, output, directory):
     objects += others
     # Where the program's source and its modules' are, written into it:
     # the files they name are looked for there last (devices/ent_files.h).
+    # (Not into one for Windows: they are this machine's.)
     folders = []
-    for path in files:
+    for path in [] if arguments.windows else files:
         if os.path.dirname(path) not in folders:
             folders.append(os.path.dirname(path))
     written = os.path.join(directory, "ent_folders.c")
@@ -1029,8 +1057,8 @@ def build(arguments, output, directory):
             # ones. (The OpenMP runtime would have it spin for a fifth of
             # a second: through all a frame does on one core, drawing
             # say, which the spinning cores slow down; see
-            # bench/RESULTS.md, 2026-10-09 and 2026-10-21.) On a Mac it
-            # sleeps at once: threads cannot be bound there, and with a
+            # bench/RESULTS.md, 2026-10-09 and 2026-10-21.) On a Mac (and
+            # on Windows, which is not measured yet) it sleeps at once: threads cannot be bound there, and with a
             # thread for each of an M4 Max's 16 cores, waiting so, the
             # landing check took 124 s where one core takes 63 and 12
             # threads that sleep 37. And so does a program with a window
@@ -1072,6 +1100,15 @@ def build(arguments, output, directory):
                 "#endif\n"
                 "#ifdef __APPLE__\n"
                 "#include <sys/sysctl.h>\n"
+                "#endif\n"
+                "#ifdef _WIN32\n"
+                "// (Windows's C library has no setenv; what it puts is\n"
+                "// in the process's environment, where OpenMP reads.)\n"
+                "static int setenv(const char *name, const char *value,\n"
+                "                  int replace) {\n"
+                "  if (!replace && getenv(name)) return 0;\n"
+                "  return _putenv_s(name, value);\n"
+                "}\n"
                 "#endif\n"
                 "#ifdef __linux__\n"
                 "// Whether `cpu` is listed in a sysfs list (\"0,12\", \"0-1\").\n"
@@ -1134,7 +1171,7 @@ def build(arguments, output, directory):
                 "}\n"
                 "__attribute__((constructor)) static void "
                 "ent_threads_wait(void) {\n"
-                "#ifdef __APPLE__\n"
+                "#if defined(__APPLE__) || defined(_WIN32)\n"
                 '  if (!getenv("OMP_WAIT_POLICY")) '
                 'setenv("KMP_BLOCKTIME", "0", 0);\n'
                 "#else\n"
@@ -1156,17 +1193,18 @@ def build(arguments, output, directory):
                 "#endif\n"
                 "}\n")
     if held:
-        apple = sys.platform == "darwin"
+        apple = sys.platform == "darwin" and not arguments.windows
         bytes_of = os.path.join(directory, "ent_assets.s")
         with open(bytes_of, "w") as source:
             source.write("  .section __TEXT,__const\n" if apple
+                         else '  .section .rdata,"dr"\n' if arguments.windows
                          else '  .section .rodata\n')
             for index, (name, where) in enumerate(held):
                 label = ("_" if apple else "") + f"ent_asset_{index}"
                 source.write(f"  .globl {label}\n  .p2align 4\n{label}:\n"
                              f"  .incbin {json.dumps(os.path.abspath(where))}"
                              "\n  .byte 0\n")
-            if not apple:
+            if not apple and not arguments.windows:
                 source.write('  .section .note.GNU-stack,"",%progbits\n')
         objects.append(os.path.join(directory, "ent_assets.o"))
         run([cc, "-c", bytes_of, "-o", objects[-1]], env=host)
@@ -1183,7 +1221,12 @@ def build(arguments, output, directory):
 
 
 def launch(arguments, executable):
-    """How to start the program: on N ranks through mpirun."""
+    """How to start the program: on N ranks through mpirun; for Windows
+    with Wine."""
+    if arguments.windows:
+        wine = shutil.which("wine") or sys.exit("ent: --windows: no wine "
+                                                "on the PATH to run it")
+        return [wine, executable]
     if not arguments.ranks:
         return [executable]
     mpirun = shutil.which("mpirun")
@@ -1241,6 +1284,10 @@ def main():
     parser.add_argument("--no-index-remarks", action="store_true",
                         help="do not say which indexes would serve the "
                         "program's `for`s")
+    parser.add_argument("--windows", action="store_true",
+                        help="build a program for 64-bit Windows (an .exe), "
+                        "with llvm-mingw's x86_64-w64-mingw32-clang; `run` "
+                        "starts it with Wine")
     parser.add_argument("--keep", metavar="dir", help="keep the generated "
                         "files (IR, header) in this directory")
     parser.add_argument("--no-cache", action="store_true",

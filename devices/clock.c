@@ -6,6 +6,34 @@
 
 #include "ent_extern.h"
 
+#ifdef _WIN32
+// (On Windows: the performance counter, and Sleep with the system's timer
+// at 1 ms, as raylib sets it too; a wait under a millisecond is not slept.)
+#include <windows.h>
+#include <timeapi.h>
+
+static double ent_clock_seconds(void) {
+  static LARGE_INTEGER rate;
+  LARGE_INTEGER now;
+  if (!rate.QuadPart) {
+    QueryPerformanceFrequency(&rate);
+    timeBeginPeriod(1);
+  }
+  QueryPerformanceCounter(&now);
+  return (double)now.QuadPart / (double)rate.QuadPart;
+}
+
+double ent_clock_wait_until(double due) {
+  double seconds = ent_clock_seconds();
+  if (due > seconds) {
+    DWORD ms = (DWORD)((due - seconds) * 1000.0);
+    if (ms > 0)
+      Sleep(ms);
+    seconds = ent_clock_seconds();
+  }
+  return seconds;
+}
+#else
 #include <time.h>
 
 static double ent_clock_seconds(void) {
@@ -26,3 +54,4 @@ double ent_clock_wait_until(double due) {
   }
   return seconds;
 }
+#endif
