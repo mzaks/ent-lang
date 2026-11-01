@@ -66,7 +66,10 @@ implementation is any of:
 - `m.build`: one shell command that builds such an object or archive. It
   runs in the module's directory, with `ENT_OUTPUT` (the file to write),
   `ENT_INCLUDE` (the directory of the generated headers) and `ENT_CC`,
-  `ENT_CXX` (the compilers `tools/ent` uses) set.
+  `ENT_CXX` (the compilers `tools/ent` uses) set. What it needs linked
+  that is known only as it builds (where its compiler keeps its own
+  libraries, say) it may write to `ENT_LINK`, as `m.link` says it
+  (`examples/mojo`, a device in Mojo).
 
 Next to any of them, `m.link` names the libraries the module needs, as
 arguments for the linker (`-lraylib -lm`).

@@ -1,0 +1,22 @@
+// A device written in Mojo (docs/syntax.md, Modules): its functions are
+// in mojodev.mojo, built by mojodev.build (build.sh), with Mojo from
+// setup.sh or an active environment. The calling convention is C's, as
+// for a device in C.
+//
+//   import mojodev
+//   for it: Item { T.mixed += mix(it.n as u64) }
+//   T.dot = dot(Samples)
+
+// Rows handed to `dot`.
+buffer Samples { x: f64, y: f64 } capacity 100000
+
+// A whole number mixed (splitmix64's finish).
+extern fn mix(x: u64) -> u64
+// The squares below n added up (by way of a list in Mojo).
+extern fn square_sum(n: i32) -> i64
+// a / b, and -1 where b is nought (Mojo raises, and catches it).
+extern fn safe_div(a: i64, b: i64) -> i64
+// The sum of x * y over the rows.
+extern proc dot(them: Samples) -> f64
+// Mojo says a line.
+extern proc greet(n: i32)

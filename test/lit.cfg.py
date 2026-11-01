@@ -72,6 +72,13 @@ if smi and os.path.exists(os.path.join(cuda, "include", "cuda.h")):
         config.substitutions.append(
             ("%gpu-chip", "sm_" + listed.stdout.split()[0].replace(".", "")))
 config.substitutions.append(("%cuda-include", os.path.join(cuda, "include")))
+# Mojo, in the environment examples/mojo/setup.sh makes (or one active,
+# with `mojo` on the PATH): the test of a device written in it runs only
+# then.
+if os.path.exists(os.path.join(os.path.dirname(config.test_source_root),
+                               "build", "mojo", ".pixi", "envs", "default",
+                               "bin", "mojo")) or shutil.which("mojo"):
+    config.available_features.add("mojo")
 # MPI (mpicc, mpirun): the tests of programs on many ranks (docs/ranks.md)
 # run only then.
 if shutil.which("mpicc") and shutil.which("mpirun"):

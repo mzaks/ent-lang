@@ -20,7 +20,9 @@ of these, which are built and linked with the program:
   m.build  one shell command that builds such an object or archive. It
            runs in the module's directory with ENT_OUTPUT (the file to
            write), ENT_INCLUDE (the directory of the generated headers),
-           ENT_CC and ENT_CXX (the C and C++ compilers used here) set.
+           ENT_CC and ENT_CXX (the C and C++ compilers used here) set;
+           it may write to ENT_LINK what it needs linked, as m.link
+           says it (examples/mojo).
 
 The program itself is compiled by the LLVM its IR was made with. The C and
 C++ next to modules, and the link, go to the machine's own compiler, which
@@ -929,15 +931,23 @@ def build(arguments, output, directory):
         else:
             with open(path) as source:
                 command = source.read().strip()
-            environment = dict(host, ENT_OUTPUT=built,
+            # (And where it may write the linker's arguments for what it
+            # needs, known only as it builds: where a compiler's own
+            # libraries are, say.)
+            linking = built + ".link"
+            environment = dict(host, ENT_OUTPUT=built, ENT_LINK=linking,
                                ENT_INCLUDE=os.path.abspath(directory),
                                ENT_CC=cc, ENT_CXX=cxx)
-            if os.path.exists(built):
-                os.remove(built)
+            for old in (built, linking):
+                if os.path.exists(old):
+                    os.remove(old)
             run(command, shell=True, env=environment,
                 cwd=os.path.dirname(os.path.abspath(path)))
             if not os.path.isfile(built):
                 sys.exit(f"ent: '{path}' did not write $ENT_OUTPUT")
+            if os.path.isfile(linking):
+                with open(linking) as source:
+                    link = shlex.split(source.read(), comments=True) + link
         others.append(built)
     # What of the program that C calls, which keeps its name; the rest
     # of it is the program's own (internal), which LLVM inlines where it

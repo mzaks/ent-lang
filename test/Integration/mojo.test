@@ -1,0 +1,12 @@
+// A device written in Mojo (examples/mojo): its functions called from a
+// `for` over a million entities on one thread and on many (Mojo's
+// allocator and its caught errors on the program's threads), a buffer
+// handed to it, and Mojo's print; the same either way, what C gives.
+// Needs Mojo: examples/mojo/setup.sh, or `mojo` on the PATH.
+// REQUIRES: mojo
+// RUN: %ent run -I %S/../../examples/mojo %S/../../examples/mojo/calls.ent > %t.one
+// RUN: FileCheck %s --input-file=%t.one
+// RUN: %ent run --parallel -I %S/../../examples/mojo %S/../../examples/mojo/calls.ent > %t.all
+// RUN: cmp %t.one %t.all
+// CHECK: Mojo says hello, 42
+// CHECK-NEXT: mixed 8790920353524676646 squares 9604000000 divided 174998885716 dot 37492162.5
