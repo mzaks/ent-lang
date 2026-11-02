@@ -1099,25 +1099,26 @@ thread on a Zen 5 core, medians of 7 processes, in ms:
 
 | Rows | GPU, first job | GPU, warm | CPU, 1 thread | CPU, all threads |
 |---|---|---|---|---|
-| 100,000 | 213 | 1.2 | 6.8 | 6.8 (too few to go parallel) |
-| 1,000,000 | 136-155 | 9.4 | 82 | 24 |
-| 4,000,000 | 213 | 58 | 364 | 131 |
+| 100,000 | 190-196 | 0.9 | 6.8 | 6.8 (too few to go parallel) |
+| 1,000,000 | 134 | 9.3 | 83 | 6.7 |
+| 4,000,000 | 165-169 | 36 | 364 | 29 |
 
-So warm it is 6 to 9 times one thread and about 2.5 times all of them. The
-first job opens the GPU and loads the kernel, on the device's own thread,
+So warm it is 7 to 10 times one thread, but all threads beat it from 1M
+rows on, by 1.4 and 1.2 times. What the GPU buys there is not the time of
+the job but that the ticks go on during it. The first job opens the GPU and loads the kernel, on the device's own thread,
 and the ticks go on through that. What the ticks pay, by part of a job:
 
 | Rows | Fill `Starts` | `send` | `collect` (take, spawn) | Read, destroy |
 |---|---|---|---|---|
 | 1,000,000 | 0.28 | 1.3 | 3.9 | 1.5 |
-| 4,000,000 | 2.1 | 7.1 | 27.5 | 12 |
+| 4,000,000 | 1.2 | 3.6 | 16 | 5.8 |
 
 The rest of the job costs them next to nothing. A tick that runs free is
-23 ns without a job and 140 to 460 ns with one out (with the clock
-readings of the bench in it; why it grows with the job is not known), and
-the worst of those ticks was under 90 us. The cost that is left is the
-arrival, all of it in one tick. A program with the device starts in 4.7
-ms, against 0.5 without.
+23 ns without a job and 110 to 145 ns with one out (with the clock
+readings of the bench in it), and the worst of those ticks was under 60
+us, but for one of 2.7 ms in the first process of a run. The cost that is
+left is the arrival, all of it in one tick. A program with the device
+starts in 4.4 ms, against 0.5 without.
 
 Homebrew's `libomp` defaults to `KMP_BLOCKTIME=0` with a passive wait
 policy, so workers sleep after every parallel region; an empty region costs
