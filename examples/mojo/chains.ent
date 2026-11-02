@@ -1,0 +1,67 @@
+// The device gpujob: batches of work go to the GPU while the ticks go on,
+// and the answers are entities that turn up some ticks later. Says what
+// came and what the ticks did meanwhile; every answer is what the CPU
+// gets (test/Integration/mojo-gpu.test).
+//
+//   examples/mojo/setup.sh            once
+//   tools/ent run -I examples/mojo examples/mojo/chains.ent
+import console
+import clock
+import gpujob
+
+const BATCHES: i32 = 4
+const ROWS: i32 = 1000000
+
+unique Run { from: u64, sent_at: i64, sent: i32, came: i32, later: i64,
+             steps: i64, longest: u64, peak: u64, chains: i64 }
+unique Busy { ticks: i64 }
+
+// The work of the tick, which does not wait for the GPU.
+system tick_on() { Busy.ticks += 1 }
+
+system give() {
+  if !Gpu.out && Run.sent < BATCHES {
+    for i in 0..ROWS { Starts += { n: Run.from + i as u64 } }
+    Run.from += ROWS as u64
+    Run.sent_at = Busy.ticks
+    Run.sent += 1
+  }
+}
+
+// Answers are entities like others: read once, then gone.
+system count() {
+  for e, c: Chain {
+    Run.steps += c.steps as i64
+    Run.chains += 1
+    Run.longest max= (c.steps as u64) << 32 | c.n  // the steps, and from where
+    Run.peak max= c.peak
+    e.destroy()
+  }
+}
+
+system tell() {
+  if Gpu.arrived > 0 {
+    Run.came += 1
+    let waited = Busy.ticks - Run.sent_at
+    Run.later += if waited > 1 { 1 } else { 0 }
+    put("job {Gpu.arrived} came {waited} ticks after it went")
+  }
+}
+
+system end() {
+  put("{Run.came} jobs, {Run.chains} chains, {Run.steps} steps")
+  put("longest {Run.longest >> 32} from {Run.longest & 0xffffffff}, highest {Run.peak}")
+  put("jobs that came some ticks later: {Run.later}")
+}
+
+world {
+  FrameRate = 1000.0
+  Run.from = 1
+}
+
+schedule frame() { tick()  tick_on()  give()  send()  collect()  count()  tell() }
+schedule finish() { end() }
+main {
+  loop { frame() } until Run.came == BATCHES || Gpu.failed
+  finish()
+}

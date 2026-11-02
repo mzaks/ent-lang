@@ -1,0 +1,32 @@
+// What the GPU's job (bench/mojo/job.ent) is on the CPU: the same chains,
+// over entities that are there already. run.py gives ROWS and JOBS.
+import console
+import clock
+
+const ROWS: i32 = 1000000
+const JOBS: i32 = 21
+
+component Row { n: u64 } capacity 1000000
+unique B { jobs: i32, start: f64, steps: i64 }
+
+fn chain(start: u64) -> i32 {
+  var n = start
+  var length = 0
+  while n > 1 {
+    n = if n & 1 == 0 { n >> 1 } else { 3 * n + 1 }
+    length += 1
+  }
+  length
+}
+
+world { for i in 0..ROWS { spawn { Row { n: 1 + i as u64 } } } }
+
+system before() { B.start = wait_until(0.0)  B.steps = 0 }
+system work() { for r: Row { B.steps += chain(r.n) as i64 } }
+system after() {
+  let took = wait_until(0.0) - B.start
+  B.jobs += 1
+  put("job {B.jobs} took {took} steps {B.steps}")
+}
+schedule round() { before()  work()  after() }
+main { loop { round() } until B.jobs == JOBS }

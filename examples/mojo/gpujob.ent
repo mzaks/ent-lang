@@ -1,0 +1,68 @@
+// A computing GPU, in Mojo (gpujob.mojo): the program gives it rows, goes
+// on with its ticks, and the answers come in as entities when they are
+// there, however many ticks later.
+//
+//   import gpujob
+//   system give() { Starts += { n: 27 }  send() }
+//   schedule tick() { give()  collect()  use() }
+//   // and `for c: Chain` where it finds any
+//
+// One job at a time: while one is out (`Gpu.out`) `send` does nothing and
+// the rows stay in `Starts` for the next try. What was sent may be changed at once,
+// the device has its own copy. Nothing that touches the GPU runs on the
+// program's threads, not even opening it, so no tick waits for it.
+
+// What the program wants worked out: Collatz chains from each `n`.
+buffer Starts { n: u64 } capacity 4000000
+
+// What a job gave: each row of `Starts`, in their order.
+buffer Finished { n: u64, steps: i32, peak: u64 } capacity 4000000
+
+// An answer: the chain from `n` takes `steps` steps and climbs to `peak`.
+component Chain { n: u64, steps: i32, peak: u64 } capacity 4000000
+
+// The device's own (`device`), the job out on it (none where `out` is
+// false), and the job whose answers came in last, spawned by `collect`
+// in the tick it says, as `arrived`: 0 where none came in this tick.
+transient unique Gpu { device: i64, out: bool, sent: i64, arrived: i64, failed: bool }
+
+extern proc open() -> i64
+// The ticket of the job this starts, or -1 where one is out already.
+extern proc submit(device: i64, them: Starts) -> i64
+// The ticket of the job that has finished, its rows given, or -1 where
+// none has, or 0 where it failed.
+extern proc take(device: i64, into: mut Finished) -> i64
+
+world { Gpu.device = open() }
+
+
+// The rows of `Starts` go out as a job, where none is out.
+system send() {
+  if !Gpu.out && len(Starts) > 0 {
+    let ticket = submit(Gpu.device, Starts)
+    if ticket > 0 {
+      Gpu.sent = ticket
+      Gpu.out = true
+      Starts = []
+    }
+  }
+}
+
+// Each tick: where the job has finished, its rows become entities.
+system collect() {
+  Gpu.arrived = 0
+  if Gpu.out {
+    let ticket = take(Gpu.device, Finished)
+    if ticket == 0 {
+      Gpu.out = false
+      Gpu.failed = true
+    } else if ticket > 0 {
+      Gpu.out = false
+      Gpu.arrived = ticket
+      for i in 0..len(Finished) {
+        spawn { Chain { n: Finished[i].n, steps: Finished[i].steps,
+                        peak: Finished[i].peak } }
+      }
+    }
+  }
+}

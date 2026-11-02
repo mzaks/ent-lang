@@ -69,7 +69,8 @@ implementation is any of:
   `ENT_CXX` (the compilers `tools/ent` uses) set. What it needs linked
   that is known only as it builds (where its compiler keeps its own
   libraries, say) it may write to `ENT_LINK`, as `m.link` says it
-  (`examples/mojo`, a device in Mojo).
+  (`examples/mojo`, devices in Mojo, one of them computing on the GPU
+  with answers that come in as entities some ticks later).
 
 Next to any of them, `m.link` names the libraries the module needs, as
 arguments for the linker (`-lraylib -lm`).

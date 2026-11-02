@@ -1090,6 +1090,35 @@ reactive.
 hand-written C over compressed rows (push, pull, pull with OpenMP), per
 network size and firing rate.
 
+`bench/mojo/run.py` runs the device in Mojo that computes on the GPU
+(`examples/mojo/gpujob.ent`: rows go out, the ticks go on, the answers come
+in as entities some ticks later) against the same Collatz chains over
+entities on the CPU, and stops unless all give the same steps. On an RTX
+4050 (45 W, driver 610.57) and a Ryzen AI 9 HX 370, on mains, native, one
+thread on a Zen 5 core, medians of 7 processes, in ms:
+
+| Rows | GPU, first job | GPU, warm | CPU, 1 thread | CPU, all threads |
+|---|---|---|---|---|
+| 100,000 | 213 | 1.2 | 6.8 | 6.8 (too few to go parallel) |
+| 1,000,000 | 136-155 | 9.4 | 82 | 24 |
+| 4,000,000 | 213 | 58 | 364 | 131 |
+
+So warm it is 6 to 9 times one thread and about 2.5 times all of them. The
+first job opens the GPU and loads the kernel, on the device's own thread,
+and the ticks go on through that. What the ticks pay, by part of a job:
+
+| Rows | Fill `Starts` | `send` | `collect` (take, spawn) | Read, destroy |
+|---|---|---|---|---|
+| 1,000,000 | 0.28 | 1.3 | 3.9 | 1.5 |
+| 4,000,000 | 2.1 | 7.1 | 27.5 | 12 |
+
+The rest of the job costs them next to nothing. A tick that runs free is
+23 ns without a job and 140 to 460 ns with one out (with the clock
+readings of the bench in it; why it grows with the job is not known), and
+the worst of those ticks was under 90 us. The cost that is left is the
+arrival, all of it in one tick. A program with the device starts in 4.7
+ms, against 0.5 without.
+
 Homebrew's `libomp` defaults to `KMP_BLOCKTIME=0` with a passive wait
 policy, so workers sleep after every parallel region; an empty region costs
 about 35 us with 12 threads on an M4 Max, and about 1.7 us with

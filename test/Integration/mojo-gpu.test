@@ -1,0 +1,13 @@
+// A device in Mojo that computes on the GPU (examples/mojo/gpujob.ent):
+// batches go out while the ticks go on, and their answers come in as
+// entities some ticks later, the same on one thread and on many, what C
+// gets for the Collatz chains from 1 to 4000000.
+// Needs Mojo with MAX (examples/mojo/setup.sh) and a GPU.
+// REQUIRES: mojo, gpu
+// RUN: %ent run -I %S/../../examples/mojo %S/../../examples/mojo/chains.ent > %t.one
+// RUN: FileCheck %s --input-file=%t.one
+// RUN: %ent run --parallel -I %S/../../examples/mojo %S/../../examples/mojo/chains.ent > %t.all
+// RUN: FileCheck %s --input-file=%t.all
+// CHECK: 4 jobs, 4000000 chains, 583065521 steps
+// CHECK-NEXT: longest 596 from 3732423, highest 858555169576
+// CHECK-NEXT: jobs that came some ticks later: 4

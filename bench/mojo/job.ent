@@ -1,0 +1,80 @@
+// The device gpujob (examples/mojo) under ticks that run as fast as they
+// can: JOBS jobs of the same rows, one after another, each timed by parts.
+// bench/mojo/run.py gives ROWS and JOBS (0: only ticks, for how long one
+// takes without the device) and takes the lines this says.
+import console
+import clock
+import gpujob
+
+const ROWS: i32 = 1000000
+const JOBS: i32 = 21
+const TICKS: i64 = 20000000
+
+unique B {
+  sent: i32, came: i32, sending: bool, ticks: i64, all_ticks: i64, skip: i32,
+  fill: f64, went: f64, submit: f64, before: f64, took: f64, worst: f32,
+  steps: i64
+}
+
+system give() {
+  if !Gpu.out && B.sent < JOBS {
+    let start = wait_until(0.0)
+    for i in 0..ROWS { Starts += { n: 1 + i as u64 } }
+    B.went = wait_until(0.0)
+    B.fill = B.went - start
+    B.sent += 1
+    B.sending = true
+  }
+}
+
+system gone() {
+  if B.sending {
+    B.submit = wait_until(0.0) - B.went
+    B.sending = false
+    B.ticks = 0
+    B.worst = 0.0
+    B.skip = 2
+  }
+}
+
+// A tick with the job out, but for the two `tick` speaks of the time
+// before it went and of giving it.
+system count() {
+  B.all_ticks += 1
+  if Gpu.out {
+    B.ticks += 1
+    if B.skip > 0 { B.skip -= 1 } else { B.worst max= Time.dt }
+    B.before = wait_until(0.0)
+  }
+}
+
+system tell() {
+  if Gpu.arrived > 0 {
+    let here = wait_until(0.0)
+    B.took = here - B.before
+    B.steps = 0
+    for e, c: Chain {
+      B.steps += c.steps as i64
+      e.destroy()
+    }
+  }
+}
+
+system said() {
+  if Gpu.arrived > 0 {
+    let here = wait_until(0.0)
+    B.came += 1
+    put("job {B.came} fill {B.fill} submit {B.submit} trip {here - B.went} ticks {B.ticks} worst {B.worst} take {B.took} read {here - B.before - B.took} steps {B.steps}")
+  }
+}
+
+system end() {
+  if JOBS == 0 { put("idle {Time.now * 1000000000.0 / B.all_ticks as f64}") }
+}
+
+schedule frame() { tick()  give()  send()  gone()  count()  collect()  tell()  said() }
+schedule finish() { end() }
+main {
+  loop { frame() } until (JOBS > 0 && B.came == JOBS) || (JOBS == 0 && B.all_ticks == TICKS) || Gpu.failed
+  finish()
+}
