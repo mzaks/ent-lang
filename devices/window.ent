@@ -43,14 +43,20 @@ import text
 // `escape` set the Escape key is the program's own and closes nothing
 // (`key_down(256)` says whether it is down: for a menu, say). `dt`
 // is the seconds the previous frame took, `frame` the number of `begin`s.
+// `dropped`: a file was dropped on the window since the frame before,
+// and its path is so many bytes long; its bytes are in `Dropped`, as many
+// as it holds (of several dropped at once, the last). 0: none was.
 // (The window, the mouse, the keys and what is drawn in a frame are the
 // machine's and not a saved world's: `transient`, see devices/world.ent.)
 transient unique Window {
   width: i32, height: i32, title: text[62], background: i32, fps: i32,
   open: bool, closed: bool, dt: f32, frame: i64, resizable: bool,
   fullscreen: bool, min_width: i32, min_height: i32, scale: f32, zoom: f32,
-  escape: bool, grab: bool
+  escape: bool, grab: bool, dropped: i32
 }
+
+// The path of the file dropped on the window, a byte a row (`dropped`).
+transient buffer Dropped { value: u8 } capacity 1024
 
 // Where the mouse is, and which of its buttons are down.
 // (`wheel_x`, `wheel_y`: how far the wheel was turned since the frame
@@ -241,6 +247,10 @@ extern proc mouse_dx() -> f32
 extern proc mouse_dy() -> f32
 // The pointer hidden and held in the window, or as it is again.
 extern proc grab_mouse(grab: bool)
+// The path of a file dropped since it was last asked, into `into`: how
+// many bytes long it is (more than `into` holds where it did not fit);
+// 0 where none was.
+extern proc take_dropped(into: mut Dropped) -> i32
 
 system begin() {
   if !Window.open {
@@ -263,6 +273,7 @@ system begin() {
   Window.closed = should_close()
   Window.dt = frame_seconds()
   Window.frame += 1
+  Window.dropped = take_dropped(Dropped)
   Mouse.x = mouse_x() / zoom
   Mouse.y = mouse_y() / zoom
   Mouse.left = mouse_down(0)

@@ -1,0 +1,42 @@
+// devices/pictures.ent: colours written as a .png and read back as they
+// were; as a .jpg, near them; a picture that is not there, and one of 16
+// by 16 (picture_big.png, next to this) too big for the buffer. Written
+// in the folder the program is started in.
+import console
+import pictures
+
+capacity Pixmap 64
+
+unique Seen { width: i32, rows: i32, same: i32, near: i32, none: i32, big: i32, wrote: bool, jpg: bool }
+
+fn colour(i: i32) -> i32 { ((i * 37) & 255) << 16 | ((i * 91) & 255) << 8 | ((i * 13) & 255) }
+
+system go() {
+  Pixmap = [{ color: 0 }; 48]
+  for i in 0..48 { Pixmap[i].color = colour(i) }
+  Seen.wrote = write_png("picture_files_out.png", Pixmap, 8, 6)
+  Pixmap = []
+  Seen.width = read_picture("picture_files_out.png", Pixmap)
+  Seen.rows = len(Pixmap)
+  for i in 0..len(Pixmap) { if Pixmap[i].color == colour(i) { Seen.same += 1 } }
+  // A .jpg of one colour comes back near it.
+  Pixmap = [{ color: 0x4080c0 }; 48]
+  Seen.jpg = write_jpg("picture_files_out.jpg", Pixmap, 8, 6, 90)
+  Pixmap = []
+  let w = read_picture("picture_files_out.jpg", Pixmap)
+  for i in 0..len(Pixmap) {
+    let c = Pixmap[i].color
+    let dr = ((c >> 16) & 255) - 0x40
+    let dg = ((c >> 8) & 255) - 0x80
+    let db = (c & 255) - 0xc0
+    if w == 8 && dr * dr + dg * dg + db * db < 48 { Seen.near += 1 }
+  }
+  Seen.none = read_picture("no_such_picture.png", Pixmap)
+  Seen.big = read_picture("picture_big.png", Pixmap)
+  put("png {Seen.wrote}: {Seen.width} wide, {Seen.rows} pixels, {Seen.same} the same")
+  put("jpg {Seen.jpg}: {Seen.near} of 48 near")
+  put("none: {Seen.none}, too big: {Seen.big}, {len(Pixmap)} pixels")
+}
+
+schedule run() { go() }
+main { run() }

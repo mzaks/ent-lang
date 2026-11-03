@@ -1205,6 +1205,26 @@ void ent_window_grab_mouse(bool grab) {
     EnableCursor();
 }
 
+// The last of the files dropped on the window since it was last asked.
+int32_t ent_window_take_dropped(int32_t *count, int32_t capacity,
+                                uint8_t *value) {
+  *count = 0;
+  if (!IsFileDropped())
+    return 0;
+  FilePathList dropped = LoadDroppedFiles();
+  int32_t length = 0;
+  if (dropped.count > 0) {
+    const char *path = dropped.paths[dropped.count - 1];
+    size_t n = strlen(path);
+    length = n > INT32_MAX ? INT32_MAX : (int32_t)n;
+    int32_t kept = length < capacity ? length : capacity;
+    memcpy(value, path, (size_t)kept);
+    *count = kept;
+  }
+  UnloadDroppedFiles(dropped);
+  return length;
+}
+
 // The rectangle drawing is clipped to, if any: set again only where it
 // is another, since setting it sends what was drawn so far on its way.
 static int ent_window_clipped;

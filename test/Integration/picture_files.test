@@ -1,0 +1,9 @@
+// Pictures as files (devices/pictures.ent): colours written as a .png and
+// read back the same, as a .jpg read back near them; -1 for a picture that
+// is not there, -2 for one too big for the buffer. Written where the
+// program is started (a folder of its own here).
+// RUN: rm -rf %t && mkdir -p %t && cd %t && %ent run %S/Inputs/picture_files.ent | FileCheck %s
+
+// CHECK:      png true: 8 wide, 48 pixels, 48 the same
+// CHECK-NEXT: jpg true: 48 of 48 near
+// CHECK-NEXT: none: -1, too big: -2, 0 pixels

@@ -1,0 +1,44 @@
+// Pictures as files: a .png or a .jpg read into colours, and colours
+// written as a .png. Unlike the window's `picture_load`, which is for
+// drawing, these give the pixels themselves, and need no window:
+//
+//   import pictures
+//   capacity Pixmap 1048576        // as many pixels as the biggest
+//   system load() {
+//     let width = read_picture("card.png", Pixmap)
+//     if width < 0 { .. there is no such picture, or it is too big ..}
+//     let height = len(Pixmap) / width
+//     let corner = Pixmap[0].color
+//   }
+//
+// A colour is 0xRRGGBB, as the window draws them; how much of a pixel
+// shows (its alpha) is not read, and a .png is written without one. The
+// pixels go from the left to the right and row under row.
+//
+// A picture is looked for by its name as `read_file` looks for a file
+// (devices/files.ent); `write_png` writes where the program was started,
+// or where a whole path says.
+//
+// Implemented in devices/pictures.c with stb_image and stb_image_write
+// (devices/stb_image.h, devices/stb_image_write.h; THIRD_PARTY_NOTICES).
+
+// The pixels read last, or to write.
+transient buffer Pixmap { color: i32 } capacity 1048576
+
+// Reads the picture `name` (.png or .jpg, and the other kinds stb_image
+// reads: .bmp, .tga, .gif's first picture) into `into`, in place of what
+// that had, and gives how many pixels wide it is: as many rows as it has
+// pixels. -1 where there is no such file or it is no picture (`into` is
+// then empty), -2 where it has more pixels than `into` holds (`into` is
+// then empty too).
+extern proc read_picture(name: text[126], into: mut Pixmap) -> i32
+
+// Writes the first `width` times `height` colours of `from` as the .png
+// `name`, in place of one that is there; false where it could not, or
+// `from` has not so many.
+extern proc write_png(name: text[126], from: Pixmap, width: i32, height: i32) -> bool
+
+// Writes them as the .jpg `name`, at `quality` from 1 (small, smudged) to
+// 100: as a picture sent around is often made again, smaller.
+extern proc write_jpg(name: text[126], from: Pixmap, width: i32, height: i32,
+                      quality: i32) -> bool
