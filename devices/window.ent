@@ -126,16 +126,20 @@ extern proc line(x0: f32, y0: f32, x1: f32, y1: f32, color: i32)
 extern proc label(text: text[126], x: f32, y: f32, size: f32, color: i32)
 // How wide `label` draws a text of that size, in pixels. The window must
 // be open (after the first `begin`).
-extern fn text_width(text: text[126], size: f32) -> f32
+// (This and the other measures of texts, and `picture_ratio`, are procs,
+// not fns: what they give depends on the fonts and pictures other procs
+// read and choose, and a font is read on its first use; so they are
+// called where and as often as the program says, on one thread.)
+extern proc text_width(text: text[126], size: f32) -> f32
 // A text that goes on in the next line where the next word would reach
 // past `width`: lines `size` pixels high, a quarter of that between them.
 extern proc paragraph(text: text[126], x: f32, y: f32, width: f32, size: f32,
                       color: i32)
 // How wide the longest word of a text is: the least width `paragraph`
 // can draw it in without a word reaching past it.
-extern fn text_min_width(text: text[126], size: f32) -> f32
+extern proc text_min_width(text: text[126], size: f32) -> f32
 // How high `paragraph` draws a text of that size in that width.
-extern fn text_height(text: text[126], size: f32, width: f32) -> f32
+extern proc text_height(text: text[126], size: f32, width: f32) -> f32
 // Text set in lines, in a font: 0 is the window's own, others come from
 // `font`. `spacing` is more room between the letters, `line` how far
 // one line is below the one before (0: as far as the text is high).
@@ -147,15 +151,15 @@ extern proc write(text: text, x: f32, y: f32, width: f32, font: i32,
                   size: f32, spacing: f32, line: f32, breaks: i32, align: i32,
                   color: i32)
 // How many lines `write` sets a text in.
-extern fn text_lines(text: text, width: f32, font: i32, size: f32,
-                     spacing: f32, breaks: i32) -> i32
+extern proc text_lines(text: text, width: f32, font: i32, size: f32,
+                       spacing: f32, breaks: i32) -> i32
 // How wide a text is where it has all the room it wants, and the least
 // width it can be set in: that of its longest word, line or all of it,
 // as `breaks` says.
-extern fn text_extent(text: text, font: i32, size: f32, spacing: f32,
-                      breaks: i32) -> f32
-extern fn text_least(text: text, font: i32, size: f32, spacing: f32,
-                     breaks: i32) -> f32
+extern proc text_extent(text: text, font: i32, size: f32, spacing: f32,
+                        breaks: i32) -> f32
+extern proc text_least(text: text, font: i32, size: f32, spacing: f32,
+                       breaks: i32) -> f32
 // Reads a font from a file (.ttf, .otf) for texts `size` pixels high,
 // and gives its number; 0, the window's own, if there is no such file
 // or it is no font, or a damaged one (cut short, or a table of it not
@@ -193,7 +197,7 @@ extern proc edges(x: f32, y: f32, width: f32, height: f32, left: f32,
 extern proc picture_load(file: text[126]) -> i32
 extern proc picture(image: i32, x: f32, y: f32, width: f32, height: f32,
                     tint: i32)
-extern fn picture_ratio(image: i32) -> f32
+extern proc picture_ratio(image: i32) -> f32
 // A part of a picture into a rectangle: the part by its top left corner
 // and its size, in the picture's own pixels (a sheet of many little
 // pictures is read once, and each drawn so). The picture may be far

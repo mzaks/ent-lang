@@ -154,6 +154,17 @@ program declared them (docs/indexes.md, step 12); --no-index-remarks
 leaves the remarks out. With --tune and a trace, only the `for`s whose
 loops took at least 1% of the traced run are named, each with its time.
 
+An extern fn is to give the same result for the same arguments and do
+nothing else. The C of the modules (.c, .cpp) is compiled to LLVM IR once
+more and read: a warning at an extern fn's declaration says where its C
+writes or reads memory other than its arguments, or calls what cannot be
+seen into, unless the C marks it ENT_SAME_RESULT (not for --windows).
+Built with --check-externs, the program calls each extern fn twice where
+it calls it, and compares the results with each other and with what the
+same arguments gave before; where they differ it says so and stops. It
+also names the extern fns whose C could not be read (an object, a
+module's .build).
+
 A module that needs libraries says so in `m.link`: the linker's arguments
 for them, as on a command line (`-lraylib`, `-L/opt/x/lib -lx`).
 
@@ -174,6 +185,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -332,6 +344,7 @@ def cache_key(arguments):
     note_tool(os.path.abspath(__file__))
     note("embed", arguments.embed)
     note("windows", arguments.windows)
+    note("check-externs", arguments.check_externs)
     note("infer-indexes", arguments.infer_indexes)
     note("trace", arguments.trace)
     if arguments.trace:
@@ -740,6 +753,226 @@ def tuned_loops(path):
     return {"loops": loops}
 
 
+def host_includes(compiler, language, known={}):
+    """Where the machine's compiler looks for headers (raylib.h in
+    /usr/include, say), which the LLVM that checks extern fns is given
+    after its own."""
+    if (compiler, language) not in known:
+        found = []
+        try:
+            said = subprocess.run([compiler, "-E", "-v", "-x", language,
+                                   os.devnull], stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.PIPE, text=True).stderr
+            listing = False
+            for line in said.splitlines():
+                if line.startswith("#include <...> search starts here"):
+                    listing = True
+                elif line.startswith("End of search list"):
+                    listing = False
+                elif listing and line.startswith(" "):
+                    path = line.split(" (")[0].strip()
+                    # (Not a compiler's own headers, stdatomic.h say: the
+                    # LLVM has its own.)
+                    if not re.search(r"/lib(64)?/(gcc|clang)/", path):
+                        found += ["-idirafter", path]
+        except OSError:
+            pass
+        known[(compiler, language)] = found
+    return known[(compiler, language)]
+
+
+def memory_of(attributes):
+    """What a function's LLVM attributes say it does with memory: "pure"
+    (nothing, or reads its arguments; errno aside), "writes", "reads" or
+    "hidden" (memory no IR names: malloc's, a library's state); "unknown"
+    where they say nothing (it calls what LLVM cannot see into)."""
+    found = re.search(r"\bmemory\(([^)]*)\)", attributes or "")
+    if not found:
+        return "unknown"
+    default, kinds = "none", {}
+    for part in found.group(1).split(","):
+        part = part.strip()
+        if ":" in part:
+            place, kind = (word.strip() for word in part.split(":"))
+            kinds[place] = kind
+        else:
+            default = part
+    worst = "pure"
+    for place in ("argmem", "inaccessiblemem", "other", "target_mem0",
+                  "target_mem1"):
+        kind = kinds.get(place, default)
+        if kind == "none" or (place == "argmem" and kind == "read"):
+            continue
+        if "write" in kind:
+            return "writes"
+        if place == "inaccessiblemem":
+            worst = "hidden"
+        elif worst != "hidden":
+            worst = "reads"
+    return worst
+
+
+def ir_functions(ir):
+    """The functions of LLVM IR (text): name -> (defined, attributes, body
+    lines); the globals it has (name -> constant or not); and the names of
+    those marked ENT_SAME_RESULT."""
+    groups = dict(re.findall(r"^attributes #(\d+) = \{ (.*) \}$", ir, re.M))
+    functions, globals_, strings, body = {}, {}, {}, None
+    for line in ir.splitlines():
+        if body is not None:
+            if line == "}":
+                body = None
+            else:
+                body.append(line)
+            continue
+        found = re.match(r'(define|declare) .*?@("[^"]+"|[\w.$]+)\((.*)', line)
+        if found:
+            group = re.findall(r"#(\d+)", found.group(3))
+            attributes = groups.get(group[-1], "") if group else ""
+            defined = found.group(1) == "define"
+            lines = [] if defined else None
+            functions[found.group(2).strip('"')] = (defined, attributes,
+                                                    lines)
+            if defined:
+                body = lines
+            continue
+        found = re.match(r'@("[^"]+"|[\w.$]+) = (.*)', line)
+        if found:
+            name, rest = found.group(1).strip('"'), found.group(2)
+            globals_[name] = " constant " in " " + rest
+            text = re.search(r'c"([^"]*)"', rest)
+            if text:
+                strings[name] = text.group(1)
+    vouched = set()
+    for line in ir.splitlines():
+        if line.startswith("@llvm.global.annotations"):
+            for function, text in re.findall(
+                    r"ptr @([\w.$]+), ptr @([\w.$]+)", line):
+                if strings.get(text, "").startswith("ent.same_result"):
+                    vouched.add(function)
+    return functions, globals_, vouched
+
+
+def why_not_pure(name, functions, globals_, seen=None):
+    """What a function does that makes it no fn, as LLVM IR shows it:
+    which globals it writes and reads, and what it calls that cannot be
+    seen into (or that does those)."""
+    seen = set() if seen is None else seen
+    seen.add(name)
+    writes, reads, calls = [], [], []
+    for line in functions[name][2] or []:
+        line = line.split(";")[0]
+        named = [word for word in re.findall(r"@([\w.$]+)", line)
+                 if word in globals_ and not globals_[word]]
+        if re.match(r"\s*store ", line):
+            writes += named
+        elif re.search(r"= load |getelementptr", line):
+            reads += named
+        called = re.search(r"\b(?:call|invoke) [^@%]*(@[\w.$]+|%[\w.]+)\(",
+                           line)
+        if not called:
+            continue
+        callee = called.group(1)
+        if callee.startswith("%"):
+            calls.append("a function by its address")
+            continue
+        callee = callee[1:]
+        # (What LLVM's intrinsics do, the function's own attributes say.)
+        if callee.startswith("llvm.") or callee not in functions \
+                or callee in seen:
+            continue
+        defined, attributes, _ = functions[callee]
+        if memory_of(attributes) == "pure":
+            continue
+        if defined:
+            more = why_not_pure(callee, functions, globals_, seen)
+            writes += more[0]
+            reads += more[1]
+            calls += more[2]
+        else:
+            calls.append(callee + "()")
+    unique = lambda names: list(dict.fromkeys(names))
+    return (unique(writes), [name for name in unique(reads)
+                             if name not in writes], unique(calls))
+
+
+def check_externs(clang, cc, cxx, sources, fns, directory, flags, verbose):
+    """Says, as warnings at their declarations, which extern fns the C of
+    the program's modules shows are no fns: that write or read what their
+    arguments do not decide, or call what cannot be seen into (unless the
+    C marks them ENT_SAME_RESULT). Each C file is compiled to LLVM IR by
+    the LLVM of the compiler, optimised (inlined, its functions' memory
+    worked out). Those not found in such a file (in an object, say) are
+    said with `verbose`."""
+    if not fns:
+        return
+    left = dict((cname, (name, where)) for cname, name, where in fns)
+    for index, source in enumerate(sources):
+        language = "c++" if source.endswith(".cpp") else "c"
+        ir_path = os.path.join(directory, "externs.%d.ll" % index)
+        compiled = subprocess.run(
+            [clang, "-O2", "-S", "-emit-llvm", "-w", "-x", language,
+             "-I", directory, *flags, source, "-o", ir_path]
+            + host_includes(cxx if language == "c++" else cc, language),
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        if compiled.returncode:
+            if verbose:
+                sys.stderr.write(f"{source}: note: could not be read to "
+                                 "check its extern fns:\n" + compiled.stderr)
+            continue
+        with open(ir_path) as read:
+            functions, globals_, vouched = ir_functions(read.read())
+        shown = os.path.relpath(source) if not os.path.relpath(
+            source).startswith("../..") else source
+        for cname in [cname for cname in left if cname in functions
+                      and functions[cname][0]]:
+            name, where = left.pop(cname)
+            kind = memory_of(functions[cname][1])
+            if kind == "pure" or cname in vouched:
+                continue
+            writes, reads, calls = why_not_pure(cname, functions, globals_)
+            said = []
+            if writes:
+                said.append("writes " + ", ".join(writes[:4]) + (
+                    " and more" if len(writes) > 4 else ""))
+            if reads:
+                said.append("reads " + ", ".join(reads[:4]) + (
+                    " and more" if len(reads) > 4 else ""))
+            if calls:
+                said.append("calls " + ", ".join(calls[:4]) + (
+                    " and %d more" % (len(calls) - 4) if len(calls) > 4
+                    else ""))
+            if not said:
+                said.append({"hidden": "uses memory no IR names (malloc's, "
+                             "a library's state)",
+                             "writes": "writes memory other than its own",
+                             "reads": "reads memory other than its "
+                             "arguments"}.get(kind, "does what cannot be "
+                                              "seen into"))
+            if kind == "writes":
+                what, advice = "is no fn", (
+                    "A fn may be called at another time, fewer times or on "
+                    "many threads at once: declare it 'extern proc'")
+            elif kind == "reads":
+                what, advice = "may give another result for the same " \
+                    "arguments", (
+                    "A fn may be called at another time or fewer times: "
+                    "declare it 'extern proc', or mark its C ENT_SAME_RESULT "
+                    "where what it reads does not change once it is called")
+            else:
+                what, advice = "cannot be checked", (
+                    "Mark its C ENT_SAME_RESULT where its result depends on "
+                    "its arguments alone, else declare it 'extern proc'")
+            sys.stderr.write(
+                f"{where or shown}: warning: extern fn '{name}' {what}: its "
+                f"C ({cname} in {shown}) {' and '.join(said)}. {advice}\n")
+    if verbose:
+        for cname, (name, where) in left.items():
+            sys.stderr.write(f"{where}: note: extern fn '{name}' is "
+                             "checked only as it runs: it is defined outside "
+                             "the .c and .cpp files of the build\n")
+
+
 def build(arguments, output, directory):
     own = [os.environ.get("ENT_BIN"), os.path.join(ROOT, "build/bin")]
     own = [path for path in own if path]
@@ -859,6 +1092,10 @@ def build(arguments, output, directory):
     given = [os.path.splitext(path)[0] + extension for path in files
              for extension in IMPLEMENTATIONS
              if os.path.isfile(os.path.splitext(path)[0] + extension)]
+    # (The C of the modules' extern fns, which is checked; the C below
+    # that comes with the compiler has none.)
+    implementing = [path for path in given + arguments.sources
+                    if path.endswith((".c", ".cpp"))]
     # What a `for` sends from a loop of its body (on many threads) and
     # the edges it connects there are kept by C that comes with the
     # compiler.
@@ -949,6 +1186,28 @@ def build(arguments, output, directory):
                 with open(linking) as source:
                     link = shlex.split(source.read(), comments=True) + link
         others.append(built)
+    # Whether its extern fns are fns: what their C shows (not of a program
+    # for Windows, whose headers are not this machine's), and with
+    # --check-externs, as it runs (the C that checks, below).
+    checks = os.path.join(directory, "ent_checks.c")
+    run([translate, "--ent-to-c-extern-checks", module, "-o", checks])
+    fns = []
+    with open(checks) as source:
+        for line in source:
+            found = re.match(r"// fn (\S+) (\S+) ?(.*)$", line)
+            if found:
+                fns.append(found.groups())
+            elif fns and not line.startswith("//"):
+                break
+    if not arguments.windows:
+        extra = []
+        if gpu:
+            extra = ["-DENT_GPU", "-I", os.path.join(
+                os.environ.get("CUDA_PATH", "/opt/cuda"), "include")]
+        if arguments.ranks:
+            extra += mpi_flags()[0]
+        check_externs(clang, cc, cxx, implementing, fns, directory, extra,
+                      arguments.check_externs)
     # What of the program that C calls, which keeps its name; the rest
     # of it is the program's own (internal), which LLVM inlines where it
     # is called from one place, or where that pays, and drops where it is
@@ -1032,6 +1291,19 @@ def build(arguments, output, directory):
     else:
         objects = [os.path.join(directory, stem + ".o")]
         run([clang, *flags, llvm, "-o", objects[0]])
+    if arguments.check_externs and fns:
+        # The program calls each extern fn's check in its place, which
+        # calls it.
+        apple = sys.platform == "darwin" and not arguments.windows
+        mark = "_" if apple else ""
+        renames = [flag for cname, _, _ in fns for flag in (
+            "--redefine-sym", f"{mark}{cname}={mark}ent__checked_{cname}")]
+        rename = find_tool("llvm-objcopy", llvm_directories())
+        for built in objects:
+            run([rename] + renames + [built])
+        objects.append(os.path.join(directory, "ent_checks.o"))
+        run([cc, "-O1", "-I", directory, "-c", checks, "-o", objects[-1]],
+            env=host)
     objects += others
     # Where the program's source and its modules' are, written into it:
     # the files they name are looked for there last (devices/ent_files.h).
@@ -1298,6 +1570,10 @@ def main():
                         help="build a program for 64-bit Windows (an .exe), "
                         "with llvm-mingw's x86_64-w64-mingw32-clang; `run` "
                         "starts it with Wine")
+    parser.add_argument("--check-externs", action="store_true",
+                        help="check as the program runs that each extern fn "
+                        "gives the same result for the same arguments, and "
+                        "say which extern fns the build could not check")
     parser.add_argument("--keep", metavar="dir", help="keep the generated "
                         "files (IR, header) in this directory")
     parser.add_argument("--no-cache", action="store_true",

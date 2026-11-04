@@ -1,0 +1,57 @@
+// Extern fns that keep their word and some that do not, for the checks
+// of `ent build` (externs.test): what their C shows (externs.c), and
+// with --check-externs, what they give as the program runs.
+component Item { id: i32, name: text[14] } capacity 100
+unique Sum { total: i32 }
+
+// Fns: the same result for the same arguments.
+extern fn doubled(x: i32) -> i32
+extern fn letters(name: text[14]) -> i32
+extern fn shared(x: i32) -> i32
+// No fns: a count of their calls, a scale a proc sets, a function of
+// another file (helper.c), which the check cannot see into.
+extern fn counted(x: i32) -> i32
+extern fn scaled(x: i32) -> f32
+extern fn hidden(x: i32) -> i32
+// Which of them the program calls (CHECK_MODE where it runs), and the
+// scale `scaled` reads.
+extern proc mode() -> i32
+extern proc set_scale(s: f32)
+extern proc say(line: text[62])
+
+world {
+  for i in 0..3 {
+    spawn { Item { id: i, name: "item {i}" } }
+  }
+}
+
+system step() {
+  let m = mode()
+  for it: mut Item {
+    it.id = doubled(it.id) + letters(it.name) + shared(it.id)
+    if m == 1 { it.id += counted(it.id) }
+    if m == 2 { it.id += scaled(1) as i32 }
+    if m == 3 { it.id += hidden(it.id) }
+  }
+}
+
+system rescale() {
+  set_scale(2.0)
+}
+
+system total() {
+  Sum.total = 0
+  for it: Item { Sum.total += it.id }
+  say("total {Sum.total}")
+}
+
+schedule frame() {
+  step()
+  rescale()
+  total()
+}
+
+main {
+  frame()
+  frame()
+}

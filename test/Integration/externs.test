@@ -1,0 +1,37 @@
+// Whether extern fns are fns. `ent build` reads their C (as LLVM IR) and
+// warns where it writes or reads what the arguments do not decide, or calls
+// what it cannot see into; ENT_SAME_RESULT keeps it quiet (`shared`).
+// RUN: %ent build --no-cache %S/Inputs/externs/externs.ent %S/Inputs/externs/helper.c -o %t.exe 2>&1 | FileCheck %s --check-prefix=STATIC
+// RUN: %t.exe | FileCheck %s --check-prefix=OUT
+
+// STATIC-NOT: 'doubled'
+// STATIC-NOT: 'letters'
+// STATIC-NOT: 'shared'
+// STATIC:     externs.ent:13:11: warning: extern fn 'counted' is no fn: its C (ent_counted in {{.*}}externs.c) writes calls. A fn may be called at another time, fewer times or on many threads at once: declare it 'extern proc'
+// STATIC:     externs.ent:14:11: warning: extern fn 'scaled' may give another result for the same arguments: its C (ent_scaled in {{.*}}externs.c) reads scale.
+// STATIC:     externs.ent:15:11: warning: extern fn 'hidden' cannot be checked: its C (ent_hidden in {{.*}}externs.c) calls externs_helper().
+// STATIC-NOT: warning
+
+// OUT-NOT:    error
+// OUT:        total 30
+// OUT-NEXT:   total 111
+
+// With --check-externs each fn is called twice where the program calls it
+// and compared with what the same arguments gave before; a fn that does
+// not keep its word stops the program, saying where it is declared.
+// RUN: %ent build --no-cache --check-externs %S/Inputs/externs/externs.ent %S/Inputs/externs/helper.c -o %t.checked 2>/dev/null
+// RUN: %t.checked | FileCheck %s --check-prefix=OUT
+// RUN: env CHECK_MODE=3 %t.checked | FileCheck %s --check-prefix=HIDDEN
+// RUN: env CHECK_MODE=1 not --crash %t.checked 2>&1 | FileCheck %s --check-prefix=TWICE
+// RUN: env CHECK_MODE=2 not --crash %t.checked 2>&1 | FileCheck %s --check-prefix=BEFORE
+// The same on many threads.
+// RUN: env ENT_PARALLEL_MIN=1 %ent build --no-cache --parallel --check-externs %S/Inputs/externs/externs.ent %S/Inputs/externs/helper.c -o %t.parallel 2>/dev/null
+// RUN: %t.parallel | FileCheck %s --check-prefix=OUT
+// RUN: env CHECK_MODE=1 not --crash %t.parallel 2>&1 | FileCheck %s --check-prefix=TWICE
+
+// HIDDEN:     total 63
+// HIDDEN-NEXT: total 423
+
+// TWICE:      externs.ent:13:11: error: extern fn 'counted' gave {{[0-9]+}} and then {{[0-9]+}} when called twice with ({{[0-9]+}}): a fn gives the same result for the same arguments. Make it depend on them alone, or declare it 'extern proc'.
+
+// BEFORE:     externs.ent:14:11: error: extern fn 'scaled' gave 1 before and now 2 with (1): a fn gives the same result for the same arguments.

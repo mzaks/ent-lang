@@ -2872,6 +2872,31 @@ has nothing to get wrong about it. Prefer them to extern systems.
   --ent-to-c-extern-header`): the texts and the functions, without the
   world. They are also in the world's header.
 
+Whether an extern fn keeps its word, `ent build` checks in two ways:
+
+- **From its C, at every build.** Each `.c` and `.cpp` of the modules
+  (and of the command line) is compiled to LLVM IR by the compiler's own
+  LLVM, optimised, and what LLVM finds each extern fn does with memory is
+  read. A fn that touches nothing but its arguments (errno aside) passes.
+  Otherwise a warning at its declaration says what its C does: it is no
+  fn where it writes memory of its own (a count of its calls); it may
+  give another result for the same arguments where it reads such memory
+  (a scale a proc sets); it cannot be checked where it calls what LLVM
+  cannot see into (a library, another file). Where its result depends on
+  its arguments alone all the same (a table filled once, a library that
+  computes), the C says so by `ENT_SAME_RESULT` before the definition
+  (from the generated headers), and the warning goes. A fn defined
+  elsewhere (an object, a module's `.build`: Mojo, say) is not read;
+  `--check-externs` names those.
+- **As the program runs, with `ent build --check-externs`.** The program
+  calls each extern fn twice where it calls it once, and compares the
+  two results with each other and with what the same arguments gave
+  before (as many as 4096 slots keep, by a hash of the arguments). Where
+  they differ, it says so with the arguments and both results, at the
+  fn's declaration, and stops (`abort`). It finds what the C does not
+  show, in any language, for the arguments the program gives; it does
+  not find output that leaves the result as it is.
+
 ## The world
 
 ```
