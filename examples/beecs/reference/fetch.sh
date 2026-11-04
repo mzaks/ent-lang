@@ -1,4 +1,16 @@
 #!/bin/sh
+# Copyright (C) 2024-2026 Martin Lange and the beecs contributors
+# (github.com/mlange-42/beecs); ported to ent-lang by Maxim Zaks, 2026.
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License, version 3, as
+# published by the Free Software Foundation (examples/beecs/COPYING).
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
 # Fetches beecs (Go, GPL-3.0) at the commit the ent-lang model was held
 # against into build/beecs/reference, builds the runner next to this
 # script against it as build/beecs/ref_beecs, and copies its weather

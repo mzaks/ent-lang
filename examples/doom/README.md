@@ -163,4 +163,5 @@ cd build/doom/wad &&                                 # where doom1.wad is
 
 The port follows the source of Doom as id Software released it and as
 Chocolate Doom keeps it, so the files in this directory are under the GNU
-General Public License, version 2 or later, as theirs are.
+General Public License, version 2 or later, as theirs are. Its text is
+in [COPYING](COPYING).

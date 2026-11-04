@@ -1140,8 +1140,16 @@ cheap by default as on the Mac with it. Results, with the conditions they were t
 - [ ] Later: structural changes (spawn/despawn), change detection, relations,
       surface syntax.
 
+## License
+
+ent-lang is under the MIT License (`LICENSE`), except `examples/doom` and
+`examples/pushover`, which are ports of GPL-2.0-or-later programs and under
+that license, and `examples/beecs`, a port of beecs and under its GPL-3.0.
+
 ## Third-party code
 
 `devices/math.ent` is derived from Sun's fdlibm (by way of FreeBSD's msun),
-Arm's optimized-routines and Mojo's standard library. Their copyright
-notices and licenses are in `THIRD_PARTY_NOTICES`.
+Arm's optimized-routines and Mojo's standard library; the Clay examples
+follow Clay's; `bench/graph/check.cc` adapts a loop of the GAP Benchmark
+Suite; tree-sitter's runtime headers are in `editors/tree-sitter-ent`.
+Their copyright notices and licenses are in `THIRD_PARTY_NOTICES`.

@@ -3,7 +3,8 @@ Third-party notices
 
 Parts of this repository are derived from the software listed below. Each
 is used under the license its authors gave it, reproduced here as those
-licenses ask. The rest of the repository is not covered by these notices.
+licenses ask. The rest of the repository is under the MIT License in
+LICENSE and is not covered by these notices.
 
 
 1. fdlibm (Sun Microsystems), by way of FreeBSD's msun
@@ -371,3 +372,117 @@ drawn by examples/clay/make_picture.py.
 
       3. This notice may not be removed or altered from any source
       distribution.
+
+
+6. Chocolate Doom and Doom (id Software, Simon Howard and contributors)
+-----------------------------------------------------------------------
+
+Used in: everything in examples/doom, a port of Doom's source as id
+Software released it and as Chocolate Doom keeps it
+(github.com/chocolate-doom/chocolate-doom, commit 895f581c). Modified:
+rewritten in ent. The game's data (doom1.wad) is not in this repository;
+examples/doom/reference/fetch.sh fetches it.
+
+  Copyright(C) 1993-1996 Id Software, Inc.
+  Copyright(C) 2005-2014 Simon Howard
+
+  GNU General Public License, version 2 or (at your option) any later
+  version. The license's text is in examples/doom/COPYING. The files in
+  examples/doom are under it and not under the MIT License.
+
+
+7. Pushover (Andreas Röver, Volker Grabsch and the others its AUTHORS names)
+----------------------------------------------------------------------------
+
+Used in: everything in examples/pushover, a port of Pushover 0.0.5
+(github.com/pushover/pushover.github.io, tag 0.0.5). Modified: rewritten
+in ent.
+Pushover's levels, pictures and sounds are not in this repository;
+examples/pushover/reference/build.sh fetches them.
+
+  Pushover is the legal property of its developers: Andreas Röver,
+  Volker Grabsch, Roberto Lorenz, Harald Radke and the others its
+  AUTHORS file names.
+
+  GNU General Public License, version 2 or (at your option) any later
+  version. The license's text is in examples/pushover/COPYING. The files
+  in examples/pushover are under it and not under the MIT License.
+
+
+8. GAP Benchmark Suite (Scott Beamer, The Regents of the University of California)
+------------------------------------------------------------------------------------
+
+Used in: bench/graph/check.cc, whose PageRank loop is adapted from
+gapbs's src/pr_spmv.cc (github.com/sbeamer/gapbs, commit 941462c7). The
+rest of gapbs is fetched and built by bench/graph/run.py and is not in
+this repository.
+
+  Copyright (c) 2015, The Regents of the University of California (Regents).
+  All Rights Reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+  1. Redistributions of source code must retain the above copyright
+     notice, this list of conditions and the following disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright
+     notice, this list of conditions and the following disclaimer in the
+     documentation and/or other materials provided with the distribution.
+  3. Neither the name of the Regents nor the
+     names of its contributors may be used to endorse or promote products
+     derived from this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+  ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+  WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+  DISCLAIMED. IN NO EVENT SHALL REGENTS BE LIABLE FOR ANY
+  DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+  (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+  ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+  (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+9. tree-sitter (Max Brunsfeld)
+------------------------------
+
+Used in: editors/tree-sitter-ent/src/tree_sitter/alloc.h, array.h and
+parser.h, tree-sitter's runtime headers as its generator writes them
+next to a grammar's parser, unmodified.
+
+  The MIT License (MIT)
+
+  Copyright (c) 2018 Max Brunsfeld
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in all
+  copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.
+
+
+10. beecs (Martin Lange and contributors)
+-----------------------------------------
+
+Used in: everything in examples/beecs, a port of beecs, BEEHAVE's model
+of a honeybee colony in Go (github.com/mlange-42/beecs, commit 28958a0).
+Modified: rewritten in ent. beecs itself and its weather files are not
+in this repository; examples/beecs/reference/fetch.sh fetches them.
+
+  Copyright (C) 2024-2026 Martin Lange and the beecs contributors
+
+  GNU General Public License, version 3. The license's text is in
+  examples/beecs/COPYING. The files in examples/beecs are under it and
+  not under the MIT License.

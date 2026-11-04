@@ -239,3 +239,9 @@ Not here:
 
 The numbers at random are not beecs's (Go's PCG stream and gonum's
 Poisson), so no run is beecs's run: the two agree in how runs spread.
+
+## Licence
+
+This is a port of beecs's source and so, like it, under the GNU General
+Public License, version 3, whose text is in [COPYING](COPYING). beecs is
+by Martin Lange and its contributors.

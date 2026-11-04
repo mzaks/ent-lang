@@ -116,7 +116,8 @@ lists.
 ## Licence
 
 This is a port of Pushover's source and so, like it, under the GNU
-General Public License, version 2 or later. Nothing of the game itself
+General Public License, version 2 or later, whose text is in
+[COPYING](COPYING). Nothing of the game itself
 is in this repository: its levels, pictures and sounds are fetched by
 `reference/build.sh` and put next to the port by `reference/assets.sh`.
 A program built with `--embed` holds them, and is the game's to pass on
