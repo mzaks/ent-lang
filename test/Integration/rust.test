@@ -5,6 +5,8 @@
 // kind read by the png crate as stb_image reads them. Needs cargo (which
 // fetches the crates on the first build) and libclang (bindgen).
 // REQUIRES: rust
+// Its fns are read as they are built, and keep their word.
+// RUN: %ent build --no-cache -I %S/../../examples/rust %S/../../examples/rust/calls.ent -o %t.exe 2>&1 | FileCheck %s --check-prefix=PURE --allow-empty
 // RUN: %ent run -I %S/../../examples/rust %S/../../examples/rust/calls.ent > %t.one
 // RUN: FileCheck %s --input-file=%t.one
 // RUN: %ent run --parallel -I %S/../../examples/rust %S/../../examples/rust/calls.ent > %t.all
@@ -12,6 +14,7 @@
 // RUN: rm -rf %t.pngs && mkdir -p %t.pngs
 // RUN: python3 %S/../../examples/rust/make_pngs.py %t.pngs
 // RUN: cd %t.pngs && %ent run -I %S/../../examples/rust %S/../../examples/rust/pngs.ent | FileCheck %s --check-prefix=PNG
+// PURE-NOT: warning
 // CHECK: Rust says hello, 42
 // CHECK-NEXT: mixed 8790920353524676646 squares 9604000000 divided 174998885716 dot 37492162.5
 // PNG: 31 of 31 pictures the same, 26381 pixels

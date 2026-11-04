@@ -2876,10 +2876,16 @@ has nothing to get wrong about it. Prefer them to extern systems.
 
 Whether an extern fn keeps its word, `ent build` checks in two ways:
 
-- **From its C, at every build.** Each `.c` and `.cpp` of the modules
-  (and of the command line) is compiled to LLVM IR by the compiler's own
-  LLVM, optimised, and what LLVM finds each extern fn does with memory is
-  read. A fn that touches nothing but its arguments (errno aside) passes.
+- **From its C or its Rust, at every build.** Each `.c` and `.cpp` of
+  the modules (and of the command line) is compiled to LLVM IR by the
+  compiler's own LLVM, optimised, and what LLVM finds each extern fn does
+  with memory is read. So is each Rust crate: a module built by its
+  `.build` next to a `Cargo.toml` (`examples/rust`), whose IR cargo makes
+  (optimised, in a folder beside the cache, `ent-rust`). A fn that
+  touches nothing but its arguments (errno aside) passes; so does one
+  that only has memory and gives it back (malloc and free, Rust's `Vec`)
+  or has a way out that does not return (an `abort`, a Rust panic, and
+  what it does just before, saying why).
   Otherwise a warning at its declaration says what its C does: it is no
   fn where it writes memory of its own (a count of its calls); it may
   give another result for the same arguments where it reads such memory
@@ -2887,9 +2893,11 @@ Whether an extern fn keeps its word, `ent build` checks in two ways:
   cannot see into (a library, another file). Where its result depends on
   its arguments alone all the same (a table filled once, a library that
   computes), the C says so by `ENT_SAME_RESULT` before the definition
-  (from the generated headers), and the warning goes. A fn defined
-  elsewhere (an object, a module's `.build`: Mojo, say) is not read;
-  `--check-externs` names those.
+  (from the generated headers), and the warning goes; in Rust (or any
+  language), a static `ent_same_result_` and the fn's C name
+  (`#[no_mangle] pub static ent_same_result_ent_m_f: u8 = 0;`) says the
+  same. A fn defined elsewhere (an object, a module's `.build` of another
+  language: Mojo, say) is not read; `--check-externs` names those.
 - **As the program runs, with `ent build --check-externs`.** The program
   calls each extern fn twice where it calls it once, and compares the
   two results with each other and with what the same arguments gave

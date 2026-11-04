@@ -1,0 +1,18 @@
+// Whether extern fns are fns, from their Rust: `ent build` has cargo make
+// the LLVM IR of a module's crate (its .build next to a Cargo.toml) and
+// reads it as it reads C. A Vec (memory had and given back) and a panic
+// (a way out) are no reason; a static ent_same_result_<C name> vouches
+// for a fn (`key_sum`). Needs cargo; the crate uses no others.
+// REQUIRES: rust
+// RUN: %ent build --no-cache %S/Inputs/externs_rust/externs_rust.ent -o %t.exe 2>&1 | FileCheck %s --check-prefix=STATIC
+// RUN: %t.exe | FileCheck %s --check-prefix=OUT
+
+// STATIC-NOT: 'square_sum'
+// STATIC-NOT: 'divided'
+// STATIC-NOT: 'key_sum'
+// STATIC:     externs_rust.ent:11:11: warning: extern fn 'counted' is no fn: its Rust (ent_counted in {{.*}}externs_rust{{/|\\}}Cargo.toml) writes externs_rust::CALLS. A fn may be called at another time, fewer times or on many threads at once: declare it 'extern proc'
+// STATIC:     externs_rust.ent:12:11: warning: extern fn 'scaled' may give another result for the same arguments: its Rust (ent_scaled in {{.*}}Cargo.toml) reads externs_rust::SCALE. A fn may be called at another time or fewer times: declare it 'extern proc', or vouch for it with `#[no_mangle] pub static ent_same_result_ent_scaled: u8 = 0;` where what it reads does not change once it is called
+// STATIC:     externs_rust.ent:13:11: warning: extern fn 'first_key' cannot be checked: its Rust (ent_first_key in {{.*}}Cargo.toml) calls {{.*}}hashmap_random_keys(). Vouch for it with
+// STATIC-NOT: warning
+
+// OUT: 14 5 45 1 6

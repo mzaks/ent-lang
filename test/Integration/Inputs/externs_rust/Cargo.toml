@@ -1,0 +1,14 @@
+# The Rust of externs_rust.ent (test/Integration/externs_rust.test): no
+# crates of its own, so that it builds without the network.
+[package]
+name = "externs_rust"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+[profile.release]
+panic = "abort"

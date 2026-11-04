@@ -156,9 +156,13 @@ loops took at least 1% of the traced run are named, each with its time.
 
 An extern fn is to give the same result for the same arguments and do
 nothing else. The C of the modules (.c, .cpp) is compiled to LLVM IR once
-more and read: a warning at an extern fn's declaration says where its C
-writes or reads memory other than its arguments, or calls what cannot be
-seen into, unless the C marks it ENT_SAME_RESULT (not for --windows).
+more and read, and so is the Rust of a module whose .build is next to a
+Cargo.toml (by cargo, in $ENT_CACHE-rust or ~/.cache/ent-rust): a warning
+at an extern fn's declaration says where it writes or reads memory other
+than its arguments, or calls what cannot be seen into (memory had and
+given back, and a way out that does not return, aside), unless the C
+marks it ENT_SAME_RESULT, or a static ent_same_result_<its C name>
+vouches for it (not for --windows).
 Built with --check-externs, the program calls each extern fn twice where
 it calls it, and compares the results with each other and with what the
 same arguments gave before; where they differ it says so and stops. It
@@ -781,11 +785,13 @@ def host_includes(compiler, language, known={}):
     return known[(compiler, language)]
 
 
-def memory_of(attributes):
+def memory_of(attributes, places=("argmem", "inaccessiblemem", "other",
+                                   "target_mem0", "target_mem1")):
     """What a function's LLVM attributes say it does with memory: "pure"
     (nothing, or reads its arguments; errno aside), "writes", "reads" or
     "hidden" (memory no IR names: malloc's, a library's state); "unknown"
-    where they say nothing (it calls what LLVM cannot see into)."""
+    where they say nothing (it calls what LLVM cannot see into). Only the
+    kinds of memory in `places` are looked at."""
     found = re.search(r"\bmemory\(([^)]*)\)", attributes or "")
     if not found:
         return "unknown"
@@ -798,8 +804,7 @@ def memory_of(attributes):
         else:
             default = part
     worst = "pure"
-    for place in ("argmem", "inaccessiblemem", "other", "target_mem0",
-                  "target_mem1"):
+    for place in places:
         kind = kinds.get(place, default)
         if kind == "none" or (place == "argmem" and kind == "read"):
             continue
@@ -853,21 +858,61 @@ def ir_functions(ir):
     return functions, globals_, vouched
 
 
-def why_not_pure(name, functions, globals_, seen=None):
+# (Parts of the names of what Rust's standard library calls that is
+# harmless as harmless_call says, though LLVM does not see it so: a
+# placeholder of the allocator, and what a HashMap calls where it cannot
+# have more memory, which panics or gives an error back.)
+RUST_HARMLESS = ("__rust_no_alloc_shim_is_unstable",
+                 "Fallibility17capacity_overflow", "Fallibility9alloc_err")
+
+
+def harmless_call(callee, attributes, after):
+    """Whether a call changes nothing a fn gives back though LLVM cannot
+    see into it: memory had and given back (malloc and free, Rust's
+    allocator), or a call that never returns (abort, a panic: the program
+    ends there); `after` is the line after the call."""
+    return ("allockind(" in attributes or
+            re.search(r"\bnoreturn\b", attributes) is not None or
+            after.strip().startswith("unreachable") or
+            any(part in callee for part in RUST_HARMLESS))
+
+
+def why_not_pure(name, functions, globals_, seen=None, harmless=None):
     """What a function does that makes it no fn, as LLVM IR shows it:
     which globals it writes and reads, and what it calls that cannot be
-    seen into (or that does those)."""
+    seen into (or that does those). The calls that change nothing it
+    gives back (harmless_call) are not among them, but are counted in
+    `harmless`."""
     seen = set() if seen is None else seen
+    harmless = [] if harmless is None else harmless
     seen.add(name)
     writes, reads, calls = [], [], []
-    for line in functions[name][2] or []:
+    lines = functions[name][2] or []
+    # (A block that ends in `unreachable` is the way out: what it does
+    # before, saying why, say, changes nothing given back.)
+    leaving, block = set(), []
+    for at, line in enumerate(lines):
+        if re.match(r"[\w.$\"-]+:", line):
+            block = []
+        block.append(at)
+        if line.strip().startswith("unreachable"):
+            leaving.update(block)
+    for at, line in enumerate(lines):
+        if at in leaving:
+            if re.search(r"\b(?:call|invoke) ", line):
+                harmless.append(name)
+            continue
         line = line.split(";")[0]
         named = [word for word in re.findall(r"@([\w.$]+)", line)
                  if word in globals_ and not globals_[word]]
-        if re.match(r"\s*store ", line):
+        if re.match(r"\s*store ", line) or re.search(r"= (atomicrmw|cmpxchg) ",
+                                                     line):
             writes += named
         elif re.search(r"= load |getelementptr", line):
             reads += named
+        if re.search(r"\b(?:call|invoke) [^@%(]*\basm\b", line):
+            calls.append("inline assembly")
+            continue
         called = re.search(r"\b(?:call|invoke) [^@%]*(@[\w.$]+|%[\w.]+)\(",
                            line)
         if not called:
@@ -884,8 +929,12 @@ def why_not_pure(name, functions, globals_, seen=None):
         defined, attributes, _ = functions[callee]
         if memory_of(attributes) == "pure":
             continue
+        after = lines[at + 1] if at + 1 < len(lines) else ""
+        if harmless_call(callee, attributes, after):
+            harmless.append(callee)
+            continue
         if defined:
-            more = why_not_pure(callee, functions, globals_, seen)
+            more = why_not_pure(callee, functions, globals_, seen, harmless)
             writes += more[0]
             reads += more[1]
             calls += more[2]
@@ -896,17 +945,80 @@ def why_not_pure(name, functions, globals_, seen=None):
                              if name not in writes], unique(calls))
 
 
-def check_externs(clang, cc, cxx, sources, fns, directory, flags, verbose):
+def demangled(names):
+    """Rust's and C++'s names as written (core::panicking::panic), by
+    LLVM's llvm-cxxfilt where there is one; else as they are."""
+    tool = next((path for path in [os.path.join(directory, "llvm-cxxfilt")
+                                   for directory in llvm_directories()]
+                 + [shutil.which("llvm-cxxfilt") or ""]
+                 if os.path.isfile(path) and os.access(path, os.X_OK)), None)
+    if not names or tool is None:
+        return names
+    # (Without what LLVM adds to a name it makes internal: ".0", ".llvm.7".)
+    plain = [re.sub(r"(\.llvm)?\.\d+$", "", name) for name in names]
+    told = subprocess.run([tool], input="\n".join(plain) + "\n", text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    lines = told.stdout.splitlines()
+    return lines if told.returncode == 0 and len(lines) == len(names) \
+        else names
+
+
+def rust_ir(crate, directory, host, verbose):
+    """The LLVM IR of a Rust crate's library (crate: its folder), as cargo
+    builds it optimised, in a folder of its own beside the cache (as the
+    crate's build.rs is given ENT_INCLUDE, the program's headers); None
+    where it cannot be had."""
+    cargo = shutil.which("cargo", path=host.get("PATH"))
+    if cargo is None:
+        if verbose:
+            sys.stderr.write(f"{crate}: note: there is no cargo to read its "
+                             "Rust to check its extern fns\n")
+        return None
+    target = os.path.join(cache_directory() + "-rust", hashlib.sha256(
+        os.path.realpath(crate).encode()).hexdigest()[:16])
+    deps = os.path.join(target, "release", "deps")
+    built = subprocess.run(
+        [cargo, "rustc", "--release", "--quiet", "--lib", "--manifest-path",
+         os.path.join(crate, "Cargo.toml"), "--target-dir", target, "--",
+         "--emit=llvm-ir", "-C", "codegen-units=1"],
+        env=dict(host, ENT_INCLUDE=os.path.abspath(directory)),
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    # (The library's IR: its name, or the package's, with _ for -; the
+    # newest, as cargo keeps those of other flags or versions too.)
+    with open(os.path.join(crate, "Cargo.toml")) as manifest:
+        text = manifest.read()
+    names = re.findall(r'^\s*name\s*=\s*"([^"]+)"', text, re.M)
+    lib = re.search(r'\[lib\][^\[]*?^\s*name\s*=\s*"([^"]+)"', text,
+                    re.M | re.S)
+    name = (lib.group(1) if lib else names[0] if names else "").replace(
+        "-", "_")
+    made = [os.path.join(deps, entry) for entry in (
+        os.listdir(deps) if os.path.isdir(deps) else [])
+        if entry.startswith(name + "-") and entry.endswith(".ll")]
+    if built.returncode or not name or not made:
+        if verbose:
+            sys.stderr.write(f"{crate}: note: its Rust could not be read to "
+                             "check its extern fns:\n" + built.stderr)
+        return None
+    return max(made, key=os.path.getmtime)
+
+
+def check_externs(clang, cc, cxx, sources, crates, fns, directory, flags,
+                  host, verbose):
     """Says, as warnings at their declarations, which extern fns the C of
-    the program's modules shows are no fns: that write or read what their
-    arguments do not decide, or call what cannot be seen into (unless the
-    C marks them ENT_SAME_RESULT). Each C file is compiled to LLVM IR by
-    the LLVM of the compiler, optimised (inlined, its functions' memory
-    worked out). Those not found in such a file (in an object, say) are
-    said with `verbose`."""
+    the program's modules, or their Rust, shows are no fns: that write or
+    read what their arguments do not decide, or call what cannot be seen
+    into (unless they are vouched for: ENT_SAME_RESULT in C, a static
+    ent_same_result_<name> in any language). Memory had and given back,
+    and calls that do not return (an abort, a panic), are no reason. Each
+    C file is compiled to LLVM IR by the LLVM of the compiler, optimised
+    (inlined, its functions' memory worked out); each Rust crate (the
+    folder of a module's .build with a Cargo.toml) by cargo. Those not
+    found in either (in an object, say) are said with `verbose`."""
     if not fns:
         return
     left = dict((cname, (name, where)) for cname, name, where in fns)
+    readings = []
     for index, source in enumerate(sources):
         language = "c++" if source.endswith(".cpp") else "c"
         ir_path = os.path.join(directory, "externs.%d.ll" % index)
@@ -920,8 +1032,17 @@ def check_externs(clang, cc, cxx, sources, fns, directory, flags, verbose):
                 sys.stderr.write(f"{source}: note: could not be read to "
                                  "check its extern fns:\n" + compiled.stderr)
             continue
+        readings.append(("C", source, ir_path))
+    for crate in crates:
+        ir_path = rust_ir(crate, directory, host, verbose)
+        if ir_path:
+            readings.append(("Rust", os.path.join(crate, "Cargo.toml"),
+                             ir_path))
+    for language, source, ir_path in readings:
         with open(ir_path) as read:
             functions, globals_, vouched = ir_functions(read.read())
+        vouched |= {name[len("ent_same_result_"):] for name in globals_
+                    if name.startswith("ent_same_result_")}
         shown = os.path.relpath(source) if not os.path.relpath(
             source).startswith("../..") else source
         for cname in [cname for cname in left if cname in functions
@@ -930,7 +1051,21 @@ def check_externs(clang, cc, cxx, sources, fns, directory, flags, verbose):
             kind = memory_of(functions[cname][1])
             if kind == "pure" or cname in vouched:
                 continue
-            writes, reads, calls = why_not_pure(cname, functions, globals_)
+            harmless = []
+            writes, reads, calls = why_not_pure(cname, functions, globals_,
+                                                harmless=harmless)
+            # (Only memory had and given back, or a way out, and what the
+            # attributes say of the rest is no more than that.)
+            if harmless and not (writes or reads or calls) and memory_of(
+                    functions[cname][1], ("argmem", "other", "target_mem0",
+                                          "target_mem1")) in ("pure",
+                                                              "unknown"):
+                continue
+            writes, reads = demangled(writes), demangled(reads)
+            called = [call[:-2] for call in calls if call.endswith("()")]
+            written = dict(zip(called, demangled(called)))
+            calls = [written[call[:-2]] + "()" if call.endswith("()")
+                     else call for call in calls]
             said = []
             if writes:
                 said.append("writes " + ", ".join(writes[:4]) + (
@@ -949,6 +1084,9 @@ def check_externs(clang, cc, cxx, sources, fns, directory, flags, verbose):
                              "reads": "reads memory other than its "
                              "arguments"}.get(kind, "does what cannot be "
                                               "seen into"))
+            vouch = ("mark its C ENT_SAME_RESULT" if language == "C" else
+                     f"vouch for it with `#[no_mangle] pub static "
+                     f"ent_same_result_{cname}: u8 = 0;`")
             if kind == "writes":
                 what, advice = "is no fn", (
                     "A fn may be called at another time, fewer times or on "
@@ -957,20 +1095,22 @@ def check_externs(clang, cc, cxx, sources, fns, directory, flags, verbose):
                 what, advice = "may give another result for the same " \
                     "arguments", (
                     "A fn may be called at another time or fewer times: "
-                    "declare it 'extern proc', or mark its C ENT_SAME_RESULT "
-                    "where what it reads does not change once it is called")
+                    f"declare it 'extern proc', or {vouch} where what it "
+                    "reads does not change once it is called")
             else:
                 what, advice = "cannot be checked", (
-                    "Mark its C ENT_SAME_RESULT where its result depends on "
-                    "its arguments alone, else declare it 'extern proc'")
+                    f"{vouch[0].upper()}{vouch[1:]} where its result depends "
+                    "on its arguments alone, else declare it 'extern proc'")
             sys.stderr.write(
                 f"{where or shown}: warning: extern fn '{name}' {what}: its "
-                f"C ({cname} in {shown}) {' and '.join(said)}. {advice}\n")
+                f"{language} ({cname} in {shown}) {' and '.join(said)}. "
+                f"{advice}\n")
     if verbose:
         for cname, (name, where) in left.items():
             sys.stderr.write(f"{where}: note: extern fn '{name}' is "
                              "checked only as it runs: it is defined outside "
-                             "the .c and .cpp files of the build\n")
+                             "the .c and .cpp files and Rust crates of the "
+                             "build\n")
 
 
 def build(arguments, output, directory):
@@ -1096,6 +1236,11 @@ def build(arguments, output, directory):
     # that comes with the compiler has none.)
     implementing = [path for path in given + arguments.sources
                     if path.endswith((".c", ".cpp"))]
+    # (And the Rust: a module built by a command, next to a Cargo.toml.)
+    crates = list(dict.fromkeys(
+        os.path.dirname(os.path.abspath(path)) for path in given
+        if path.endswith(".build") and os.path.isfile(os.path.join(
+            os.path.dirname(os.path.abspath(path)), "Cargo.toml"))))
     # What a `for` sends from a loop of its body (on many threads) and
     # the edges it connects there are kept by C that comes with the
     # compiler.
@@ -1206,8 +1351,8 @@ def build(arguments, output, directory):
                 os.environ.get("CUDA_PATH", "/opt/cuda"), "include")]
         if arguments.ranks:
             extra += mpi_flags()[0]
-        check_externs(clang, cc, cxx, implementing, fns, directory, extra,
-                      arguments.check_externs)
+        check_externs(clang, cc, cxx, implementing, crates, fns, directory,
+                      extra, host, arguments.check_externs)
     # What of the program that C calls, which keeps its name; the rest
     # of it is the program's own (internal), which LLVM inlines where it
     # is called from one place, or where that pays, and drops where it is

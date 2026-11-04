@@ -1,0 +1,30 @@
+// Extern fns in Rust (src/lib.rs, a crate built by externs_rust.build)
+// that keep their word and some that do not, for the check of their
+// Rust that `ent build` makes (test/Integration/externs_rust.test).
+import console
+
+// Fns: memory had and given back, a panic, a HashMap vouched for.
+extern fn square_sum(n: i32) -> i64
+extern fn divided(a: i64, b: i64) -> i64
+extern fn key_sum(n: i32) -> i64
+// No fns: a count of their calls, a scale a proc sets, a HashMap's order.
+extern fn counted(x: i64) -> i64
+extern fn scaled(x: i64) -> i64
+extern fn first_key(n: i32) -> i32
+extern proc set_scale(s: i64)
+
+unique T { a: i64, b: i64, c: i64, d: i64, e: i64, f: i32 }
+
+system run() {
+  set_scale(3)
+  T.a = square_sum(4)
+  T.b = divided(10, 2)
+  T.c = key_sum(10)
+  T.d = counted(1)
+  T.e = scaled(2)
+  T.f = first_key(10)
+  put("{T.a} {T.b} {T.c} {T.d} {T.e}")
+}
+
+schedule once() { run() }
+main { once() }

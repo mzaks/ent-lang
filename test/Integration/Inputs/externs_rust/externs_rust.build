@@ -1,0 +1,1 @@
+cargo build --release --quiet --target-dir "$ENT_OUTPUT.target" && cp "$ENT_OUTPUT.target/release/libexterns_rust.a" "$ENT_OUTPUT" && echo "-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc" > "$ENT_LINK"
