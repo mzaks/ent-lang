@@ -1,0 +1,53 @@
+// The Rust device's `read_png` (the png crate) and pictures.read_picture
+// (stb_image) read the same .png files, of every colour type and bit
+// depth, plain and interlaced, and give the same colours
+// (test/Integration/rust.test). Started where make_pngs.py wrote them:
+//
+//   python3 examples/rust/make_pngs.py /tmp/pngs
+//   cd /tmp/pngs && tools/ent run -I examples/rust examples/rust/pngs.ent
+import console
+import pictures
+import rustdev
+
+capacity Pixmap 4096
+capacity Picture 4096
+
+unique T { pictures: i32, same: i32, pixels: i32, differ: i32 }
+
+// The colour types and bit depths make_pngs.py writes, in its order.
+fn colour_type(k: i32) -> i32 {
+  if k < 5 { 0 } else if k < 7 { 2 } else if k < 11 { 3 } else if k < 13 { 4 } else { 6 }
+}
+fn depth(k: i32) -> i32 {
+  if k < 5 { 1 << k } else if k == 5 || k == 10 || k == 11 || k == 13 { 8 }
+  else if k == 6 || k == 12 || k == 14 { 16 } else { 1 << (k - 7) }
+}
+
+// The k-th file: each kind plain, then interlaced, and last a palette's
+// with how much of each colour shows.
+fn picture(k: i32) -> text[30] {
+  if k == 30 { "k3_8_trns.png" }
+  else if k % 2 == 0 { "k{colour_type(k / 2)}_{depth(k / 2)}.png" }
+  else { "k{colour_type(k / 2)}_{depth(k / 2)}_i.png" }
+}
+
+system compare() {
+  for k in 0..31 {
+    let name = picture(k)
+    let a = read_picture(name, Pixmap)
+    let b = read_png(name, Picture)
+    T.differ = 0
+    if a != b || len(Pixmap) != len(Picture) { T.differ = -1 }
+    else { for i in 0..len(Pixmap) { if Pixmap[i].color != Picture[i].color { T.differ += 1 } } }
+    T.pictures += 1
+    T.pixels += len(Pixmap)
+    if T.differ == 0 { T.same += 1 } else { put("{name}: stb {a} wide, rust {b}, {T.differ} differ") }
+  }
+  put("{T.same} of {T.pictures} pictures the same, {T.pixels} pixels")
+  let none = read_png("no_such_picture.png", Picture)
+  let other = read_png("not_a.png", Picture)
+  put("none: {none}, not a png: {other}, {len(Picture)} pixels")
+}
+
+schedule once() { compare() }
+main { once() }

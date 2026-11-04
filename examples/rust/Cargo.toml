@@ -1,0 +1,20 @@
+# The Rust of the device rustdev (rustdev.ent): a static library that
+# rustdev.build (build.sh) makes and tools/ent links into the program.
+[package]
+name = "rustdev"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+[dependencies]
+png = "0.17"
+
+[build-dependencies]
+bindgen = "0.71"
+
+[profile.release]
+panic = "abort"

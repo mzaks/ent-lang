@@ -1,0 +1,29 @@
+// The Rust device (rustdev.ent) called from a `for` over a million
+// entities, on many threads where built with --parallel, and handed a
+// buffer; it says what C would (test/Integration/rust.test).
+//
+//   tools/ent run --parallel -I examples/rust examples/rust/calls.ent
+import console
+import rustdev
+
+component Item { n: i64 } capacity 1000000
+unique T { mixed: u64, squares: i64, divided: i64, dot: f64 }
+
+world {
+  for i in 0..1000000 { spawn { Item { n: i as i64 } } }
+  for i in 0..100000 { Samples += { x: (i % 101) as f64 * 0.5, y: (i % 37) as f64 - 3.0 } }
+}
+
+system run() {
+  for it: Item {
+    T.mixed += mix(it.n as u64) >> 20
+    T.squares += square_sum((it.n % 50) as i32)
+    T.divided += safe_div(it.n, it.n % 7)
+  }
+  T.dot = dot(Samples)
+  greet(42)
+  put("mixed {T.mixed} squares {T.squares} divided {T.divided} dot {T.dot}")
+}
+
+schedule once() { run() }
+main { once() }

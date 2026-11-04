@@ -1,0 +1,33 @@
+// A device written in Rust (docs/syntax.md, Modules): its functions are
+// in src/lib.rs, a crate (Cargo.toml) built by rustdev.build (build.sh)
+// with cargo, which fetches the crates it uses on its first build. The
+// calling convention is C's, as for a device in C, and each function is
+// checked against its declaration here as Rust compiles it (bindgen, which
+// needs libclang).
+//
+//   import rustdev
+//   for it: Item { T.mixed += mix(it.n as u64) }
+//   T.dot = dot(Samples)
+//   let width = read_png("card.png", Picture)
+
+// Rows handed to `dot`.
+buffer Samples { x: f64, y: f64 } capacity 100000
+
+// The pixels read last by `read_png`, as pictures.Pixmap.
+transient buffer Picture { color: i32 } capacity 1048576
+
+// A whole number mixed (splitmix64's finish).
+extern fn mix(x: u64) -> u64
+// The squares below n added up (by way of a Vec in Rust).
+extern fn square_sum(n: i32) -> i64
+// a / b, and -1 where b is nought.
+extern fn safe_div(a: i64, b: i64) -> i64
+// The sum of x * y over the rows.
+extern proc dot(them: Samples) -> f64
+// Rust says a line.
+extern proc greet(n: i32)
+// The .png `name` read into `into` by the png crate, as
+// pictures.read_picture reads it with stb_image: how many pixels wide it
+// is, -1 where there is no such file or it is no .png, -2 where it is too
+// big for `into`.
+extern proc read_png(name: text[126], into: mut Picture) -> i32

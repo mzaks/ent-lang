@@ -79,6 +79,10 @@ if os.path.exists(os.path.join(os.path.dirname(config.test_source_root),
                                "build", "mojo", ".pixi", "envs", "default",
                                "bin", "mojo")) or shutil.which("mojo"):
     config.available_features.add("mojo")
+# Rust (cargo on the PATH): the test of a device written in it
+# (examples/rust) runs only then.
+if shutil.which("cargo"):
+    config.available_features.add("rust")
 # MPI (mpicc, mpirun): the tests of programs on many ranks (docs/ranks.md)
 # run only then.
 if shutil.which("mpicc") and shutil.which("mpirun"):

@@ -70,7 +70,9 @@ implementation is any of:
   that is known only as it builds (where its compiler keeps its own
   libraries, say) it may write to `ENT_LINK`, as `m.link` says it
   (`examples/mojo`, devices in Mojo, one of them computing on the GPU
-  with answers that come in as entities some ticks later).
+  with answers that come in as entities some ticks later;
+  `examples/rust`, a device in Rust, a crate built by cargo, its
+  functions checked against their declarations by way of bindgen).
 
 Next to any of them, `m.link` names the libraries the module needs, as
 arguments for the linker (`-lraylib -lm`).

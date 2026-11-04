@@ -1,0 +1,18 @@
+// A device written in Rust (examples/rust): its functions called from a
+// `for` over a million entities on one thread and on many (Rust's
+// allocator on the program's threads), a buffer handed to it, and Rust's
+// println; the same either way, what C gives. And .png files of every
+// kind read by the png crate as stb_image reads them. Needs cargo (which
+// fetches the crates on the first build) and libclang (bindgen).
+// REQUIRES: rust
+// RUN: %ent run -I %S/../../examples/rust %S/../../examples/rust/calls.ent > %t.one
+// RUN: FileCheck %s --input-file=%t.one
+// RUN: %ent run --parallel -I %S/../../examples/rust %S/../../examples/rust/calls.ent > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: rm -rf %t.pngs && mkdir -p %t.pngs
+// RUN: python3 %S/../../examples/rust/make_pngs.py %t.pngs
+// RUN: cd %t.pngs && %ent run -I %S/../../examples/rust %S/../../examples/rust/pngs.ent | FileCheck %s --check-prefix=PNG
+// CHECK: Rust says hello, 42
+// CHECK-NEXT: mixed 8790920353524676646 squares 9604000000 divided 174998885716 dot 37492162.5
+// PNG: 31 of 31 pictures the same, 26381 pixels
+// PNG-NEXT: none: -1, not a png: -1, 0 pixels
