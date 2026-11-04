@@ -4,7 +4,7 @@
 # --embed) and raylib linked into it, built here from its source for that
 # macOS (Homebrew's is for the macOS it was built on). What it uses
 # besides is the system's own: Cocoa, OpenGL, CoreAudio and the like.
-# Needs git, curl, cmake and what ent needs. Everything goes to
+# Needs git, curl, unzip, cmake and what ent needs. Everything goes to
 # build/doom, which is not committed.
 #
 #   examples/doom/bundle.sh          writes build/doom/bundle/out/doom
@@ -16,18 +16,13 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 doom=$root/build/doom
 bundle=$doom/bundle
-wad_sha1=5b2e249b9c5133ec987b3ea77596381dc0d6bc1d
-wad_url=https://github.com/Akbar30Bill/DOOM_wads/raw/master/doom1.wad
 # The raylib whose header window.c and sound.c are compiled against.
 raylib=6.0
 export MACOSX_DEPLOYMENT_TARGET=11.0
 
-mkdir -p "$doom/wad" "$bundle"
+mkdir -p "$bundle"
 
-if [ ! -f "$doom/wad/doom1.wad" ]; then
-  curl -sL -o "$doom/wad/doom1.wad" "$wad_url"
-fi
-echo "$wad_sha1  $doom/wad/doom1.wad" | shasum -c -
+sh "$here/reference/wad.sh"
 
 if [ ! -f "$bundle/raylib-build/raylib/libraylib.a" ]; then
   rm -rf "$bundle/raylib-src"

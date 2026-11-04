@@ -130,12 +130,16 @@ them as systems. It is being built; what is here so far:
 - `reference/`: what the port is compared against. `fetch.sh` fetches
   Chocolate Doom and the shareware WAD into `build/doom` and builds the
   first with `trace.patch`, which makes it write a line for each tic of a
-  level; `compare.py` finds the first tic at which two such traces
+  level; `wad.sh`, which `fetch.sh` and `bundle.sh` run, takes the WAD
+  out of id Software's v1.9 shareware release (`doom19s.zip`, from the
+  idgames archive's mirrors), unchanged; `compare.py` finds the first
+  tic at which two such traces
   differ. `make_tables.py` wrote `tables.ent`, `gamma.ent` and `random.ent`
   from the reference's C, `make_info.py` wrote `info.ent`.
 - `bundle.sh`: the game as one program for a Mac with Apple's chips,
   from macOS 11 on, with nothing installed: the WAD in it and raylib
-  (built from its source) linked into it.
+  (built from its source) linked into it. The WAD is id Software's
+  shareware one, as they gave it out, and not under the GPL.
 
 ```sh
 examples/doom/reference/fetch.sh demo1 demo2 demo3   # the traces to match

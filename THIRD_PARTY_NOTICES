@@ -380,8 +380,11 @@ drawn by examples/clay/make_picture.py.
 Used in: everything in examples/doom, a port of Doom's source as id
 Software released it and as Chocolate Doom keeps it
 (github.com/chocolate-doom/chocolate-doom, commit 895f581c). Modified:
-rewritten in ent. The game's data (doom1.wad) is not in this repository;
-examples/doom/reference/fetch.sh fetches it.
+rewritten in ent. The game's data (doom1.wad, the shareware WAD of Doom
+v1.9, id Software's) is not in this repository and not under the GPL:
+examples/doom/reference/wad.sh takes it, unchanged, out of id Software's
+shareware release doom19s.zip from the idgames archive's mirrors, and
+examples/doom/bundle.sh puts it, unchanged, in the program it builds.
 
   Copyright(C) 1993-1996 Id Software, Inc.
   Copyright(C) 2005-2014 Simon Howard
