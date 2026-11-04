@@ -9,9 +9,9 @@
 //
 //   tools/ent run -I examples examples/clay/sidebar.ent
 //
-// The pictures are profile-picture.png, next to this file (Clay's, from
-// its examples/raylib-sidebar-scrolling-container/resources), and a
-// colour where that is not there.
+// The pictures are profile-picture.png, next to this file (a head and
+// shoulders that make_picture.py draws, in place of the photograph in
+// Clay's example), and a colour where that is not there.
 import window
 import layout
 import layout_window
