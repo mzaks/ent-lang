@@ -76,6 +76,10 @@ implementation is any of:
 
 Next to any of them, `m.link` names the libraries the module needs, as
 arguments for the linker (`-lraylib -lm`).
+Next to an `m.build`, `m.emit` is one shell command, run as `m.build` is,
+that writes the module's LLVM IR (text or bitcode) to `ENT_OUTPUT`
+instead, for the check of its extern fns (below; `examples/mojo`). A Rust
+crate needs none.
 
 `tools/ent` compiles the program itself with the LLVM its IR was made
 with, and hands the modules' C and C++ and the link to the machine's own
@@ -2881,7 +2885,9 @@ Whether an extern fn keeps its word, `ent build` checks in two ways:
   compiler's own LLVM, optimised, and what LLVM finds each extern fn does
   with memory is read. So is each Rust crate: a module built by its
   `.build` next to a `Cargo.toml` (`examples/rust`), whose IR cargo makes
-  (optimised, in a folder beside the cache, `ent-rust`). A fn that
+  (optimised, in a folder beside the cache, `ent-rust`), and each module
+  of another language with an `m.emit` (Mojo: `examples/mojo`), whose IR
+  is optimised as C's is. A fn that
   touches nothing but its arguments (errno aside) passes; so does one
   that only has memory and gives it back (malloc and free, Rust's `Vec`)
   or has a way out that does not return (an `abort`, a Rust panic, and
@@ -2896,8 +2902,10 @@ Whether an extern fn keeps its word, `ent build` checks in two ways:
   (from the generated headers), and the warning goes; in Rust (or any
   language), a static `ent_same_result_` and the fn's C name
   (`#[no_mangle] pub static ent_same_result_ent_m_f: u8 = 0;`) says the
-  same. A fn defined elsewhere (an object, a module's `.build` of another
-  language: Mojo, say) is not read; `--check-externs` names those.
+  same, and so does an exported function of that name (in Mojo,
+  `@export("ent_same_result_ent_m_f") def f() abi("C"): pass`). A fn
+  defined elsewhere (an object, a module's `.build` without an `m.emit`)
+  is not read; `--check-externs` names those.
 - **As the program runs, with `ent build --check-externs`.** The program
   calls each extern fn twice where it calls it once, and compares the
   two results with each other and with what the same arguments gave

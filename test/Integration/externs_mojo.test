@@ -1,0 +1,18 @@
+// Whether extern fns are fns, from their Mojo: a module's .emit writes its
+// LLVM IR (examples/mojo/build.sh with ENT_EMIT=llvm), which `ent build`
+// optimises and reads as it reads C. A List (memory had and given back)
+// and an error raised and caught are no reason; an exported function
+// ent_same_result_<C name> vouches for a fn (`vouched`). Needs Mojo:
+// examples/mojo/setup.sh, or `mojo` on the PATH.
+// REQUIRES: mojo
+// RUN: %ent build --no-cache %S/Inputs/externs_mojo/externs_mojo.ent -o %t.exe 2>&1 | FileCheck %s --check-prefix=STATIC
+// RUN: %t.exe | FileCheck %s --check-prefix=OUT
+
+// STATIC-NOT: 'square_sum'
+// STATIC-NOT: 'safe_div'
+// STATIC-NOT: 'vouched'
+// STATIC:     externs_mojo.ent:13:11: warning: extern fn 'counted' cannot be checked: its Mojo (ent_counted in {{.*}}externs_mojo.mojo) calls rand(). Vouch for it with `@export("ent_same_result_ent_counted") def ...() abi("C"): pass` where its result depends on its arguments alone, else declare it 'extern proc'
+// STATIC:     externs_mojo.ent:14:11: warning: extern fn 'from_env' cannot be checked: its Mojo (ent_from_env in {{.*}}externs_mojo.mojo) calls getenv().
+// STATIC-NOT: warning
+
+// OUT: 14 -1 0 true

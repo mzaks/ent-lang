@@ -1,0 +1,27 @@
+// Extern fns in Mojo (externs_mojo.mojo, built by externs_mojo.build;
+// its IR by externs_mojo.emit) that keep their word and some that do not,
+// for the check of their IR that `ent build` makes
+// (test/Integration/externs_mojo.test).
+import console
+
+// Fns: a List (memory had and given back), an error raised and caught,
+// one vouched for.
+extern fn square_sum(n: i32) -> i64
+extern fn safe_div(a: i64, b: i64) -> i64
+extern fn vouched(x: i64) -> i64
+// No fns: what rand() gives, what the environment says.
+extern fn counted(x: i64) -> i64
+extern fn from_env(x: i64) -> i64
+
+unique T { a: i64, b: i64, c: i64, d: i64, e: i64 }
+
+system run() {
+  T.a = square_sum(4)
+  T.b = safe_div(10, 0)
+  T.c = vouched(0) - from_env(0)
+  T.d = counted(0) - counted(0) + 1
+  put("{T.a} {T.b} {T.c} {T.d > -2147483648}")
+}
+
+schedule once() { run() }
+main { once() }
