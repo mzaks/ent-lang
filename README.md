@@ -8,6 +8,9 @@ a surface syntax comes later. (Until 2026-10-01 it was called ecs-lang, with
 an `ecs` dialect and `ecs_` names in generated C; `bench/RESULTS.md` keeps
 the old names for results taken before.)
 
+How it came to be, from the first commit to v0.1, is told in the
+[devlog](docs/devlog/README.md).
+
 ## Build
 
 Requires Homebrew LLVM (tested with 22.1.8, which ships MLIR, FileCheck and
