@@ -28,6 +28,40 @@ int32_t ent_files_read_file(const ent_text126 *name, int32_t *count,
   return size;
 }
 
+// (A path from a text of any length; false where it is too long.)
+static bool ent_files_path(const ent_text *name, char *path, size_t room) {
+  uint32_t length = name ? name->length : 0;
+  if (length >= room)
+    return false;
+  memcpy(path, name ? name->bytes : "", length);
+  path[length] = 0;
+  return true;
+}
+
+const ent_text *ent_files_read_text(const ent_text *name) {
+  char path[4096];
+  struct ent_file file;
+  if (!ent_files_path(name, path, sizeof path) || !ent_file_open(path, &file))
+    return NULL;
+  ent_text *text = NULL;
+  if (file.size > 0 && file.size < UINT32_MAX) {
+    text = ent_text_new((uint32_t)file.size);
+    memcpy(text->bytes, file.bytes, file.size);
+  }
+  ent_file_close(&file);
+  return text;
+}
+
+int64_t ent_files_file_size(const ent_text *name) {
+  char path[4096];
+  struct ent_file file;
+  if (!ent_files_path(name, path, sizeof path) || !ent_file_open(path, &file))
+    return -1;
+  int64_t size = (int64_t)file.size;
+  ent_file_close(&file);
+  return size;
+}
+
 bool ent_files_write_file(const ent_text126 *name, int32_t count,
                           const uint8_t *value) {
   char path[127];

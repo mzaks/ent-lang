@@ -1,0 +1,218 @@
+// The crawler: the business on top of the pipeline (http-SPEC.md, §4.2
+// and §5.2). A page that answered becomes the asks for the pages it
+// links to, so the pipeline feeds itself. It knows nothing of sockets.
+//
+// Breadth first, by depth: the links of a page are followed once every
+// ask less deep is settled (`Level`), so a page's depth is the fewest
+// links to it from the seed, whichever answers first; a redirect is as
+// deep as the ask redirected. Two asks for one URL are one, the older,
+// with the lesser depth.
+import text
+import console
+import files
+import urls
+import pipeline
+
+// Links from the seed to here.
+component Depth { d: i32 }
+// The host it goes to.
+component At { host: entity }
+// A host it may go to, and how many asks to it are out.
+component Host { name: text, busy: i32 }
+// A page links to a page.
+relation (Ask)-[Links]->(Ask) capacity 4194304
+// How it ended, for the report: the status, or why there was none.
+component Ending { word: text }
+
+// What the crawl is to do (crawl.conf): the first URL, the hosts it may
+// go to (with spaces between them), how deep, how many asks out to a
+// host at once.
+unique Rules { seed: text, allow: text, max_depth: i32, per_host: i32 }
+// How deep the links followed are so far.
+unique Level: i32
+// Asks not settled; none at the end.
+unique Open: i32
+
+index HostByName of Host by name hash
+
+// The value of `key` in a file of `key value` lines.
+fn setting(conf: text, key: text) -> text {
+  let at = find("\n" + conf, "\n" + key + " ", 0)
+  if at < 0 { "" }
+  else {
+    let from = at + len(key) + 1
+    slice(conf, from, or_end(find(conf, "\n", from), len(conf)))
+  }
+}
+
+fn allowed(allow: text, host: text) -> bool {
+  len(host) > 0 && find(" " + allow + " ", " " + host + " ", 0) >= 0
+}
+
+fn is_html(headers: text) -> bool {
+  find(lower(headers), "content-type: text/html", 0) >= 0
+}
+
+system setup() {
+  let conf = read_text("crawl.conf")
+  Rules.seed = setting(conf, "seed")
+  Rules.allow = setting(conf, "allow")
+  Rules.max_depth = number(setting(conf, "max_depth")) as i32
+  Rules.per_host = number(setting(conf, "per_host")) as i32
+  Net.timeout = number(setting(conf, "timeout_ms")) as f64 / 1000.0
+  Net.slow_after = number(setting(conf, "slow_ms")) as f64 / 1000.0
+  Net.retries = number(setting(conf, "retries")) as i32
+  Net.redirects = number(setting(conf, "redirects")) as i32
+  Net.backoff = number(setting(conf, "backoff_ms")) as f64 / 1000.0
+  let allow = setting(conf, "allow")
+  var at = 0
+  while at < len(allow) {
+    let end = or_end(find(allow, " ", at), len(allow))
+    if end > at { spawn { Host { name: slice(allow, at, end), busy: 0 } } }
+    at = end + 1
+  }
+  let seed = normalise(setting(conf, "seed"))
+  spawn { Ask { method: Method.Get, url: seed, headers: "", body: "", origin: none,
+                hops: 0, tries: 0, next_at: 0.0, serial: 0 },
+          Twin { of: none },
+          Depth { d: 0 } }
+}
+
+// A redirect's ask is as deep as the one redirected. (In two steps: a
+// query that gives entities a Depth does not read the Depth of others.)
+component Inherited { d: i32 }
+system inherit_depth() {
+  for me, a: Ask, t: Twin without Depth, Inherited where t.of == none {
+    if let d = Depth(a.origin).d { me.add(Inherited { d: d }) }
+  }
+}
+system take_depth() {
+  for me, i: Inherited without Depth { me.add(Depth { d: i.d }) }
+}
+
+// Each ask to its host; one to a host it may not go to is dropped.
+system place() {
+  for me, a: Ask, t: Twin without At where t.of == none {
+    let host = HostByName.get(host_of(a.url))
+    if host == none { me.destroy() } else { me.add(At { host: host }) }
+  }
+}
+
+// At most `per_host` asks out to a host at once; the others held back,
+// the oldest let go first.
+system be_polite() {
+  for h: mut Host { h.busy = 0 }
+  for a: Ask, at: At with Sent without Got, Failed { Host(at.host).busy += 1 }
+  for me, a: Ask, t: Twin, at: At without Sent in turn by a.serial where t.of == none {
+    if let busy = Host(at.host).busy {
+      if busy < Rules.per_host {
+        Host(at.host).busy += 1
+        if me.has(Held) { me.remove(Held) }
+      } else if !me.has(Held) {
+        me.add(Held)
+      }
+    }
+  }
+}
+
+// The links of a page that answered with HTML, once every ask less deep
+// is settled: an ask for each URL not asked for yet, an edge to each.
+system extract_links() {
+  for me, a: Ask, g: Got, d: Depth without Handled
+      where d.d <= Level && d.d < Rules.max_depth && g.status == 200 &&
+            is_html(g.headers) {
+    let page = uncommented(g.body, 0)
+    let low = lower(page)
+    let (base, skip) = base_of(a.url, page, low)
+    var at = 0
+    while at >= 0 {
+      let (target, here) = next_link(base, page, low, at, skip)
+      if len(target) > 0 && allowed(Rules.allow, host_of(target)) {
+        let known = ByUrl.get(target)
+        if known == none {
+          let made = spawn { Ask { method: Method.Get, url: target, headers: "",
+                                   body: "", origin: me, hops: 0, tries: 0,
+                                   next_at: 0.0, serial: 0 },
+                             Twin { of: none }, Depth { d: d.d + 1 } }
+          connect (me)-[Links]->(made)
+        } else {
+          Depth(known).d min= d.d + 1
+          connect (me)-[Links]->(known)
+        }
+      }
+      at = if here < 0 { -1 } else { here + 1 }
+    }
+    me.add(Handled)
+  }
+}
+
+// Every other answer is settled as it is: given up, an error, a
+// redirect (followed by then), what is not HTML, a page as deep as may
+// be.
+system settle() {
+  for me, a: Ask, g: Got, d: Depth without Handled
+      where !retryable(g.status) && (g.status != 200 || !is_html(g.headers) ||
+                                     d.d >= Rules.max_depth) {
+    me.add(Handled)
+  }
+  for me, a: Ask with GaveUp without Handled { me.add(Handled) }
+}
+
+// A duplicate's depth and the links to it go to the ask it is one of.
+system merge() {
+  for me, a: Ask, t: Twin, optional d: Depth where t.of != none {
+    if let deep = d.d {
+      Depth(t.of).d min= deep
+    } else {
+      if let deep = Depth(a.origin).d { Depth(t.of).d min= deep }
+    }
+    for (from)-[Links]->(me) { connect (from)-[Links]->(t.of) }
+  }
+}
+
+// One level deeper once every ask at this one is settled; how many asks
+// are open.
+system advance_level() {
+  let open = for a: Ask, t: Twin, d: Depth without Handled where d.d <= Level && t.of == none { }
+  let unplaced = for a: Ask, t: Twin without Depth where t.of == none { }
+  let left = for a: Ask, t: Twin without Handled where t.of == none { }
+  if open + unplaced == 0 && left > 0 { Level += 1 }
+  Open = left
+}
+
+// How each ask ended.
+system conclude() {
+  for me, a: Ask, t: Twin, optional g: Got, optional f: Failed where t.of == none {
+    if let status = g.status {
+      me.add(Ending { word: "{status}" })
+    } else {
+      if let kind = f.kind {
+        if kind == Failure.Timeout { me.add(Ending { word: "timeout" }) }
+        else { me.add(Ending { word: "failed" }) }
+      } else {
+        me.add(Ending { word: "open" })
+      }
+    }
+  }
+}
+
+// The report, a line each, in no order (check/crawl.py sorts them).
+system report() {
+  for me, a: Ask, e: Ending, optional g: Got {
+    put("fetched {a.url} {e.word} {a.tries + 1}")
+    if let status = g.status, let location = g.location {
+      if status >= 300 && status < 400 && len(location) > 0 {
+        put("redirect {a.url} {resolve(a.url, location)}")
+      }
+    }
+    if me.has(RedirectLimit) { put("redirect-limit {a.url}") }
+    if me.has(Slow) { put("slow {a.url}") }
+    for (me)-[Links]->(to) {
+      if let url = Ask(to).url, let word = Ending(to).word {
+        if !starts(word, "2") && !starts(word, "3") {
+          put("broken {url} {word} from {a.url}")
+        }
+      }
+    }
+  }
+}

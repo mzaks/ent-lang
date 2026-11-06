@@ -1,0 +1,54 @@
+// A crawl of a generated site, answered by the mock (http-SPEC.md, §6).
+// Run where site.py wrote the site (it reads crawl.conf and
+// site.manifest from there):
+//
+//   python3 examples/http/site.py --pages 200 --depth 8 --out /tmp/site
+//   cd /tmp/site && ent run -I <repo>/examples/http <repo>/examples/http/crawl_mock.ent
+//
+// The schedule is the talk's diagram: an ask is placed, sent, answered
+// (or times out), tried again, its redirect followed, settled or its
+// links taken, duplicates merged. The mock's systems stand where the
+// live device's will (crawl_live.ent, C3); the others are the same.
+import console
+import text
+import pipeline
+import crawl
+import mock
+
+default_capacity 262144
+
+schedule start() { load_site() setup() }
+
+schedule frame() {
+  inherit_depth()
+  take_depth()
+  place()
+  drop_stale()
+  be_polite()
+  mock_send()
+  answer()
+  fill()
+  time_out()
+  warn_slow()
+  retry()
+  follow_redirect()
+  settle()
+  extract_links()
+  number_asks()
+  drop_duplicates()
+  merge()
+  forget_duplicates()
+  log()
+  history()
+  clean_up()
+  advance_level()
+  advance()
+}
+
+schedule finish() { conclude() report() stalled() }
+
+main {
+  start()
+  loop { frame() } until Open == 0 || Frames >= 1000000
+  finish()
+}

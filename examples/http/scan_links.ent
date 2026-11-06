@@ -1,0 +1,27 @@
+// The link scanner alone (K12, http-SPEC.md §8.2): every link of every
+// HTML page of a site, as `link <page> <where it goes>`, for
+// check/crawl.py to compare with what Python's regular expressions and
+// urllib find. Run where site.py wrote the site.
+import console
+import text
+import urls
+import mock
+
+default_capacity 262144
+
+system scan() {
+  for p: Page where find(p.kind, "html", 0) >= 0 {
+    let page = uncommented(p.body, 0)
+    let low = lower(page)
+    let (base, skip) = base_of(p.url, page, low)
+    var at = 0
+    while at >= 0 {
+      let (target, here) = next_link(base, page, low, at, skip)
+      if len(target) > 0 { put("link {p.url} {target}") }
+      at = if here < 0 { -1 } else { here + 1 }
+    }
+  }
+}
+
+schedule run() { load_site() scan() }
+main { run() }

@@ -80,59 +80,68 @@ The questions this example is meant to answer:
 | `http-SPEC.md` | This file. |
 | `site.py` | Generates a site (§7.1): a folder of HTML files, a manifest the mock reads, and the expected report. |
 | `pipeline.ent` | The talk's layer: request data, sending, responses, errors, timestamps, retry, dedupe, slow warnings, logging, cleanup (§4.1, §5.1). Knows nothing of crawling. |
-| `crawl.ent` | The crawler's layer: link extraction, URL normalising, hosts, depth, politeness, the report (§4.2, §5.2). Knows nothing of sockets. |
+| `urls.ent` | Fns: where a link goes (URL resolving and normalising) and where the links of a page are (§7.3). |
+| `crawl.ent` | The crawler's layer: link extraction, hosts, depth, politeness, the report (§4.2, §5.2). Knows nothing of sockets. |
 | `mock.ent` | The mock: loads the manifest, answers request data from it with a simulated clock (§6.1). |
 | `live.ent` | The live device's ent side (§6.2). |
 | `devices/http.ent`, `devices/http.c` | The HTTP client device, a module from the start (§6.2), with its own tests in `test/Integration/` (D1 to D10, §8.1). |
 | `crawl_mock.ent`, `crawl_live.ent` | The two programs: the same layers, another schedule (§6). |
-| `crawl_combined.ent` | The five-small-systems vs one-combined variant (§8, K10). |
+| `crawl_lean.ent` | crawl_mock.ent without the optional systems (§8, K7). |
+| `crawl_combined.ent` | Four of the pipeline's systems as one (§8, K10). |
+| `scan_links.ent` | The link scanner alone, every link of every page (§8, K12). |
 | `server/` | The local server (§7.2): the generated site plus the endpoints the device tests need. |
 | `check/` | The check scripts (§8). |
-| `bench/http/` | The C reference crawler, the setups of the other crawlers, the bench script (§9). |
+| `bench/http/` | `mock.py` (§9.1, built in C1); the C reference crawler, the setups of the other crawlers (C3, C4). |
 | `sites.md` | The public sites crawled by hand, why they may be, and the results (§9.3). |
 
 ## 4. Data
 
-Sketches: names and fields are settled here, the syntax when C1 is
-built.
+As built in C1 (the files say each field's meaning).
 
 ### 4.1 The pipeline (the talk's components)
 
 | Component | Fields | Meaning |
 |---|---|---|
-| `Ask` | `method: Method, url, headers, body, origin: entity` | Request data: what is wanted. The talk's base URL, path components, method, parameters and payload, here as one URL plus headers and body. `origin` is what caused it (an event, a page, a redirect). |
+| `Ask` | `method: Method, url, headers, body, origin: entity, hops, tries, next_at: f64, serial` | Request data: what is wanted (the talk's base URL, path, method, parameters and payload, here as one URL plus headers and body), what caused it (`origin`: the ask a redirect came from), redirects followed to get here, tries again so far, not to be sent before `next_at`, the order asks were made in. |
+| `Twin` | `of: entity` | Every ask has one: the older ask for the same URL of which it is a duplicate, or none. |
 | `Sent` | `at: f64, handle: i64` | Handed to the device. |
-| `Got` | `at: f64, status: i32, headers, body, location, cut: bool` | A response. `location` for redirects; `cut` where the body was past the limit. |
-| `Failed` | `at: f64, kind: Failure, code: i32` | No HTTP response: refused, timed out, DNS, TLS (the talk's OS-level errors). |
-| `Attempt` | `n: i32, next_at: f64` | Retries so far and when the next may go. |
+| `Got` | `at: f64, status: i32, headers, body, location` | A response; `location` for redirects. (`cut`, for a body past the limit, comes with the device, C2.) |
+| `Failed` | `at: f64, kind: Failure` | No HTTP response: timed out, refused, DNS, TLS (the talk's OS-level errors). |
 | tag `Slow` | | Sent long ago and no answer yet (a warning, not a timeout). |
-| tag `GaveUp` | | Retries used up. |
-| tag `Handled` | | The business layer is done with the payload; cleanup may drop the body. |
+| tag `GaveUp` | | Tries again used up. |
+| tag `Followed`, `RedirectLimit` | | Its redirect was followed; or not, past `Net.redirects`. |
+| tag `Held` | | The program holds it back from sending. |
+| tag `Handled` | | The program is done with its answer; clean-up may drop the body. |
+| tag `Known` | | Not a duplicate: the ask for its URL that later ones are duplicates of. |
+| unique `Net` | `timeout, slow_after, retries, backoff, redirects` | The pipeline's settings. |
+| unique `Now` | | The time, as the device says (the mock's own clock). |
+| buffer `History` | `ask, at, status` | A row for each answer (the talk's history). |
+| index `ByUrl`, `Kept` | | Hash indexes by URL of every ask, and of the known ones. |
 
-`enum Method { Get, Head, Post, Put, Patch, Delete, Options, Other }`
-(`Other` takes its name from a header-like line, for methods such as
-`PROPFIND`), `enum Failure { Refused, Timeout, Dns, Tls, TooBig, Other }`.
-The crawler only asks with `Get` and `Head`; the pipeline handles them
-all.
+`enum Method { Get, Head, Post, Put, Patch, Delete, Options }` (another
+by name comes with the device), `enum Failure { Refused, Timeout, Dns,
+Tls, TooBig, Other }`. The crawler only asks with `Get`; the pipeline
+handles them all.
 
-A redirect spawns a new `Ask` whose `origin` is the redirected request,
-so a chain is a path of entities; a relation `(Ask)-[RedirectOf]->(Ask)
-tree` lets the report walk it up.
+A redirect spawns a new `Ask` whose `origin` is the redirected one and
+whose `hops` is one more.
 
 ### 4.2 The crawler
 
 | Data | Fields | Meaning |
 |---|---|---|
-| component `Depth` | `d: i32` | Links from the seed to this page. |
-| entity `Host` | `name, next_at: f64, in_flight: i32` | Per-host politeness: at most `in_flight` open and one send per interval. |
-| relation `(Ask)-[On]->(Host)` | | Which host a request goes to. |
+| component `Depth` | `d: i32` | Links from the seed to this page (a redirect's: the redirected ask's). |
+| component `At` | `host: entity` | The host it goes to. |
+| component `Host` | `name, busy: i32` | A host it may go to (one entity each, from `allow`), and how many asks to it are out. |
 | relation `(Ask)-[Links]->(Ask)` | | Page links to page: the found graph, for the report. |
-| component `Seed` | `url` | The talk's UI event: what the user asked for. |
-| unique `Rules` | `max_depth, allowed hosts, retries, slow_after, timeout` | The crawl's settings. |
+| component `Ending` | `word` | How an ask ended, for the report. |
+| unique `Rules` | `seed, allow, max_depth, per_host` | The crawl's settings (crawl.conf). |
+| unique `Level`, `Open` | | How deep the links followed are so far; asks not settled. |
 
-Dedupe: `index ByUrl of Ask by url hash`. A link whose normalised URL
-`ByUrl.get` already has adds a `Links` edge to the existing entity and
-spawns nothing.
+A link to a URL `ByUrl` already has adds a `Links` edge to that ask
+(and lowers its depth where the link is shorter) and spawns nothing.
+Links found in one frame to one new URL spawn an ask each; all but one
+are duplicates, merged by the crawler's `merge` into it (§5.2).
 
 ### 4.3 Bodies and URLs
 
@@ -151,39 +160,49 @@ systems that can be left out with no other change (K7).
 
 | System | Reads | Does | Opt. |
 |---|---|---|---|
-| `drop_duplicates` | `Ask`, `ByUrl` | Destroys an `Ask` whose URL another live `Ask` has (the talk's "drop the new one while the same is pending"). | |
-| `send` | `Ask` without `Sent`, `Attempt.next_at`, the clock | Hands it to the device; adds `Sent`. | |
-| `receive` | the device's completions | Adds `Got` or `Failed` with the time. | |
-| `follow_redirect` | `Got` with 3xx and `location` | Spawns the next `Ask`, connected by `RedirectOf`; up to `Rules.redirects`, then `Failed`. | |
-| `retry` | `Failed` with a transient kind, `Got` with 5xx or 429 | Removes `Sent`/`Failed`/`Got`, bumps `Attempt` with backoff; past the limit adds `GaveUp`. | |
-| `time_out` | `Sent` without an answer, the clock | Cancels at the device, adds `Failed { kind: Timeout }`. | |
-| `warn_slow` | `Sent` without an answer, the clock | Adds `Slow` past `slow_after`, prints a warning once. | yes |
-| `log` | `Sent`, `Got`, `Failed` (`on [added]`) | One line per event. | yes |
-| `history` | `Got`, `Failed` (`on [added]`) | Keeps a row per answer (URL, status, times) for the report and K9. | yes |
-| `clean_up` | `Handled` | Drops the body (gives its bytes back). | yes |
+| `number_asks` | `Ask` with serial 0 | Gives it the next serial. | |
+| `drop_duplicates` | new asks, `Kept`, `ByUrl` | The talk's "drop the new one": an ask for a URL a known ask has is its duplicate (`Twin.of`); of new asks for one URL all but the one `ByUrl` names first. Two `get`s, no loop over the asks. | |
+| `forget_duplicates` | `Twin` | Destroys the duplicates, after the program had them in the frame. | |
+| `time_out` | `Sent` without an answer, `Now` | Adds `Failed { kind: Timeout }`. (Cancels at the device: C2.) | |
+| `warn_slow` | `Sent` without an answer, `Now` | Adds `Slow` past `slow_after`, once. | yes |
+| `retry` | `Failed`, `Got` with 5xx or 429 | Removes `Sent` and the answer, bumps `tries` and `next_at` (backoff doubling); past the limit adds `GaveUp`. | |
+| `follow_redirect` | `Got` with 3xx and a location | Spawns the next `Ask` (`hops` one more) up to `Net.redirects`, else `RedirectLimit`. | |
+| `log` | `Got` (`on added`) | One line for each answer. | yes |
+| `history` | `Got` (`on added`) | A row of `History` for each answer. | yes |
+| `clean_up` | `Handled` (`on added`) | Drops the body (gives its bytes back). | yes |
+
+Sending and receiving are the device's: `mock_send`, `answer` and `fill`
+(mock.ent) in C1, `send` and `receive` of the live device in C3.
 
 ### 5.2 The crawler
 
 | System | Reads | Does | Opt. |
 |---|---|---|---|
-| `seed` | `Seed` | Spawns the first `Ask` with `Depth 0` (the talk's UI event to request data). | |
-| `place` | `Ask` without `On` | Parses the host, finds or spawns its `Host`, connects `On`; a host not allowed: destroyed. | |
-| `read_robots` | a new `Host` | Asks for its `/robots.txt` first; holds the host's other asks until it is in (or failed: then all allowed, as the convention is). | |
-| `obey_robots` | `Ask` with `On`, the host's rules | Destroys asks the rules disallow for our user agent; takes `Crawl-delay` into the host's interval. | |
-| `be_polite` | `Host`, `On` | Holds back `send` per host by `next_at` and `in_flight` (writes `Attempt.next_at`). | yes |
-| `extract_links` | `Got` 200 with HTML, `Depth` | Scans the body for links (§7.3), normalises each, spawns an `Ask` with `Depth d + 1` below `max_depth`, or links to the one `ByUrl` has; adds `Handled`. | |
-| `report` | `Ask`, `Got`, `Failed`, `GaveUp`, `Links`, `RedirectOf` | At the end: pages, broken links with the pages that link to them, redirect chains, given up, slow. | |
+| `setup` | crawl.conf | Sets `Rules` and `Net`, spawns a `Host` for each allowed host and the seed's `Ask` with `Depth 0` (the talk's UI event to request data). | |
+| `inherit_depth`, `take_depth` | an `Ask` without `Depth` | A redirect's ask is as deep as its origin (two steps: a query that gives entities a `Depth` does not read that of others). | |
+| `place` | an `Ask` without `At` | Its host, by the hash index `HostByName`; an ask to a host not allowed is destroyed. | |
+| `be_polite` | `Host`, `At`, `Sent` | At most `per_host` asks out to a host at once: the others `Held`, the oldest let go first (`in turn by serial`). | yes |
+| `settle` | `Got`, `GaveUp` | Every answer but a page whose links are to be followed is `Handled` as it is. | |
+| `extract_links` | `Got` 200 with HTML, `Depth`, `Level` | Scans the body for links (§7.3); for each to an allowed host an `Ask` with `Depth d + 1`, or an edge to the one `ByUrl` has (its depth lowered); adds `Handled`. Only once every ask less deep is settled, and not at `max_depth`. | |
+| `merge` | duplicates | A duplicate's depth and the links to it go to the ask it is one of. | |
+| `advance_level` | `Depth`, `Handled` | One level deeper once every ask at this one is settled; `Open`. | |
+| `conclude`, `report` | `Got`, `Failed`, `Links` | At the end: `Ending`, then a line for every ask, redirect, redirect not followed, slow ask and broken link (with the page that links to it). | |
 
 ### 5.3 Order and the end
 
-One frame: `seed place read_robots obey_robots drop_duplicates be_polite send receive time_out
-follow_redirect retry extract_links warn_slow log history clean_up`.
-The compiler orders by access anyway. The order written is the talk's
-diagram, so a reader can follow it.
+One frame (crawl_mock.ent): `inherit_depth take_depth place drop_stale
+be_polite mock_send answer fill time_out warn_slow retry follow_redirect
+settle extract_links number_asks drop_duplicates merge forget_duplicates
+log history clean_up advance_level advance`. The order is the talk's
+diagram, so a reader can follow it; the compiler keeps it where systems
+touch the same data.
 
-The crawl ends when no `Ask` lacks an answer (`Got`, `Failed` with
-`GaveUp`, or destroyed). `main` loops the frame while there is one, then
-runs `report`.
+Breadth first by depth: the links of a page are followed only once every
+ask less deep is settled (`Level`), so a page's depth is the fewest links
+to it from the seed, whatever answers first, and the report does not
+depend on the clock. The crawl ends when every ask is settled (`Open`
+0); `main` loops the frame until then and then runs `conclude` and
+`report`.
 
 ## 6. The two programs
 
@@ -193,14 +212,18 @@ That is the talk's offline bypass, as a schedule.
 
 ### 6.1 Mock
 
-- `mock.ent` reads the manifest of §7.1 into `Page` entities (`url`,
-  `status`, `location`, `body`, `delay`, `fails_first`) in `world`.
-- `answer` replaces `send` and `receive`: for each `Ask` without `Sent`,
-  it looks up the `Page` by URL and adds `Got` or `Failed` at simulated
-  time `now + delay`, so `time_out`, `warn_slow` and `retry` see the
-  same times on every run.
-- The clock is a unique that `answer` moves to the next answer's time,
-  so a crawl with long delays takes no wall time.
+- `mock.ent` reads the manifest of §7.1 (`load_site`) into `Page`
+  entities (`url`, `status`, `delay`, `fails`, `kind`, `location`,
+  `body`), found by URL with the hash index `PageByUrl`.
+- `mock_send` stands for the device's `send`: an `Ask` due, not held and
+  no duplicate gets `Sent` and a `Due` at `Now + delay`. `answer` and
+  `fill` stand for `receive`: at that time it gets `Got` (503 for the
+  first `fails` tries), unless `time_out` was first; `fill` gives it the
+  page's headers, location and body. (Two systems: one that adds a
+  component with texts reads none; §10.4.)
+- The clock is the unique `Now`, which `advance` moves to the next thing
+  due (an answer, a timeout, a slow warning, a retry), so a crawl with
+  long delays takes no wall time and the same times on every run.
 
 ### 6.2 Live: the `http` device
 
@@ -318,21 +341,22 @@ and need no network beyond `127.0.0.1`:
 ### 8.2 The crawler
 
 `check/crawl.py` runs a program against a generated site and compares
-its report with `expected.json`. Every check runs on the mock. K8, K9
+its report with `expected.txt` (site.py works it out with Python's
+urllib). Every check runs on the mock. K8, K9
 and K11 run on live too.
 
 | # | Check |
 |---|---|
 | K1 | Every page reachable within `max_depth` is fetched exactly once. |
 | K2 | The broken links and the pages that link to them are exactly the expected ones. |
-| K3 | Redirect chains are followed to the end. The loop and over-long chains stop at the limit as `Failed`. |
+| K3 | Redirect chains are followed to the end. The loop and over-long chains stop at the limit (`RedirectLimit`). |
 | K4 | Pages failing the first k times are retried and end as 200. Those always failing end as `GaveUp` after `retries`. |
 | K5 | No page beyond `max_depth` is fetched. No other host is fetched. |
 | K6 | Slow pages are warned about once each. Pages past the timeout end as `Timeout`. |
 | K7 | Built without the optional systems (`warn_slow`, `log`, `history`, `clean_up`, `be_polite`), the program compiles with no change to the other systems and gives the same report (less what those systems add). |
 | K8 | Live and mock give the same report on the same site. |
 | K9 | Politeness: no host sees more than its limit in flight or more sends per interval than allowed (from `history`). |
-| K10 | `crawl_combined.ent`, with `send`, `receive`, `time_out`, `follow_redirect` and `retry` as one system, gives the same report. |
+| K10 | `crawl_combined.ent`, with `time_out`, `warn_slow`, `retry` and `follow_redirect` as one system, gives the same report. (With the live device `send` and `receive` join them, C3.) |
 | K11 | `robots.txt`: disallowed paths are never asked for; `Crawl-delay` is kept; a missing `robots.txt` allows all; one that times out holds the host until it answers or fails. |
 | K12 | The link scanner finds exactly the links of a page of every case in §7.3 (a generated page per case, plus saved real pages with their expected links). |
 
@@ -429,6 +453,31 @@ not yet built. This example is the first full one. If it works, the
 shape (a request component in, a completion buffer out, polled with a
 wait) is a candidate for that proposal, with `console` (`Print`) as the
 simple case.
+
+### 10.4 Met in C1
+
+What the crawler ran into, for the open-topics list; each was worked
+around in the example, not in the compiler:
+
+- **A component with texts is not added while a text is held.** A
+  system that holds a `let` of a text cannot add or remove a component
+  with text fields (the move would leave the `let` pointing at freed
+  bytes). So the mock's answer is `answer` (adds `Got` with empty texts)
+  and `fill` (sets them), and a redirect's depth goes through
+  `Inherited`.
+- **A `for` inside a `for` uses no index.** Dropping duplicates as "the
+  asks with this URL" was a loop over all asks for each new one: 7 s at
+  3·10⁴ pages, 138 s at 10⁵. As a `Twin` field set by `get` on two hash
+  indexes it is 0.97 s and 4.5 s.
+- **A hash index is made anew when rows move.** At 10⁵ pages `ByUrl` is
+  made 246 times (1.4 s of 4.5) and `Kept` 123 times (0.7 s): every
+  frame spawns asks. Mending it, as relation indexes are mended, would
+  take half the time away.
+- **No running sum in an `on added` for**, no `else if let`, no `var`
+  of text, no `let` of a unique's text, no `while` in a fn (loops over
+  texts are fns calling themselves).
+- **URLs:** percent-decoding of unreserved bytes (§7.3) is not done;
+  site.py makes no links that need it.
 
 ## 11. Milestones
 

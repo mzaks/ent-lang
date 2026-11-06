@@ -1,0 +1,179 @@
+// The pipeline of requests as entities, from the talk "ECS pattern
+// explained" (MCE 2018; http-SPEC.md, §4.1 and §5.1). A request is an
+// entity, each stage of it a component, each step a system with one job;
+// no system calls another. It knows nothing of crawling: what asks for
+// requests and what is done with their answers is the business of the
+// program that imports it (crawl.ent). Nor of sockets: a device sends
+// and answers (mock.ent, or the live device of C3).
+//
+// What a program does with it:
+// - spawns an `Ask` (with `tries` 0, `next_at` 0 and `serial` 0);
+// - holds asks back from sending with the tag `Held`;
+// - reads `Got` (or `Failed` with `GaveUp`), and says it is done with an
+//   answer with the tag `Handled`;
+// - sets `Net` (timeouts, retries) and moves the clock `Now`.
+import text
+import console
+import urls
+
+enum Method { Get, Head, Post, Put, Patch, Delete, Options }
+enum Failure { Refused, Timeout, Dns, Tls, TooBig, Other }
+
+// Request data: what is wanted, and what caused it (`origin`: the ask a
+// redirect came from, or what the program says). `hops`: redirects
+// followed to get here; `tries`: how many times it was tried again;
+// `next_at`: not to be sent before then; `serial`: the order asks were
+// made in, for which of two alike is kept.
+component Ask { method: Method, url: text, headers: text, body: text,
+                origin: entity, hops: i32, tries: i32, next_at: f64,
+                serial: i64 }
+// Every ask has one: the older ask for the same URL, `of`, of which this
+// one is a duplicate (none: it is no duplicate). A duplicate is not sent,
+// and is gone at the end of the frame (the program may move what points
+// to it first). (Apart from `Ask`, which a query that marks it only
+// reads: so a text of it can be held while it does.)
+component Twin { of: entity }
+// Handed to the device, at a time.
+component Sent { at: f64, handle: i64 }
+// An answer: its status, headers ("Name: value" lines) and body, and
+// where a redirect goes.
+component Got { at: f64, status: i32, headers: text, body: text, location: text }
+// No answer: why.
+component Failed { at: f64, kind: Failure }
+// Sent long ago, and no answer yet.
+tag Slow
+// Tried as often as `Net.retries` allows.
+tag GaveUp
+// Its redirect is followed (or, past the limit, not).
+tag Followed
+// A redirect that was not followed: too many before it.
+tag RedirectLimit
+// Not to be sent yet: the program holds it back.
+tag Held
+// The program is done with its answer.
+tag Handled
+
+// Timeouts and waits in seconds.
+unique Net { timeout: f64, slow_after: f64, retries: i32, backoff: f64,
+             redirects: i32 }
+// The time, in seconds, as the device says.
+unique Now: f64
+unique Counters { serial: i64, answers: i64 }
+
+// What every answer was, in the order they came (the talk's history).
+buffer History { ask: entity, at: f64, status: i32 } capacity 1048576
+
+index ByUrl of Ask by url hash
+
+// Whether a status asks to be tried again.
+fn retryable(status: i32) -> bool { status >= 500 || status == 429 }
+
+// How long to wait before try `n` (1, 2, ..): twice as long each time.
+fn wait_before(n: i32, backoff: f64) -> f64 {
+  var wait = backoff
+  for i in 1..n { wait = wait * 2.0 }
+  wait
+}
+
+// Every new ask gets the next number.
+system number_asks() {
+  for a: mut Ask where a.serial == 0 {
+    let before = Counters.serial += 1
+    a.serial = before + 1
+  }
+}
+
+// The talk's "drop the new one": an ask for a URL an ask has that came
+// before (`Known`) is a duplicate of it; of new asks for one URL, all
+// but the one ByUrl names first are duplicates of that one. (A field of
+// `Twin`, not a component it is given: so the asks are found by `get`
+// of the two indexes, not by a loop over all of them.)
+tag Known
+index Kept of Ask, Known by url hash
+system drop_duplicates() {
+  for me, a: Ask, t: mut Twin without Known {
+    let u = a.url
+    let known = Kept.get(u)
+    let first = if known != none { known } else { ByUrl.get(u) }
+    if first != me && first != none { t.of = first } else { me.add(Known) }
+  }
+}
+
+system forget_duplicates() {
+  for me, a: Ask, t: Twin where t.of != none { me.destroy() }
+}
+
+// No answer in time.
+system time_out() {
+  for me, a: Ask, s: Sent without Got, Failed where Now >= s.at + Net.timeout {
+    me.add(Failed { at: Now, kind: Failure.Timeout })
+  }
+}
+
+// A warning, once, for a request that takes long.
+system warn_slow() {
+  for me, a: Ask, s: Sent without Got, Failed, Slow
+      where Now >= s.at + Net.slow_after {
+    me.add(Slow)
+  }
+}
+
+// Tried again, later, where the answer says so or there was none; given
+// up after `Net.retries`.
+system retry() {
+  for me, a: mut Ask, g: Got without GaveUp where retryable(g.status) {
+    if a.tries >= Net.retries {
+      me.add(GaveUp)
+    } else {
+      a.tries += 1
+      a.next_at = Now + wait_before(a.tries, Net.backoff)
+      me.remove(Got)
+      me.remove(Sent)
+    }
+  }
+  for me, a: mut Ask, f: Failed without GaveUp {
+    if a.tries >= Net.retries {
+      me.add(GaveUp)
+    } else {
+      a.tries += 1
+      a.next_at = Now + wait_before(a.tries, Net.backoff)
+      me.remove(Failed)
+      me.remove(Sent)
+    }
+  }
+}
+
+// A redirect is a new ask, from the one redirected.
+system follow_redirect() {
+  for me, a: Ask, g: Got without Followed
+      where g.status >= 300 && g.status < 400 && len(g.location) > 0 {
+    me.add(Followed)
+    let target = resolve(a.url, g.location)
+    if len(target) > 0 {
+      if a.hops >= Net.redirects {
+        me.add(RedirectLimit)
+      } else {
+        spawn { Ask { method: a.method, url: target, headers: a.headers, body: "",
+                      origin: me, hops: a.hops + 1, tries: 0, next_at: 0.0,
+                      serial: 0 }, Twin { of: none } }
+      }
+    }
+  }
+}
+
+// The talk's logging: a line for each answer, nothing else depends on it.
+system log() {
+  for a: Ask, g: Got on added Got { put("log {a.url} {g.status}") }
+}
+
+// The talk's history: a row for each answer.
+system history() {
+  for me, g: Got on added Got {
+    History += { ask: me, at: g.at, status: g.status }
+  }
+}
+
+// The talk's clean-up: an answer the program is done with keeps no body.
+system clean_up() {
+  for g: mut Got with Handled on added Handled { g.body = "" }
+}

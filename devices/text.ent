@@ -28,3 +28,6 @@ extern fn find(t: text, what: text, from: i32) -> i32
 extern fn slice(t: text, from: i32, to: i32) -> text
 // `t` with A to Z as a to z; every other byte as it is.
 extern fn lower(t: text) -> text
+// The whole number `t` starts with (after spaces, with a sign), as
+// strtoll reads it; 0 where it starts with none.
+extern fn number(t: text) -> i64

@@ -1,0 +1,125 @@
+// The mock: the talk's offline bypass (http-SPEC.md, §6.1). In place of
+// sending and receiving it answers every ask from a site held in memory
+// (site.manifest, made by site.py), on a clock of its own: an answer
+// comes as long after the ask as the page says, and the clock goes on to
+// the next thing that is due, so a crawl gives the same report every
+// time and takes no time waiting.
+import text
+import files
+import console
+import urls
+import pipeline
+
+// A page of the site: how it answers. `fails`: the first so many tries
+// of it answer 503.
+component Page { url: text, status: i32, delay: f64, fails: i32, kind: text,
+                 location: text, body: text }
+// When an ask that was sent is answered, by which page (none: 404).
+component Due { at: f64, sent: f64, page: entity }
+
+index PageByUrl of Page by url hash
+
+// How many frames the crawl took, and when the clock has nowhere to go.
+unique Frames: i64
+
+// The next field of a manifest line, from byte `at` on: up to a space.
+fn field(line: text, at: i32) -> text {
+  slice(line, at, or_end(find(line, " ", at), len(line)))
+}
+
+system load_site() {
+  let all = read_text("site.manifest")
+  var at = 0
+  while at < len(all) {
+    let end = find(all, "\n", at)
+    let line = slice(all, at, end)
+    let url = field(line, 0)
+    let a = len(url) + 1
+    let status = field(line, a)
+    let b = a + len(status) + 1
+    let delay = field(line, b)
+    let c = b + len(delay) + 1
+    let fails = field(line, c)
+    let d = c + len(fails) + 1
+    let kind = field(line, d)
+    let e = d + len(kind) + 1
+    let location = field(line, e)
+    let f = e + len(location) + 1
+    let length = number(field(line, f)) as i32
+    spawn { Page { url: url, status: number(status) as i32,
+                   delay: number(delay) as f64 / 1000.0, fails: number(fails) as i32,
+                   kind: kind, location: if location == "-" { "" } else { location },
+                   body: slice(all, end + 1, end + 1 + length) } }
+    at = end + 1 + length + 1
+  }
+}
+
+// What was due for an ask sent before it was tried again is no more.
+system drop_stale() {
+  for me with Due without Sent { me.remove(Due) }
+}
+
+// The device's send: an ask goes out now, its answer due as the page
+// says.
+system mock_send() {
+  for me, a: Ask, t: Twin without Sent, Held where a.next_at <= Now && t.of == none {
+    let page = PageByUrl.get(a.url)
+    var delay: f64 = 0.0
+    if let wait = Page(page).delay { delay = wait }
+    me.add(Sent { at: Now, handle: 0 })
+    me.add(Due { at: Now + delay, sent: Now, page: page })
+  }
+}
+
+// The device's receive: an answer that is due, unless the ask has timed
+// out first. (Its texts come in a step after: a component with texts is
+// not added where a text is at hand, `fill`.)
+tag Unfilled
+system answer() {
+  for me, a: Ask, s: Sent, d: Due without Got, Failed
+      where d.at <= Now && d.at < s.at + Net.timeout {
+    if let status = Page(d.page).status, let fails = Page(d.page).fails {
+      let given = if a.tries < fails { 503 } else { status }
+      me.add(Got { at: Now, status: given, headers: "", body: "", location: "" })
+    } else {
+      me.add(Got { at: Now, status: 404, headers: "", body: "", location: "" })
+    }
+    me.add(Unfilled)
+  }
+}
+
+system fill() {
+  for me, g: mut Got, d: Due with Unfilled {
+    if let kind = Page(d.page).kind, let location = Page(d.page).location,
+       let body = Page(d.page).body {
+      g.headers = "Content-Type: " + kind + "\r\n"
+      g.location = location
+      g.body = body
+    } else {
+      g.headers = "Content-Type: text/plain\r\n"
+    }
+    me.remove(Unfilled)
+  }
+}
+
+// The clock goes on to the next thing due: an answer, a timeout, a
+// request that becomes slow, a try again.
+unique Next: f64
+system advance() {
+  Frames += 1
+  Next = 1.0e300
+  for a: Ask, s: Sent, d: Due without Got, Failed {
+    let late = s.at + Net.timeout
+    let due = if d.at < late { d.at } else { late }
+    if due > Now { Next min= due }
+    let slow = s.at + Net.slow_after
+    if slow > Now { Next min= slow }
+  }
+  for a: Ask, t: Twin without Sent where a.next_at > Now && t.of == none { Next min= a.next_at }
+  if Next < 1.0e300 { Now = Next }
+}
+
+// A crawl that stopped at the limit of frames says so.
+system stalled() {
+  if Frames >= 1000000 { put("stalled at {Now} s") }
+}

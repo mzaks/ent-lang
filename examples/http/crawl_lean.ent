@@ -1,0 +1,42 @@
+// K7 (http-SPEC.md §8.2): crawl_mock.ent without the systems the talk
+// says can be taken away without touching the others: politeness,
+// slow-request warnings, logging, history, clean-up. Nothing else is
+// changed, and the report is the same, less the `slow` lines.
+import console
+import text
+import pipeline
+import crawl
+import mock
+
+default_capacity 262144
+
+schedule start() { load_site() setup() }
+
+schedule frame() {
+  inherit_depth()
+  take_depth()
+  place()
+  drop_stale()
+  mock_send()
+  answer()
+  fill()
+  time_out()
+  retry()
+  follow_redirect()
+  settle()
+  extract_links()
+  number_asks()
+  drop_duplicates()
+  merge()
+  forget_duplicates()
+  advance_level()
+  advance()
+}
+
+schedule finish() { conclude() report() stalled() }
+
+main {
+  start()
+  loop { frame() } until Open == 0 || Frames >= 1000000
+  finish()
+}

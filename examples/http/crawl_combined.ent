@@ -1,0 +1,90 @@
+// K10 (http-SPEC.md §8.2): crawl_mock.ent with the pipeline's steps
+// after an answer (time out, warn, try again, follow a redirect) as one
+// system in place of four, as the talk says one may try: the report is
+// the same.
+import console
+import text
+import pipeline
+import crawl
+import mock
+import urls
+
+default_capacity 262144
+
+// The four of pipeline.ent in one.
+system handle_answers() {
+  for me, a: Ask, s: Sent without Got, Failed where Now >= s.at + Net.timeout {
+    me.add(Failed { at: Now, kind: Failure.Timeout })
+  }
+  for me, a: Ask, s: Sent without Got, Failed, Slow
+      where Now >= s.at + Net.slow_after {
+    me.add(Slow)
+  }
+  for me, a: mut Ask, g: Got without GaveUp where retryable(g.status) {
+    if a.tries >= Net.retries {
+      me.add(GaveUp)
+    } else {
+      a.tries += 1
+      a.next_at = Now + wait_before(a.tries, Net.backoff)
+      me.remove(Got)
+      me.remove(Sent)
+    }
+  }
+  for me, a: mut Ask, f: Failed without GaveUp {
+    if a.tries >= Net.retries {
+      me.add(GaveUp)
+    } else {
+      a.tries += 1
+      a.next_at = Now + wait_before(a.tries, Net.backoff)
+      me.remove(Failed)
+      me.remove(Sent)
+    }
+  }
+  for me, a: Ask, g: Got without Followed
+      where g.status >= 300 && g.status < 400 && len(g.location) > 0 {
+    me.add(Followed)
+    let target = resolve(a.url, g.location)
+    if len(target) > 0 {
+      if a.hops >= Net.redirects {
+        me.add(RedirectLimit)
+      } else {
+        spawn { Ask { method: a.method, url: target, headers: a.headers, body: "",
+                      origin: me, hops: a.hops + 1, tries: 0, next_at: 0.0,
+                      serial: 0 }, Twin { of: none } }
+      }
+    }
+  }
+}
+
+schedule start() { load_site() setup() }
+
+schedule frame() {
+  inherit_depth()
+  take_depth()
+  place()
+  drop_stale()
+  be_polite()
+  mock_send()
+  answer()
+  fill()
+  handle_answers()
+  settle()
+  extract_links()
+  number_asks()
+  drop_duplicates()
+  merge()
+  forget_duplicates()
+  log()
+  history()
+  clean_up()
+  advance_level()
+  advance()
+}
+
+schedule finish() { conclude() report() stalled() }
+
+main {
+  start()
+  loop { frame() } until Open == 0 || Frames >= 1000000
+  finish()
+}

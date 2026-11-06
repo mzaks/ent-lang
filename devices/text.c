@@ -334,3 +334,20 @@ ENT_TEXT_SAME_RESULT const ent_text *ent_text_lower(const ent_text *text) {
   }
   return low;
 }
+
+// The whole number a text starts with, in decimal (after spaces and
+// tabs, with a sign), as far as its digits go; 0 where it has none.
+ENT_TEXT_SAME_RESULT int64_t ent_text_number(const ent_text *text) {
+  text = text ? text : &ent_text_none;
+  uint32_t i = 0;
+  while (i < text->length && (text->bytes[i] == ' ' || text->bytes[i] == '\t'))
+    ++i;
+  int negative = 0;
+  if (i < text->length && (text->bytes[i] == '-' || text->bytes[i] == '+'))
+    negative = text->bytes[i++] == '-';
+  uint64_t value = 0;
+  for (; i < text->length && text->bytes[i] >= '0' && text->bytes[i] <= '9';
+       ++i)
+    value = value * 10 + (uint64_t)(text->bytes[i] - '0');
+  return negative ? -(int64_t)value : (int64_t)value;
+}
