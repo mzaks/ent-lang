@@ -1,0 +1,16 @@
+// A running sum in a reactive `for` (each new one numbered as a scan
+// would, in the order of the rows, not of the log), and a connect there
+// whose first run scans; the same as the scan that runs for the same
+// entities gives, and with threads.
+// RUN: %ent run %S/Inputs/reactive_running.ent 2>/dev/null > %t.out
+// RUN: sed -e 's/with Hit on added Hit {/with Hit where a.k == 0 {/' \
+// RUN:     -e 's/  for me, a: A with Hit where a.k == 0 {/  for me, a: A with Hit without Linked {\n    me.add(Linked)/' \
+// RUN:     %S/Inputs/reactive_running.ent > %t.scan.ent
+// RUN: %ent run %t.scan.ent 2>/dev/null | cmp - %t.out
+// RUN: %ent run --parallel %S/Inputs/reactive_running.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK: step 1 counter 6 edges 6
+// CHECK: step 8 counter 40 edges 39
+// CHECK: a 0 19
+// CHECK-NEXT: a 1 13

@@ -9,6 +9,9 @@ import crawl
 import mock
 
 default_capacity 262144
+// (The mock holds no ask back by host: many are going at once, a third
+// of the pages at 10^5.)
+capacity Going 131072
 
 schedule start() { load_site() setup() }
 
@@ -17,6 +20,7 @@ schedule frame() {
   take_depth()
   place()
   drop_stale()
+  ready()
   mock_send()
   answer()
   fill()

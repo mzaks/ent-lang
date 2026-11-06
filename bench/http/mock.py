@@ -41,6 +41,7 @@ def program_for(pages, where):
     capacity = 1 << max(12, (pages * 11 // 10).bit_length())
     # (Without the history said at the end, which only the checks read.)
     text = text.replace(" say_history()", "")
+    text = text.replace("capacity Going 131072", f"capacity Going {capacity // 2}")
     text = text.replace("default_capacity 262144",
                         f"default_capacity {capacity}\n"
                         f"capacity Links {capacity * 8}\n"

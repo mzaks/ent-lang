@@ -29,8 +29,9 @@ component Turn { n: i64 }
 // robots.ent's robots_rules gives them: none, where it was not a 200);
 // the seconds between asks it wants, and when the next may go.
 component Robots { ask: entity, known: bool, rules: text, delay: f64, next: f64 }
-// The ask for a host's robots.txt, which nothing holds back.
-tag RobotsAsk
+// The ask for a host's robots.txt, which nothing holds back. (One a
+// host: so few that their archetype need not be as big as the asks'.)
+tag RobotsAsk capacity 1024
 // An ask robots.txt does not let the crawler send.
 tag Disallowed
 // A page links to a page.
@@ -110,19 +111,26 @@ system setup() {
 // query that gives entities a Depth does not read the Depth of others.)
 component Inherited { d: i32 }
 system inherit_depth() {
-  for me, a: Ask, t: Twin without Depth, Inherited where t.of == none {
-    if let d = Depth(a.origin).d { me.add(Inherited { d: d }) }
+  for me, a: Ask, t: Twin without Depth, Inherited on added Twin {
+    if t.of == none {
+      if let d = Depth(a.origin).d { me.add(Inherited { d: d }) }
+    }
   }
 }
 system take_depth() {
-  for me, i: Inherited without Depth { me.add(Depth { d: i.d }) }
+  for me, i: Inherited without Depth on added Inherited { me.add(Depth { d: i.d }) }
 }
 
 // Each ask to its host, once the host's robots.txt is known (held back
 // till then); one to a host it may not go to is dropped, one robots.txt
-// does not allow is held for good.
+// does not allow is held for good. Looked at as it comes, and again
+// (`Recheck`) where it waited for a robots.txt and one came.
+tag ForRobots
+tag Recheck
 system place() {
-  for me, a: Ask, t: Twin without At where t.of == none {
+  for me, a: Ask, t: Twin without At on added Twin, added Recheck {
+   if me.has(Recheck) { me.remove(Recheck) }
+   if t.of == none {
     let host = HostByName.get(host_of(a.url))
     if host == none {
       me.destroy()
@@ -131,6 +139,7 @@ system place() {
     } else if let known = Robots(host).known, let rules = Robots(host).rules {
       if !known {
         if !me.has(Held) { me.add(Held) }
+        me.add(ForRobots)
       } else {
         me.add(At { host: host })
         if robots_allow(rules, path_of(a.url)) {
@@ -142,12 +151,14 @@ system place() {
         }
       }
     }
+   }
   }
 }
 
 // A host's robots.txt once it is answered for good (after `retry`: an
 // answer still there is not to be tried again) or has failed for good:
 // its rules where it answered 200, none else.
+unique KnownHosts: i64
 system read_robots() {
   for r: mut Robots where !r.known {
     if let status = Got(r.ask).status, let body = Got(r.ask).body {
@@ -159,6 +170,15 @@ system read_robots() {
       r.known = true
     } else {
       if let kind = Failed(r.ask).kind { r.known = true }
+    }
+  }
+  // (Where one came: the asks that waited for it looked at again.)
+  let known = for r: Robots where r.known { }
+  if known as i64 > KnownHosts {
+    KnownHosts = known as i64
+    for me with ForRobots {
+      me.remove(ForRobots)
+      me.add(Recheck)
     }
   }
 }
@@ -177,8 +197,7 @@ system be_polite() {
     }
   }
   for h: mut Host { h.busy = 0 }
-  for a: Ask, at: At with Sent without Got, Failed { Host(at.host).busy += 1 }
-  for a: Ask, at: At without Sent, Held { Host(at.host).busy += 1 }
+  for a: Ask, at: At with Going { Host(at.host).busy += 1 }
   for h: mut Host {
     let more = h.let_go + (Rules.per_host - h.busy) as i64
     if more > h.let_go { h.let_go = if more < h.turns { more } else { h.turns } }
@@ -196,7 +215,7 @@ system be_polite() {
 // it (`next_at`, which the device's send keeps). (Part of politeness:
 // optional.)
 system pace() {
-  for me, a: mut Ask, at: At without Sent, Held in turn by a.serial {
+  for me, a: mut Ask, at: At with Going without Sent in turn by a.serial {
     if let delay = Robots(at.host).delay, let next = Robots(at.host).next {
       if delay > 0.0 {
         if a.next_at <= Now && next <= Now {
@@ -211,11 +230,14 @@ system pace() {
 
 // A page: an answer of 200 with HTML, which may have links to follow.
 // (Said once, as it comes: not looked at again each frame it waits for
-// the level.)
+// the level.) One as deep as may be is settled there.
 tag Html
 system classify() {
-  for me, g: Got on added Got {
-    if g.status == 200 && is_html(g.headers) { me.add(Html) }
+  for me, g: Got, optional d: Depth on added Got {
+    if g.status == 200 && is_html(g.headers) {
+      me.add(Html)
+      if let deep = d.d { if deep >= Rules.max_depth { me.add(Handled) } }
+    }
   }
 }
 
@@ -251,36 +273,38 @@ system extract_links() {
   }
 }
 
-// Every other answer is settled as it is: given up, an error, a
-// redirect (followed by then), what is not HTML, a page as deep as may
-// be.
+// Every other answer is settled as it comes: given up, an error, a
+// redirect (followed by then), what is not HTML. (A page as deep as may
+// be by classify, or here where its depth came after it.)
 system settle() {
-  for me, a: Ask, g: Got, d: Depth without Handled, Html
-      where !retryable(g.status) {
-    me.add(Handled)
+  for me, g: Got without Handled, Html on added Got {
+    if !retryable(g.status) { me.add(Handled) }
   }
-  for me, a: Ask, d: Depth with Html without Handled
-      where d.d >= Rules.max_depth {
-    me.add(Handled)
+  for me, d: Depth with Html without Handled on added Depth {
+    if d.d >= Rules.max_depth { me.add(Handled) }
   }
-  for me, a: Ask with GaveUp without Handled { me.add(Handled) }
+  for me with GaveUp without Handled on added GaveUp { me.add(Handled) }
 }
 
 // A duplicate's depth and the link that made it go to the ask it is one
 // of; an ask that is none is linked to from its page.
 system merge() {
   for me, a: Ask, t: Twin, optional d: Depth, optional l: LinkedFrom
-      where t.of != none {
-    if let deep = d.d {
-      Depth(t.of).d min= deep
-    } else {
-      if let deep = Depth(a.origin).d { Depth(t.of).d min= deep }
+      on changed t.of {
+    if t.of != none {
+      if let deep = d.d {
+        Depth(t.of).d min= deep
+      } else {
+        if let deep = Depth(a.origin).d { Depth(t.of).d min= deep }
+      }
+      if let page = l.page { connect (page)-[Links]->(t.of) }
     }
-    if let page = l.page { connect (page)-[Links]->(t.of) }
   }
-  for me, t: Twin, l: LinkedFrom with Known where t.of == none {
-    connect (l.page)-[Links]->(me)
-    me.remove(LinkedFrom)
+  for me, t: Twin, l: LinkedFrom with Known on added Known {
+    if t.of == none {
+      connect (l.page)-[Links]->(me)
+      me.remove(LinkedFrom)
+    }
   }
 }
 

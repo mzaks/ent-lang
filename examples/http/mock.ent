@@ -62,7 +62,7 @@ system drop_stale() {
 // The device's send: an ask goes out now, its answer due as the page
 // says.
 system mock_send() {
-  for me, a: Ask, t: Twin without Sent, Held where a.next_at <= Now && t.of == none {
+  for me, a: Ask with Going without Sent where a.next_at <= Now {
     let page = PageByUrl.get(a.url)
     var delay: f64 = 0.0
     if let wait = Page(page).delay { delay = wait }
@@ -76,8 +76,9 @@ system mock_send() {
 // not added where a text is at hand, `fill`.)
 tag Unfilled
 system answer() {
-  for me, a: Ask, s: Sent, d: Due without Got, Failed
+  for me, a: Ask, s: Sent, d: Due with Going
       where d.at <= Now && d.at < s.at + Net.timeout {
+    me.remove(Going)
     if let status = Page(d.page).status, let fails = Page(d.page).fails {
       let given = if a.tries < fails { 503 } else { status }
       me.add(Got { at: Now, status: given, headers: "", body: "", location: "" })
@@ -89,7 +90,7 @@ system answer() {
 }
 
 system fill() {
-  for me, g: mut Got, d: Due with Unfilled {
+  for me, g: mut Got, d: Due with Unfilled on added Unfilled {
     if let kind = Page(d.page).kind, let location = Page(d.page).location,
        let body = Page(d.page).body {
       g.headers = "Content-Type: " + kind + "\r\n"
@@ -108,14 +109,14 @@ unique Next: f64
 system advance() {
   Frames += 1
   Next = 1.0e300
-  for a: Ask, s: Sent, d: Due without Got, Failed {
+  for a: Ask, s: Sent, d: Due with Going {
     let late = s.at + Net.timeout
     let due = if d.at < late { d.at } else { late }
     if due > Now { Next min= due }
     let slow = s.at + Net.slow_after
     if slow > Now { Next min= slow }
   }
-  for a: Ask, t: Twin without Sent where a.next_at > Now && t.of == none { Next min= a.next_at }
+  for a: Ask with Going without Sent where a.next_at > Now { Next min= a.next_at }
   if Next < 1.0e300 { Now = Next }
 }
 

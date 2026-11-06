@@ -1,0 +1,40 @@
+// Reactive `for`s with a running sum, and with a connect
+// (test/Integration/reactive_running.test): both go by the rows the
+// trigger fired for, in the order of the rows, as a scan over every
+// entity that runs for the same ones does; and their first run, which
+// scans, gives an edge only where the body runs.
+import console
+component A { n: i64, k: i64, back: i64 } capacity 1024
+tag Hit
+tag Linked
+relation (A)-[R]->(A) capacity 4096
+unique Counter: i64
+unique Step: i64
+unique Sum: i64
+world { for i in 0..40 { spawn { A { n: i, k: 0, back: 39 - i } } } }
+system go() {
+  Step += 1
+  let s = Step
+  // (Later rows first: the log's order is not the rows'.)
+  for me, a: A without Hit in turn by a.back { if a.back % 7 == s % 7 { me.add(Hit) } }
+}
+system number() {
+  for a: mut A with Hit on added Hit {
+    let before = Counter += 1
+    a.k = before + 1
+  }
+}
+system link() {
+  for me, a: A with Hit on added Hit {
+    if a.n > 0 { connect (me)-[R]->(me) }
+  }
+}
+system count() {
+  Sum = 0
+  for me, a: A { for (me)-[R]->(b) { Sum += 1 } }
+  put("step {Step} counter {Counter} edges {Sum}")
+}
+system say() { for a: A { put("a {a.n} {a.k}") } }
+schedule frame() { go() number() link() count() }
+schedule end() { say() }
+main { frame() frame() frame() frame() frame() frame() frame() frame() end() }

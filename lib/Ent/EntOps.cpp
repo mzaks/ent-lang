@@ -4178,11 +4178,13 @@ LogicalResult RunningOp::verify() {
     return emitOpError("is in a query whose entities take turns, where a "
                        "unique is read and written as it is: no running sum "
                        "is needed");
-  if (query.getCascade() || query.hasBy() ||
-      query->hasAttr(QueryOp::kTriggersAttr))
-    return emitOpError("is in a query that goes along a tree, by a field or "
-                       "reacts to changes: a running sum goes by the order "
-                       "of the archetypes and their rows");
+  // (A query that reacts to changes runs it for the entities it visits
+  // in the order of their rows, as a scan would: see LowerToLoops'
+  // kRowOrderedAttr.)
+  if (query.getCascade() || query.hasBy())
+    return emitOpError("is in a query that goes along a tree or by a "
+                       "field: a running sum goes by the order of the "
+                       "archetypes and their rows");
   for (Operation *parent = (*this)->getParentOp(); parent != query;
        parent = parent->getParentOp())
     if (isa<LoopLikeOpInterface, EachOp, EdgesOp>(parent))

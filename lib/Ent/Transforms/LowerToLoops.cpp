@@ -1260,6 +1260,9 @@ static bool changesOnlyRows(Operation *from, FlatSymbolRefAttr callee,
 }
 
 static bool isEntityLocal(QueryOp query) {
+  // (A walk of the logs in the order of the rows: one thread.)
+  if (query->hasAttr("ent.row_ordered"))
+    return false;
   for (ArchetypeOp archetype : getMatchedArchetypes(query))
     if (isStructuralFor(query, archetype))
       return false;
@@ -1279,6 +1282,10 @@ static bool isEntityLocal(QueryOp query) {
       return WalkResult::interrupt();
     // (Nor rows given a buffer where they are sent: see ent.any_order.)
     if (isa<AppendOp, ConnectOp>(op) && op->hasAttr("ent.at_once"))
+      return WalkResult::interrupt();
+    // (Nor a running sum of a query that reacts to changes: it goes by
+    // the rows the query runs for, one after another.)
+    if (isa<RunningOp>(op) && query->hasAttr(QueryOp::kTriggersAttr))
       return WalkResult::interrupt();
     // What a `for` inside the body became (see lowerEach): it reads the
     // columns of other entities, which the query does not write (what it
@@ -13042,15 +13049,22 @@ static std::optional<std::string> whyScans(QueryOp query,
   }
   bool applies = false, spawns = false;
   query.getBody().walk([&](Operation *op) {
-    // (Not what comes to the same in any order: kOrderFreeAttr.)
+    // (Not what comes to the same in any order: kOrderFreeAttr; nor what
+    // waits on lists in a row-ordered walk, kLoopedAttr.)
     applies |= isa<ApplyOp, AccumulateOp, ConnectOp, AppendOp>(op) &&
-               !op->hasAttr(kOrderFreeAttr);
+               !op->hasAttr(kOrderFreeAttr) &&
+               !(op->hasAttr(kLoopedAttr) && query->hasAttr(kRowOrderedAttr));
     spawns |= isa<SpawnOp>(op);
   });
   if (applies)
     return std::string("it applies or accumulates values, connects "
                        "edges or appends rows, which are combined in row "
                        "order");
+  bool running = false;
+  query.getBody().walk([&](RunningOp) { running = true; });
+  if (running && !query->hasAttr(kRowOrderedAttr))
+    return std::string("it keeps a running sum, which goes by the order of "
+                       "the rows");
   if (!query->hasAttr(kRowOrderedAttr) &&
       (spawns || llvm::any_of(getMatchedArchetypes(query),
                               [&](ArchetypeOp archetype) {
@@ -21391,6 +21405,10 @@ static bool lowerRunning(IRRewriter &rewriter, QueryOp query,
       spread = &archetype;
   if (!options.parallelEntities && !options.gpu && !spread)
     return false;
+  // (A query that reacts to changes runs for some of its rows, one after
+  // another: its sums are kept as it goes.)
+  if (query->hasAttr(QueryOp::kTriggersAttr))
+    return false;
   // A whole number added for every entity, from the body itself (not an
   // `if` of it): the row's place among the query's rows times it, which
   // needs no pass of its own.
@@ -22482,7 +22500,12 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
           .wasInterrupted();
   markReduced(rewriter, query, options, entityLocal, sendsLooped);
   SmallVector<ConnectOp> connects;
-  query.getBody().walk([&](ConnectOp connect) { connects.push_back(connect); });
+  // (Not those given where they stand, kAtOnceAttr: no edges wait for
+  // them; their relations are kept in order all the same.)
+  query.getBody().walk([&](ConnectOp connect) {
+    if (!connect->hasAttr(kAtOnceAttr))
+      connects.push_back(connect);
+  });
   // (Not those given where they stand, kAtOnceAttr: no rows wait for
   // them.)
   SmallVector<AppendOp> appends;
@@ -22493,8 +22516,9 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // Relations whose edges the query changes: sorted when it ends.
   llvm::SetVector<Attribute> changedRelations;
   noteOrderWrites(rewriter, query, layout, world, changedRelations);
-  for (ConnectOp connect : connects)
+  query.getBody().walk([&](ConnectOp connect) {
     changedRelations.insert(connect.getRelationAttr().getAttr());
+  });
   query.getBody().walk([&](DisconnectOp disconnect) {
     changedRelations.insert(
         disconnect->getParentOfType<EdgesOp>().getRelationAttr().getAttr());
@@ -27735,9 +27759,22 @@ struct EntLowerToLoops
           return false;
         };
         bool spawns = false;
+        // (Whole numbers sent to a field the query also reads, by `+=`,
+        // `min=` or `max=`: they wait on lists, as those sent from a loop
+        // of a body do (kLoopedAttr), in the order of the rows, and are
+        // combined when it ends, so that no entity reads what another
+        // sent. Not values of a unique, nor fractions.)
+        SmallVector<ApplyOp> deferred;
         query.getBody().walk([&](Operation *op) {
-          if (isa<ApplyOp, AccumulateOp>(op) && !op->hasAttr(kOrderFreeAttr))
-            blocked = true;
+          if (isa<ApplyOp, AccumulateOp>(op) && !op->hasAttr(kOrderFreeAttr)) {
+            auto apply = dyn_cast<ApplyOp>(op);
+            if (apply && apply.getRule() != "set" &&
+                isa<IntegerType>(apply.getValue().getType()) &&
+                !apply->hasAttr(kLoopedAttr) && !inLoop(op))
+              deferred.push_back(apply);
+            else
+              blocked = true;
+          }
           spawns |= isa<SpawnOp>(op);
           if (!isa<AppendOp, ConnectOp>(op) || op->hasAttr(kAtOnceAttr))
             return;
@@ -27754,8 +27791,15 @@ struct EntLowerToLoops
                                    [&](ArchetypeOp archetype) {
                                      return isStructuralFor(query, archetype);
                                    });
-        if (blocked || (given.empty() && !structural))
+        // (A running sum: what came before an entity is that of the rows
+        // before its own.)
+        bool running = false;
+        query.getBody().walk([&](RunningOp) { running = true; });
+        if (blocked ||
+            (given.empty() && !structural && !running && deferred.empty()))
           return;
+        for (ApplyOp apply : deferred)
+          apply->setAttr(kLoopedAttr, rewriter.getUnitAttr());
         for (Operation *op : given) {
           op->setAttr(kOrderFreeAttr, rewriter.getUnitAttr());
           op->setAttr(kAtOnceAttr, rewriter.getUnitAttr());

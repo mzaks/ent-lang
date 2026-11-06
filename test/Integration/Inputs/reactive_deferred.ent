@@ -1,0 +1,33 @@
+// A reactive `for` that sends whole numbers to a field it also reads
+// (test/Integration/reactive_deferred.test): each entity sends `min=` to
+// the entity of the next row, and reads its own value. What it sends
+// lands when the `for` ends, so no entity reads what another sent, as a
+// scan over every entity gives it.
+import console
+component N { i: i64, v: i64, to: entity, back: i64 } capacity 1024
+tag Go
+buffer Ids { e: entity } capacity 64
+unique Step: i64
+unique Total: i64
+world { for i in 0..30 { let e = spawn { N { i: i, v: 100 + i * 3, to: none, back: 29 - i } }  Ids += { e: e } } }
+system link() {
+  for me, n: mut N where n.to == none { n.to = Ids[(n.i + 1) % 30].e }
+}
+system go() {
+  Step += 1
+  let s = Step
+  // (Later rows first: the log's order is not the rows'.)
+  for me, n: N without Go in turn by n.back { if n.back % 4 == s % 4 { me.add(Go) } }
+}
+system send() {
+  for me, n: N with Go on added Go {
+    N(n.to).v min= n.v - 5
+  }
+}
+system say() {
+  Total = 0
+  for n: N { Total += n.v }
+  put("step {Step} total {Total}")
+}
+schedule frame() { link() go() send() say() }
+main { frame() frame() frame() frame() frame() }

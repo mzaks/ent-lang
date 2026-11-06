@@ -27,6 +27,7 @@ schedule frame() {
   take_depth()
   place()
   be_polite()
+  ready()
   pace()
   send()
   receive()

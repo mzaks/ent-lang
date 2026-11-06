@@ -1,0 +1,14 @@
+// A reactive `for` that sends whole numbers to a field it also reads
+// goes through the log in the order of the rows, what it sends combined
+// when it ends: the same as a scan over every entity gives (which runs
+// for the same ones), and with threads.
+// RUN: %ent run %S/Inputs/reactive_deferred.ent 2>/dev/null > %t.out
+// RUN: sed -e 's/  for me, n: N with Go on added Go {/  for me, n: N with Go without Sent {\n    me.add(Sent)/' \
+// RUN:     -e 's/^tag Go$/tag Go\ntag Sent/' \
+// RUN:     %S/Inputs/reactive_deferred.ent > %t.scan.ent
+// RUN: %ent run %t.scan.ent 2>/dev/null | cmp - %t.out
+// RUN: %ent run --parallel %S/Inputs/reactive_deferred.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK: step 1
+// CHECK: step 5

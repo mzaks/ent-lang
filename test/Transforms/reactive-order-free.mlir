@@ -29,9 +29,9 @@ ent.system @told() reads [@T, @H] writes [@N, @Count] {
   }
 }
 
-// One that reads what it sends to waits for its end, in the order of rows.
+// One that reads what it sends to: what it sends waits on lists for its
+// end, the rows from the logs put in order and visited then (no remark).
 ent.system @read() reads [@T, @H] writes [@N] {
-  // expected-remark @+1 {{scans every entity on each run: it applies or accumulates values, connects edges or appends rows, which are combined in row order}}
   ent.query (%t: !ent.ref<@T>, %n: !ent.ref<@N>) on [changed @H "hp"] {
     %id = ent.get %t "entity" : !ent.ref<@T> -> !ent.entity
     %mine = ent.get %n "n" : !ent.ref<@N> -> i32

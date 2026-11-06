@@ -10,27 +10,33 @@ import mock
 import urls
 
 default_capacity 262144
+// (The mock holds no ask back by host: many are going at once, a third
+// of the pages at 10^5.)
+capacity Going 131072
 
 // The four of pipeline.ent in one.
 system handle_answers() {
-  for me, a: Ask, s: Sent without Got, Failed where Now >= s.at + Net.timeout {
+  for me, a: Ask, s: Sent with Going where Now >= s.at + Net.timeout {
     me.add(Failed { at: Now, kind: Failure.Timeout })
+    me.remove(Going)
   }
-  for me, a: Ask, s: Sent without Got, Failed, Slow
+  for me, a: Ask, s: Sent with Going without Slow
       where Now >= s.at + Net.slow_after {
     me.add(Slow)
   }
-  for me, a: mut Ask, g: Got without GaveUp where retryable(g.status) {
-    if a.tries >= Net.retries {
-      me.add(GaveUp)
-    } else {
-      a.tries += 1
-      a.next_at = Now + wait_before(a.tries, Net.backoff)
-      me.remove(Got)
-      me.remove(Sent)
+  for me, a: mut Ask, g: Got without GaveUp on added Got {
+    if retryable(g.status) {
+      if a.tries >= Net.retries {
+        me.add(GaveUp)
+      } else {
+        a.tries += 1
+        a.next_at = Now + wait_before(a.tries, Net.backoff)
+        me.remove(Got)
+        me.remove(Sent)
+      }
     }
   }
-  for me, a: mut Ask, f: Failed without GaveUp {
+  for me, a: mut Ask, f: Failed without GaveUp on added Failed {
     if a.tries >= Net.retries {
       me.add(GaveUp)
     } else {
@@ -40,8 +46,8 @@ system handle_answers() {
       me.remove(Sent)
     }
   }
-  for me, a: Ask, g: Got without Followed
-      where g.status >= 300 && g.status < 400 && len(g.location) > 0 {
+  for me, a: Ask, g: Got without Followed on added Got {
+   if g.status >= 300 && g.status < 400 && len(g.location) > 0 {
     me.add(Followed)
     let target = resolve(a.url, g.location)
     if len(target) > 0 {
@@ -53,6 +59,7 @@ system handle_answers() {
                       serial: 0 }, Twin { of: none } }
       }
     }
+   }
   }
 }
 
@@ -64,6 +71,7 @@ schedule frame() {
   place()
   drop_stale()
   be_polite()
+  ready()
   pace()
   mock_send()
   answer()

@@ -238,3 +238,71 @@ The mock (few frames: 123 at 10⁵) is as it was: 10⁴ 0.112 / 0.146 s
 Peak memory fell by a third (484 to 340 MB at 64 connections; which
 part, not looked into). ent-par is slower than ent here, as before; the
 loops that now go through the logs in row order run on one thread.
+
+### Live, with the states few asks are in kept apart
+
+The loops left went over every ask each frame to find the few in one
+state. Now:
+
+- **Going** (`tag Going apart`, pipeline.ent): let go and not answered
+  yet. `ready` gives it as an ask comes, is let go or is to be tried
+  again; the device sends those without `Sent` and takes it away with
+  the answer. `send`, `fetch`, `time_out`, `warn_slow`, `pace` and the
+  hosts' counts go over just those (at most the hosts' connections: a
+  capacity of 4,096; the mock, which sends all at once, says more).
+  One tag for both states: an entity given one `apart` tag and losing
+  another in one `for` is moved once, by the last (open).
+- **Once per event**: `retry`, `follow_redirect`, `settle`,
+  `number_asks`, `drop_duplicates`, `merge`, `forget_duplicates`,
+  `inherit_depth`, `take_depth`, `place` and the mock's `fill` are
+  `on added` / `on changed` loops, which go through the logs. `place`
+  looks at an ask again (`Recheck`) where it waited for a robots.txt
+  and one came.
+- In the compiler, for these: a reactive `for` may keep a running sum
+  (`number_asks`), and one that sends whole numbers to a field it also
+  reads (`merge`: `Depth(t.of).d min= d.d`) goes through the logs, those
+  waiting on lists till it ends; both visit the rows in order, as a scan
+  does. And a connect given where it stands no longer has its edge
+  placed again by the scan of a first run (it stopped the program).
+
+Traced at 10⁵ pages and 64 connections: 8.7 to 5.5 s; measured, 7.4 to
+5.0 s (C 2.3), at 256 connections 4.9 to 4.2 s, at 1024 4.7 to 4.5. Left: `receive`
+2.0 s, `Links` kept in order 1.2 s (sorted after each of the four
+systems that connect or despawn, 24,050 times, read only by the report),
+`extract_links` 0.8 s (taking the links out), and `be_polite` letting
+asks go 0.47 s: each held ask looks at its host's turn every frame (a
+host's queue is what C has).
+
+The mock (few frames, most asks changing in each) is as it was, a
+little slower at 10⁵: 10⁴ 0.118 / 0.152 s (one core / all cores), 10⁵
+1.809 / 1.921, 10⁶ 22.499 / 22.115 (0.112 / 0.146, 1.755 / 1.939,
+22.846 / 24.327 before). Live:
+
+| pages | connections | crawler | wall s | CPU s | peak MB | pages/s |
+|---|---|---|---|---|---|---|
+| 10⁴ | 64 | C | 1.010 | 0.124 | 23 | 10,422 |
+| 10⁴ | 64 | ent | 1.097 | 0.233 | 41 | 9,595 |
+| 10⁴ | 64 | ent-par | 1.092 | 0.314 | 41 | 9,644 |
+| 10⁴ | 256 | C | 1.047 | 0.137 | 23 | 10,059 |
+| 10⁴ | 256 | ent | 1.099 | 0.229 | 40 | 9,575 |
+| 10⁴ | 256 | ent-par | 1.116 | 0.285 | 42 | 9,437 |
+| 10⁴ | 1024 | C | 1.069 | 0.202 | 23 | 9,846 |
+| 10⁴ | 1024 | ent | 1.116 | 0.295 | 42 | 9,436 |
+| 10⁴ | 1024 | ent-par | 1.102 | 0.337 | 43 | 9,550 |
+| 10⁵ | 64 | C | 2.285 | 1.181 | 69 | 46,171 |
+| 10⁵ | 64 | ent | 5.041 | 4.015 | 312 | 20,927 |
+| 10⁵ | 64 | ent-par | 5.495 | 4.665 | 314 | 19,197 |
+| 10⁵ | 256 | C | 2.078 | 1.363 | 76 | 50,757 |
+| 10⁵ | 256 | ent | 4.233 | 3.624 | 269 | 24,918 |
+| 10⁵ | 256 | ent-par | 4.539 | 3.911 | 271 | 23,243 |
+| 10⁵ | 1024 | C | 3.001 | 2.300 | 76 | 35,147 |
+| 10⁵ | 1024 | ent | 4.545 | 3.863 | 270 | 23,211 |
+| 10⁵ | 1024 | ent-par | 4.773 | 4.127 | 273 | 22,103 |
+
+Memory: each kind of ask that can be `Going` has an archetype for it
+as well. The robots.txt asks, one a host, now have an archetype of
+1,024 (`tag RobotsAsk capacity 1024`), where they had one as big as
+every other kind's: so the live crawl holds less than before (312 MB
+where 340). The mock lets every ask go at once: a third of the pages
+are going at its most (36,207 at 10⁵, 360,260 at 10⁶), and it gives
+`Going` half the asks' capacity; 589 MB at 10⁵ where 565.

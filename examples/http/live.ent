@@ -60,7 +60,7 @@ system connect() {
 // redirects are the pipeline's to follow (`follow` 0), its body at most
 // 16 MB.
 system send() {
-  for me, a: Ask, t: Twin without Sent, Held where a.next_at <= Now && t.of == none {
+  for me, a: Ask with Going without Sent where a.next_at <= Now {
     let handle = http_start(Web.session, method_name(a.method), a.url, a.headers,
                             a.body, Net.timeout, 16777216, 0)
     me.add(Sent { at: Now, handle: handle })
@@ -77,7 +77,7 @@ system receive() {
 
 // Each ask that was sent takes its own answer, once it has one.
 system fetch() {
-  for me, s: Sent without Got, Failed {
+  for me, s: Sent with Going {
     let status = http_status(s.handle)
     if status >= 0 {
       let failure = http_failure(s.handle)
@@ -88,6 +88,7 @@ system fetch() {
         me.add(Failed { at: Now, kind: failure_of(failure) })
       }
       http_forget(s.handle)
+      me.remove(Going)
     }
   }
 }

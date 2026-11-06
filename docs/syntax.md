@@ -161,6 +161,8 @@ capacity Inside 4096                        // another capacity for one declared
   tag too), or `default_capacity`; one made for a declared archetype's
   entities is named after it (`Gun_Close`), holds optionally what it
   does, and is no bigger. No archetype can hold it as `optional`.
+  An entity given or losing two components kept `apart` in one run of a
+  `for` is moved once, by the last of them (open: both should hold).
 - A relation's edges go from a source entity to a target entity and carry
   its fields. They are not entities; `capacity` bounds how many there are.
   An entity may have any number of edges, also several to the same target.
@@ -309,11 +311,13 @@ for with Enemy { Count += 1 }     // nor the entity
   running its body only where a trigger fired, on its first run and
   where a log has lost events. Where what it does must land in the
   order of the rows (it spawns, destroys or moves entities, connects,
-  gives rows to a buffer), it takes the rows the log names, puts them
+  gives rows to a buffer, keeps a running sum, or sends whole numbers
+  to a field it also reads), it takes the rows the log names, puts them
   in order and runs its body for them so, on one thread: what it does
-  comes out as a scan's would. It still goes through all of them where
-  it sends values other than whole numbers (or to a field it also
-  reads), gives rows to one buffer or edges to one relation from two
+  comes out as a scan's would (whole numbers sent to a field it reads
+  wait for its end, as they do in a scan). It still goes through all of
+  them where it sends fractions to a field it also reads, sends with
+  `=`, gives rows to one buffer or edges to one relation from two
   places or from a loop of its body, or reacts to an ancestor's events
   (`via`). Whole numbers sent with `+=`, `-=`, `min=` or `max=`, and
   how many entities it ran for, come to the same in any order: those
@@ -936,7 +940,9 @@ of a depth.
   passes, the values first, then a scan of them, then the body, with the
   same result (a sum made of another, as `slot` of `first` above, takes
   a pass after it, which reads what the first added from its scan). Not in a `for` that takes turns, where the unique is
-  read and written as it is.
+  read and written as it is, nor in one along a tree or `by` a field.
+  In a reactive `for`, the entities before this one are those it runs
+  for this time, in the order of their rows.
 - Another entity: `Hull(target).hp -= damage` (also `+=`, `min=`, `max=`)
   combines into its field when the query ends; reading one may find nothing,
   so it is `if let hp = Hull(target).hp { ... } else { ... }`. So is a

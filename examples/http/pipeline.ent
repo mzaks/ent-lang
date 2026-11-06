@@ -7,8 +7,11 @@
 // and answers (mock.ent, or the live device of C3).
 //
 // What a program does with it:
-// - spawns an `Ask` (with `tries` 0, `next_at` 0 and `serial` 0);
+// - spawns an `Ask` (with `tries` 0, `next_at` 0 and `serial` 0, and a
+//   `Twin` of none);
 // - holds asks back from sending with the tag `Held`;
+// - runs `ready` before the device's send (which sends asks that are
+//   `Going` and not `Sent`);
 // - reads `Got` (or `Failed` with `GaveUp`), and says it is done with an
 //   answer with the tag `Handled`;
 // - sets `Net` (timeouts, retries) and moves the clock `Now`.
@@ -35,6 +38,17 @@ component Ask { method: Method, url: text, headers: text, body: text,
 component Twin { of: entity }
 // Handed to the device, at a time.
 component Sent { at: f64, handle: i64 }
+// Let go and not answered yet: no duplicate, not held back, and not sent
+// yet (the device sends it once its `next_at` has come) or sent (it then
+// has `Sent`). Given by `ready`; taken away with `Got` or `Failed` (by the
+// device, or `time_out`), or as it is held back. Kept apart: of many
+// asks, few are going at once, and what sends them and waits for their
+// answers goes over just those. As many as the hosts' connections, at
+// most, where the program holds asks back by host (crawl.ent's
+// `be_polite`); a program that sends all at once says how many
+// (`capacity Going N`). (One tag for both: an entity given one tag kept
+// apart and losing another in one `for` would be moved once.)
+tag Going apart capacity 4096
 // An answer: its status, headers ("Name: value" lines) and body, and
 // where a redirect goes.
 component Got { at: f64, status: i32, headers: text, body: text, location: text }
@@ -76,11 +90,24 @@ fn wait_before(n: i32, backoff: f64) -> f64 {
   wait
 }
 
-// Every new ask gets the next number.
+// Going as an ask comes, is let go (`Held` taken away) or is to be tried
+// again (`Sent` taken away); no longer as it is held back.
+system ready() {
+  for me, t: Twin without Held, Sent, Going on added Twin, removed Held, removed Sent {
+    if t.of == none { me.add(Going) }
+  }
+  for me with Going, Held on added Held { me.remove(Going) }
+}
+
+// Every new ask gets the next number. (Each step that is done once for
+// an ask, as it comes or as something happens to it, is a `for` that
+// goes through what happened: not over every ask each frame.)
 system number_asks() {
-  for a: mut Ask where a.serial == 0 {
-    let before = Counters.serial += 1
-    a.serial = before + 1
+  for a: mut Ask on added Ask {
+    if a.serial == 0 {
+      let before = Counters.serial += 1
+      a.serial = before + 1
+    }
   }
 }
 
@@ -92,7 +119,7 @@ system number_asks() {
 tag Known
 index Kept of Ask, Known by url hash
 system drop_duplicates() {
-  for me, a: Ask, t: mut Twin without Known {
+  for me, a: Ask, t: mut Twin without Known on added Twin {
     let u = a.url
     let known = Kept.get(u)
     let first = if known != none { known } else { ByUrl.get(u) }
@@ -101,19 +128,20 @@ system drop_duplicates() {
 }
 
 system forget_duplicates() {
-  for me, a: Ask, t: Twin where t.of != none { me.destroy() }
+  for me, t: Twin on changed t.of { if t.of != none { me.destroy() } }
 }
 
 // No answer in time.
 system time_out() {
-  for me, a: Ask, s: Sent without Got, Failed where Now >= s.at + Net.timeout {
+  for me, a: Ask, s: Sent with Going where Now >= s.at + Net.timeout {
     me.add(Failed { at: Now, kind: Failure.Timeout })
+    me.remove(Going)
   }
 }
 
 // A warning, once, for a request that takes long.
 system warn_slow() {
-  for me, a: Ask, s: Sent without Got, Failed, Slow
+  for me, a: Ask, s: Sent with Going without Slow
       where Now >= s.at + Net.slow_after {
     me.add(Slow)
   }
@@ -122,17 +150,19 @@ system warn_slow() {
 // Tried again, later, where the answer says so or there was none; given
 // up after `Net.retries`.
 system retry() {
-  for me, a: mut Ask, g: Got without GaveUp where retryable(g.status) {
-    if a.tries >= Net.retries {
-      me.add(GaveUp)
-    } else {
-      a.tries += 1
-      a.next_at = Now + wait_before(a.tries, Net.backoff)
-      me.remove(Got)
-      me.remove(Sent)
+  for me, a: mut Ask, g: Got without GaveUp on added Got {
+    if retryable(g.status) {
+      if a.tries >= Net.retries {
+        me.add(GaveUp)
+      } else {
+        a.tries += 1
+        a.next_at = Now + wait_before(a.tries, Net.backoff)
+        me.remove(Got)
+        me.remove(Sent)
+      }
     }
   }
-  for me, a: mut Ask, f: Failed without GaveUp {
+  for me, a: mut Ask, f: Failed without GaveUp on added Failed {
     if a.tries >= Net.retries {
       me.add(GaveUp)
     } else {
@@ -146,8 +176,8 @@ system retry() {
 
 // A redirect is a new ask, from the one redirected.
 system follow_redirect() {
-  for me, a: Ask, g: Got without Followed
-      where g.status >= 300 && g.status < 400 && len(g.location) > 0 {
+  for me, a: Ask, g: Got without Followed on added Got {
+   if g.status >= 300 && g.status < 400 && len(g.location) > 0 {
     me.add(Followed)
     let target = resolve(a.url, g.location)
     if len(target) > 0 {
@@ -159,6 +189,7 @@ system follow_redirect() {
                       serial: 0 }, Twin { of: none } }
       }
     }
+   }
   }
 }
 
