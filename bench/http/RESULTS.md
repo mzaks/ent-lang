@@ -203,8 +203,12 @@ there are, not by what changed:
 
 Traced at 10⁵ pages and 64 connections (one core, 5,259 frames): 8.7 s,
 of which `receive` 2.4 s, `Links` kept in order 1.3 s, `extract_links`
-looking over the pages waiting for their level 1.0 s, and the rest
-loops over every ask (0.02 to 0.06 ms a frame each).
+1.0 s, and the rest loops over every ask (0.02 to 0.06 ms a frame
+each). `extract_links` is taking the links out of the pages, not
+looking over those waiting for their level: its median frame is 1 µs,
+and nine frames in ten come to 84 ms in all. Holding the waiting pages
+apart (an `apart` tag till the level comes to them) was tried: 20 ms
+less, 110 MB more; not kept.
 
 The mock (few frames: 123 at 10⁵) is as it was: 10⁴ 0.112 / 0.146 s
 (one core / all cores), 10⁵ 1.755 / 1.939, 10⁶ 22.846 / 24.327 (22.2 /

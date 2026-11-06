@@ -552,7 +552,8 @@ around in the example, not in the compiler:
   pass over every ask (`Kept` and `ByUrl`: 1.8 to 0.12 s): 7.4 s
   (RESULTS.md, "Live, after on added and hash indexes by what
   changed"). Left: plain loops over every ask (0.15 ms a frame each at
-  10⁵), `Links` kept in order, the pages waiting for their level.
+  10⁵), `Links` kept in order, taking links out of pages (the pages
+  waiting for their level cost little: held apart, 20 ms less).
 - **Two spawns alike in what they require went to one archetype** (fixed
   in C3): asks spawned with `LinkedFrom`, which `merge` removes, and the
   seed's without it, both required `Ask, Twin, Depth`; the compiler made
