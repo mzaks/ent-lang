@@ -360,7 +360,9 @@ static void unindex(const Edges *e, int64_t p, int64_t j) {
 // Room for one more edge in key k's run, where it has none, from the
 // nearest run that has some: the runs between moved over by one, toward
 // it (the edges' places in the index too, with positions). False where no
-// run has room, or moving would make `moved` more than `budget`.
+// run has room, or moving would make `moved` more than `budget`. (Every
+// key passed counts as an edge moved: its offsets are, and where most
+// keys have no edges the walk to room is long while few edges move.)
 static int room_in_table(const Edges *e, int64_t k, int64_t *moved,
                          int64_t budget) {
   char *dead = at(e, SPEC_DEAD);
@@ -369,7 +371,7 @@ static int room_in_table(const Edges *e, int64_t k, int64_t *moved,
     int found = 0;
     if (right < e->keys) {
       int64_t from = off(e, SPEC_SORTED, k + 1), end = off(e, SPEC_ENDS, right);
-      if (*moved + (end - from) > budget)
+      if (*moved + (end - from) + (right - k) > budget)
         right = e->keys;
       else if (end < off(e, SPEC_SORTED, right + 1)) {
         move_edges(e, from, from + 1, end - from);
@@ -381,7 +383,7 @@ static int room_in_table(const Edges *e, int64_t k, int64_t *moved,
         if (e->positions)
           for (int64_t q = from + 1; q <= end; q++)
             set_off(e, SPEC_INDEX_EDGES, off(e, SPEC_SLOT, q), q);
-        *moved += end - from;
+        *moved += (end - from) + (right - k);
         return 1;
       } else {
         right++;
@@ -390,7 +392,7 @@ static int room_in_table(const Edges *e, int64_t k, int64_t *moved,
     }
     if (left >= 0) {
       int64_t hole = off(e, SPEC_ENDS, left), end = off(e, SPEC_ENDS, k);
-      if (*moved + (end - hole) > budget)
+      if (*moved + (end - hole) + (k - left) > budget)
         left = -1;
       else if (hole < off(e, SPEC_SORTED, left + 1)) {
         int64_t from = off(e, SPEC_SORTED, left + 1);
@@ -403,7 +405,7 @@ static int room_in_table(const Edges *e, int64_t k, int64_t *moved,
         if (e->positions)
           for (int64_t q = from - 1; q < end - 1; q++)
             set_off(e, SPEC_INDEX_EDGES, off(e, SPEC_SLOT, q), q);
-        *moved += end - from;
+        *moved += (end - from) + (k - left);
         return 1;
       } else {
         left--;
@@ -424,7 +426,7 @@ static int room_in_index(const Edges *e, int64_t t, int64_t *moved,
     if (right < e->keys) {
       int64_t from = off(e, SPEC_INDEX, t + 1),
               end = off(e, SPEC_INDEX_ENDS, right);
-      if (*moved + (end - from) > budget)
+      if (*moved + (end - from) + (right - t) > budget)
         right = e->keys;
       else if (end < off(e, SPEC_INDEX, right + 1)) {
         move_index(e, from, from + 1, end - from);
@@ -433,7 +435,7 @@ static int room_in_index(const Edges *e, int64_t t, int64_t *moved,
           set_off(e, SPEC_INDEX_ENDS, m, off(e, SPEC_INDEX_ENDS, m) + 1);
         }
         slots_from(e, from + 1, end + 1);
-        *moved += end - from;
+        *moved += (end - from) + (right - t);
         return 1;
       } else {
         right++;
@@ -443,7 +445,7 @@ static int room_in_index(const Edges *e, int64_t t, int64_t *moved,
     if (left >= 0) {
       int64_t hole = off(e, SPEC_INDEX_ENDS, left),
               end = off(e, SPEC_INDEX_ENDS, t);
-      if (*moved + (end - hole) > budget)
+      if (*moved + (end - hole) + (t - left) > budget)
         left = -1;
       else if (hole < off(e, SPEC_INDEX, left + 1)) {
         int64_t from = off(e, SPEC_INDEX, left + 1);
@@ -453,7 +455,7 @@ static int room_in_index(const Edges *e, int64_t t, int64_t *moved,
           set_off(e, SPEC_INDEX_ENDS, m, off(e, SPEC_INDEX_ENDS, m) - 1);
         }
         slots_from(e, from - 1, end - 1);
-        *moved += end - from;
+        *moved += (end - from) + (t - left);
         return 1;
       } else {
         left--;
