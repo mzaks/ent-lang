@@ -526,6 +526,14 @@ around in the example, not in the compiler:
   disallowed, silently (C3). Texts built in a loop are fns calling
   themselves (robots.ent, `rules_from`). The cut should be an error, or
   the var a `text`.
+- **Systems that look at every waiting ask each frame** (C3, live).
+  The mock jumps from one thing due to the next: 123 frames at 10⁵
+  pages. Live, a frame takes what came in a few milliseconds: 4,223
+  frames at 64 connections, and `settle` (pages waiting for their
+  level, looked at again each frame), `be_polite` and `pace` (every
+  unsent ask sorted by serial), and `Links` sorted anew make ent 10
+  times C's time there (bench/http/RESULTS.md, 9.1). Not a cost of the
+  pipeline's shape: of what each system visits.
 - **A relation's mending walked far for room** (fixed in C3). The sort
   of `Links` was 30 s of 52 at 10⁶ pages, though it sorted anew only 20
   times: the mending before each (devices/edges.c) looked for room past
@@ -541,7 +549,7 @@ around in the example, not in the compiler:
 | **C0** | §10.1 decided and, if a language feature, built with its own tests. | `extract_links` can make a URL `text`. |
 | **C1** | `site.py`, `pipeline.ent`, `crawl.ent`, `mock.ent`, `crawl_mock.ent`, `crawl_combined.ent`, `check/`. | K1 to K7, K10 and K12 (generated cases) pass on the mock; mock throughput measured. |
 | **C2** | `devices/http` and the local server with its httpbin endpoints and TLS listener. | D1 to D10 pass (done: test/Integration/http_device.test). |
-| **C3** | `crawl_live.ent`, `robots.txt`, `bench/http/crawl.c`. | K8, K9 and K11 pass (done: check/crawl.py --live); the live benchmark against C is measured and written down. |
+| **C3** | `crawl_live.ent`, `robots.txt`, `bench/http/crawl.c`. | K8, K9 and K11 pass (done: check/crawl.py --live); the live benchmark against C is measured and written down (done: bench/http/live.py, RESULTS.md: C 2.3 s at 10⁵ pages, ent 5.5 to 22.7 s, per-frame work over every waiting ask). |
 | **C4** | The other crawlers' setups, the mirrored real site. | §9.2 measured and written down, every crawler verified first. |
 | **C5** | `sites.md`, crawls of the public sites. | §9.3 run; what it found is in K12 and D1 to D10. |
 | **C6** | A live window (Clay, `layout`, `window`): requests in flight, slow ones, errors, history. | Shows a crawl as it runs. |

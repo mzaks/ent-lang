@@ -38,6 +38,7 @@ tools/ent build -I examples/http examples/http/crawl_mock.ent -o /tmp/crawl
 (cd /tmp/site && /tmp/crawl | grep -v "^log \|^history " | sort -u)   # = expected.txt
 python3 examples/http/check/crawl.py [--parallel] [--live]
 python3 bench/http/mock.py 10000 100000    # pages a second, bench/http/RESULTS.md
+python3 bench/http/live.py                 # over the network, against bench/http/crawl.c
 ```
 
 Over the network (`crawl_live.ent` says it step by step): `serve.c` on
