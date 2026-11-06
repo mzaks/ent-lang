@@ -1,0 +1,36 @@
+// Two spawns alike in what they require: one with a component that is
+// removed later (so the archetype holds it optionally), one without it.
+import console
+
+component Node { id: i32 }
+component Mark { from: i32 }
+
+default_capacity 64
+
+unique Total: i32
+
+system setup() {
+  spawn { Node { id: 1 } }
+  spawn { Node { id: 2 }, Mark { from: 7 } }
+}
+
+system take() {
+  for me, n: Node, m: Mark {
+    Total += m.from * 10 + n.id
+    me.remove(Mark)
+  }
+}
+
+system count() {
+  let marked = for n: Node, m: Mark { }
+  let all = for n: Node { }
+  put("total {Total} marked {marked} all {all}")
+}
+
+schedule start() { setup() count() }
+schedule step() { take() count() }
+
+main {
+  start()
+  step()
+}

@@ -34,6 +34,7 @@ schedule frame() {
   retry()
   read_robots()
   follow_redirect()
+  classify()
   settle()
   extract_links()
   number_asks()

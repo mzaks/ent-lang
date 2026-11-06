@@ -55,8 +55,9 @@ enum {
   SPEC_SLOT,        // capacity offsets
   SPEC_SOURCE_COPY, // capacity ids
   SPEC_TARGET_COPY, // capacity ids
-  SPEC_MENDS,       // i64s: edges changed since the last sort anew, and
-                    // why the last mending did not mend (WHY_*)
+  SPEC_MENDS,       // i64s: edges changed since the last sort anew, why
+                    // the last mending did not mend (WHY_*), and how much
+                    // mending moved since to make room
   SPEC_FIELDS,      // how many; then for each its offset, bytes and copy
   SPEC_FIELD0,
 };
@@ -208,37 +209,39 @@ void ent_edges_dense(char *arena, const int64_t *spec) {
       set_off(&e, SPEC_INDEX_ENDS, k, off(&e, SPEC_INDEX, k + 1));
     slots_from(&e, 0, off(&e, SPEC_INDEX, e.keys));
   }
-  *(int64_t *)(arena + spec[SPEC_MENDS]) = 0;
+  int64_t *mends = (int64_t *)(arena + spec[SPEC_MENDS]);
+  mends[0] = mends[2] = 0;
 }
 
 // New starts for runs of `lengths` (keys of them) with room after each:
-// one for every key up to `top` (those past it have no entity with an
-// edge) and an eighth of its length, all of it no more than `room` (each
-// share made smaller where it would be).
+// one for every key and an eighth of its length, all of it no more than
+// `room` (each share made smaller where it would be: by how much the
+// shares up to it would have, so that none is lost to rounding, and
+// where there is room for one in two of them, every other key has one).
+// (Keys with no edge get room too: in a graph that grows, the entities
+// that come are those past the last with an edge, and a run without room
+// takes it from the nearest with some, which, were there none past the
+// last, would be ever farther.)
 static int64_t *spread_starts(const Edges *e, const int64_t *lengths,
-                              int64_t top, int64_t room) {
-  int64_t want = top;
+                              int64_t room) {
+  int64_t want = e->keys;
   for (int64_t k = 0; k < e->keys; k++)
     want += lengths[k] / 8;
   int64_t *starts = malloc(sizeof(int64_t) * (e->keys + 1));
-  int64_t at_ = 0;
+  int64_t at_ = 0, wanted = 0, given = 0;
   for (int64_t k = 0; k < e->keys; k++) {
     starts[k] = at_;
-    int64_t more = (k < top ? 1 : 0) + lengths[k] / 8;
-    if (want > room)
-      more = (int64_t)((__int128)more * room / want);
+    int64_t more = 1 + lengths[k] / 8;
+    if (want > room) {
+      wanted += more;
+      int64_t upto = (int64_t)((__int128)wanted * room / want);
+      more = upto - given;
+      given = upto;
+    }
     at_ += lengths[k] + more;
   }
   starts[e->keys] = at_;
   return starts;
-}
-
-// One more than the greatest key with a run of `lengths` not empty.
-static int64_t top_key(const Edges *e, const int64_t *lengths, int64_t top) {
-  for (int64_t k = e->keys - 1; k >= top; k--)
-    if (lengths[k])
-      return k + 1;
-  return top;
 }
 
 void ent_edges_spread(char *arena, const int64_t *spec) {
@@ -257,20 +260,18 @@ void ent_edges_spread(char *arena, const int64_t *spec) {
   int64_t *lengths = malloc(sizeof(int64_t) * e.keys);
   for (int64_t k = 0; k < e.keys; k++)
     lengths[k] = off(&e, SPEC_SORTED, k + 1) - off(&e, SPEC_SORTED, k);
-  int64_t top = top_key(&e, lengths, 0);
   int64_t *index_lengths = NULL, *index_starts = NULL;
   if (e.index) {
     slots_from(&e, 0, off(&e, SPEC_INDEX, e.keys));
     index_lengths = malloc(sizeof(int64_t) * e.keys);
     for (int64_t k = 0; k < e.keys; k++)
       index_lengths[k] = off(&e, SPEC_INDEX, k + 1) - off(&e, SPEC_INDEX, k);
-    top = top_key(&e, index_lengths, top);
   }
-  int64_t *starts = spread_starts(&e, lengths, top, room);
+  int64_t *starts = spread_starts(&e, lengths, room);
   // (The index as long as the table, and the table as the index: a GPU
   // copies as many of each as the table counts.)
   if (e.index) {
-    index_starts = spread_starts(&e, index_lengths, top, room);
+    index_starts = spread_starts(&e, index_lengths, room);
     int64_t longest = starts[e.keys] > index_starts[e.keys]
                           ? starts[e.keys]
                           : index_starts[e.keys];
@@ -308,7 +309,7 @@ void ent_edges_spread(char *arena, const int64_t *spec) {
   }
   free(starts);
   free(lengths);
-  *(int64_t *)(arena + spec[SPEC_MENDS]) = 0;
+  mends[0] = mends[2] = 0;
 }
 
 // Where in its target's run of the index the edge at `p` of the table is:
@@ -489,10 +490,14 @@ int32_t ent_edges_mend(char *arena, const int64_t *spec) {
   if (*count < used || mends[0] + (*count - used) > limit)
     return 1;
   int64_t changed = 0;
-  // (What it moves, in all: no more than a quarter of the table, beyond
-  // which a sort anew costs less; or than the table, where the moves are
-  // of runs side by side and not of slots all over.)
-  int64_t moved = 0, budget = e.positions ? used / 4 : used, borrowed = 0;
+  // (What it moves, in all since the last sort anew: no more than a sort
+  // anew costs, which goes over every key and edge; the edges counted as
+  // a quarter of the table where each edge moved moves a slot elsewhere
+  // too, not side by side.)
+  int64_t cost = e.keys + (e.positions ? used / 4 : used);
+  int64_t moved = 0, budget = cost - mends[2], borrowed = 0;
+  if (budget <= 0)
+    return 1;
   // The edges disconnected out of their runs, those after them down by one.
   char *dead = at(&e, SPEC_DEAD);
   for (int64_t p = 0; p < used;) {
@@ -575,7 +580,11 @@ int32_t ent_edges_mend(char *arena, const int64_t *spec) {
   }
   *count = used;
   mends[0] += changed;
-  mends[1] = borrowed > used / 32 ? WHY_CROWDED : WHY_NONE;
+  // (Room taken from far runs: the more of it since the last sort, the
+  // farther the next must go. Past half of what a sort costs, the next
+  // mending sorts anew, which gives room again.)
+  mends[2] += borrowed;
+  mends[1] = mends[2] > cost / 2 ? WHY_CROWDED : WHY_NONE;
   return 0;
 }
 

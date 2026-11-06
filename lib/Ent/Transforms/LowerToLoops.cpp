@@ -19785,15 +19785,17 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
       rewriter.setInsertionPointToStart(gather.getBody());
       list(gather.getInductionVar());
     };
-    // A slice is of the entities the query goes over by their components
-    // (`with`, `without`, `any`): where the archetype holds some of them
-    // optionally (a tag that is not apart, say), only the rows that have
-    // or lack them as asked are listed, one after another, so that the
-    // slice is taken of those. (Listing them all, the slice would be of
-    // all, and the body then pass over those without: the first k by the
-    // key might be none of those asked for.)
+    // Where the archetype holds some of the components the query goes
+    // over by (`with`, `without`, `any`) optionally (a tag that is not
+    // apart, say), only the rows that have or lack them as asked are
+    // listed, one after another: a slice is then of those (listing them
+    // all, the slice would be of all, and the body then pass over those
+    // without: the first k by the key might be none of those asked for),
+    // and only those are put in order (where few of many are asked for,
+    // as the asks waiting to be sent among all there were, the sort is
+    // of the few).
     PresenceTest test = getPresenceTest(query, ArchetypeOp(archetype->op));
-    if (!query.getSlice().empty() && !test.empty() && !spread) {
+    if (!test.empty() && !spread) {
       auto has = [&](FlatSymbolRefAttr component, Value row) -> Value {
         Value byte = memref::LoadOp::create(
             rewriter, loc,

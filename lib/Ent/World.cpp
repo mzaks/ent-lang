@@ -1133,7 +1133,7 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
         if (relation.positions)
           relation.slotOffset = place(offsetBytes, edges);
       }
-      relation.mendsOffset = place(8, 2);
+      relation.mendsOffset = place(8, 3);
     }
     // The orders an index of the relation keeps, where loops read them:
     // by its field (`by s.field`) or by the other end (`where v == b`), in

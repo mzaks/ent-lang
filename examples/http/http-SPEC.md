@@ -134,7 +134,10 @@ whose `hops` is one more.
 |---|---|---|
 | component `Depth` | `d: i32` | Links from the seed to this page (a redirect's: the redirected ask's). |
 | component `At` | `host: entity` | The host it goes to. |
-| component `Host` | `name, busy: i32` | A host it may go to (one entity each, from `allow`), and how many asks to it are out. |
+| component `Host` | `name, busy: i32, turns: i64, let_go: i64` | A host it may go to (one entity each, from `allow`); how many asks to it are out (or let go and not sent yet); how many of its asks have a turn, and how many of those were let go. |
+| component `Turn` | `n: i64` | An ask's place among its host's, in the order they were made (`be_polite`). |
+| component `LinkedFrom` | `page` | The page whose link made this ask: the `Links` edge is connected once the ask is known to be no duplicate (`merge`). |
+| tag `Html` | | An answer of 200 with HTML: a page whose links may be followed (`classify`, once, as it comes). |
 | relation `(Ask)-[Links]->(Ask)` | | Page links to page: the found graph, for the report. |
 | component `Robots` | `ask, known, rules, delay: f64, next: f64` | On a `Host`: the ask for its robots.txt, whether it is known (answered or failed for good), its rules for the crawler (none where it was not a 200), its `Crawl-delay` and when the next ask may go. |
 | tag `RobotsAsk`, `Disallowed` | | The ask for a robots.txt (nothing holds it back); an ask robots.txt does not allow (held for good). |
@@ -142,10 +145,13 @@ whose `hops` is one more.
 | unique `Rules` | `seed, allow, max_depth, per_host` | The crawl's settings (crawl.conf). |
 | unique `Level`, `Open` | | How deep the links followed are so far; asks not settled. |
 
-A link to a URL `ByUrl` already has adds a `Links` edge to that ask
-(and lowers its depth where the link is shorter) and spawns nothing.
-Links found in one frame to one new URL spawn an ask each; all but one
-are duplicates, merged by the crawler's `merge` into it (§5.2).
+A link to a URL an ask has that is known to be no duplicate (`Kept`)
+adds a `Links` edge to that ask (and lowers its depth where the link is
+shorter) and spawns nothing. Links found in one frame to one new URL
+spawn an ask each, which carries the page (`LinkedFrom`); all but one
+are duplicates, merged by the crawler's `merge` into it, the edge from
+each page then connected to the one kept (§5.2). So nothing reads
+`Links` before the report.
 
 ### 4.3 Bodies and URLs
 
@@ -187,11 +193,12 @@ Sending and receiving are the device's: `mock_send`, `answer` and `fill`
 | `inherit_depth`, `take_depth` | an `Ask` without `Depth` | A redirect's ask is as deep as its origin (two steps: a query that gives entities a `Depth` does not read that of others). | |
 | `place` | an `Ask` without `At` | Its host, by the hash index `HostByName`, once the host's robots.txt is known (`Held` till then); an ask to a host not allowed is destroyed, one robots.txt does not allow is `Disallowed`, `Handled` and held for good. | |
 | `read_robots` | `Robots`, the robots ask's `Got` or `Failed` | Once it is answered or has failed for good (after `retry`): its rules (robots.ent) where it answered 200, none else; the host's `known`. | |
-| `be_polite` | `Host`, `At`, `Sent` | At most `per_host` asks out to a host at once: the others `Held`, the oldest let go first (`in turn by serial`). | yes |
+| `be_polite` | `Host`, `At`, `Sent` | At most `per_host` asks out to a host at once: the others `Held`, the oldest let go first. Each new ask takes the next `Turn` at its host (`in turn by serial`, of the new ones) and is `Held`; each frame the host lets go as many more turns as it has room for, and the asks whose turn has come lose `Held` (no order of all that wait). | yes |
 | `pace` | `Robots`, `At` | A host's `Crawl-delay`: of its asks due, the oldest goes once the host's time has come, which is then that much later; the others wait for it (`next_at`). | yes |
-| `settle` | `Got`, `GaveUp` | Every answer but a page whose links are to be followed is `Handled` as it is. | |
-| `extract_links` | `Got` 200 with HTML, `Depth`, `Level` | Scans the body for links (§7.3); for each to an allowed host an `Ask` with `Depth d + 1`, or an edge to the one `ByUrl` has (its depth lowered); adds `Handled`. Only once every ask less deep is settled, and not at `max_depth`. | |
-| `merge` | duplicates | A duplicate's depth and the links to it go to the ask it is one of. | |
+| `classify` | `Got`, on added | `Html` where it is a 200 with HTML (the headers lowered and searched once). | |
+| `settle` | `Got`, `GaveUp`, `Html` | Every answer but a page whose links are to be followed is `Handled` as it is. | |
+| `extract_links` | `Html`, `Depth`, `Level` | Scans the body for links (§7.3); for each to an allowed host an `Ask` with `Depth d + 1` and `LinkedFrom`, or an edge to the one `Kept` has (its depth lowered); adds `Handled`. Only once every ask less deep is settled, and not at `max_depth`. | |
+| `merge` | duplicates, `LinkedFrom` | A duplicate's depth and the link that made it go to the ask it is one of; an ask that is none is linked to from its page. | |
 | `advance_level` | `Depth`, `Handled` | One level deeper once every ask at this one is settled; `Open`. | |
 | `conclude`, `report` | `Got`, `Failed`, `Links` | At the end: `Ending`, then a line for every ask, redirect, redirect not followed, slow ask and broken link (with the page that links to it). | |
 
@@ -199,7 +206,7 @@ Sending and receiving are the device's: `mock_send`, `answer` and `fill`
 
 One frame (crawl_mock.ent): `inherit_depth take_depth place drop_stale
 be_polite pace mock_send answer fill time_out warn_slow retry
-read_robots follow_redirect settle extract_links number_asks
+read_robots follow_redirect classify settle extract_links number_asks
 drop_duplicates merge forget_duplicates log history clean_up
 advance_level advance`. crawl_live.ent has `send receive fetch` where
 the mock has `drop_stale mock_send answer fill`, `cancel_late` after
@@ -533,7 +540,20 @@ around in the example, not in the compiler:
   level, looked at again each frame), `be_polite` and `pace` (every
   unsent ask sorted by serial), and `Links` sorted anew make ent 10
   times C's time there (bench/http/RESULTS.md, 9.1). Not a cost of the
-  pipeline's shape: of what each system visits.
+  pipeline's shape: of what each system visits. Partly fixed: `classify`
+  (a page `Html` once), `be_polite` by turns, `Links` connected only once
+  an ask is no duplicate, and in the compiler and devices/edges.c a
+  `for ... by` that sorts only the entities with its tags, room for new
+  entities' runs and sorts anew only once mending cost as much: 22.7 to
+  10.6 s (C 2.3). Left: a floor of loops over every ask (0.15 ms a
+  frame each at 10⁵), `on added` and the hash indexes' mending alike
+  (RESULTS.md, "Live, after the first per-frame fixes").
+- **Two spawns alike in what they require went to one archetype** (fixed
+  in C3): asks spawned with `LinkedFrom`, which `merge` removes, and the
+  seed's without it, both required `Ask, Twin, Depth`; the compiler made
+  one archetype for the first family and put the second's spawns in it,
+  which holds no `LinkedFrom` (an error at the spawn). Families alike in
+  what they require are one now, holding what either holds optionally.
 - **A relation's mending walked far for room** (fixed in C3). The sort
   of `Links` was 30 s of 52 at 10⁶ pages, though it sorted anew only 20
   times: the mending before each (devices/edges.c) looked for room past
@@ -549,7 +569,7 @@ around in the example, not in the compiler:
 | **C0** | §10.1 decided and, if a language feature, built with its own tests. | `extract_links` can make a URL `text`. |
 | **C1** | `site.py`, `pipeline.ent`, `crawl.ent`, `mock.ent`, `crawl_mock.ent`, `crawl_combined.ent`, `check/`. | K1 to K7, K10 and K12 (generated cases) pass on the mock; mock throughput measured. |
 | **C2** | `devices/http` and the local server with its httpbin endpoints and TLS listener. | D1 to D10 pass (done: test/Integration/http_device.test). |
-| **C3** | `crawl_live.ent`, `robots.txt`, `bench/http/crawl.c`. | K8, K9 and K11 pass (done: check/crawl.py --live); the live benchmark against C is measured and written down (done: bench/http/live.py, RESULTS.md: C 2.3 s at 10⁵ pages, ent 5.5 to 22.7 s, per-frame work over every waiting ask). |
+| **C3** | `crawl_live.ent`, `robots.txt`, `bench/http/crawl.c`. | K8, K9 and K11 pass (done: check/crawl.py --live); the live benchmark against C is measured and written down (done: bench/http/live.py, RESULTS.md: C 2.3 s at 10⁵ pages, ent 5.5 to 22.7 s, per-frame work over every waiting ask; after the first fixes 4.8 to 10.6 s). |
 | **C4** | The other crawlers' setups, the mirrored real site. | §9.2 measured and written down, every crawler verified first. |
 | **C5** | `sites.md`, crawls of the public sites. | §9.3 run; what it found is in K12 and D1 to D10. |
 | **C6** | A live window (Clay, `layout`, `window`): requests in flight, slow ones, errors, history. | Shows a crawl as it runs. |

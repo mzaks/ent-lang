@@ -70,6 +70,7 @@ schedule frame() {
   fill()
   handle_answers()
   read_robots()
+  classify()
   settle()
   extract_links()
   number_asks()

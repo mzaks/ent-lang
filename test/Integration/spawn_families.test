@@ -1,0 +1,8 @@
+// Spawns whose shapes differ only in a component that a system removes
+// share one archetype, which holds it optionally (before, the first
+// family's archetype was chosen for both, and the spawn with the
+// component was an error: it does not hold it).
+// RUN: %ent run %S/Inputs/spawn_families.ent 2>&1 | FileCheck %s
+
+// CHECK: total 0 marked 1 all 2
+// CHECK-NEXT: total 72 marked 0 all 2

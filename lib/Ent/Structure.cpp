@@ -676,9 +676,20 @@ LogicalResult mlir::ent::inferArchetypes(ModuleOp module) {
     for (bool joined = true; joined;) {
       joined = false;
       for (Family &other : families) {
+        // (Two members alike, or alike in what they require: an
+        // archetype holds both, with what either holds optionally.)
+        auto required = [](const Set &member, const Set &optional) {
+          Set wanted;
+          for (Attribute component : member)
+            if (!optional.contains(component))
+              wanted.insert(component);
+          return wanted;
+        };
         bool shared = llvm::any_of(other.members, [&](const Set &theirs) {
           return llvm::any_of(family.members, [&](const Set &ours) {
-            return same(ours, theirs);
+            return same(ours, theirs) ||
+                   same(required(ours, family.optional),
+                        required(theirs, other.optional));
           });
         });
         if (!shared)

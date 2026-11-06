@@ -2528,9 +2528,11 @@ entity's run (and of its target's in the index by target, where the
 relation is read both ways), one disconnected is taken out and those
 after it move down; so the order the loops see is the one a sort of all
 the edges gives. A run without room takes it from the nearest run that
-has some. All of them are sorted anew where more than a sixteenth of the
-edges changed since that was last done, or where room had to come from
-far; `ENT_EDGES_ANEW=1` in the environment sorts anew every time, to
+has some (every entity has room, also one with no edges yet: in a graph
+that grows, the new entities' runs). All of them are sorted anew where
+more than a sixteenth of the edges changed since that was last done, or
+where taking room from other runs since has moved about as much as a
+sort anew would (every entity and edge); `ENT_EDGES_ANEW=1` in the environment sorts anew every time, to
 hold the two against each other. (A program run by a C host keeps its
 edges side by side, as its header says.)
 

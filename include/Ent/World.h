@@ -287,8 +287,9 @@ struct WorldRelation {
   /// relation that systems connect or disconnect (not a tree): each key's
   /// run of edges ends at `ends` (and in the index at `indexEnds`), with
   /// room after it up to the next run; `slot` is each edge's position in
-  /// the index; `mends` (two i64s) how many edges changed since the last
-  /// sort anew, and why the last mending did not (devices/edges.c).
+  /// the index; `mends` (three i64s) how many edges changed since the last
+  /// sort anew, why the last mending did not, and how much mending moved
+  /// to make room since (devices/edges.c).
   uint64_t endsOffset = 0;
   uint64_t indexEndsOffset = 0;
   /// An index of the relation by a field of its edges, or by their other

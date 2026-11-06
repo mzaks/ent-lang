@@ -18,8 +18,12 @@ import pipeline
 component Depth { d: i32 }
 // The host it goes to.
 component At { host: entity }
-// A host it may go to, and how many asks to it are out.
-component Host { name: text, busy: i32 }
+// A host it may go to; how many asks to it are out (or let go and not
+// sent yet); how many of its asks were given a turn, and how many of
+// them let go (be_polite).
+component Host { name: text, busy: i32, turns: i64, let_go: i64 }
+// An ask's place among its host's, in the order they were made.
+component Turn { n: i64 }
 // A host's robots.txt (§8.2, K11): the ask for it; whether it is known
 // (answered, or failed for good); its rules for the crawler (as
 // robots.ent's robots_rules gives them: none, where it was not a 200);
@@ -31,6 +35,11 @@ tag RobotsAsk
 tag Disallowed
 // A page links to a page.
 relation (Ask)-[Links]->(Ask) capacity 4194304
+// The page whose link made this ask: the edge is connected once the ask
+// is known to be no duplicate, to the ask it is one of where it is (so
+// nothing reads `Links` before the report, and it is not sorted while
+// the crawl goes on).
+component LinkedFrom { page: entity }
 // How it ended, for the report: the status, or why there was none.
 component Ending { word: text }
 
@@ -86,7 +95,7 @@ system setup() {
                                  headers: "", body: "", origin: none, hops: 0, tries: 0,
                                  next_at: 0.0, serial: 0 },
                            Twin { of: none }, Depth { d: 0 }, RobotsAsk }
-      spawn { Host { name: name, busy: 0 },
+      spawn { Host { name: name, busy: 0, turns: 0, let_go: 0 },
               Robots { ask: robots, known: false, rules: "", delay: 0.0, next: 0.0 } }
     }
     at = end + 1
@@ -155,19 +164,28 @@ system read_robots() {
 }
 
 // At most `per_host` asks out to a host at once; the others held back,
-// the oldest let go first.
+// the oldest let go first. Each ask, as it comes, takes the next turn at
+// its host and waits; each frame a host lets go as many more turns as it
+// has room for. (So no frame puts the waiting asks in order: an ask let
+// go is one whose turn has come.)
 system be_polite() {
+  for me, a: Ask, at: At without Sent, Held, Turn in turn by a.serial {
+    if let n = Host(at.host).turns {
+      Host(at.host).turns = n + 1
+      me.add(Turn { n: n })
+      me.add(Held)
+    }
+  }
   for h: mut Host { h.busy = 0 }
   for a: Ask, at: At with Sent without Got, Failed { Host(at.host).busy += 1 }
-  for me, a: Ask, t: Twin, at: At without Sent, Disallowed in turn by a.serial
-      where t.of == none {
-    if let busy = Host(at.host).busy {
-      if busy < Rules.per_host {
-        Host(at.host).busy += 1
-        if me.has(Held) { me.remove(Held) }
-      } else if !me.has(Held) {
-        me.add(Held)
-      }
+  for a: Ask, at: At without Sent, Held { Host(at.host).busy += 1 }
+  for h: mut Host {
+    let more = h.let_go + (Rules.per_host - h.busy) as i64
+    if more > h.let_go { h.let_go = if more < h.turns { more } else { h.turns } }
+  }
+  for me, a: Ask, at: At, t: Turn with Held without Disallowed {
+    if let let_go = Host(at.host).let_go {
+      if t.n < let_go { me.remove(Held) }
     }
   }
 }
@@ -191,12 +209,21 @@ system pace() {
   }
 }
 
-// The links of a page that answered with HTML, once every ask less deep
-// is settled: an ask for each URL not asked for yet, an edge to each.
+// A page: an answer of 200 with HTML, which may have links to follow.
+// (Said once, as it comes: not looked at again each frame it waits for
+// the level.)
+tag Html
+system classify() {
+  for me, g: Got on added Got {
+    if g.status == 200 && is_html(g.headers) { me.add(Html) }
+  }
+}
+
+// The links of a page, once every ask less deep is settled: an ask for
+// each URL not asked for yet, an edge to each.
 system extract_links() {
-  for me, a: Ask, g: Got, d: Depth without Handled
-      where d.d <= Level && d.d < Rules.max_depth && g.status == 200 &&
-            is_html(g.headers) {
+  for me, a: Ask, g: Got, d: Depth with Html without Handled
+      where d.d <= Level && d.d < Rules.max_depth {
     let page = uncommented(g.body, 0)
     let low = lower(page)
     let (base, skip) = base_of(a.url, page, low)
@@ -204,13 +231,15 @@ system extract_links() {
     while at >= 0 {
       let (target, here) = next_link(base, page, low, at, skip)
       if len(target) > 0 && allowed(Rules.allow, host_of(target)) {
-        let known = ByUrl.get(target)
+        // (Only an ask known to be no duplicate: one made this frame may
+        // yet be one, and a new ask for its URL is merged with it.)
+        let known = Kept.get(target)
         if known == none {
-          let made = spawn { Ask { method: Method.Get, url: target, headers: "",
-                                   body: "", origin: me, hops: 0, tries: 0,
-                                   next_at: 0.0, serial: 0 },
-                             Twin { of: none }, Depth { d: d.d + 1 } }
-          connect (me)-[Links]->(made)
+          spawn { Ask { method: Method.Get, url: target, headers: "",
+                        body: "", origin: me, hops: 0, tries: 0,
+                        next_at: 0.0, serial: 0 },
+                  Twin { of: none }, Depth { d: d.d + 1 },
+                  LinkedFrom { page: me } }
         } else {
           Depth(known).d min= d.d + 1
           connect (me)-[Links]->(known)
@@ -226,23 +255,32 @@ system extract_links() {
 // redirect (followed by then), what is not HTML, a page as deep as may
 // be.
 system settle() {
-  for me, a: Ask, g: Got, d: Depth without Handled
-      where !retryable(g.status) && (g.status != 200 || !is_html(g.headers) ||
-                                     d.d >= Rules.max_depth) {
+  for me, a: Ask, g: Got, d: Depth without Handled, Html
+      where !retryable(g.status) {
+    me.add(Handled)
+  }
+  for me, a: Ask, d: Depth with Html without Handled
+      where d.d >= Rules.max_depth {
     me.add(Handled)
   }
   for me, a: Ask with GaveUp without Handled { me.add(Handled) }
 }
 
-// A duplicate's depth and the links to it go to the ask it is one of.
+// A duplicate's depth and the link that made it go to the ask it is one
+// of; an ask that is none is linked to from its page.
 system merge() {
-  for me, a: Ask, t: Twin, optional d: Depth where t.of != none {
+  for me, a: Ask, t: Twin, optional d: Depth, optional l: LinkedFrom
+      where t.of != none {
     if let deep = d.d {
       Depth(t.of).d min= deep
     } else {
       if let deep = Depth(a.origin).d { Depth(t.of).d min= deep }
     }
-    for (from)-[Links]->(me) { connect (from)-[Links]->(t.of) }
+    if let page = l.page { connect (page)-[Links]->(t.of) }
+  }
+  for me, t: Twin, l: LinkedFrom with Known where t.of == none {
+    connect (l.page)-[Links]->(me)
+    me.remove(LinkedFrom)
   }
 }
 

@@ -117,3 +117,66 @@ frame, `Links` mended where new pages' runs have no room. ent-par uses
 three to four times the CPU for the same wall time: its threads wait on
 the main thread's procs. C's peak memory is a seventh of ent's (the
 capacities for 10⁵ asks, links and history are made at the start).
+
+### Live, after the first per-frame fixes
+
+The same bench after these changes. Each was traced at 10⁵ pages and 64
+connections, one core:
+
+| change | crawl s |
+|---|---|
+| as above | 22.4 |
+| `Links` read only by the report: an ask a link made carries its page (`LinkedFrom`), and `merge` connects the edge once the ask is no duplicate | 22.3 |
+| relation mending (devices/edges.c): sorted anew only once the room taken since the last sort costs about as much as a sort (keys and edges), not after every mending that took room from far (1,356 sorts anew) | 17.7 |
+| `classify`: a page is `Html` once, as its answer comes; `settle` no longer lowers the headers of every waiting page each frame | 14.3 |
+| `be_polite` by turns: an ask takes the next turn at its host as it comes, and a host lets go as many turns as it has room for (no order of all that wait) | 14.6 |
+| a `for ... by` / `in turn by` puts in order only the entities that have and lack its tags as asked (before: every row of its archetypes, asking each in its turn: so `pace`, and `be_polite`'s order of the new asks, sorted all) | 12.3 |
+| room after every entity's run, also of those with no edge yet (new pages had none, and took it from ever farther) | 11.0 |
+
+The mock (`bench/http/mock.py`) after them: 10⁴ 0.120 / 0.150 s (one core
+/ all cores), 10⁵ 1.752 / 1.926, 10⁶ 22.201 / 22.469 (25.5 / 24.6
+before).
+
+The `Links` change alone gained nothing: a relation is kept in order
+after every system that connects or despawns, read or not, and the
+mending was what cost. Threads now sleep at once in a program on the
+http device, as in one with a window (tools/ent), so ent-par's CPU is
+ent's.
+
+| pages | connections | crawler | wall s | CPU s | peak MB | pages/s |
+|---|---|---|---|---|---|---|
+| 10⁴ | 64 | C | 1.021 | 0.125 | 18 | 10,310 |
+| 10⁴ | 64 | ent | 1.096 | 0.282 | 66 | 9,604 |
+| 10⁴ | 64 | ent-par | 1.125 | 0.339 | 68 | 9,358 |
+| 10⁴ | 256 | C | 1.050 | 0.143 | 24 | 10,027 |
+| 10⁴ | 256 | ent | 1.123 | 0.263 | 67 | 9,376 |
+| 10⁴ | 256 | ent-par | 1.126 | 0.296 | 66 | 9,353 |
+| 10⁴ | 1024 | C | 1.085 | 0.197 | 24 | 9,703 |
+| 10⁴ | 1024 | ent | 1.120 | 0.307 | 68 | 9,397 |
+| 10⁴ | 1024 | ent-par | 1.156 | 0.334 | 69 | 9,109 |
+| 10⁵ | 64 | C | 2.286 | 1.179 | 75 | 46,142 |
+| 10⁵ | 64 | ent | 10.636 | 9.705 | 484 | 9,918 |
+| 10⁵ | 64 | ent-par | 11.072 | 11.206 | 491 | 9,527 |
+| 10⁵ | 256 | C | 2.100 | 1.374 | 75 | 50,230 |
+| 10⁵ | 256 | ent | 5.738 | 5.148 | 441 | 18,383 |
+| 10⁵ | 256 | ent-par | 6.466 | 6.227 | 447 | 16,315 |
+| 10⁵ | 1024 | C | 2.979 | 2.265 | 76 | 35,413 |
+| 10⁵ | 1024 | ent | 4.827 | 4.317 | 442 | 21,856 |
+| 10⁵ | 1024 | ent-par | 5.258 | 4.721 | 444 | 20,061 |
+
+Left of the 11 s (64 connections, 5,190 frames): `receive` 2.4 s (curl
+and waiting), keeping `Links` 1.1 s, the hash indexes `Kept` and `ByUrl`
+1.8 s, `extract_links` 0.9 s (the pages waiting for their level,
+looked over each frame), the `on added` loops of `history` and `log`
+0.8 s, and some 20 loops of 0.1 to 0.2 ms a frame each. What is left is
+mostly a floor, not one system: a loop over the asks costs about
+0.15 ms a frame at 100,000 of them even where it does nothing for any
+of them (a tag not `apart` is a byte each entity has, and the loop asks
+each), as do an `on added` loop and a hash index's mending. C does
+nothing for an ask until it is its turn. To get there each loop should
+cost what changed in the frame, not how many asks there are: tags
+`apart` with small capacities for the states few asks are in (in
+flight, answered and not settled; `Handled apart` alone gained 0.7 s and
+cost 170 MB: an archetype of full capacity more), a log of what was
+added for `on added` loops and for the hash indexes, and the pages
+waiting for their level held apart until it comes.
