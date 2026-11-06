@@ -217,6 +217,17 @@ read once, the clock is rank 0's. In a `for` over distributed entities each
 rank calls the device for its own rows; what they write to standard output
 reaches rank 0, which writes it in their order.
 
+Each partition runs on a thread of its own, also where a process has one
+partition: never the process's main thread, which only waits for them. A
+proc a `for` over distributed entities calls is so called by each
+partition for its own rows, at once where partitions share a process (one
+at a time with `ENT_RUNNING=1`), and each process has its own of what the
+proc keeps, which what a system's proc sets (on rank 0 alone) is not.
+`ent build --ranks` says so at the call where the proc's code writes or
+reads global memory (the C library's standard streams aside), as it reads
+an extern fn's: give the proc what it needs as arguments, or call it
+outside the `for` (test/Integration/ranks_procs.test).
+
 An extern system (a system without a body, as `world`'s `save_world`)
 works on the whole world, where each rank has only its own rows of a
 distributed archetype: one that declares no reads or writes, or reads or

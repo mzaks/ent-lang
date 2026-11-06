@@ -1,0 +1,19 @@
+// An extern proc is called on the thread that runs the schedule, the
+// program's main thread: from a system and from a `for` over entities,
+// which a proc keeps on that thread, also where the program is built
+// --parallel. So a device whose state is its thread's (thread-local, or a
+// library that must stay on the thread it started on) may be a proc. A fn
+// is not so kept: the control, that the test sees other threads at all.
+// (On many ranks the thread is a partition's: ranks_procs.test.)
+// RUN: %ent build --no-cache %S/Inputs/proc_thread/proc_thread.ent -o %t.one 2>&1 | FileCheck %s --check-prefix=QUIET --allow-empty
+// RUN: %t.one | FileCheck %s --check-prefix=ONE
+// RUN: env ENT_PARALLEL_MIN=1 %ent build --no-cache --parallel %S/Inputs/proc_thread/proc_thread.ent -o %t.many 2>&1 | FileCheck %s --check-prefix=QUIET --allow-empty
+// RUN: %t.many | FileCheck %s --check-prefix=MANY
+
+// QUIET-NOT: warning
+
+// ONE:  procs off the main thread: outside 0, inside 0 of 300000
+// ONE:  fn off the main thread: none
+
+// MANY: procs off the main thread: outside 0, inside 0 of 300000
+// MANY: fn off the main thread: some

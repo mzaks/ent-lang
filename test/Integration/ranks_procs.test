@@ -1,0 +1,42 @@
+// Extern procs on many ranks (docs/ranks.md, Devices). A system's proc is
+// called by rank 0 alone; a proc in a `for` over distributed entities by
+// each partition for its own rows, on the partition's thread (never the
+// process's main thread), at once where partitions share a process
+// (one at a time with ENT_RUNNING=1). So `ent build --ranks` says where
+// such a proc's code keeps state (`tally`), and not for one that keeps
+// none (`twice`) or the console's `put`.
+// REQUIRES: mpi
+// RUN: %ent build --no-cache %S/Inputs/ranks_procs/ranks_procs.ent --ranks 4 --partitions -o %t.exe 2>&1 | FileCheck %s --check-prefix=WARN
+// RUN: %ent build --no-cache %S/Inputs/ranks_procs/ranks_procs.ent -o %t.one 2>&1 | FileCheck %s --check-prefix=QUIET --allow-empty
+// RUN: %t.one 2>&1 | sort | FileCheck %s --check-prefix=ONE
+// RUN: mpirun -n 2 --oversubscribe %t.exe 2>&1 | sort | FileCheck %s --check-prefix=TWO
+// RUN: mpirun -n 2 --oversubscribe -x ENT_RUNNING=1 %t.exe 2>&1 | sort | FileCheck %s --check-prefix=TURNS
+// RUN: mpirun -n 4 --oversubscribe %t.exe 2>&1 | sort | FileCheck %s --check-prefix=FOUR
+
+// WARN-NOT:   'twice'
+// WARN-NOT:   'put'
+// WARN:       ranks_procs.ent:20:16: warning: extern proc 'tally' is called in a `for` over distributed entities, and its C (ent_tally in {{.*}}ranks_procs.c) writes {{.*}}tally_calls{{.*}}. On many ranks each partition calls it for its own rows, at once where partitions share a process, and each process has its own of what it keeps: give it what it needs as arguments, or call it outside the `for`
+// WARN-NOT:   warning
+
+// QUIET-NOT:  warning
+
+// ONE:        calls: daily 3 tally 12000, threads 1, on main 12003, at once 1
+// ONE-NEXT:   day 1: 7998
+// ONE-NEXT:   day 2: 15996
+// ONE-NEXT:   day 3: 23994
+
+// TWO:        calls: daily 0 tally 6000, threads 2, on main 0,
+// TWO-NEXT:   calls: daily 3 tally 6000, threads 2, on main 0,
+// TWO-NEXT:   day 1: 7998
+// TWO-NEXT:   day 2: 15996
+// TWO-NEXT:   day 3: 23994
+
+// TURNS:      calls: daily 0 tally 6000, threads 2, on main 0, at once 1
+// TURNS-NEXT: calls: daily 3 tally 6000, threads 2, on main 0, at once 1
+// TURNS-NEXT: day 1: 7998
+
+// FOUR:       calls: daily 0 tally 3000, threads 1, on main 0, at once 1
+// FOUR-NEXT:  calls: daily 0 tally 3000, threads 1, on main 0, at once 1
+// FOUR-NEXT:  calls: daily 0 tally 3000, threads 1, on main 0, at once 1
+// FOUR-NEXT:  calls: daily 3 tally 3000, threads 1, on main 0, at once 1
+// FOUR-NEXT:  day 1: 7998

@@ -1,0 +1,27 @@
+// Extern procs on many ranks (ranks_procs.test): one a system calls, which
+// rank 0 calls alone; and those a `for` over distributed entities calls,
+// which each partition calls for its own rows. `tally` keeps counts, so
+// `ent build --ranks` says so where the `for` calls it; `twice` keeps
+// nothing and `put` writes the console, which the ranks gather: no word.
+import console
+component Cell { number: i32, value: i64 } capacity 4000
+distribute Cell by number
+unique Seen { days: i64 }
+
+extern proc daily() -> i64
+extern proc tally(n: i32) -> i64
+extern proc twice(n: i32) -> i64
+
+world { for i in 0..4000 { spawn { Cell { number: i, value: 0 } } } }
+
+system step() {
+  Seen.days += daily()
+  for c: mut Cell {
+    c.value += tally(c.number) + twice(c.number)
+    if c.number == 3999 { put("day {Seen.days}: {c.value}") }
+  }
+}
+
+schedule day() { step() }
+
+main { loop { day() } until Seen.days >= 3 }

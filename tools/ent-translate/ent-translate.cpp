@@ -15,6 +15,7 @@
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/FormatVariadic.h"
 
+#include <functional>
 #include <set>
 
 using namespace mlir;
@@ -250,8 +251,85 @@ static std::string whereOf(Location loc) {
 /// gave before (as many as a table of 4096 keeps, by a hash of them). Where
 /// they differ it says so and stops the program.
 ///
+/// The extern procs a `for` over distributed entities calls, by way of the
+/// program's own procs too: (the proc, where the `for` calls it). On many
+/// ranks each partition calls them for its own rows, at once where
+/// partitions share a process, and each process has its own of what they
+/// keep.
+static SmallVector<std::pair<FunctionOp, Location>>
+distributedProcs(ModuleOp module) {
+  SymbolTable symbols(module);
+  llvm::StringSet<> distributed;
+  for (ComponentOp component : module.getOps<ComponentOp>())
+    if (component->hasAttr(WorldLayout::kDistributeAttr))
+      distributed.insert(component.getSymName());
+  SmallVector<std::pair<FunctionOp, Location>> found;
+  if (distributed.empty())
+    return found;
+  // (A query is over distributed entities where an archetype it matches
+  // holds a distributed component; where there are no archetypes yet, where
+  // it requires one.)
+  auto overDistributed = [&](QueryOp query) {
+    SmallVector<FlatSymbolRefAttr> required = query.getRequired();
+    SmallVector<FlatSymbolRefAttr> without = query.getWithout();
+    bool anyArchetype = false;
+    for (ArchetypeOp archetype : module.getOps<ArchetypeOp>()) {
+      anyArchetype = true;
+      llvm::StringSet<> held;
+      for (Attribute attr : archetype.getComponents())
+        held.insert(cast<FlatSymbolRefAttr>(attr).getValue());
+      if (llvm::any_of(required, [&](FlatSymbolRefAttr name) {
+            return !held.contains(name.getValue());
+          }) ||
+          llvm::any_of(without, [&](FlatSymbolRefAttr name) {
+            return held.contains(name.getValue());
+          }))
+        continue;
+      if (llvm::any_of(held.keys(), [&](StringRef name) {
+            return distributed.contains(name);
+          }))
+        return true;
+    }
+    return !anyArchetype &&
+           llvm::any_of(required, [&](FlatSymbolRefAttr name) {
+             return distributed.contains(name.getValue());
+           });
+  };
+  llvm::StringSet<> said;
+  std::function<void(Operation *, Location, llvm::StringSet<> &)> walk =
+      [&](Operation *body, Location at, llvm::StringSet<> &seen) {
+        body->walk([&](InvokeOp invoke) {
+          if (!invoke.getProc())
+            return;
+          auto callee =
+              symbols.lookup<FunctionOp>(invoke.getCallee());
+          if (!callee || !seen.insert(callee.getSymName()).second)
+            return;
+          // (Where the `for` calls it: the call in the `for`, also for an
+          // extern proc that a proc of the program calls.)
+          Location where = body->getParentOfType<QueryOp>() ||
+                                   isa<QueryOp>(body)
+                               ? invoke.getLoc()
+                               : at;
+          if (callee.isDefined())
+            walk(callee, where, seen);
+          else if (said.insert(callee.getSymName()).second)
+            found.push_back({callee, where});
+        });
+      };
+  module.walk([&](QueryOp query) {
+    if (!overDistributed(query))
+      return;
+    llvm::StringSet<> seen;
+    walk(query, query.getLoc(), seen);
+  });
+  return found;
+}
+
 /// It starts with a line `// fn <C name> <name> <where>` for each, which
-/// `ent build` reads for its static check of the C.
+/// `ent build` reads for its static check of the C, and a line
+/// `// distributed <C name> <name> <where it is called>` for each extern
+/// proc a `for` over distributed entities calls (distributedProcs).
 static LogicalResult emitExternChecks(ModuleOp module, raw_ostream &os) {
   SmallVector<FunctionOp> functions;
   for (FunctionOp function : module.getOps<FunctionOp>())
@@ -266,6 +344,9 @@ static LogicalResult emitExternChecks(ModuleOp module, raw_ostream &os) {
   for (FunctionOp function : functions)
     os << llvm::formatv("// fn {0} {1} {2}\n", function.getCName(),
                         function.getSymName(), whereOf(function.getLoc()));
+  for (auto [proc, where] : distributedProcs(module))
+    os << llvm::formatv("// distributed {0} {1} {2}\n", proc.getCName(),
+                        proc.getSymName(), whereOf(where));
   os << "\n#include \"ent_extern.h\"\n\n"
         "#include <inttypes.h>\n#include <stdatomic.h>\n#include <stdio.h>\n"
         "#include <stdlib.h>\n#include <string.h>\n\n"

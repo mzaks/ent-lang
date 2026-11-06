@@ -1,0 +1,30 @@
+// Which thread calls an extern proc (proc_thread.test): the one that runs
+// the schedule, the program's main thread, from a system and from a `for`
+// over entities, also built --parallel (a `for` that calls a proc is
+// gone through on that thread). A fn in a `for` without a proc may be
+// called from any of the threads that go through it.
+component Item { n: i64 } capacity 100000
+unique Seen { calls: i64, sum: i64 }
+
+extern proc outside() -> i64
+extern proc inside(n: i64) -> i64
+extern fn pure(n: i64) -> i64
+extern proc report()
+
+world { for i in 0..100000 { spawn { Item { n: i as i64 } } } }
+
+system step() {
+  Seen.calls += outside()
+  for it: mut Item { it.n += inside(it.n) }
+  for it: Item { Seen.sum += pure(it.n) }
+}
+
+system tell() { report() }
+
+schedule day() { step() }
+schedule end() { tell() }
+
+main {
+  loop { day() } until Seen.calls >= 3
+  end()
+}

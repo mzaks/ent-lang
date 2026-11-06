@@ -2865,6 +2865,13 @@ has nothing to get wrong about it. Prefer them to extern systems.
   among all other systems, and a `for` that calls one visits its entities
   in order, one at a time. A proc is called as a statement, or as an
   expression where it gives a value.
+- A proc is called on the thread that runs the schedule, the program's
+  main thread, also from a `for` and also where the program is built
+  `--parallel` (a `for` that calls one is gone through on that thread):
+  a device whose state is its thread's (thread-local, or a library that
+  must stay on the thread it started on) may be a proc
+  (test/Integration/proc_thread.test). On many ranks each partition's
+  thread is its own, never the process's main thread (docs/ranks.md).
 - They are called in systems and in `world`, not in `main` or a `run_if`
   condition: those read uniques, which a system has written.
 - Parameters and results are numbers and bools; a parameter may also be a

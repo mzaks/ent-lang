@@ -931,8 +931,7 @@ def global_pointers(lines, globals_):
             elif re.match(r"(getelementptr|phi|select|bitcast|addrspacecast"
                           r"|freeze)\b", rest):
                 for word in re.findall(IR_GLOBAL + "|" + IR_VALUE, rest):
-                    if word.startswith("@") and mutable(word) and \
-                            not rest.startswith(("phi", "select")):
+                    if word.startswith("@") and mutable(word):
                         candidate = (mutable(word), 0)
                     elif word in derived:
                         candidate = derived[word]
@@ -1034,13 +1033,15 @@ def why_not_pure(name, functions, globals_, seen=None, harmless=None):
         if re.match(r"\s*store ", line):
             address = line.rsplit(", ptr ", 1)[-1].split()[0] \
                 if ", ptr " in line else None
-        elif re.search(r"= (atomicrmw|cmpxchg|load) ", line):
-            found = re.search(r"\bptr\s+(\S+)", line.split(" = ", 1)[1])
+        # (An atomic change whose result is not used has no `%x = `.)
+        changes = re.match(r"\s*(?:" + IR_VALUE + r" = )?(atomicrmw|cmpxchg) ",
+                           line)
+        if changes or re.search(r"= load ", line):
+            found = re.search(r"\bptr\s+(\S+)", line.split(" = ", 1)[-1])
             address = found.group(1) if found else None
         simple = address is not None and re.fullmatch(
             "(?:" + IR_GLOBAL + "|" + IR_VALUE + "),?", address)
-        if re.match(r"\s*store ", line) or re.search(r"= (atomicrmw|cmpxchg) ",
-                                                     line):
+        if re.match(r"\s*store ", line) or changes:
             if simple:
                 writes += [memory(address)] if memory(address) else []
             else:
@@ -1103,6 +1104,44 @@ def why_not_pure(name, functions, globals_, seen=None, harmless=None):
     return (unique(writes), [name for name in unique(reads)
                              if name not in writes and "*" + name not in
                              writes], unique(calls))
+
+
+# (What every process has of its own and alike, which a proc may use on
+# every rank: the C library's standard streams, by their names in glibc,
+# macOS and Windows' C libraries.)
+STANDARD_STREAMS = {"stdout", "stderr", "stdin", "__stdoutp", "__stderrp",
+                    "__stdinp", "_IO_2_1_stdout_", "_IO_2_1_stderr_",
+                    "_IO_2_1_stdin_"}
+
+
+def distributed_warning(cname, name, where, language, shown, functions,
+                        globals_):
+    """Says, at where a `for` over distributed entities calls the extern
+    proc `name`, that its code writes or reads global memory: on many ranks
+    each partition calls it for its own rows (at once where partitions
+    share a process, from threads of their own), and each process has its
+    own of what it keeps, which what a proc called outside a `for` sets
+    (on rank 0 alone) is not."""
+    writes, reads, _ = why_not_pure(cname, functions, globals_)
+    writes = [w for w in writes if w.lstrip("*") not in STANDARD_STREAMS]
+    reads = [r for r in reads if r.lstrip("*") not in STANDARD_STREAMS]
+    if not writes and not reads:
+        return
+    writes, reads = named_memory(writes), named_memory(reads)
+    said = []
+    if writes:
+        said.append("writes " + ", ".join(writes[:4]) +
+                    (" and more" if len(writes) > 4 else ""))
+    if reads:
+        said.append("reads " + ", ".join(reads[:4]) +
+                    (" and more" if len(reads) > 4 else ""))
+    sys.stderr.write(
+        f"{where or shown}: warning: extern proc '{name}' is called in a "
+        f"`for` over distributed entities, and its {language} ({cname} in "
+        f"{shown}) {' and '.join(said)}. On many ranks each partition calls "
+        "it for its own rows, at once where partitions share a process, and "
+        "each process has its own of what it keeps: give it what it needs "
+        "as arguments, or call it outside the `for`\n")
 
 
 def named_memory(names):
@@ -1213,7 +1252,7 @@ def emitted_ir(emit, index, clang, cc, cxx, directory, host, verbose):
 
 
 def check_externs(clang, cc, cxx, sources, crates, emits, fns, directory,
-                  flags, host, verbose):
+                  flags, host, verbose, distributed=()):
     """Says, as warnings at their declarations, which extern fns the C of
     the program's modules, or their Rust, shows are no fns: that write or
     read what their arguments do not decide, or call what cannot be seen
@@ -1223,10 +1262,16 @@ def check_externs(clang, cc, cxx, sources, crates, emits, fns, directory,
     C file is compiled to LLVM IR by the LLVM of the compiler, optimised
     (inlined, its functions' memory worked out); each Rust crate (the
     folder of a module's .build with a Cargo.toml) by cargo. Those not
-    found in either (in an object, say) are said with `verbose`."""
-    if not fns:
+    found in either (in an object, say) are said with `verbose`.
+
+    `distributed` (on many ranks): the extern procs a `for` over
+    distributed entities calls, (C name, name, where it is called), said
+    where their code writes or reads global memory
+    (distributed_warning)."""
+    if not fns and not distributed:
         return
     left = dict((cname, (name, where)) for cname, name, where in fns)
+    procs = dict((cname, (name, where)) for cname, name, where in distributed)
     readings = []
     for index, source in enumerate(sources):
         language = "c++" if source.endswith(".cpp") else "c"
@@ -1329,6 +1374,12 @@ def check_externs(clang, cc, cxx, sources, crates, emits, fns, directory,
                 f"{where or shown}: warning: extern fn '{name}' {what}: its "
                 f"{language} ({cname} in {shown}) {' and '.join(said)}. "
                 f"{advice}\n")
+        for cname in [cname for cname in procs if cname in functions
+                      and functions[cname][0]]:
+            name, where = procs.pop(cname)
+            if cname not in vouched:
+                distributed_warning(cname, name, where, language, shown,
+                                    functions, globals_)
     if verbose:
         for cname, (name, where) in left.items():
             sys.stderr.write(f"{where}: note: extern fn '{name}' is "
@@ -1564,13 +1615,14 @@ def build(arguments, output, directory):
     # --check-externs, as it runs (the C that checks, below).
     checks = os.path.join(directory, "ent_checks.c")
     run([translate, "--ent-to-c-extern-checks", module, "-o", checks])
-    fns = []
+    fns, distributed = [], []
     with open(checks) as source:
         for line in source:
-            found = re.match(r"// fn (\S+) (\S+) ?(.*)$", line)
+            found = re.match(r"// (fn|distributed) (\S+) (\S+) ?(.*)$", line)
             if found:
-                fns.append(found.groups())
-            elif fns and not line.startswith("//"):
+                (fns if found.group(1) == "fn" else distributed).append(
+                    found.groups()[1:])
+            elif not line.startswith("//"):
                 break
     if not arguments.windows:
         extra = []
@@ -1580,7 +1632,8 @@ def build(arguments, output, directory):
         if arguments.ranks:
             extra += mpi_flags()[0]
         check_externs(clang, cc, cxx, implementing, crates, emits, fns,
-                      directory, extra, host, arguments.check_externs)
+                      directory, extra, host, arguments.check_externs,
+                      distributed if arguments.ranks else ())
     # What of the program that C calls, which keeps its name; the rest
     # of it is the program's own (internal), which LLVM inlines where it
     # is called from one place, or where that pays, and drops where it is
