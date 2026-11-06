@@ -12,7 +12,9 @@
 // STATIC-NOT: 'key_sum'
 // STATIC:     externs_rust.ent:11:11: warning: extern fn 'counted' is no fn: its Rust (ent_counted in {{.*}}externs_rust{{/|\\}}Cargo.toml) writes externs_rust::CALLS. A fn may be called at another time, fewer times or on many threads at once: declare it 'extern proc'
 // STATIC:     externs_rust.ent:12:11: warning: extern fn 'scaled' may give another result for the same arguments: its Rust (ent_scaled in {{.*}}Cargo.toml) reads externs_rust::SCALE. A fn may be called at another time or fewer times: declare it 'extern proc', or vouch for it with `#[no_mangle] pub static ent_same_result_ent_scaled: u8 = 0;` where what it reads does not change once it is called
-// STATIC:     externs_rust.ent:13:11: warning: extern fn 'first_key' cannot be checked: its Rust (ent_first_key in {{.*}}Cargo.toml) calls {{.*}}hashmap_random_keys(). Vouch for it with
+// (A HashMap's RandomState counts its keys up in a thread-local: written
+// through what holds them.)
+// STATIC:     externs_rust.ent:13:11: warning: extern fn 'first_key' is no fn: its Rust (ent_first_key in {{.*}}Cargo.toml) writes {{.*}}KEYS{{.*}} and calls {{.*}}hashmap_random_keys(). A fn may be called
 // STATIC-NOT: warning
 
 // OUT: 14 5 45 1 6

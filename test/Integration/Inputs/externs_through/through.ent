@@ -1,0 +1,15 @@
+// Extern fns whose C (through.c) is shaped as Goose's: a check that the
+// program has started, which is no reason they are not fns, and data
+// stacks reached through a global pointer, which are (externs_through.test).
+extern fn mix(x: u64) -> u64
+extern fn stacked(n: i32) -> i64
+extern fn thread_stacked(n: i32) -> i64
+extern proc say(line: text[62])
+
+system run() {
+  say("mix {mix(1)} stacked {stacked(30)} {thread_stacked(40)}")
+}
+
+schedule once() { run() }
+
+main { once() }

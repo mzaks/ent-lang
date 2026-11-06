@@ -2891,9 +2891,14 @@ Whether an extern fn keeps its word, `ent build` checks in two ways:
   touches nothing but its arguments (errno aside) passes; so does one
   that only has memory and gives it back (malloc and free, Rust's `Vec`)
   or has a way out that does not return (an `abort`, a Rust panic, and
-  what it does just before, saying why).
+  what it does just before, saying why), and reading a flag only to
+  decide whether to take that way out (has the program started? an
+  assert's) is no reason either.
   Otherwise a warning at its declaration says what its C does: it is no
-  fn where it writes memory of its own (a count of its calls); it may
+  fn where it writes memory of its own (a count of its calls), or memory
+  it reaches through a global's pointer, plain or thread-local ("writes
+  what stacks points to": a data stack, as the C Goose makes keeps, or a
+  HashMap's keys in Rust); it may
   give another result for the same arguments where it reads such memory
   (a scale a proc sets); it cannot be checked where it calls what LLVM
   cannot see into (a library, another file). Where its result depends on

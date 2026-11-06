@@ -884,6 +884,99 @@ def harmless_call(callee, attributes, after):
             any(part in callee for part in RUNTIME_HARMLESS))
 
 
+# (An IR value's name, and a global's: %5, %"a b", @g, @"std::x".)
+IR_VALUE = r'%"[^"]+"|%[\w.$-]+'
+IR_GLOBAL = r'@"[^"]+"|@[\w.$]+'
+
+
+def ir_uses(name, line):
+    """Whether an IR line uses the value `name` (as a whole word)."""
+    return re.search(r'(?<![\w.$"-])' + re.escape(name) + r'(?![\w.$"-])',
+                     line) is not None
+
+
+def global_pointers(lines, globals_):
+    """The values of a function's IR that point into a global's memory:
+    value -> (the global, 0 where it is the global's own, 1 where it was
+    reached through a pointer read out of it, as a data stack is through
+    the global that holds it). Through `getelementptr`, `phi`, `select`
+    and casts, and where the global is thread-local, through
+    `llvm.threadlocal.address`."""
+    def mutable(word):
+        word = word[1:].strip('"')
+        return word if word in globals_ and not globals_[word] else None
+    derived, changed = {}, True
+    while changed:
+        changed = False
+        for line in lines:
+            found = re.match(r"\s*(" + IR_VALUE + r") = (.*)", line)
+            if not found:
+                continue
+            value, rest = found.group(1), found.group(2).split(";")[0]
+            point = None
+            if re.match(r"(?:tail |musttail |notail )?call ", rest) and \
+                    "@llvm.threadlocal.address" in rest:
+                named = [mutable(word) for word in
+                         re.findall(IR_GLOBAL, rest.split("(", 1)[1])]
+                point = next(((word, 0) for word in named if word), None)
+            elif re.match(r"load (?:atomic )?(?:volatile )?ptr,", rest):
+                address = re.search(r",\s*ptr\s+(" + IR_GLOBAL + "|" +
+                                    IR_VALUE + ")", rest)
+                if address:
+                    word = address.group(1)
+                    if word.startswith("@") and mutable(word):
+                        point = (mutable(word), 1)
+                    elif word in derived:
+                        point = (derived[word][0], 1)
+            elif re.match(r"(getelementptr|phi|select|bitcast|addrspacecast"
+                          r"|freeze)\b", rest):
+                for word in re.findall(IR_GLOBAL + "|" + IR_VALUE, rest):
+                    if word.startswith("@") and mutable(word) and \
+                            not rest.startswith(("phi", "select")):
+                        candidate = (mutable(word), 0)
+                    elif word in derived:
+                        candidate = derived[word]
+                    else:
+                        continue
+                    if point is None or candidate[1] > point[1]:
+                        point = candidate
+            if point and derived.get(value) != point:
+                derived[value] = point
+                changed = True
+    return derived
+
+
+def deciding_loads(lines, leaving_labels):
+    """The lines of a function's IR that load a value used for nothing
+    but to decide whether to leave by a way out (a branch to a block that
+    ends in `unreachable`, as a check that has the program started, or an
+    assert's, does): reading it is no reason a fn is none."""
+    def only_decides(value, depth=0):
+        for line in lines:
+            if line.lstrip().startswith(value + " =") or \
+                    not ir_uses(value, line):
+                continue
+            branch = re.match(r"\s*br i1 (\S+), label (%\S+), label (%\S+)",
+                              line)
+            if branch and branch.group(1) == value:
+                if {branch.group(2).rstrip(",")[1:].strip('"'),
+                        branch.group(3)[1:].strip('"')} & leaving_labels:
+                    continue
+                return False
+            step = re.match(r"\s*(" + IR_VALUE + r") = (icmp|trunc|zext|"
+                            r"sext|xor|and|or|freeze)\b", line)
+            if step and depth < 8 and only_decides(step.group(1), depth + 1):
+                continue
+            return False
+        return True
+    deciding = set()
+    for at, line in enumerate(lines):
+        found = re.match(r"\s*(" + IR_VALUE + r") = load ", line)
+        if found and only_decides(found.group(1)):
+            deciding.add(at)
+    return deciding
+
+
 def why_not_pure(name, functions, globals_, seen=None, harmless=None):
     """What a function does that makes it no fn, as LLVM IR shows it:
     which globals it writes and reads, and what it calls that cannot be
@@ -897,13 +990,33 @@ def why_not_pure(name, functions, globals_, seen=None, harmless=None):
     lines = functions[name][2] or []
     # (A block that ends in `unreachable` is the way out: what it does
     # before, saying why, say, changes nothing given back.)
-    leaving, block = set(), []
+    leaving, block, label, leaving_labels = set(), [], None, set()
     for at, line in enumerate(lines):
-        if re.match(r"[\w.$\"-]+:", line):
-            block = []
+        found = re.match(r'("[^"]+"|[\w.$-]+):', line)
+        if found:
+            block, label = [], found.group(1).strip('"')
         block.append(at)
         if line.strip().startswith("unreachable"):
             leaving.update(block)
+            if label is not None:
+                leaving_labels.add(label)
+    # (Where the memory a value points to is a global's, or reached through
+    # one, as Goose's data stacks are; and the reads that only decide
+    # whether to leave, as a check that the program has started does.)
+    derived = global_pointers(lines, globals_)
+    deciding = deciding_loads(lines, leaving_labels)
+
+    def memory(word):
+        """The global memory an address names: g, *g (through g), or
+        None."""
+        word = word.rstrip(",")
+        if word.startswith("@") and word[1:].strip('"') in globals_ and \
+                not globals_[word[1:].strip('"')]:
+            return word[1:].strip('"')
+        if word in derived:
+            return ("*" if derived[word][1] else "") + derived[word][0]
+        return None
+
     for at, line in enumerate(lines):
         if at in leaving:
             if re.search(r"\b(?:call|invoke) ", line):
@@ -914,10 +1027,32 @@ def why_not_pure(name, functions, globals_, seen=None, harmless=None):
         named = [word.strip('"') for word in re.findall(
             r'@("[^"]+"|[\w.$]+)', line)
             if word.strip('"') in globals_ and not globals_[word.strip('"')]]
+        # (Where a store or a load is to: its address, a global's or one
+        # pointing into one; the names of the line where it is no simple
+        # value, a constant expression say.)
+        address = None
+        if re.match(r"\s*store ", line):
+            address = line.rsplit(", ptr ", 1)[-1].split()[0] \
+                if ", ptr " in line else None
+        elif re.search(r"= (atomicrmw|cmpxchg|load) ", line):
+            found = re.search(r"\bptr\s+(\S+)", line.split(" = ", 1)[1])
+            address = found.group(1) if found else None
+        simple = address is not None and re.fullmatch(
+            "(?:" + IR_GLOBAL + "|" + IR_VALUE + "),?", address)
         if re.match(r"\s*store ", line) or re.search(r"= (atomicrmw|cmpxchg) ",
                                                      line):
-            writes += named
-        elif re.search(r"= load |getelementptr", line):
+            if simple:
+                writes += [memory(address)] if memory(address) else []
+            else:
+                writes += named
+        elif re.search(r"= load ", line):
+            if at in deciding:
+                pass
+            elif simple:
+                reads += [memory(address)] if memory(address) else []
+            else:
+                reads += named
+        elif re.search(r"getelementptr", line):
             reads += named
         if re.search(r"\b(?:call|invoke) [^@%(]*\basm\b", line):
             calls.append("inline assembly")
@@ -931,6 +1066,19 @@ def why_not_pure(name, functions, globals_, seen=None, harmless=None):
             calls.append("a function by its address")
             continue
         callee = callee[1:].strip('"')
+        # (The pointers into globals' memory it is given: what it writes
+        # through them, a memset's or memcpy's first, or a function's that
+        # writes what it is given, is written.)
+        given = [memory(word) for word in re.findall(
+            IR_GLOBAL + "|" + IR_VALUE, line[called.end():])]
+        if re.match(r"llvm\.mem(set|cpy|move)", callee):
+            if given and given[0]:
+                writes.append(given[0])
+            reads += [word for word in given[1:2] if word]
+            continue
+        if callee in functions and memory_of(functions[callee][1],
+                                             ("argmem",)) == "writes":
+            writes += [word for word in given if word]
         # (What LLVM's intrinsics do, the function's own attributes say.)
         if callee.startswith("llvm.") or callee not in functions \
                 or callee in seen:
@@ -950,8 +1098,19 @@ def why_not_pure(name, functions, globals_, seen=None, harmless=None):
         else:
             calls.append(callee + "()")
     unique = lambda names: list(dict.fromkeys(names))
+    # (A global read for the pointer it holds is said by what is written
+    # through that.)
     return (unique(writes), [name for name in unique(reads)
-                             if name not in writes], unique(calls))
+                             if name not in writes and "*" + name not in
+                             writes], unique(calls))
+
+
+def named_memory(names):
+    """Globals as why_not_pure gives them, as they are said: g, or "what g
+    points to" for *g; demangled."""
+    told = demangled([name.lstrip("*") for name in names])
+    return [f"what {plain} points to" if name.startswith("*") else plain
+            for name, plain in zip(names, told)]
 
 
 def demangled(names):
@@ -1118,7 +1277,11 @@ def check_externs(clang, cc, cxx, sources, crates, emits, fns, directory,
                                           "target_mem1")) in ("pure",
                                                               "unknown"):
                 continue
-            writes, reads = demangled(writes), demangled(reads)
+            # (What it writes, where its attributes say nothing, as where it
+            # writes through a global's pointer and has a way out.)
+            if writes:
+                kind = "writes"
+            writes, reads = named_memory(writes), named_memory(reads)
             called = [call[:-2] for call in calls if call.endswith("()")]
             written = dict(zip(called, demangled(called)))
             calls = [written[call[:-2]] + "()" if call.endswith("()")

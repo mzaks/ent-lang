@@ -1,0 +1,13 @@
+// Extern fns whose C is shaped as the C Goose makes (Inputs/externs_through):
+// what they write through a global's pointer, as a data stack, plain or
+// thread-local, makes them no fns; reading a flag only to leave where it
+// is not set (has the program started?) is no reason, as an abort is not.
+// RUN: %ent build --no-cache %S/Inputs/externs_through/through.ent -o %t.exe 2>&1 | FileCheck %s --check-prefix=STATIC
+// RUN: %t.exe | FileCheck %s --check-prefix=OUT
+
+// STATIC-NOT: 'mix'
+// STATIC:     through.ent:5:11: warning: extern fn 'stacked' is no fn: its C (ent_stacked in {{.*}}through.c) writes what stacks points to. A fn may be called at another time, fewer times or on many threads at once: declare it 'extern proc'
+// STATIC:     through.ent:6:11: warning: extern fn 'thread_stacked' is no fn: its C (ent_thread_stacked in {{.*}}through.c) writes what thread_stacks points to.
+// STATIC-NOT: warning
+
+// OUT: mix 6238072747940578789 stacked 900 1600
