@@ -716,7 +716,8 @@ def Ent_FunctionOp : Ent_Op<"function", [Symbol, IsolatedFromAbove]> {
 
     Without a body it is implemented in C. A bool then crosses as a C
     `bool`, a text as a pointer to its struct (`const ent_text126 *`); a
-    text cannot be the result.
+    text of any length is given back as the address of its block
+    (`ent_text_new`'s, one it was given, or none).
 
     With a body it is the program's own: the entry block's arguments are
     its parameters, and `ent.yield` ends it with its value. The body only

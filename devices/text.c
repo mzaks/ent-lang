@@ -128,6 +128,11 @@ static void ent_text_free(ent_text_made *made) {
   }
 }
 
+// A text an extern fn or proc gives back: `length` bytes for C to fill
+// (and a 0 after them, there already), kept as long as a joined text is.
+// Any thread may make one.
+ent_text *ent_text_new(uint32_t length) { return ent_text_make(length); }
+
 // The bytes of `a` and then those of `b`.
 uint64_t ent_text_join(uint64_t a, uint64_t b) {
   const ent_text *left = ent_text_of(a), *right = ent_text_of(b);
@@ -257,4 +262,75 @@ void ent_text_cut(uint64_t view, uint64_t out, int32_t capacity) {
   char *to = (char *)(uintptr_t)out;
   memcpy(to, &length, sizeof length);
   memcpy(to + sizeof length, text->bytes, length);
+}
+
+// What a program calls (devices/text.ent): fns over texts, each giving a
+// new text where it gives one (`ent_text_new`), or the one it was given
+// where that is the same. Their results depend on their arguments alone;
+// what they make is memory the program has and gives back.
+#if defined(__clang__)
+#define ENT_TEXT_SAME_RESULT __attribute__((annotate("ent.same_result")))
+#else
+#define ENT_TEXT_SAME_RESULT
+#endif
+
+// Where `what` is in `text` first, from byte `from` on; -1 where it is
+// not. (An empty `what` is at `from`, where that is in the text or just
+// after it.)
+ENT_TEXT_SAME_RESULT int32_t ent_text_find(const ent_text *text,
+                                           const ent_text *what,
+                                           int32_t from) {
+  text = text ? text : &ent_text_none;
+  what = what ? what : &ent_text_none;
+  if (from < 0)
+    from = 0;
+  if ((uint32_t)from > text->length)
+    return -1;
+  if (!what->length)
+    return from;
+  // (Not memmem: Windows has none.)
+  const char *at = text->bytes + from, *end = text->bytes + text->length;
+  while ((size_t)(end - at) >= what->length) {
+    at = memchr(at, what->bytes[0], (size_t)(end - at) - what->length + 1);
+    if (!at)
+      return -1;
+    if (!memcmp(at, what->bytes, what->length))
+      return (int32_t)(at - text->bytes);
+    ++at;
+  }
+  return -1;
+}
+
+// The bytes from `from` up to `to` (not that one), of those it has.
+ENT_TEXT_SAME_RESULT const ent_text *
+ent_text_slice(const ent_text *text, int32_t from, int32_t to) {
+  text = text ? text : &ent_text_none;
+  if (from < 0)
+    from = 0;
+  if (to < 0 || (uint32_t)to > text->length)
+    to = to < 0 ? 0 : (int32_t)text->length;
+  if (to <= from)
+    return 0;
+  if (from == 0 && (uint32_t)to == text->length)
+    return text;
+  ent_text *part = ent_text_new((uint32_t)(to - from));
+  memcpy(part->bytes, text->bytes + from, (size_t)(to - from));
+  return part;
+}
+
+// With A to Z as a to z; other bytes as they are.
+ENT_TEXT_SAME_RESULT const ent_text *ent_text_lower(const ent_text *text) {
+  text = text ? text : &ent_text_none;
+  uint32_t first = 0;
+  while (first < text->length &&
+         !(text->bytes[first] >= 'A' && text->bytes[first] <= 'Z'))
+    ++first;
+  if (first == text->length)
+    return text->length ? text : 0;
+  ent_text *low = ent_text_new(text->length);
+  for (uint32_t i = 0; i < text->length; ++i) {
+    char c = text->bytes[i];
+    low->bytes[i] = c >= 'A' && c <= 'Z' ? (char)(c - 'A' + 'a') : c;
+  }
+  return low;
 }

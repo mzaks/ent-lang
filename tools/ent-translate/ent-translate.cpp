@@ -102,7 +102,12 @@ static void emitTexts(ModuleOp module, raw_ostream &os,
         "#ifndef ENT_TEXT\n#define ENT_TEXT\n"
         "typedef struct {\n  uint32_t length;\n"
         "#ifdef __cplusplus\n  char bytes[1];\n#else\n  char bytes[];\n"
-        "#endif\n} ent_text;\n#endif\n";
+        "#endif\n} ent_text;\n"
+        "// A text for an extern fn or proc to give back: `length` bytes to "
+        "fill\n// (and a 0 after them, there already), kept by the program "
+        "while the\n// schedule that called it runs. (Or give back one it "
+        "was given, or NULL\n// for no bytes.)\n"
+        "ent_text *ent_text_new(uint32_t length);\n#endif\n";
   if (!capacities.empty())
     os << "\n// Texts: `length` bytes of `bytes` count, the rest are zero "
           "(keep them\n// so when writing: equal texts are equal byte for "
@@ -450,8 +455,7 @@ static LogicalResult emitExternChecks(ModuleOp module, raw_ostream &os) {
         "{3} ent__checked_{0}({1}) {{\n"
         "  {3} first = {4};\n  {3} again = {4};\n"
         "  uint64_t got = 0, more = 0, key = 0xcbf29ce484222325ull;\n"
-        "  memcpy(&got, &first, sizeof first);\n"
-        "  memcpy(&more, &again, sizeof again);\n{5}"
+        "{11}{5}"
         "  int twice = got != more;\n"
         "  if (twice || ent__check_seen(ent__check_slots_{0}, key, got, "
         "&more)) {{\n"
@@ -470,8 +474,19 @@ static LogicalResult emitExternChecks(ModuleOp module, raw_ostream &os) {
         name, params.empty() ? "void" : llvm::join(params, ", "),
         llvm::join(puts, ""), resultType, call, llvm::join(keys, ""),
         function.getSymName(), where.empty() ? "ent: " : where + ": error: ",
-        put(result, "(twice ? first : earlier)"),
-        put(result, "(twice ? again : first)"), llvm::join(args, ", "));
+        // (A text C gives back is compared by its bytes, not its address;
+        // one given before is no longer there to show.)
+        isa<StringType>(result)
+            ? "if (twice) {\n      " + put(result, "first") +
+                  "\n    } else {\n      fputs(\"another text\", "
+                  "stderr);\n    }"
+            : put(result, "(twice ? first : earlier)"),
+        put(result, "(twice ? again : first)"), llvm::join(args, ", "),
+        isa<StringType>(result)
+            ? "  got = ent__check_text(0, first);\n"
+              "  more = ent__check_text(0, again);\n"
+            : "  memcpy(&got, &first, sizeof first);\n"
+              "  memcpy(&more, &again, sizeof again);\n");
   }
   return success();
 }

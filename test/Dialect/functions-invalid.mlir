@@ -6,7 +6,7 @@ ent.function @f(!ent.ref<@P>) -> f32
 
 // -----
 
-// expected-error @+1 {{gives a text, which C cannot give back yet}}
+// expected-error @+1 {{gives a text of a capacity, which C cannot give back (it gives a text of any length)}}
 ent.function proc @name() -> !ent.text<8>
 
 // -----

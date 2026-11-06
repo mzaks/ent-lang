@@ -1876,8 +1876,12 @@ LogicalResult FunctionOp::verify() {
   if (getResults().size() > 1)
     return emitOpError("gives several values, which C cannot give back");
   if (std::optional<Type> result = getResult()) {
-    if (isa<TextType, StringType>(*result))
-      return emitOpError("gives a text, which C cannot give back yet");
+    // (A text of any length: the address of a block, ent_text_new's.)
+    if (isa<TextType>(*result))
+      return emitOpError("gives a text of a capacity, which C cannot give "
+                         "back (it gives a text of any length)");
+    if (isa<StringType>(*result))
+      return success();
     if (!crossesToC(*result))
       return emitOpError("gives a ")
              << *result << ", which C cannot give back";

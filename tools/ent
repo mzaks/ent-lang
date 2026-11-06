@@ -880,8 +880,10 @@ def ir_functions(ir):
 # as harmless_call says, though LLVM does not see it so. Rust's: a
 # placeholder of the allocator, and what a HashMap calls where it cannot
 # have more memory, which panics or gives an error back. Mojo's: the
-# stack trace an error is given as it is raised, which says where.)
-RUNTIME_HARMLESS = ("__rust_no_alloc_shim_is_unstable",
+# stack trace an error is given as it is raised, which says where. ent's:
+# the block of a text a fn gives back, memory it has and the program
+# gives back, devices/text.c.)
+RUNTIME_HARMLESS = ("ent_text_new", "__rust_no_alloc_shim_is_unstable",
                     "Fallibility17capacity_overflow", "Fallibility9alloc_err",
                     "KGEN_CompilerRT_GetStackTrace")
 

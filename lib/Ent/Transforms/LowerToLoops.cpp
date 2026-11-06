@@ -23666,6 +23666,10 @@ static Block *stackOf(Operation *op) {
 ///
 /// A buffer it is handed (`world` is then the system's): how many rows it
 /// has, and where each field's values are.
+/// Whether lowering a call said why it cannot be (lowerInvoke gives
+/// nothing back; the pass fails once all calls are lowered).
+static bool invokeFailed = false;
+
 static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
                         FunctionOp function, bool defined,
                         const WorldLayout *layout = nullptr,
@@ -23777,6 +23781,15 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
   // handed to change, so that the ranks go on alike (devices/ranks.c).
   bool rootOnly = ranksMode && function.getProc() &&
                   !invoke->hasAttr(kRankLocalAttr);
+  // (Its bytes are rank 0's: the other ranks would need them sent.)
+  // (Said here, failed when every call is lowered: invokeFailed.)
+  if (rootOnly && llvm::any_of(resultTypes, llvm::IsaPred<StringType>)) {
+    invoke->emitError("on many ranks a proc that rank 0 calls cannot give "
+                      "a text back yet");
+    invokeFailed = true;
+    // (Lowered as on one rank, for the pass to fail after.)
+    rootOnly = false;
+  }
   ModuleOp module = invoke->getParentOfType<ModuleOp>();
   scf::IfOp root;
   if (rootOnly) {
@@ -23893,6 +23906,16 @@ static void lowerInvoke(IRRewriter &rewriter, InvokeOp invoke,
     else if (isa<EnumType>(resultTypes.front()))
       result = UnrealizedConversionCastOp::create(rewriter, loc,
                                                   resultTypes.front(), result)
+                   .getResult(0);
+    else if (isa<StringType>(resultTypes.front()))
+      // A text C gives back: the address of a block it made with
+      // `ent_text_new` (kept while the schedule runs, as a joined one is),
+      // one it was given, or none (no bytes).
+      result = UnrealizedConversionCastOp::create(
+                   rewriter, loc, resultTypes.front(),
+                   LLVM::PtrToIntOp::create(rewriter, loc,
+                                            rewriter.getI64Type(), result)
+                       .getResult())
                    .getResult(0);
     results.push_back(result);
   }
@@ -27121,6 +27144,7 @@ struct EntLowerToLoops
   void runOnOperation() override {
     ModuleOp module = getOperation();
     IRRewriter rewriter(module.getContext());
+    invokeFailed = false;
     sendLists.clear();
     listOwners.clear();
     groupedSends.clear();
@@ -28046,6 +28070,8 @@ struct EntLowerToLoops
       auto function = symbols.lookup<FunctionOp>(invoke.getCallee());
       lowerInvoke(rewriter, invoke, function, defined.contains(function));
     }
+    if (invokeFailed)
+      return signalPassFailure();
 
     for (auto main : llvm::make_early_inc_range(module.getOps<MainOp>()))
       if (failed(lowerMain(rewriter, main, module, *layout, arenaType)))

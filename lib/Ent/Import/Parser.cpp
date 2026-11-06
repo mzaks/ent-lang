@@ -7082,8 +7082,10 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
     if (isExtern && several)
       return error(resultAt, "C gives one value back; a fn with a body may "
                              "give several");
-    if (isExtern && isa<TextType, StringType>(function.results.front()))
-      return error(resultAt, "C cannot give a text back yet");
+    // (C gives a text back as the address of a block: one of any length.)
+    if (isExtern && isa<TextType>(function.results.front()))
+      return error(resultAt, "C gives a text back as a 'text' of any "
+                             "length, not of a capacity");
     if (isExtern && isa<IndexOfType>(function.results.front()))
       return error(resultAt, "C gives numbers back: an i32 for a row number");
     if (!several)

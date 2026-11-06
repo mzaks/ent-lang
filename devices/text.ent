@@ -4,7 +4,7 @@
 //   import text
 //   component Page { words: text }
 //
-// There is nothing here to call. The compiler does: where a field is
+// Most of it is not called: the compiler does it. Where a field is
 // given a text it asks for a block with a copy of the bytes, and where a
 // field gets another, its component goes or its entity is destroyed, it
 // gives the block back; `len`, `t[i]`, `==` and `as text[N]` look into
@@ -13,3 +13,18 @@
 //
 // A program run with ENT_TEXT_REPORT set says at its end how many blocks
 // its fields held.
+//
+// What a program calls: fns over texts. Where one gives a text it is a
+// new one (as joining makes, kept while the schedule runs; a field that
+// is given it takes its copy), or the one it was given where that is the
+// same. Byte numbers start at 0.
+
+// Where `what` is in `t` first, from byte `from` on (from 0 where `from`
+// is below nought); -1 where it is not there. An empty `what` is at
+// `from`, where that is no further than the end of `t`.
+extern fn find(t: text, what: text, from: i32) -> i32
+// The bytes of `t` from byte `from` up to byte `to`, not that one: those
+// of them it has (none where `to` is not after `from`).
+extern fn slice(t: text, from: i32, to: i32) -> text
+// `t` with A to Z as a to z; every other byte as it is.
+extern fn lower(t: text) -> text

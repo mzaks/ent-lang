@@ -1,0 +1,50 @@
+// Texts C gives back: an extern fn or proc may give a `text` (of any
+// length), a block C makes with `ent_text_new` (kept while the schedule
+// runs, as a joined text is), one it was given, or none. The text
+// module's `find`, `slice` and `lower` are such fns; with them a program
+// takes the links out of a page. `ent build` reads that `ent_text_new`
+// changes nothing a fn gives back; --check-externs compares the texts by
+// their bytes; nothing is left held or kept at the end.
+// RUN: %ent build --no-cache %S/Inputs/text_extern/text_extern.ent %S/Inputs/text_extern/shout.c -o %t.exe 2>&1 | FileCheck %s --check-prefix=STATIC
+// RUN: env ENT_TEXT_REPORT=1 %t.exe > %t.out 2> %t.err
+// RUN: FileCheck %s --input-file=%t.out
+// RUN: FileCheck %s --check-prefix=REPORT --input-file=%t.err
+// RUN: %ent build --no-cache --check-externs %S/Inputs/text_extern/text_extern.ent %S/Inputs/text_extern/shout.c -o %t.checked 2>/dev/null
+// RUN: %t.checked | cmp - %t.out
+// RUN: env DRIFT=1 not --crash %t.checked 2>&1 | FileCheck %s --check-prefix=DRIFT
+// RUN: env ENT_PARALLEL_MIN=1 %ent build --no-cache --parallel --check-externs %S/Inputs/text_extern/text_extern.ent %S/Inputs/text_extern/shout.c -o %t.parallel 2>/dev/null
+// RUN: %t.parallel | cmp - %t.out
+// RUN: ent-translate --import-ent %S/Inputs/text_extern/text_extern.ent -I %S/../../devices -o %t.mlir
+// RUN: ent-translate --ent-to-c-extern-header %t.mlir | FileCheck %s --check-prefix=HEADER
+// On many ranks rank 0 alone calls a proc, and its text is not sent yet.
+// RUN: not %ent build --no-cache %S/Inputs/text_extern/text_extern.ent %S/Inputs/text_extern/shout.c --ranks 2 -o %t.ranks 2>&1 | FileCheck %s --check-prefix=RANKS
+
+// STATIC-NOT: 'shout'
+// STATIC-NOT: 'nothing'
+// STATIC-NOT: 'find'
+// STATIC-NOT: 'slice'
+// STATIC-NOT: 'lower'
+// STATIC:     text_extern.ent:17:11: warning: extern fn 'drift' is no fn
+// STATIC-NOT: warning
+
+// CHECK:      link /One (4)
+// CHECK-NEXT: link /two (4)
+// CHECK-NEXT: link https://x.org/Three (19)
+// CHECK-NEXT: find: 2 5 -1 3 -1 0
+// CHECK-NEXT: slice: 'bc' 'ab' 'ef' '' '' same: true
+// CHECK-NEXT: lower: 'mixed 123 {{.}}b' 'plain' ''
+// CHECK-NEXT: shout: 'HEY!' nothing: '' (0)
+// CHECK-NEXT: drift: hey
+// CHECK-NEXT: said: hello 3 times
+
+// REPORT:      texts held: 0
+// REPORT-NEXT: texts kept: 0
+
+// DRIFT: text_extern.ent:17:11: error: extern fn 'drift' gave "hey1" and then "hey2" when called twice with ("hey")
+
+// HEADER: ent_text *ent_text_new(uint32_t length);
+// HEADER: const ent_text * ent_text_slice(const ent_text * arg0, int32_t arg1, int32_t arg2);
+// HEADER: const ent_text * ent_shout(const ent_text * arg0);
+// HEADER: const ent_text * ent_greeting(int32_t arg0);
+
+// RANKS: text_extern.ent:54:10: error: on many ranks a proc that rank 0 calls cannot give a text back yet

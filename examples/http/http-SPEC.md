@@ -66,7 +66,7 @@ The questions this example is meant to answer:
 
 - JavaScript rendering, a full HTML parser (§7.3 lists what the link
   scanner handles), sitemaps.
-- Streaming bodies larger than the arena (a body past the limit is cut
+- Streaming bodies larger than `max_body` (a body past the limit is cut
   and marked so), WebSockets, HTTP/3.
 - Public sites in the checks or in the benchmarks: those go to
   `127.0.0.1` only, so they are repeatable and load nobody else's
@@ -100,9 +100,9 @@ built.
 
 | Component | Fields | Meaning |
 |---|---|---|
-| `Ask` | `method: Method, url, headers (window), body (window), origin: entity` | Request data: what is wanted. The talk's base URL, path components, method, parameters and payload, here as one URL plus headers and body. `origin` is what caused it (an event, a page, a redirect). |
+| `Ask` | `method: Method, url, headers, body, origin: entity` | Request data: what is wanted. The talk's base URL, path components, method, parameters and payload, here as one URL plus headers and body. `origin` is what caused it (an event, a page, a redirect). |
 | `Sent` | `at: f64, handle: i64` | Handed to the device. |
-| `Got` | `at: f64, status: i32, headers (window), body (window), location, cut: bool` | A response. `location` for redirects; `cut` where the body was past the limit. |
+| `Got` | `at: f64, status: i32, headers, body, location, cut: bool` | A response. `location` for redirects; `cut` where the body was past the limit. |
 | `Failed` | `at: f64, kind: Failure, code: i32` | No HTTP response: refused, timed out, DNS, TLS (the talk's OS-level errors). |
 | `Attempt` | `n: i32, next_at: f64` | Retries so far and when the next may go. |
 | tag `Slow` | | Sent long ago and no answer yet (a warning, not a timeout). |
@@ -136,14 +136,11 @@ spawns nothing.
 
 ### 4.3 Bodies and URLs
 
-Bodies come back from C as bytes. The device convention so far
-(`devices/files.ent`) is a `buffer { value: u8 }`, so bodies go into a
-byte arena buffer `Bodies`, and `Got` holds a window into it (`start`,
-`count`). Cleanup (§5.1) gives windows back by compacting the arena
-between frames, or the arena is sized for a whole crawl in C1.
-
-URLs are `text` (of any length), so that `ByUrl` can hash them. Making
-a URL from the bytes of a body is the gap of §10.1.
+Bodies and headers are `text` fields (of any length): the device gives
+them back as texts (§10.1), and a field gives its bytes back when it
+gets another or its component goes. URLs are `text` too, so that `ByUrl`
+can hash them; `extract_links` makes them with `slice`. (Before C0 this
+was a byte arena with windows into it.)
 
 ## 5. Systems
 
@@ -163,7 +160,7 @@ systems that can be left out with no other change (K7).
 | `warn_slow` | `Sent` without an answer, the clock | Adds `Slow` past `slow_after`, prints a warning once. | yes |
 | `log` | `Sent`, `Got`, `Failed` (`on [added]`) | One line per event. | yes |
 | `history` | `Got`, `Failed` (`on [added]`) | Keeps a row per answer (URL, status, times) for the report and K9. | yes |
-| `clean_up` | `Handled` | Drops the body window. | yes |
+| `clean_up` | `Handled` | Drops the body (gives its bytes back). | yes |
 
 ### 5.2 The crawler
 
@@ -221,20 +218,22 @@ extern proc http_session(user_agent: text, cookies: bool,
                          proxy: text) -> i64
 
 // Starts a request; gives its handle. `method` is a name ("GET",
-// "PROPFIND", ..). `headers` is "Name: value" lines. The body is a
-// window of `bytes`. `follow` > 0 lets the device follow that many
-// redirects itself; 0 hands every 3xx to the program.
+// "PROPFIND", ..). `headers` is "Name: value" lines. `follow` > 0 lets
+// the device follow that many redirects itself; 0 hands every 3xx to
+// the program.
 extern proc http_start(session: i64, method: text[16], url: text,
-                       headers: text, bytes: Bytes, body_at: i32,
-                       body_count: i32, timeout: f64, max_body: i32,
-                       follow: i32) -> i64
+                       headers: text, body: text, timeout: f64,
+                       max_body: i32, follow: i32) -> i64
 extern proc http_cancel(handle: i64)
 
 // Waits at most `wait` seconds for answers. Gives a row in `done` for
-// each (handle, status, failure, time to first byte, total time, where
-// its headers and body start in `bytes` and how many bytes each, `cut`)
-// and appends the headers and bodies to `bytes`. How many answered.
-extern proc http_poll(wait: f64, done: mut Done, bytes: mut Bytes) -> i32
+// each (handle, status, failure, time to first byte, total time, `cut`).
+// How many answered.
+extern proc http_poll(wait: f64, done: mut Done) -> i32
+// What an answered request got, as texts (§10.1); then it is gone.
+extern proc http_body(handle: i64) -> text
+extern proc http_headers(handle: i64) -> text
+extern proc http_forget(handle: i64)
 
 extern proc http_close(session: i64)
 ```
@@ -242,9 +241,9 @@ extern proc http_close(session: i64)
 - Procs run on the main thread, which curl multi needs.
 - `http_poll` blocks in `curl_multi_poll` up to `wait`, the time to the
   next `Attempt.next_at` or timeout, so `main` does not spin.
-- Response headers come back as received: one line each, in the arena.
-  A small ent fn module (`http_headers`) finds a header by name, once
-  text has search (§10.1).
+- Response headers come back as received, one line each. A fn in the
+  module (`header(headers, name)`), written in ent with `find`, `slice`
+  and `lower`, finds one by name.
 - The crawler opens one session with `follow` 0, so its pipeline sees
   every redirect.
 - The exact parameters are settled at C2 and written in the module's
@@ -406,27 +405,22 @@ Run by hand, never in checks or benchmarks, with these rules:
 
 ## 10. What ent lacks for this
 
-### 10.1 Text from bytes (blocks `extract_links`)
+### 10.1 Text from C (done in C0)
 
-`text` has no slices or search (docs/syntax.md, Text), and a device
-gives bytes back in a `u8` buffer. `extract_links` must take the bytes
-between `href="` and `"` and make a `text` URL for `ByUrl`. Two ways:
+`text` had no slices or search, and C could not give a text back. C0
+made the language feature, not the stopgap: an extern fn or proc may
+give a `text` back (C makes it with `ent_text_new`), and the module
+`text` has `find`, `slice` and `lower` as extern fns over it, a library
+and not compiler built-ins (test/Integration/text_extern.test takes the
+links out of a page with them). So the device gives a body back as a
+`text`, and `extract_links` makes URL texts with `slice`.
 
-- **A language feature (preferred, foundations first):** `text` slices
-  `t[a..b]` and a `text` made from a window of a `u8` buffer (or bodies
-  as `text` straight from the device: an extern proc that gives a
-  `text`).
-- **A stopgap:** URLs stay windows into the arena, keyed by a `u64`
-  wyhash computed in ent over the bytes (`devices/wyhash.ent`), and
-  handed to `http_start` as a buffer window. Works without changes to
-  the language, but a hash index on a `u64` with no text behind it
-  cannot tell two URLs with the same hash apart.
+### 10.2 Bodies in an arena (not needed after C0)
 
-### 10.2 Bodies in an arena
-
-Windows into a growing `u8` buffer need a way to give space back:
-compacting between frames (moving windows), or buffers with free
-lists. In C1 the arena is sized for the whole crawl.
+With bodies as `text` fields, a body's bytes are given back when its
+field gets another or its component goes (`clean_up` removes it), so
+§4.3's byte arena is no longer needed for bodies. Request bodies to
+send stay a `text` too.
 
 ### 10.3 The device request/response shape
 

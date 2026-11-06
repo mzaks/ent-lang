@@ -1,0 +1,59 @@
+// Texts that C gives back (text_extern.test): the text module's fns, and
+// a program's own extern fn and proc.
+import console
+import text
+
+component Page { body: text, n: i32 }
+component Link { url: text }
+unique Said: text
+default_capacity 64
+
+// A program's own C (shout.c): a new text, and one a proc makes up.
+extern fn shout(t: text) -> text
+extern proc greeting(n: i32) -> text
+// One that gives back nothing: no bytes.
+extern fn nothing(t: text) -> text
+// A fn only where DRIFT is not set.
+extern fn drift(t: text) -> text
+
+world {
+  spawn { Page { body: "<a HREF=\"/One\">1</a> <a href=\"/two\">2</a> <a href=\"https://x.org/Three\">3</a>", n: 1 } }
+  spawn { Page { body: "no links here", n: 2 } }
+}
+
+system links() {
+  for p: Page {
+    let low = lower(p.body)
+    var at = find(low, "href=\"", 0)
+    while at >= 0 {
+      let start = at + 6
+      let end = find(p.body, "\"", start)
+      spawn { Link { url: slice(p.body, start, end) } }
+      at = find(low, "href=\"", end)
+    }
+  }
+}
+
+system show() {
+  for l: Link { put("link {l.url} ({len(l.url)})") }
+  let abc = "abc"
+  let abcabc = "abcabc"
+  let c = "c"
+  let x = "x"
+  let none = ""
+  let a = "a"
+  put("find: {find(abcabc, c, 0)} {find(abcabc, c, 3)} {find(abc, x, 0)} {find(abc, none, 3)} {find(abc, none, 4)} {find(abc, a, -5)}")
+  let six = "abcdef"
+  put("slice: '{slice(six, 1, 3)}' '{slice(six, -2, 2)}' '{slice(six, 4, 99)}' '{slice(six, 3, 3)}' '{slice(six, 5, 1)}' same: {slice(six, 0, 6) == six}")
+  let mixed = "MiXed 123 \xC4B"
+  let plain = "plain"
+  put("lower: '{lower(mixed)}' '{lower(plain)}' '{lower(none)}'")
+  let hey = "hey"
+  put("shout: '{shout(hey)}' nothing: '{nothing(x)}' ({len(nothing(x))})")
+  put("drift: {drift(hey)}")
+  Said = greeting(3)
+  put("said: {Said}")
+}
+
+schedule frame() { links() show() }
+main { frame() }

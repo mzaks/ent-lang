@@ -178,7 +178,7 @@ extern fn beep()
 
 // -----
 
-// expected-error @+1 {{C cannot give a text back yet}}
+// expected-error @+1 {{C gives a text back as a 'text' of any length, not of a capacity}}
 extern proc name() -> text[8]
 
 // -----

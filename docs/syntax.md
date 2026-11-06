@@ -1260,8 +1260,9 @@ well as for text: any byte may be in it, nothing ends it.
   schedule a C host calls or of an extern system yet; an extern fn or proc
   takes one.
 
-Text has no order (`<`), search or slices yet, and its bytes cannot be
-changed one by one.
+Text has no order (`<`) yet, and its bytes cannot be changed one by one.
+Search and slices are fns of the module `text`, over texts of any length
+(below).
 
 ### Text of any length
 
@@ -1297,6 +1298,20 @@ component is removed or its entity destroyed.
   after it, with a 0 after them (which does not count). So does an
   extern system, and a schedule from a C host that runs it (no address:
   a text without bytes).
+- An extern fn or proc may give one back (`-> text`; not a `text[N]`):
+  in C `const ent_text *`, a block it makes with `ent_text_new(length)`
+  and fills (the 0 after the bytes is there already), one it was given,
+  or `NULL` for none. What it makes is kept as a joined text is, so a
+  field that is given it takes its copy. `ent build` knows that
+  `ent_text_new` changes nothing a fn gives back, and `--check-externs`
+  compares such results by their bytes. (Not yet from a proc that only
+  rank 0 calls, on many ranks.)
+- The module `text` has fns over them (`find(t, what, from)`, where
+  `what` is in `t` first from byte `from` on, -1 where it is not;
+  `slice(t, from, to)`, the bytes from `from` up to `to`, not that one;
+  `lower(t)`, A to Z as a to z), extern fns in its C
+  (test/Integration/text_extern.test takes the links out of a page with
+  them).
 - When `main` is done, what fields and uniques still hold is given back.
   (A C host's world keeps what it holds.)
 - A value of it is what a field holds or a literal is, seen, not a
@@ -2885,7 +2900,8 @@ has nothing to get wrong about it. Prefer them to extern systems.
   condition: those read uniques, which a system has written.
 - Parameters and results are numbers and bools; a parameter may also be a
   text, which C gets as `const ent_textN *`. A text argument of another
-  capacity is widened or cut like anywhere else.
+  capacity is widened or cut like anywhere else. A result may also be a
+  `text` of any length (see Text of any length).
 - A proc's parameter may also be a buffer, which C gets as how many rows
   it has and where each field's values are (see Buffers).
 - In C, `extern proc put` is `void ent_put(const ent_text126 *line)`, and
