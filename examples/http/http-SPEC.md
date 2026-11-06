@@ -469,10 +469,12 @@ around in the example, not in the compiler:
   asks with this URL" was a loop over all asks for each new one: 7 s at
   3·10⁴ pages, 138 s at 10⁵. As a `Twin` field set by `get` on two hash
   indexes it is 0.97 s and 4.5 s.
-- **A hash index is made anew when rows move.** At 10⁵ pages `ByUrl` is
-  made 246 times (1.4 s of 4.5) and `Kept` 123 times (0.7 s): every
-  frame spawns asks. Mending it, as relation indexes are mended, would
-  take half the time away.
+- **A hash index was made anew when entities came or moved** (fixed
+  after C1). At 10⁵ pages `ByUrl` was made 246 times (1.4 s of 4.5) and
+  `Kept` 123 times (0.7 s): every frame spawns asks. It is now mended
+  where no key was written (docs/indexes.md, 5.1): 0.11 s for both. And
+  a write to any field of `Ask` (`serial`, `tries`) counted as a write
+  of its key; now only `url` does.
 - **No running sum in an `on added` for**, no `else if let`, no `var`
   of text, no `let` of a unique's text, no `while` in a fn (loops over
   texts are fns calling themselves).

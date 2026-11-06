@@ -118,6 +118,16 @@ system marked() {
   put("marked: {Count} {Sum}")
 }
 system thin() { for e, x: Ship where x.team == 3 { if x.number % 2 == 0 { e.destroy() } } }
+// Ships move to another archetype and back, which changes how they are
+// stored, and none of their keys (the index mended without them).
+tag Docked
+system dock() {
+  let s = Step
+  for e, x: Ship {
+    if (x.number + s) % 7 == 0 && !e.has(Docked) { e.add(Docked) }
+    else if (x.number + s) % 5 == 0 && e.has(Docked) { e.remove(Docked) }
+  }
+}
 system more() {
   let s = Step
   if s % 4 == 0 {
@@ -130,5 +140,7 @@ schedule round() {
   numbered(0) crews() first(2) crews() rehire() crews() named() said()
   thin() team(3) more() shuffle() team(3) fives() sided()
   numbered(1000) crews() first(3) rehire() crews() marked()
+  dock() first(2) crews() team(2) more() dock() first(3) crews() team(3)
+  thin() numbered(1000) crews()
 }
 main { loop { round() } until Step >= 60 }

@@ -90,7 +90,13 @@ are rows, it is made anew, as `rebuild` does.
 A hash index (5.1) has no order to keep: as fits it is mended from the
 entities whose key or copies differ from their rows', `incremental` from
 those a reactive `for` visits; each moved from its key's list to its new
-key's, at the end.
+key's, at the end. Where entities came, went or moved between
+archetypes and no key or copy was written since it was made, it is
+mended too (`N_rejoin`): every entity it holds is given its place as
+stored now, the rows of those gone are taken out, and one that came gets
+a row at the end of its key's list; only those are hashed. (A key or
+copy written as well: made anew.) What a hash index counts as written
+is its key and what it copies, not the rest of its first component.
 
 A clustered index (5.2) is brought up to date before every system where
 it is out of date, eager or not: its archetype's rows are in its order
@@ -185,7 +191,14 @@ Built (2026-10-23, `docs/syntax.md`, Hash indexes):
   `for` says changed (`incremental`, through its log: the list of what
   changed is in any order, `ent.any_order`): each taken out of its key's list
   and put at the end of its new key's (a key none has now: its slot
-  emptied, those after it moved back, no tombstones).
+  emptied, those after it moved back, no tombstones). Where entities
+  came, went or moved and no key was written, as fits and `incremental`
+  mend it as well: those gone out, the last row put in each one's room,
+  those that came at the end of their keys' lists, every place as the
+  entities are stored now (`get` and a `for` it answers go by places, so
+  they give what they gave made anew). The crawler (examples/http), which
+  spawns asks every frame: its two text indexes took 2.5 s of 4.5 at
+  10⁵ asks made anew, 0.11 s mended (2026-11-06).
 - For: an entity by name or an id from outside, a netlist's signal name
   to its entity (AIGER and SPICE import), network ids.
 

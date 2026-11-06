@@ -86,12 +86,24 @@ Kept keptOf(BufferOp buffer, DictionaryAttr info,
   // key, what it copies, a grid's places and what its sizes are worked
   // out of. (Its update gives a proc the first component to change, which
   // the analysis takes for writing all of it.)
+  // (Of a hash index, only its key and what it copies: the rest of the
+  // first component its procs are handed only to tell entities their
+  // rows.)
+  llvm::DenseSet<std::pair<Attribute, Attribute>> hashed;
+  if (info.get("hash")) {
+    SmallVector<StringAttr> key = strings(info, "key");
+    hashed.insert({key[0], key[1]});
+    SmallVector<StringAttr> copies = strings(info, "copies");
+    for (size_t i = 0; i + 1 < copies.size(); i += 2)
+      hashed.insert({copies[i], copies[i + 1]});
+  }
   SystemAccess made = computeAccess(symbols.lookup(kept.update), archetypes);
   for (const Column &column : made.reads) {
     auto [archetype, component, field] = column;
     if (kept.readBy.contains(column) || kept.holds.contains(column) ||
         !component || component.empty() || !field || field.empty() ||
-        (!archetype && made.writes.contains(column)))
+        (!archetype && made.writes.contains(column)) ||
+        (!hashed.empty() && !hashed.contains({component, field})))
       continue;
     kept.values.insert(column);
   }
