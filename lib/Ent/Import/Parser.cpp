@@ -4065,10 +4065,10 @@ LogicalResult Parser::parseIndex() {
     bits->setAttr(WorldLayout::kTransientAttr, builder.getUnitAttr());
     setFamilies[*name + "_bits"] = true;
   }
-  // A hash index: its entities, a row each in the order they are stored,
-  // with its key (a text's hashes), its place there, the rows before and
-  // after it of its key, and what it copies (the room the first
-  // component's capacity).
+  // A hash index: its entities, a row each, with its key (a text's
+  // hashes), the rows before and after it of its key, and what it copies
+  // (the room put in where the capacity is known); rows of those that
+  // went stay till it is made anew.
   if (hashed) {
     Record listed;
     listed.fields.push_back({"who", EntityType::get(context)});
@@ -4132,25 +4132,6 @@ LogicalResult Parser::parseIndex() {
     made->setAttr(WorldLayout::kTransientAttr, builder.getUnitAttr());
     buffers[changedName] = std::move(changed);
   }
-  // A hash index mended where entities came, went or moved: the rows of
-  // those it still holds, each with its place now (`N_seen`; those that
-  // came are in `N_changed`).
-  if (hashed && how != "rebuild") {
-    Record seen;
-    seen.fields.push_back({"row", builder.getI32Type()});
-    seen.fields.push_back({"place", builder.getI64Type()});
-    std::string seenName = *name + "_seen";
-    BufferOp made = BufferOp::create(
-        builder, loc(at), declareSymbol(at, seenName),
-        builder.getArrayAttr(
-            {builder.getStringAttr("row"), builder.getStringAttr("place")}),
-        builder.getArrayAttr({TypeAttr::get(builder.getI32Type()),
-                              TypeAttr::get(builder.getI64Type())}),
-        builder.getI64IntegerAttr(1));
-    made->setAttr(WorldLayout::kTransientAttr, builder.getUnitAttr());
-    buffers[seenName] = std::move(seen);
-  }
-
   // What the index declares for itself.
   std::string spelled =
       !keyType.isIntOrFloat()
@@ -4258,6 +4239,8 @@ LogicalResult Parser::parseIndex() {
         << "transient unique " << n << "_keyed: bool\n"
         << "transient unique " << n
         << "_places: i64\n"
+        // (How many rows it had when it was made last.)
+        << "transient unique " << n << "_built: i64\n"
         // (How many keys it has: what its slots are made for.)
         << "transient unique " << n
         << "_keys: i64\n"
@@ -4351,143 +4334,51 @@ LogicalResult Parser::parseIndex() {
       out << "    }\n";
     }
     out << "  }\n  keys\n}\n";
-    // Mended: each changed entity's copies written into its row; where
-    // its key changed, its row taken out of its key's list (and where no
-    // other has that key, the slot emptied, those after it along the
-    // slots that their home no longer reaches moved back into the hole),
-    // then put at the end of its new key's, with its place as it was.
+    // Kept up where entities came, went, moved or changed their key, by
+    // what changed alone: a row at the end for each entity that came, or
+    // whose key changed (`N_changed`, which a reactive `for` lists from
+    // the log of what happened), its own row field told; its copies
+    // written into its row where its key is the same. A row whose entity
+    // went, lost a component of the index or has another row now stays
+    // where it is, and whoever reads the index passes over it (its
+    // entity's row field no longer names it; see findHashSlot's readers):
+    // so nothing goes over every entity to find what went or moved. Made
+    // anew where the rows come to twice as many as when it was made last
+    // (`most`), or to its room, or a key more could make the keys more
+    // than half its slots: then the rows of those that went are gone, at
+    // a pass over every entity once for as many changes.
     if (how != "rebuild") {
-      // A row taken out of its key's list; where no other has that key,
-      // the slot emptied, those after it along the slots that their home
-      // no longer reaches moved back into the hole (no tombstones). Says
-      // whether it emptied the slot.
-      out << "proc " << n << "_unlink(order: mut " << n << ", tags: mut " << n
-          << "_tags, list: mut " << n << "_list, r: i32) -> bool {\n"
-          << "  let mask = len(order) - 1\n"
-          << "  let s = " << slotOf("list[r]") << "\n"
-          << "  let p = list[r].prev\n"
-          << "  let q = list[r].next\n"
-          << "  if p < 0 { order[s].head = q } else { list[p].next = q }\n"
-          << "  if q < 0 { order[s].last = p } else { list[q].prev = p }\n"
-          << "  order[s].count -= 1\n"
-          << "  if order[s].count == 1 { order[s].one = "
-             "list[order[s].head].who }\n"
-          << "  let emptied = order[s].head < 0\n"
-          << "  if emptied {\n"
-          << "    var hole = s\n"
-          << "    var j = (s + 1) & mask\n"
-          << "    while order[j].head >= 0 {\n"
-          << "      let h = " << n << "_home(order, "
-          << hashOf("order[j].key") << ")\n"
-          << "      let stays = (hole <= j && hole < h && h <= j) || "
-             "(hole > j && (hole < h || h <= j))\n"
-          << "      if !stays {\n"
-          << "        order[hole].key = order[j].key\n"
-          << (textKey ? "        order[hole].check = order[j].check\n" : "")
-          << "        order[hole].head = order[j].head\n"
-          << "        order[hole].last = order[j].last\n"
-          << "        order[hole].count = order[j].count\n"
-          << "        order[hole].one = order[j].one\n"
-          << "        " << n << "_mark(tags, hole, tags[j].tag, len(order))\n"
-          << "        hole = j\n"
-          << "      }\n"
-          << "      j = (j + 1) & mask\n"
-          << "    }\n"
-          << "    order[hole].head = -1\n"
-          << "    " << n << "_mark(tags, hole, 128 as u8, len(order))\n"
-          << "  }\n"
-          << "  emptied\n}\n";
-      // (How many keys there are, given and said; -1 where a key more
-      // could make them more than half the slots: then made anew.)
-      out << "proc " << n << "_mend(order: mut " << n << ", tags: mut " << n
+      out << "proc " << n << "_join(order: mut " << n << ", tags: mut " << n
           << "_tags, list: mut " << n << "_list, held: mut " << of.front()
-          << ", changed: " << n << "_changed, given: i64) -> i64 {\n"
+          << ", changed: " << n << "_changed, given: i64, most: i64) -> i64 {\n"
           << "  var keys = given\n"
           << "  for k in 0..len(changed) {\n"
-          << "   if keys >= 0 && (keys + 1) * 2 > len(order) as i64 {\n"
-          << "    keys = -1\n"
-          << "   }\n"
-          << "   if keys >= 0 {\n"
-          << "    let r = held[changed[k].who]." << rowField << "\n";
-      for (const Copy &copy : copies)
-        out << "    list[r]." << copy.name << " = changed[k]." << copy.name
-            << "\n";
-      out << "    if list[r].key != changed[k].key"
-          << (textKey ? " || list[r].check != changed[k].check" : "") << " {\n"
-          << "      if " << n << "_unlink(order, tags, list, r) { keys -= 1 }\n"
-          << "      list[r].key = changed[k].key\n"
-          << (textKey ? "      list[r].check = changed[k].check\n" : "")
-          << "      if " << n << "_append(order, tags, list, r) { keys += 1 }\n"
-          << "    }\n   }\n  }\n";
-      // (After all of them: two may have swapped their keys.)
-      if (unique) {
-        out << "  if keys >= 0 {\n   for k in 0..len(changed) {\n"
-            << "    let r = held[changed[k].who]." << rowField << "\n";
-        checkUnique("    ", "list[r]");
-        out << "   }\n  }\n";
-      }
-      out << "  keys\n}\n";
-      // Mended where entities came, went or moved and no key or copy was
-      // written: the rows of those it still holds (`seen`) given their
-      // places now; those of the others (places from before `from`) taken
-      // out, the last row put where each was; a row at the end for each
-      // that came (`changed`). Only those that came are hashed. How many
-      // keys there are, given and said, as `_mend`.
-      std::vector<std::string> rowFields{"who", "key"};
-      if (textKey)
-        rowFields.push_back("check");
-      for (const char *field : {"place", "next", "prev"})
-        rowFields.push_back(field);
-      for (const Copy &copy : copies)
-        rowFields.push_back(copy.name);
-      out << "proc " << n << "_rejoin(order: mut " << n << ", tags: mut " << n
-          << "_tags, list: mut " << n << "_list, held: mut " << of.front()
-          << ", seen: " << n << "_seen, changed: " << n
-          << "_changed, from: i64, given: i64) -> i64 {\n"
-          << "  var keys = given\n"
-          << "  for k in 0..len(seen) { list[seen[k].row].place = "
-             "seen[k].place }\n"
-          << "  var r = len(list) - 1\n"
-          << "  while r >= 0 {\n"
-          << "    if list[r].place < from {\n"
-          << "      if " << n << "_unlink(order, tags, list, r) { keys -= 1 }\n"
-          << "      let last = len(list) - 1\n"
-          << "      if r < last {\n";
-      for (const std::string &field : rowFields)
-        out << "        list[r]." << field << " = list[last]." << field << "\n";
-      out << "        let s = " << slotOf("list[r]") << "\n"
-          << "        let p = list[r].prev\n"
-          << "        let q = list[r].next\n"
-          << "        if p < 0 { order[s].head = r } else { list[p].next = r }\n"
-          << "        if q < 0 { order[s].last = r } else { list[q].prev = r }\n"
-          << "        held[list[r].who]." << rowField << " = r\n"
-          << "      }\n"
-          << "      list = list[..last]\n"
-          << "    }\n"
-          << "    r -= 1\n"
-          << "  }\n"
-          << "  for k in 0..len(changed) {\n"
-          << "   if keys >= 0 && (keys + 1) * 2 > len(order) as i64 {\n"
+          << "   if keys >= 0 && ((keys + 1) * 2 > len(order) as i64 || "
+             "len(list) as i64 >= most) {\n"
           << "    keys = -1\n"
           << "   }\n"
           << "   if keys >= 0 {\n"
           << "    let who = changed[k].who\n"
-          << "    let at = len(list)\n"
-          << "    list += { who: who, key: changed[k].key"
+          << "    let r = held[who]." << rowField << "\n"
+          << "    if r >= 0 && r < len(list) && list[r].who == who && "
+             "list[r].key == changed[k].key"
+          << (textKey ? " && list[r].check == changed[k].check" : "")
+          << " {\n";
+      for (const Copy &copy : copies)
+        out << "      list[r]." << copy.name << " = changed[k]." << copy.name
+            << "\n";
+      out << "    } else {\n"
+          << "      let at = len(list)\n"
+          << "      list += { who: who, key: changed[k].key"
           << (textKey ? ", check: changed[k].check" : "")
-          << ", place: held[who]." << placeField << ", next: -1, prev: -1";
+          << ", place: 0, next: -1, prev: -1";
       for (const Copy &copy : copies)
         out << ", " << copy.name << ": changed[k]." << copy.name;
       out << " }\n"
-          << "    held[who]." << rowField << " = at\n"
-          << "    if " << n << "_append(order, tags, list, at) { keys += 1 }\n"
+          << "      held[who]." << rowField << " = at\n"
+          << "      if " << n << "_append(order, tags, list, at) { keys += 1 }\n"
+          << "    }\n"
           << "   }\n  }\n";
-      if (unique) {
-        out << "  if keys >= 0 {\n   for k in 0..len(changed) {\n"
-            << "    let r = held[changed[k].who]." << rowField << "\n";
-        checkUnique("    ", "list[r]");
-        out << "   }\n  }\n";
-      }
       out << "  keys\n}\n";
     }
     // (`Name.get(key)` is `ent.index.get`, lowered where the slots are
@@ -4501,58 +4392,55 @@ LogicalResult Parser::parseIndex() {
     std::string rest;
     for (const Copy &copy : copies)
       rest += ", " + copy.name + ": " + through(copy);
-    // Where the same entities are in it, mended: those a reactive `for`
-    // visits (`incremental`), or whose key or copies differ from their
-    // row's (as fits).
     if (how != "rebuild") {
-      // (Where entities came, went or moved, but no key or copy was
-      // written since: `_rejoin`. Made anew where it says so.)
-      out << "  let joining = !" << n << "_whole && !" << n << "_keyed && "
-          << n << "_keys >= 0 && len(" << n << "_list) > 0\n"
-          << "  if joining {\n"
-          << "    let from = " << n << "_places\n"
-          << "    " << n << "_changed = []\n"
-          << "    " << n << "_seen = []\n"
-          << "    for e" << mutBindings << " {\n"
-          << "      let place_ = " << n << "_places += 1\n"
-          << "      c0." << placeField << " = place_\n"
-          << "      let r = c0." << rowField << "\n"
-          << "      if r < len(" << n << "_list) && " << n << "_list[r].who == e {\n"
-          << "        " << n << "_seen += { row: r, place: place_ }\n"
-          << "      } else {\n"
-          << "        " << n << "_changed += { who: e, key: " << held << rest
-          << " }\n"
-          << "      }\n"
-          << "    }\n"
-          << "    " << n << "_keys = " << n << "_rejoin(" << n << ", " << n
-          << "_tags, " << n << "_list, " << of.front() << ", " << n << "_seen, "
-          << n << "_changed, from, " << n << "_keys)\n"
-          << "    " << n << "_whole = " << n << "_keys >= 0\n"
-          << "  }\n";
-      out << "  if " << n << "_whole && !joining {\n"
-          << "    " << n << "_changed = []\n"
-          << "    for e" << bindings;
-      if (how == "incremental") {
-        out << " on changed c0." << *key;
-        for (const Copy &copy : copies)
-          out << ", changed " << through(copy);
-      } else {
-        std::string row = n + "_list[c0." + rowField + "]";
-        out << " where " << row << ".key != "
-            << (textKey ? "hash_of(c0." + *key + ")" : "c0." + *key);
-        if (textKey)
-          out << " || " << row << ".check != hash_of(c0." << *key << ", "
-              << other << ")";
-        for (const Copy &copy : copies)
-          out << " || " << row << "." << copy.name << " != " << through(copy);
-      }
-      out << " {\n      " << n << "_changed += { who: e, key: " << held << rest
-          << " }\n    }\n"
-          << "    " << n << "_keys = " << n << "_mend(" << n << ", " << n
+      // (What came or changed since the last update, also where it is made
+      // anew below: so that the next lists only what came after.)
+      out << "  " << n << "_changed = []\n"
+          << "  for e" << bindings << " on ";
+      for (auto [number, component] : llvm::enumerate(of))
+        out << (number ? ", " : "") << "added " << component;
+      out << ", changed c0." << *key;
+      for (const Copy &copy : copies)
+        out << ", changed " << through(copy);
+      out << " {\n    " << n << "_changed += { who: e, key: " << held << rest
+          << " }\n  }\n"
+          << "  if " << n << "_whole {\n"
+          << "    var most_ = " << n << "_built * 2\n"
+          << "    if most_ < 64 { most_ = 64 }\n"
+          << "    if most_ > (" << kSlotsPlaceholder << " as i64) { most_ = "
+          << kSlotsPlaceholder << " as i64 }\n"
+          << "    " << n << "_keys = " << n << "_join(" << n << ", " << n
           << "_tags, " << n << "_list, " << of.front() << ", " << n
-          << "_changed, " << n << "_keys)\n"
-          << "    if " << n << "_keys < 0 { " << n << "_whole = false }\n"
-          << "  }\n"
+          << "_changed, " << n << "_keys, most_)\n"
+          << "    if " << n << "_keys < 0 { " << n << "_whole = false }\n";
+      // (Under `unique`: of the rows of a key that came, those whose
+      // entity still names them, no more than one.)
+      if (unique)
+        out << "    if " << n << "_whole {\n"
+            << "     for k in 0..len(" << n << "_changed) {\n"
+            << "      let s = " << n << "_slot(" << n << ", " << n
+            << "_changed[k].key"
+            << (textKey ? ", " + n + "_changed[k].check" : "") << ")\n"
+            << "      var x = " << n << "[s].head\n"
+            << "      var first_ = " << n << "_changed[k].who\n"
+            << "      var found_ = false\n"
+            << "      while x >= 0 {\n"
+            << "       let who_ = " << n << "_list[x].who\n"
+            << "       if let r = " << of.front() << "(who_)." << rowField
+            << " {\n"
+            << "        if r == x {\n"
+            << "         if found_ && first_ != who_ {\n"
+            << "          index_duplicate(" << n << "_list[x].key, first_, who_)\n"
+            << "         }\n"
+            << "         first_ = who_\n"
+            << "         found_ = true\n"
+            << "        }\n"
+            << "       }\n"
+            << "       x = " << n << "_list[x].next\n"
+            << "      }\n"
+            << "     }\n"
+            << "    }\n";
+      out << "  }\n"
           << "  if !" << n << "_whole {\n";
     }
     out << "  " << n << "_places = 0\n"
@@ -4560,13 +4448,13 @@ LogicalResult Parser::parseIndex() {
         << "  for e" << mutBindings << " {\n"
         << "    let place_ = " << n
         << "_places += 1\n"
-        // (Where it is stored: what a `for` it answers goes by.)
         << "    c0." << placeField << " = place_\n"
         << "    " << n << "_list += { who: e, key: " << held
         << ", place: place_, next: -1, prev: -1" << rest << " }\n  }\n"
         << "  " << n << "_keys = " << n << "_build(" << n << ", " << n
         << "_tags, " << n << "_list, " << of.front() << ", "
         << kSlotsPlaceholder << ", " << n << "_keys)\n"
+        << "  " << n << "_built = len(" << n << "_list) as i64\n"
         << "  " << n << "_whole = true\n";
     if (how != "rebuild")
       out << "  }\n";
@@ -4574,8 +4462,7 @@ LogicalResult Parser::parseIndex() {
         << "  " << n << "_keyed = false\n}\n"
         << "system " << n << "_stale() {\n  " << n << "_fresh = false\n  " << n
         << "_keyed = true\n}\n"
-        << "system " << n << "_moved() {\n  " << n << "_fresh = false\n  " << n
-        << "_whole = false\n}\n";
+        << "system " << n << "_moved() {\n  " << n << "_fresh = false\n}\n";
   } else {
     out << "transient unique " << n << "_fresh: bool\n"
         << "transient unique " << n << "_places: i64\n"
@@ -6055,7 +5942,7 @@ LogicalResult Parser::parseIndex() {
   // (Made again incrementally: the entities that changed are listed in any
   // order, which the mending does not show, so the reactive `for` that
   // lists them goes through the log of what changed, not every entity.)
-  if (how == "incremental" && !grid)
+  if ((how == "incremental" || (hashed && how != "rebuild")) && !grid)
     if (auto update = dyn_cast_or_null<SystemOp>(SymbolTable::lookupSymbolIn(
             module, builder.getStringAttr(resolve(n + "_update")))))
       update.walk([&](AppendOp append) {
@@ -6297,10 +6184,12 @@ LogicalResult Parser::finishIndexOrders() {
       while (slots < 2 * capacity.getInt())
         slots *= 2;
       buffer.setCapacityAttr(builder.getI64IntegerAttr(slots));
+      // (Its list as many as the slots: rows of entities that went stay
+      // till it is made anew, when they come to as many as there are.)
       cast<BufferOp>(
           SymbolTable::lookupSymbolIn(
               module, builder.getStringAttr(buffer.getSymName() + "_list")))
-          .setCapacityAttr(builder.getI64IntegerAttr(capacity.getInt()));
+          .setCapacityAttr(builder.getI64IntegerAttr(slots));
       // (Its tags: one for each slot, and the first 16 again.)
       cast<BufferOp>(
           SymbolTable::lookupSymbolIn(
@@ -6316,9 +6205,8 @@ LogicalResult Parser::finishIndexOrders() {
           constant.setValueAttr(IntegerAttr::get(value.getType(), slots));
       });
     }
-    // Made again incrementally: as many changed as there may be entities
-    // (and as many seen, of a hash index).
-    for (StringRef part : {"_changed", "_seen"})
+    // Made again incrementally: as many changed as there may be entities.
+    for (StringRef part : {"_changed"})
       if (auto changed = dyn_cast_or_null<BufferOp>(SymbolTable::lookupSymbolIn(
               module, builder.getStringAttr(buffer.getSymName() + part))))
         changed.setCapacityAttr(builder.getI64IntegerAttr(capacity.getInt()));

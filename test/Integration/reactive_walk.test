@@ -1,0 +1,32 @@
+// A reactive `for` that gives rows to a buffer, moves and despawns goes
+// through the log of what was added (in another order than the rows'),
+// and what it does comes out as a scan over every entity gives it: the
+// same `for` without its trigger (`without Done` finds the same ones),
+// and built with threads.
+// RUN: %ent run %S/Inputs/reactive_walk.ent 2>/dev/null > %t.out
+// RUN: sed 's/h: Hit on added Hit {/h: Hit without Done {/' \
+// RUN:     %S/Inputs/reactive_walk.ent > %t.scan.ent
+// RUN: %ent run %t.scan.ent 2>/dev/null | cmp - %t.out
+// RUN: %ent run --parallel %S/Inputs/reactive_walk.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK: seen 0 0
+// CHECK-NEXT: seen 3 0
+// CHECK-NEXT: seen 6 0
+// CHECK-NEXT: seen 9 0
+// CHECK-NEXT: seen 17 1
+// CHECK-NEXT: seen 11 1
+// CHECK-NEXT: seen 14 1
+// CHECK-NEXT: seen 2 2
+// CHECK-NEXT: seen 5 2
+// CHECK-NEXT: seen 8 2
+// CHECK-NEXT: seen 16 3
+// CHECK-NEXT: seen 19 3
+// CHECK-NEXT: seen 13 3
+// CHECK-NEXT: seen 4 4
+// CHECK-NEXT: seen 7 4
+// CHECK-NEXT: seen 10 4
+// CHECK-NEXT: seen 1 5
+// CHECK-NEXT: seen 18 5
+// CHECK-NEXT: seen 15 5
+// CHECK-NEXT: left 14 done 13

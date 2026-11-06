@@ -1,0 +1,31 @@
+// Reactive `for`s that give rows to a buffer where they stand
+// (test/Integration/reactive_walk_absent.test): their components are
+// optional in the archetype the entities share, so the first run, which
+// goes over every entity, gives a row only for those that have them and
+// whose trigger fired.
+import console
+component A { n: i64 } capacity 1024
+component S { at: f64 }
+component G { at: f64, st: i32 }
+component F { at: f64 }
+buffer H { sent: f64, at: f64, st: i32 } capacity 4096
+unique Step: i64
+world { for i in 0..20 { spawn { A { n: i } } } }
+system go() {
+  Step += 1
+  let s = Step
+  for me, a: A without S { if a.n % 5 == s % 5 { me.add(S { at: s as f64 }) } }
+  for me, a: A, x: S without G, F where a.n % 3 == s % 3 {
+    if a.n % 2 == 0 { me.add(G { at: s as f64 + 0.5, st: 200 }) }
+    else { me.add(F { at: s as f64 + 0.25 }) }
+  }
+}
+system hist() {
+  for me, x: S, g: G on added G { H += { sent: x.at, at: g.at, st: g.st } }
+  for me, x: S, f: F on added F { H += { sent: x.at, at: f.at, st: 0 } }
+}
+system count() { put("step {Step} rows {len(H)}") }
+system say() { for i in 0..len(H) { put("row {H[i].sent} {H[i].at} {H[i].st}") } }
+schedule frame() { go() hist() count() }
+schedule end() { say() }
+main { frame() frame() frame() frame() frame() frame() frame() frame() end() }

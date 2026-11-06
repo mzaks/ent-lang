@@ -1,0 +1,17 @@
+// A reactive `for` that gives rows to a buffer where they stand gives a
+// row only where its body runs: not for an entity without its components
+// on its first run, which scans (they were once given for every entity
+// there). The same as a scan over every entity with the same components
+// gives, and with threads.
+// RUN: %ent run %S/Inputs/reactive_walk_absent.ent 2>/dev/null > %t.out
+// RUN: sed -e 's/g: G on added G {/g: G where g.at == Step as f64 + 0.5 {/' \
+// RUN:     -e 's/f: F on added F {/f: F where f.at == Step as f64 + 0.25 {/' \
+// RUN:     %S/Inputs/reactive_walk_absent.ent > %t.scan.ent
+// RUN: %ent run %t.scan.ent 2>/dev/null | sort > %t.scan.sorted
+// RUN: sort %t.out | cmp - %t.scan.sorted
+// RUN: %ent run --parallel %S/Inputs/reactive_walk_absent.ent 2>/dev/null | sort | cmp - %t.scan.sorted
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK: step 1 rows 2
+// CHECK: step 8 rows 20
+// CHECK-NOT: row 0.0 0.0 0

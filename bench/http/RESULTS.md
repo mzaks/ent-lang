@@ -180,3 +180,57 @@ flight, answered and not settled; `Handled apart` alone gained 0.7 s and
 cost 170 MB: an archetype of full capacity more), a log of what was
 added for `on added` loops and for the hash indexes, and the pages
 waiting for their level held apart until it comes.
+
+### Live, after `on added` and hash indexes by what changed
+
+Two changes in the compiler, both for loops that cost by how many asks
+there are, not by what changed:
+
+- A reactive `for` (`on added Got`) that gives rows to a buffer,
+  connects or changes which entities there are went through every
+  entity, so that what it does lands in the order of the rows. It now
+  takes the rows the log names, puts them in order and runs its body
+  for them so (docs/syntax.md, the reactive `for`): `history` and `log`
+  0.8 s to 0.05 s.
+- A hash index kept as fits looked at every entity each time it was
+  read after a change (were its key and copies still its row's?), and
+  where entities came, went or moved, it gave every one its place
+  again. Now a reactive `for` lists those that came or changed their
+  key, each gets a row at the end of its key's list, and the rows of
+  those that went or moved stay till it is made anew (at twice as many
+  rows as made); `get` and the `for`s it answers pass over them
+  (docs/indexes.md, 5.1): `Kept` and `ByUrl` 1.8 s to 0.12 s.
+
+Traced at 10⁵ pages and 64 connections (one core, 5,259 frames): 8.7 s,
+of which `receive` 2.4 s, `Links` kept in order 1.3 s, `extract_links`
+looking over the pages waiting for their level 1.0 s, and the rest
+loops over every ask (0.02 to 0.06 ms a frame each).
+
+The mock (few frames: 123 at 10⁵) is as it was: 10⁴ 0.112 / 0.146 s
+(one core / all cores), 10⁵ 1.755 / 1.939, 10⁶ 22.846 / 24.327 (22.2 /
+22.5 before). Live:
+
+| pages | connections | crawler | wall s | CPU s | peak MB | pages/s |
+|---|---|---|---|---|---|---|
+| 10⁴ | 64 | C | 1.009 | 0.119 | 23 | 10,438 |
+| 10⁴ | 64 | ent | 1.101 | 0.239 | 42 | 9,565 |
+| 10⁴ | 64 | ent-par | 1.122 | 0.320 | 50 | 9,384 |
+| 10⁴ | 256 | C | 1.045 | 0.134 | 23 | 10,073 |
+| 10⁴ | 256 | ent | 1.123 | 0.232 | 47 | 9,371 |
+| 10⁴ | 256 | ent-par | 1.123 | 0.277 | 61 | 9,375 |
+| 10⁴ | 1024 | C | 1.076 | 0.214 | 23 | 9,782 |
+| 10⁴ | 1024 | ent | 1.162 | 0.324 | 65 | 9,064 |
+| 10⁴ | 1024 | ent-par | 1.171 | 0.323 | 61 | 8,989 |
+| 10⁵ | 64 | C | 2.319 | 1.200 | 75 | 45,484 |
+| 10⁵ | 64 | ent | 7.421 | 6.328 | 340 | 14,215 |
+| 10⁵ | 64 | ent-par | 8.011 | 7.233 | 340 | 13,169 |
+| 10⁵ | 256 | C | 2.152 | 1.398 | 75 | 49,018 |
+| 10⁵ | 256 | ent | 4.929 | 4.270 | 306 | 21,402 |
+| 10⁵ | 256 | ent-par | 5.456 | 4.924 | 315 | 19,334 |
+| 10⁵ | 1024 | C | 3.086 | 2.364 | 76 | 34,180 |
+| 10⁵ | 1024 | ent | 4.747 | 4.129 | 309 | 22,220 |
+| 10⁵ | 1024 | ent-par | 5.101 | 4.469 | 315 | 20,681 |
+
+Peak memory fell by a third (484 to 340 MB at 64 connections; which
+part, not looked into). ent-par is slower than ent here, as before; the
+loops that now go through the logs in row order run on one thread.

@@ -1,0 +1,12 @@
+// A hash index that is empty when first made, its entities coming later
+// (an empty index was once never mended), each way it is kept; on one
+// core and on many.
+// RUN: sed -e 's/WAY//' %S/Inputs/hash_late.ent > %t.fits.ent
+// RUN: sed -e 's/WAY/incremental/' %S/Inputs/hash_late.ent > %t.incremental.ent
+// RUN: sed -e 's/WAY/rebuild/' %S/Inputs/hash_late.ent > %t.rebuild.ent
+// RUN: %ent run %t.fits.ent | FileCheck %s
+// RUN: %ent run %t.incremental.ent | FileCheck %s
+// RUN: %ent run %t.rebuild.ent | FileCheck %s
+// RUN: %ent run --parallel %t.fits.ent | FileCheck %s
+
+// CHECK: good {{[0-9]+}} bad 0

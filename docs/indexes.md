@@ -87,16 +87,20 @@ or moved between archetypes (which reactive queries do not see as
 changes of the key), and where the rows would move more steps than there
 are rows, it is made anew, as `rebuild` does.
 
-A hash index (5.1) has no order to keep: as fits it is mended from the
-entities whose key or copies differ from their rows', `incremental` from
-those a reactive `for` visits; each moved from its key's list to its new
-key's, at the end. Where entities came, went or moved between
-archetypes and no key or copy was written since it was made, it is
-mended too (`N_rejoin`): every entity it holds is given its place as
-stored now, the rows of those gone are taken out, and one that came gets
-a row at the end of its key's list; only those are hashed. (A key or
-copy written as well: made anew.) What a hash index counts as written
-is its key and what it copies, not the rest of its first component.
+A hash index (5.1) has no order to keep: as fits and `incremental` it is
+kept up by what changed alone (`N_join`). A reactive `for` lists the
+entities that came (got a component of the index, spawned with them)
+and those whose key or copies changed, through the logs; each gets a row
+at the end of its key's list, its row field naming it (or, of the same
+key, its copies written into its row). Nothing goes over every entity to
+find what went or moved: a row whose entity went, lost a component of
+the index or has another row now stays where it is, and the readers
+pass over it (`get`, and the `for`s the index answers, ask the entity
+where it is stored now). Made anew once the rows come to twice as many
+as when it was last made (64 at least), or to its room, or where a key
+more would make the keys more than half its slots. What a hash index
+counts as written is its key and what it copies, not the rest of its
+first component.
 
 A clustered index (5.2) is brought up to date before every system where
 it is out of date, eager or not: its archetype's rows are in its order
@@ -165,8 +169,9 @@ Built (2026-10-23, `docs/syntax.md`, Hash indexes):
   (`ent.index.get`, and the `for`s it answers).
 - `Name.get(key)`: the entity of a key, the first as they are stored
   where several have it; `none` where none has it. Lowered where it is
-  (`ent.index.get`): a key one entity has gives the slot's own entity
-  (`one`), read beside its key; others go along the key's list. Against
+  (`ent.index.get`): along the key's list, the rows that stand for
+  their entities still (see the kept item below), each entity found
+  where it is stored now. Against
   absl::flat_hash_map by the same loop (`bench/hash/get.py` and
   `swiss.cpp`): keys not there faster from 200,000 keys on (3.4 ns
   where 5.8, at 4 million 4.0 where 9.5), keys found 1 to 1.5 ns
@@ -186,19 +191,19 @@ Built (2026-10-23, `docs/syntax.md`, Hash indexes):
 - `unique`: where two entities have one key, when the index is made
   (or mended), the program stops, naming the key and both entities.
 - Kept each of the ways of section 4: `rebuild` makes it anew; as fits
-  and `incremental` mend it, from the entities whose key or copies
-  differ from their rows' (as fits, all looked at) or that a reactive
-  `for` says changed (`incremental`, through its log: the list of what
-  changed is in any order, `ent.any_order`): each taken out of its key's list
-  and put at the end of its new key's (a key none has now: its slot
-  emptied, those after it moved back, no tombstones). Where entities
-  came, went or moved and no key was written, as fits and `incremental`
-  mend it as well: those gone out, the last row put in each one's room,
-  those that came at the end of their keys' lists, every place as the
-  entities are stored now (`get` and a `for` it answers go by places, so
-  they give what they gave made anew). The crawler (examples/http), which
-  spawns asks every frame: its two text indexes took 2.5 s of 4.5 at
-  10⁵ asks made anew, 0.11 s mended (2026-11-06).
+  and `incremental` alike by what changed (section 4: the entities that
+  came or changed their key or copies, from the logs, a row each at the
+  end of its key's list; the list of them is in any order,
+  `ent.any_order`). The rows of entities that went, lost a component or
+  got another row stay till it is made anew; `get` and a `for` it
+  answers ask each row's entity whether its row field still names the
+  row and it has every component, and order those that do as they are
+  stored now (archetype, then row), so they give what they gave made
+  anew. The crawler (examples/http), which spawns asks every frame: its
+  two text indexes took 2.5 s of 4.5 at 10⁵ asks made anew, 0.11 s
+  mended by a pass over every entity (2026-11-06), and are now kept by
+  what changed (both from 1.8 s of the live crawl's 11 s, 10⁵ pages, 64
+  connections, to 0.12 s; 2026-11-06).
 - For: an entity by name or an id from outside, a netlist's signal name
   to its entity (AIGER and SPICE import), network ids.
 

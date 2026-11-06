@@ -1,0 +1,54 @@
+// Reactive fors that give rows to a buffer, move and despawn entities:
+// they go through the log of what happened, and what they do comes out
+// in the order of the rows, as a scan over every entity gives it.
+import console
+
+component Item { id: i32, key: i32 }
+component Hit { at: i32 }
+tag Done
+component Gone { n: i32 }
+
+default_capacity 64
+
+buffer Seen { id: i32, at: i32 } capacity 256
+unique Step: i32
+
+system setup() {
+  for i in 0..20 { spawn { Item { id: i, key: (i * 13) % 20 } } }
+}
+
+// Each step hits some items, in an order other than their rows' (so the
+// log of what was added is in that order too).
+system hit() {
+  for me, it: mut Item without Hit, Done in turn by it.key {
+    let k = (it.id * 7 + Step * 3) % 20
+    if k < 4 { me.add(Hit { at: Step }) }
+  }
+}
+
+// What a hit item is said to be, a row each: in row order.
+system note() {
+  for me, it: Item, h: Hit on added Hit {
+    Seen += { id: it.id, at: h.at }
+    if it.id % 3 == 0 { me.destroy() } else { me.add(Done) }
+  }
+}
+
+system advance() { Step += 1 }
+
+system say() {
+  for i in 0..len(Seen) { put("seen {Seen[i].id} {Seen[i].at}") }
+  let left = for it: Item { }
+  let done = for it: Item with Done { }
+  put("left {left} done {done}")
+}
+
+schedule start() { setup() }
+schedule step() { hit() note() advance() }
+schedule finish() { say() }
+
+main {
+  start()
+  loop { step() } until Step >= 6
+  finish()
+}

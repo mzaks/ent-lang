@@ -1278,7 +1278,7 @@ static bool isEntityLocal(QueryOp query) {
     if (op->hasAttr("ent.order_free"))
       return WalkResult::interrupt();
     // (Nor rows given a buffer where they are sent: see ent.any_order.)
-    if (isa<AppendOp>(op) && op->hasAttr("ent.at_once"))
+    if (isa<AppendOp, ConnectOp>(op) && op->hasAttr("ent.at_once"))
       return WalkResult::interrupt();
     // What a `for` inside the body became (see lowerEach): it reads the
     // columns of other entities, which the query does not write (what it
@@ -1967,6 +1967,10 @@ static bool canRunForAbsentEntities(QueryOp query) {
                 .getAsValueRange<TypeAttr>(),
             [](Type type) { return isa<StringType>(type); }))
       return WalkResult::interrupt();
+    // (A row given to a buffer where it stands, kAtOnceAttr, has no slot
+    // to say it was not: it is given only where the body runs.)
+    if (isa<AppendOp>(op) && op->hasAttr("ent.at_once"))
+      return WalkResult::interrupt();
     if (isa<GetOp, SetOp, ReadOp, AddOp, RemoveOp, EntityOp, HasOp, LookupOp,
             ApplyOp, AccumulateOp, AppendOp, YieldOp, scf::IfOp,
             scf::YieldOp>(op))
@@ -2324,10 +2328,12 @@ static constexpr llvm::StringLiteral kReducedAttr = "ent.reduced";
 static constexpr llvm::StringLiteral kOrderFreeAttr = "ent.order_free";
 
 /// Marks a reactive query some of whose kOrderFreeAttr sends are not
-/// whole numbers: the order of the rows shows in what they come to, so
-/// its walk of the logs gathers the rows it is to visit, puts them in
-/// order (devices/sends.c), and then visits them; one sending op for a
-/// field, so that sending row after row is combining op after op.
+/// whole numbers, or that gives rows or edges where they are sent or
+/// changes which entities there are: the order of the rows shows in what
+/// they come to, so its walk of the logs gathers the rows it is to visit,
+/// puts them in order (devices/sends.c), and then visits them; one
+/// sending op for a field (or buffer, or relation), so that sending row
+/// after row is combining op after op.
 static constexpr llvm::StringLiteral kRowOrderedAttr = "ent.row_ordered";
 
 /// Marks an `ent.apply` or `ent.accumulate` in a loop of its query's
@@ -13045,10 +13051,11 @@ static std::optional<std::string> whyScans(QueryOp query,
     return std::string("it applies or accumulates values, connects "
                        "edges or appends rows, which are combined in row "
                        "order");
-  if (spawns || llvm::any_of(getMatchedArchetypes(query),
-                             [&](ArchetypeOp archetype) {
-                               return isStructuralFor(query, archetype);
-                             }))
+  if (!query->hasAttr(kRowOrderedAttr) &&
+      (spawns || llvm::any_of(getMatchedArchetypes(query),
+                              [&](ArchetypeOp archetype) {
+                                return isStructuralFor(query, archetype);
+                              })))
     return std::string("it changes which entities archetypes hold, which "
                        "is applied in row order");
   return std::nullopt;
@@ -19318,6 +19325,72 @@ struct HashSlot {
 /// the keys looked at only where the tag is the key's and before the
 /// first empty slot, which is as far as linear probing puts it; the next
 /// 16 only where there was no empty one.
+/// Of row `row` (an i32) of a hash index's list, whose entity is `who`:
+/// whether it stands for the entity still (alive, with every component
+/// of the index, and its row field naming this row: the index keeps the
+/// rows of those that went, or got another key, till it is made anew,
+/// see its `_join`), and where the entity is stored now, as a key of the
+/// order a `for` over every entity visits them in (its archetype's, then
+/// its row's), an i64.
+static std::pair<Value, Value> hashRowNow(IRRewriter &rewriter, Location loc,
+                                          const WorldLayout &layout,
+                                          WorldAccess &world,
+                                          const WorldBuffer &slots, Value who,
+                                          Value row) {
+  auto info = BufferOp(slots.op)->getAttrOfType<DictionaryAttr>("ent.index");
+  SmallVector<FlatSymbolRefAttr> of;
+  for (Attribute component : cast<ArrayAttr>(info.get("of")))
+    of.push_back(FlatSymbolRefAttr::get(cast<StringAttr>(component)));
+  auto held = cast<ArrayAttr>(info.get("row"));
+  auto holder = cast<StringAttr>(held[0]);
+  auto rowField = cast<StringAttr>(held[1]);
+  Type i1 = rewriter.getI1Type(), i64 = rewriter.getI64Type();
+  auto candidate = [&](const WorldArchetype &archetype) {
+    return llvm::all_of(of, [&](FlatSymbolRefAttr component) {
+      return ArchetypeOp(archetype.op).contains(component);
+    });
+  };
+  SmallVector<Value> now = emitLocate(
+      rewriter, loc, layout, world, who, candidate, FlatSymbolRefAttr(),
+      TypeRange{i1, i64},
+      [&](const WorldArchetype &archetype, Value at,
+          Value) -> SmallVector<Value> {
+        Value named = memref::LoadOp::create(
+            rewriter, loc, world.column(archetype, holder, rowField),
+            ValueRange{at});
+        Value stands = arith::CmpIOp::create(
+            rewriter, loc, arith::CmpIPredicate::eq,
+            arith::ExtSIOp::create(rewriter, loc, i64, named),
+            arith::ExtSIOp::create(rewriter, loc, i64, row));
+        // (A component it may have or not where it is: its byte.)
+        for (FlatSymbolRefAttr component : of) {
+          if (!ArchetypeOp(archetype.op).isOptional(component))
+            continue;
+          Value byte = memref::LoadOp::create(
+              rewriter, loc,
+              world.column(archetype, component.getAttr(),
+                           rewriter.getStringAttr("")),
+              ValueRange{at});
+          stands = arith::AndIOp::create(
+              rewriter, loc, stands,
+              arith::CmpIOp::create(
+                  rewriter, loc, arith::CmpIPredicate::ne, byte,
+                  arith::ConstantIntOp::create(rewriter, loc, 0, 8)));
+        }
+        Value order = arith::OrIOp::create(
+            rewriter, loc,
+            arith::ConstantIntOp::create(rewriter, loc,
+                                         int64_t(archetype.index) << 40, 64),
+            arith::IndexCastOp::create(rewriter, loc, i64, at));
+        return {stands, order};
+      },
+      [&]() -> SmallVector<Value> {
+        return {arith::ConstantIntOp::create(rewriter, loc, 0, 1),
+                arith::ConstantIntOp::create(rewriter, loc, 0, 64)};
+      });
+  return {now[0], now[1]};
+}
+
 static HashSlot probeHash(IRRewriter &rewriter, Location loc,
                           const WorldLayout &layout, WorldAccess &world,
                           StringAttr index, Value wanted, Value check,
@@ -19939,7 +20012,7 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
     memref::StoreOp::create(rewriter, loc, rows, cells, ValueRange{zero});
   } else if (viaHash) {
     // The key's list, from its slot's head along `next` (rows of
-    // `N_list`), each entity's place a key of the order.
+    // `N_list`), each entity where it is stored a key of the order.
     const WorldBuffer &list = layout.getBuffer(StringAttr::get(
         rewriter.getContext(), query.getViaHash().getValue() + "_list"));
     auto load = [&](const WorldBuffer &buffer, StringRef name, Value row) {
@@ -19973,14 +20046,27 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
         },
         [&](OpBuilder &, Location, ValueRange at) {
           Value row = arith::IndexCastOp::create(rewriter, loc, index, at[0]);
-          memref::StoreOp::create(rewriter, loc, load(list, "place", row), keys,
-                                  ValueRange{at[1]});
-          memref::StoreOp::create(rewriter, loc, load(list, "who", row), ids,
-                                  ValueRange{at[1]});
+          // (Those whose entities it still stands for, where they are
+          // stored now.)
+          Value who = load(list, "who", row);
+          auto [stands, order] = hashRowNow(rewriter, loc, layout, world,
+                                            *viaHash, who, at[0]);
+          auto ifStands = scf::IfOp::create(rewriter, loc, stands);
+          {
+            OpBuilder::InsertionGuard inner(rewriter);
+            rewriter.setInsertionPointToStart(ifStands.thenBlock());
+            memref::StoreOp::create(rewriter, loc, order, keys,
+                                    ValueRange{at[1]});
+            memref::StoreOp::create(rewriter, loc, who, ids,
+                                    ValueRange{at[1]});
+          }
           scf::YieldOp::create(
               rewriter, loc,
               ValueRange{load(list, "next", row),
-                         arith::AddIOp::create(rewriter, loc, at[1], one)});
+                         arith::SelectOp::create(
+                             rewriter, loc, stands,
+                             arith::AddIOp::create(rewriter, loc, at[1], one),
+                             at[1])});
         });
     memref::StoreOp::create(rewriter, loc, walk.getResult(1), cells,
                             ValueRange{zero});
@@ -24059,8 +24145,8 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
                   &world);
       continue;
     }
-    // The entity of a key, of a hash index: the head of the key's list
-    // where it is the one, else the first of the list as they are stored.
+    // The entity of a key, of a hash index: of its list's rows that stand
+    // for their entities still, the one stored first.
     if (auto get = dyn_cast<IndexGetOp>(op)) {
       Type i32 = rewriter.getI32Type();
       Type i64 = rewriter.getI64Type();
@@ -24092,9 +24178,9 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
                                           rewriter.getIndexType(), row);
       };
       Value none = world.noEntity(loc);
-      // Where the key is there: the slot's entity, where its key has one
-      // (none there where several have it, then the list's first); none
-      // where it is not, without reading the slot further.
+      // Where the key is there: of the rows of its list that stand for
+      // their entities still, the entity stored first; none where it is
+      // not, without reading the slot further.
       auto walked = scf::IfOp::create(rewriter, loc, TypeRange{none.getType()},
                                       found.found, /*withElseRegion=*/true);
       {
@@ -24102,16 +24188,6 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
         rewriter.setInsertionPointToStart(walked.elseBlock());
         scf::YieldOp::create(rewriter, loc, none);
         rewriter.setInsertionPointToStart(walked.thenBlock());
-        Value one = load(slots, "one", found.slot);
-        auto many = scf::IfOp::create(
-            rewriter, loc, TypeRange{none.getType()},
-            arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::eq, one,
-                                  none),
-            /*withElseRegion=*/true);
-        scf::YieldOp::create(rewriter, loc, many.getResult(0));
-        rewriter.setInsertionPointToStart(many.elseBlock());
-        scf::YieldOp::create(rewriter, loc, one);
-        rewriter.setInsertionPointToStart(many.thenBlock());
         Value head = load(slots, "head", found.slot);
         auto walk = scf::WhileOp::create(
             rewriter, loc, TypeRange{i32, none.getType(), i64},
@@ -24129,17 +24205,21 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
             },
             [&](OpBuilder &, Location, ValueRange at) {
               Value row = toIndex(at[0]);
-              Value place = load(list, "place", row);
-              Value earlier = arith::CmpIOp::create(
-                  rewriter, loc, arith::CmpIPredicate::slt, place, at[2]);
+              Value who = load(list, "who", row);
+              auto [stands, order] =
+                  hashRowNow(rewriter, loc, layout, world, slots, who, at[0]);
+              Value earlier = arith::AndIOp::create(
+                  rewriter, loc, stands,
+                  arith::CmpIOp::create(rewriter, loc,
+                                        arith::CmpIPredicate::slt, order,
+                                        at[2]));
               scf::YieldOp::create(
                   rewriter, loc,
                   ValueRange{load(list, "next", row),
                              arith::SelectOp::create(rewriter, loc, earlier,
-                                                     load(list, "who", row),
-                                                     at[1]),
+                                                     who, at[1]),
                              arith::SelectOp::create(rewriter, loc, earlier,
-                                                     place, at[2])});
+                                                     order, at[2])});
             });
         scf::YieldOp::create(rewriter, loc, walk.getResult(1));
       }
@@ -27623,6 +27703,65 @@ struct EntLowerToLoops
       if (!seen.wasInterrupted())
         mark();
     });
+    // A reactive query that gives rows to buffers, connects edges or
+    // changes which entities there are (moves, despawns, spawns) goes
+    // through the logs too: its walk gathers the rows it is to visit,
+    // puts them in order (kRowOrderedAttr) and visits them so, as a scan
+    // over every entity does those it runs for. So the rows and edges it
+    // gives are given where they are sent, in the order a scan stages
+    // them (one op for each buffer and relation: staged, those of one op
+    // would land before those of the next), and what it changes is
+    // pending in the order of the rows. Not where it sends values to be
+    // combined when it ends (each waits in a slot of its row), nor where
+    // it gives rows or edges from a loop of its body.
+    if (!gpu && !ranksMode)
+      module.walk([&](QueryOp query) {
+        if (query.isTurn() || query.getCascade() || query.hasBy() ||
+            query.getInSet())
+          return;
+        SmallVector<Trigger> triggers = getTriggers(query);
+        if (triggers.empty() || llvm::any_of(triggers, [](const Trigger &t) {
+              return bool(t.via);
+            }))
+          return;
+        bool blocked = false;
+        llvm::SmallDenseSet<Attribute> buffers, relations;
+        SmallVector<Operation *> given;
+        auto inLoop = [&](Operation *op) {
+          for (Operation *parent = op->getParentOp(); parent != query;
+               parent = parent->getParentOp())
+            if (isa<LoopLikeOpInterface, EdgesOp, EachOp>(parent))
+              return true;
+          return false;
+        };
+        bool spawns = false;
+        query.getBody().walk([&](Operation *op) {
+          if (isa<ApplyOp, AccumulateOp>(op) && !op->hasAttr(kOrderFreeAttr))
+            blocked = true;
+          spawns |= isa<SpawnOp>(op);
+          if (!isa<AppendOp, ConnectOp>(op) || op->hasAttr(kAtOnceAttr))
+            return;
+          Attribute into = isa<AppendOp>(op)
+                               ? Attribute(cast<AppendOp>(op).getBufferAttr())
+                               : Attribute(cast<ConnectOp>(op).getRelationAttr());
+          auto &seen = isa<AppendOp>(op) ? buffers : relations;
+          if (!seen.insert(into).second || inLoop(op))
+            blocked = true;
+          given.push_back(op);
+        });
+        bool structural =
+            spawns || llvm::any_of(getMatchedArchetypes(query),
+                                   [&](ArchetypeOp archetype) {
+                                     return isStructuralFor(query, archetype);
+                                   });
+        if (blocked || (given.empty() && !structural))
+          return;
+        for (Operation *op : given) {
+          op->setAttr(kOrderFreeAttr, rewriter.getUnitAttr());
+          op->setAttr(kAtOnceAttr, rewriter.getUnitAttr());
+        }
+        query->setAttr(kRowOrderedAttr, rewriter.getUnitAttr());
+      });
     // And an edge connected there, or in a loop over edges.
     module.walk([&](ConnectOp connect) {
       auto query = connect->getParentOfType<QueryOp>();

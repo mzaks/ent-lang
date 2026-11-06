@@ -306,11 +306,16 @@ for with Enemy { Count += 1 }     // nor the entity
   `log N` after a trigger sets its event log's capacity (`log 0`: none).
   Such a `for` goes through the log of what happened, not through every
   entity, so it costs by how much changed. It goes through all of them,
-  running its body only where a trigger fired, on its first run, where a
-  log has lost events, and where what it does must land in the order of
-  the rows: it destroys or moves entities, connects, gives rows to a
-  buffer, or sends values other than whole numbers (or to a field it
-  also reads). Whole numbers sent with `+=`, `-=`, `min=` or `max=`, and
+  running its body only where a trigger fired, on its first run and
+  where a log has lost events. Where what it does must land in the
+  order of the rows (it spawns, destroys or moves entities, connects,
+  gives rows to a buffer), it takes the rows the log names, puts them
+  in order and runs its body for them so, on one thread: what it does
+  comes out as a scan's would. It still goes through all of them where
+  it sends values other than whole numbers (or to a field it also
+  reads), gives rows to one buffer or edges to one relation from two
+  places or from a loop of its body, or reacts to an ancestor's events
+  (`via`). Whole numbers sent with `+=`, `-=`, `min=` or `max=`, and
   how many entities it ran for, come to the same in any order: those
   are combined as it goes, on one thread.
 
@@ -2162,21 +2167,26 @@ entities of a key, by a hash of it, in place of an order.
   key when the index is made again, the program stops (exit status 3),
   naming the key and both entities.
 - Kept as the others, `lazy` or `eager`, and `rebuild`, `incremental`
-  or as fits (neither said). It has no order: as fits, every entity
-  whose key or copied fields differ from its row's is mended (taken
-  out of its key's list and put at the end of its new key's);
-  `incremental`, those a reactive `for` says changed, which goes through
-  the log of what changed (on one thread); `rebuild` makes it anew.
-  Anew where entities came, went or moved, and where keys come to more
-  than half its slots.
+  or as fits (neither said). It has no order: as fits and `incremental`
+  are the same, kept up by what changed alone: a reactive `for` goes
+  through the log of the entities that came or whose key or copied
+  fields changed (on one thread), and each gets a row at the end of its
+  key's list (where its key is the same, its copies are written into
+  its row). The row of one that went, lost a component or has another
+  row now stays, and `get` and the `for`s the index answers pass over
+  it. Made anew where its rows come to twice as many as when it was
+  made last, or to its room, or where keys come to more than half its
+  slots; `rebuild` makes it anew every time.
 - Its slots (`Name`, a power of two, twice the keys at least and as
-  many as twice the first component's capacity) hold the keys, and its rows (`Name_list`, one for
-  each entity, in the order they are stored) the entities: `who`, the
-  key, `place`, the rows before and after of its key, and what `{ }`
-  copies; its tags (`Name_tags`, a byte for each slot) let a key be
-  looked for 16 slots at a time. The names `Name_list`, `Name_tags`,
-  `Name_changed`, `Name_keys`, `Name_home`, `Name_tag`, `Name_mark`,
-  `Name_slot`, `Name_append`, `Name_build` and `Name_mend` are taken
+  many as twice the first component's capacity) hold the keys, and its
+  rows (`Name_list`, as many as the slots: a row for each entity as
+  made, one more for each that came or changed its key since) the
+  entities: `who`, the key, `place`, the rows before and after of its
+  key, and what `{ }` copies; its tags (`Name_tags`, a byte for each
+  slot) let a key be looked for 16 slots at a time. The names
+  `Name_list`, `Name_tags`, `Name_changed`, `Name_keys`, `Name_built`,
+  `Name_home`, `Name_tag`, `Name_mark`, `Name_slot`, `Name_append`,
+  `Name_build` and `Name_join` are taken
   besides those above. Not `find`, `[r]` or `for ... by`: it
   has no order.
 - `hash_of(x)` and `hash_of(x, seed)`, built in: the hash it takes, of a

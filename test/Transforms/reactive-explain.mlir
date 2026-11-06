@@ -24,9 +24,28 @@ ent.system @pass(%d: f32) reads [@T, @G] writes [@H] {
   }
 }
 
+// (Despawns walk the logs: the rows are gathered and visited in their
+// order, so what is pending is in the order a scan gives.)
 ent.system @cull() reads [@H] writes [@A] {
-  // expected-remark @+1 {{scans every entity on each run: it changes which entities archetypes hold, which is applied in row order}}
   ent.query (%h: !ent.ref<@H>) on [changed @H "hp"] {
     ent.despawn
+  }
+}
+
+ent.buffer @Log (hp: f32) capacity 64
+
+// (A row given a buffer walks the logs too, given where it is sent in
+// the order of the rows; two ops giving rows to one buffer do not: each
+// op's rows land before the next's.)
+ent.system @note() reads [@H] writes [@Log] {
+  ent.query (%h: !ent.ref<@H>) on [changed @H "hp"] {
+    %v = ent.get %h "hp" : !ent.ref<@H> -> f32
+    ent.append @Log (%v) : f32
+  }
+  // expected-remark @+1 {{scans every entity on each run: it applies or accumulates values, connects edges or appends rows, which are combined in row order}}
+  ent.query (%h: !ent.ref<@H>) on [changed @H "hp"] {
+    %v = ent.get %h "hp" : !ent.ref<@H> -> f32
+    ent.append @Log (%v) : f32
+    ent.append @Log (%v) : f32
   }
 }
