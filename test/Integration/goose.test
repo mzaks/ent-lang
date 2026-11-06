@@ -1,0 +1,26 @@
+// A device written in Goose (examples/goose): a fn called from a `for`
+// over a million entities on one thread and on many, a proc that keeps an
+// array on Goose's data stack called from one (on the main thread), and
+// buffers handed to procs that parse and sort; the same either way. A bad
+// list is an answer (-1), not a stop. Needs the Goose compiler
+// (examples/goose/setup.sh).
+// REQUIRES: goose
+// Its fns are read as Goose compiles them, and keep their word.
+// RUN: cd %S/../../examples/goose && env GOOSE=%goose %ent build --no-cache calls.ent -o %t.one 2>&1 | FileCheck %s --check-prefix=PURE --allow-empty
+// RUN: cd %S/../../examples/goose && %t.one > %t.one.txt
+// RUN: FileCheck %s --input-file=%t.one.txt
+// RUN: cd %S/../../examples/goose && env GOOSE=%goose %ent build --no-cache --parallel calls.ent -o %t.all 2>&1 | FileCheck %s --check-prefix=PURE --allow-empty
+// RUN: cd %S/../../examples/goose && %t.all > %t.all.txt
+// RUN: cmp %t.one.txt %t.all.txt
+// One that keeps an array on the data stack, declared a fn: its data
+// stacks are the program's, and the check says so.
+// RUN: rm -rf %t.dir && cp -r %S/../../examples/goose %t.dir
+// RUN: sed -i 's/^extern proc square_sum/extern fn square_sum/' %t.dir/goosedev.ent
+// RUN: cd %t.dir && env GOOSE=%goose %ent build --no-cache calls.ent -o %t.fn 2>&1 | FileCheck %s --check-prefix=FN
+// PURE-NOT: warning
+// CHECK: mixed 8790920353524676646 squares 9604000000
+// CHECK-NEXT: 5888 bytes, 1001 numbers, 1001 kept, median 48398
+// CHECK-NEXT: 12,x: -1, 0 kept
+// CHECK-NEXT: 7,,: 2, median 0
+// FN: goosedev.ent:30:11: warning: extern fn 'goosedev.square_sum' is no fn: its Goose (ent_goosedev_square_sum in {{.*}}goosedev.goose) writes what gs_stks points to. A fn may be called at another time, fewer times or on many threads at once: declare it 'extern proc'
+// FN-NOT: warning

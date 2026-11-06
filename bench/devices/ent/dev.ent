@@ -1,0 +1,123 @@
+// The workloads of bench/devices in ent itself: fns and procs of the
+// program, where the other folders have extern ones in C, Rust and Goose
+// with the same names and buffers. (median16 is not here: a fn has no
+// array of its own, and sixteen vars sorted by hand is no fair stand-in.)
+
+buffer Text { value: u8 } capacity 16777216
+buffer Values { value: i64 } capacity 2097152
+buffer Scratch { value: i64 } capacity 2097152
+buffer Pixels { value: u8 } capacity 4194304
+buffer Blurred { value: u8 } capacity 4194304
+
+// splitmix64's finish.
+fn mix(x: u64) -> u64 {
+  var z = x + 0x9E3779B97F4A7C15
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EB
+  z ^ (z >> 31)
+}
+
+// The squares below n added up (with no array: an ent fn has none).
+fn square_sum(n: i32) -> i64 {
+  var sum: i64 = 0
+  for i in 0..n {
+    let w = i as i64
+    sum += w * w
+  }
+  sum
+}
+
+// The whole numbers of comma-separated text into `into`: how many; -1 at a
+// byte that is neither digit nor comma.
+proc parse(text: Text, into: mut Values) -> i64 {
+  into = []
+  var current: i64 = 0
+  var digits = false
+  var bad = false
+  for i in 0..len(text) {
+    let c = text[i].value
+    if c == 44 {
+      into += { value: current }
+      current = 0
+      digits = false
+    } else if c >= 48 && c <= 57 {
+      current = current * 10 + (c - 48) as i64
+      digits = true
+    } else {
+      bad = true
+      break
+    }
+  }
+  if digits && !bad { into += { value: current } }
+  if bad { into = [] }
+  if bad { -1 } else { len(into) as i64 }
+}
+
+// The lower median of the values, by quickselect (Hoare's partition, the
+// middle as pivot) on a copy in `scratch`.
+proc median(values: Values, scratch: mut Scratch) -> i64 {
+  scratch = []
+  let n = len(values)
+  for i in 0..n { scratch += { value: values[i].value } }
+  var answer: i64 = 0
+  if n > 0 {
+    let k = (n - 1) / 2
+    var lo = 0
+    var hi = n - 1
+    for round in 0..n {
+      if lo >= hi { break }
+      let p = scratch[(lo + hi) / 2].value
+      var i = lo
+      var j = hi
+      for step in 0..n {
+        if i > j { break }
+        for a in 0..n {
+          if scratch[i].value >= p { break }
+          i += 1
+        }
+        for b in 0..n {
+          if scratch[j].value <= p { break }
+          j -= 1
+        }
+        if i <= j {
+          let t = scratch[i].value
+          scratch[i].value = scratch[j].value
+          scratch[j].value = t
+          i += 1
+          j -= 1
+        }
+      }
+      if k <= j {
+        hi = j
+      } else if k >= i {
+        lo = i
+      } else {
+        break
+      }
+    }
+    answer = scratch[k].value
+  }
+  answer
+}
+
+// A 3 by 3 box blur of a picture `width` wide; its edge as it is.
+proc blur(from: Pixels, to: mut Blurred, width: i32) {
+  to = []
+  let height = len(from) / width
+  for y in 0..height {
+    for x in 0..width {
+      let at = y * width + x
+      if y == 0 || x == 0 || y == height - 1 || x == width - 1 {
+        to += { value: from[at].value }
+      } else {
+        var sum = 0
+        for dy in 0..3 {
+          let row = at + (dy - 1) * width
+          sum += from[row - 1].value as i32 + from[row].value as i32 +
+                 from[row + 1].value as i32
+        }
+        to += { value: (sum / 9) as u8 }
+      }
+    }
+  }
+}

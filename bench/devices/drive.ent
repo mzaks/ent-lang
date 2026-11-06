@@ -1,0 +1,118 @@
+// The device workloads of bench/devices/run.sh, the same for each
+// language: `dev` is the module in ent/, c/, rust/ or goose/ (by -I).
+// The lines that end in //16 are left out for ent's (run.sh).
+// Each is run ROUNDS times and the best time said, with a sum of what it
+// gave, which is the same in every language.
+//
+//   per entity (1M, fns: on all cores with --parallel)
+//     mix         splitmix64's finish
+//     square_sum  the squares below n % 200, by way of an array
+//     median16    16 numbers mixed from one, sorted on the stack (no ent)
+//   on a buffer (procs, one core)
+//     parse       1M comma-separated numbers, about 5.9 MB
+//     median      1M numbers, quickselect on a copy
+//     blur        a 3 by 3 box blur of 2048 by 2048 bytes
+import console
+import clock
+import dev
+
+const ROUNDS = 10
+const WIDTH = 2048
+
+component Item { n: i64 } capacity 1000000
+unique Best { mix: f64, square_sum: f64, median16: f64, parse: f64,
+              median: f64, blur: f64 }
+unique Sum { mix: u64, square_sum: i64, median16: u64, parsed: i64,
+             median: i64, blurred: i64 }
+unique Round { n: i32, start: f64 }
+
+// The text: mixed numbers below 100000, comma-separated.
+proc make_text(into: mut Text) {
+  for i in 0..1000000 {
+    if i > 0 { into += { value: 44 } }
+    var v = (mix(i as u64) % 100000) as i64
+    var div: i64 = 10000
+    var started = false
+    for d in 0..5 {
+      let digit = v / div
+      if digit > 0 || started || d == 4 {
+        into += { value: (48 + digit) as u8 }
+        started = true
+      }
+      v = v % div
+      div = div / 10
+    }
+  }
+}
+
+world {
+  for i in 0..1000000 { spawn { Item { n: i as i64 } } }
+  make_text(Text)
+  for i in 0..WIDTH * WIDTH {
+    Pixels += { value: (mix(i as u64) & 255) as u8 }
+  }
+}
+
+fn best(old: f64, new: f64, round: i32) -> f64 {
+  if round == 0 || new < old { new } else { old }
+}
+
+system start() { Round.start = wait_until(0.0) }
+
+system mixing() { for it: Item { Sum.mix += mix(it.n as u64) >> 20 } }
+system mixed() {
+  Best.mix = best(Best.mix, wait_until(0.0) - Round.start, Round.n)
+}
+system squaring() {
+  for it: Item { Sum.square_sum += square_sum((it.n % 200) as i32) }
+}
+system squared() {
+  Best.square_sum = best(Best.square_sum, wait_until(0.0) - Round.start,
+                         Round.n)
+}
+system sixteen() {                                                     //16
+  for it: Item { Sum.median16 += median16(it.n as u64) >> 20 }         //16
+}                                                                      //16
+system sixteened() {                                                   //16
+  Best.median16 = best(Best.median16, wait_until(0.0) - Round.start,  //16
+                       Round.n)                                        //16
+}                                                                      //16
+
+system buffers() {
+  let a = wait_until(0.0)
+  let n = parse(Text, Values)
+  let b = wait_until(0.0)
+  let m = median(Values, Scratch)
+  let c = wait_until(0.0)
+  blur(Pixels, Blurred, WIDTH)
+  let d = wait_until(0.0)
+  Best.parse = best(Best.parse, b - a, Round.n)
+  Best.median = best(Best.median, c - b, Round.n)
+  Best.blur = best(Best.blur, d - c, Round.n)
+  Sum.parsed += n
+  Sum.median += m
+}
+
+system add_blurred() {
+  var s: i64 = 0
+  for i in 0..len(Blurred) { s += Blurred[i].value as i64 }
+  Sum.blurred += s
+  Round.n += 1
+  if Round.n == ROUNDS {
+    put("mix         {Best.mix * 1000.0} ms  {Sum.mix}")
+    put("square_sum  {Best.square_sum * 1000.0} ms  {Sum.square_sum}")
+    put("median16    {Best.median16 * 1000.0} ms  {Sum.median16}")   //16
+    put("parse       {Best.parse * 1000.0} ms  {Sum.parsed}")
+    put("median      {Best.median * 1000.0} ms  {Sum.median}")
+    put("blur        {Best.blur * 1000.0} ms  {Sum.blurred}")
+  }
+}
+
+schedule round() {
+  start() mixing() mixed()
+  start() squaring() squared()
+  start() sixteen() sixteened()                                         //16
+  buffers() add_blurred()
+}
+
+main { loop { round() } until Round.n >= ROUNDS }

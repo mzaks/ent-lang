@@ -1,0 +1,42 @@
+// The Goose device (goosedev.ent) called from a `for` over a million
+// entities, on many threads where built with --parallel (`mix`, a fn) and
+// on the main thread (`square_sum`, a proc, as it keeps an array on
+// Goose's data stack), and handed buffers (`parse` and `median`, procs
+// too); the same either way (test/Integration/goose.test). Run where
+// numbers.txt is:
+//
+//   cd examples/goose && ../../tools/ent run --parallel calls.ent
+import console
+import files
+import goosedev
+
+component Item { n: i64 } capacity 1000000
+unique T { mixed: u64, squares: i64 }
+
+world { for i in 0..1000000 { spawn { Item { n: i as i64 } } } }
+
+system run() {
+  for it: Item { T.mixed += mix(it.n as u64) >> 20 }
+  for it: Item { T.squares += square_sum((it.n % 50) as i32) }
+  put("mixed {T.mixed} squares {T.squares}")
+
+  let size = read_file("numbers.txt", Bytes)
+  let n = parse(Bytes, Values)
+  put("{size} bytes, {n} numbers, {len(Values)} kept, median {median(Values)}")
+
+  // "12,x": no list; and "7,,": two numbers, 7 and an empty one (nought).
+  Bytes = []
+  Bytes += { value: 49 }
+  Bytes += { value: 50 }
+  Bytes += { value: 44 }
+  Bytes += { value: 120 }
+  put("12,x: {parse(Bytes, Values)}, {len(Values)} kept")
+  Bytes = []
+  Bytes += { value: 55 }
+  Bytes += { value: 44 }
+  Bytes += { value: 44 }
+  put("7,,: {parse(Bytes, Values)}, median {median(Values)}")
+}
+
+schedule once() { run() }
+main { once() }

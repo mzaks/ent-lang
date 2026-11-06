@@ -1,0 +1,1 @@
+ENT_EMIT=llvm sh build.sh goosedev

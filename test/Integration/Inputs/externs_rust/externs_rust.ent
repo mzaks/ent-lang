@@ -3,17 +3,19 @@
 // Rust that `ent build` makes (test/Integration/externs_rust.test).
 import console
 
-// Fns: memory had and given back, a panic, a HashMap vouched for.
+// Fns: memory had and given back, a panic, a HashMap vouched for, an
+// array of its own sorted.
 extern fn square_sum(n: i32) -> i64
 extern fn divided(a: i64, b: i64) -> i64
 extern fn key_sum(n: i32) -> i64
+extern fn middle(seed: u64) -> u64
 // No fns: a count of their calls, a scale a proc sets, a HashMap's order.
 extern fn counted(x: i64) -> i64
 extern fn scaled(x: i64) -> i64
 extern fn first_key(n: i32) -> i32
 extern proc set_scale(s: i64)
 
-unique T { a: i64, b: i64, c: i64, d: i64, e: i64, f: i32 }
+unique T { a: i64, b: i64, c: i64, d: i64, e: i64, f: i32, g: u64 }
 
 system run() {
   set_scale(3)
@@ -23,7 +25,8 @@ system run() {
   T.d = counted(1)
   T.e = scaled(2)
   T.f = first_key(10)
-  put("{T.a} {T.b} {T.c} {T.d} {T.e}")
+  T.g = middle(3)
+  put("{T.a} {T.b} {T.c} {T.d} {T.e} {T.g}")
 }
 
 schedule once() { run() }

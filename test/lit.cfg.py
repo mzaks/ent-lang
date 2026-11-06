@@ -83,6 +83,16 @@ if os.path.exists(os.path.join(os.path.dirname(config.test_source_root),
 # (examples/rust) runs only then.
 if shutil.which("cargo"):
     config.available_features.add("rust")
+# Goose (`goose` on the PATH, or the one examples/goose/setup.sh builds in
+# build/goose): the test of a device written in it runs only then, with
+# %goose the compiler.
+goose = os.path.join(os.path.dirname(config.test_source_root), "build",
+                     "goose", "build", "goose")
+if not os.path.exists(goose):
+    goose = shutil.which("goose")
+if goose:
+    config.available_features.add("goose")
+    config.substitutions.append(("%goose", goose))
 # MPI (mpicc, mpirun): the tests of programs on many ranks (docs/ranks.md)
 # run only then.
 if shutil.which("mpicc") and shutil.which("mpirun"):

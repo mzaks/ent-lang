@@ -168,13 +168,21 @@ the cost of a fast-moving language: about twenty commits titled "Point the
 Zed extension at the grammar with ...", one for each new piece of syntax. On
 11 October the language got an icon, which is how you know it's serious.
 
+## Later: other languages
+
+Devices in Mojo and Rust, and purity checked instead of trusted, came in
+[post 11](11-other-languages-and-v0-1.md). A device in Goose, what it taught
+the checks, and a comparison of ent, C, Rust and Goose for device functions
+are in [post 12](12-goose-and-device-languages.md).
+
 ## What this settled
 
 - **The compiler sees everything, or it guarantees nothing.** Foreign code
   gets values and columns, never the world.
 - **Pure or not is a declaration**, and it decides scheduling. (Whether an
   `extern fn` *really* is pure became a compile-time check much later, for
-  C, Rust and Mojo: [post 11](11-other-languages-and-v0-1.md).)
+  C, Rust and Mojo: [post 11](11-other-languages-and-v0-1.md), and Goose:
+  [post 12](12-goose-and-device-languages.md).)
 - **Bulk data goes in columns**, filled in parallel and deterministically,
   read by C as plain arrays.
 - **Devices grow when a program needs them**, not from a wish list.

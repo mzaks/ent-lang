@@ -19,4 +19,5 @@ and openly so.
 | 09 | [Indexes as a language feature, and a SAT solver](09-indexes.md) | 16 – 26 Oct |
 | 10 | [Pixalorien: a hackathon game](10-pixalorien.md) | 27 Oct – 4 Nov |
 | 11 | [Other languages behind devices, and v0.1](11-other-languages-and-v0-1.md) | 31 Oct – 4 Nov |
+| 12 | [A device in Goose, and which language a device function wants](12-goose-and-device-languages.md) | 4 – 6 Nov |
 

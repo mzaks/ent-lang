@@ -183,6 +183,9 @@ The check found real problems right away. The window device's text-measuring
 functions read fonts that other procedures load lazily, which is a race on
 many threads. They're procs now, and that change is what v0.1.1 is.
 
+Two days later a device in Goose slipped past the check and taught it to see
+writes through pointers kept in globals: [post 12](12-goose-and-device-languages.md).
+
 ## Three systems
 
 - **macOS.** Threads can't be pinned on a Mac, and with one thread per core of
@@ -242,4 +245,4 @@ Five weeks, 631 commits to the first tag. The loop runs: input, transform,
 output, and the output becomes the next input. It's the same for a world of
 entities and for building a language.
 
-Back to the [index](README.md).
+Next: [12 · A device in Goose, and which language a device function wants](12-goose-and-device-languages.md).

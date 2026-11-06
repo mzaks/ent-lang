@@ -14,6 +14,27 @@ pub extern "C" fn ent_square_sum(n: i32) -> i64 {
     values.iter().sum()
 }
 
+/// The lower middle of 16 numbers made from `seed`, by an insertion sort
+/// of an array on the stack. (LLVM's attributes say it writes memory,
+/// as it stores through a `phi` of the array's parts: they are its own.)
+#[no_mangle]
+pub extern "C" fn ent_middle(seed: u64) -> u64 {
+    let mut a = [0u64; 16];
+    for (k, v) in a.iter_mut().enumerate() {
+        *v = seed.wrapping_mul(0x9E3779B97F4A7C15).rotate_left(k as u32 * 5) ^ k as u64;
+    }
+    for i in 1..16 {
+        let v = a[i];
+        let mut j = i;
+        while j > 0 && a[j - 1] > v {
+            a[j] = a[j - 1];
+            j -= 1;
+        }
+        a[j] = v;
+    }
+    a[7]
+}
+
 /// a / b, which panics (and so ends the program) where b is nought.
 #[no_mangle]
 pub extern "C" fn ent_divided(a: i64, b: i64) -> i64 {

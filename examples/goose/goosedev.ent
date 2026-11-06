@@ -1,0 +1,38 @@
+// A device written in Goose (docs/syntax.md, Modules): its functions are
+// in goosedev.goose, which goosedev.build (build.sh) makes into C with
+// `goose` (examples/goose/setup.sh builds it) and compiles with
+// goosedev_shim.c, which calls them under ent's names. goosedev.emit
+// gives the check of extern fns the same as LLVM IR, so a function
+// declared a fn here is read as Goose compiles it.
+//
+//   import goosedev
+//   for it: Item { T.mixed += mix(it.n as u64) }
+//   for it: Item { T.squares += square_sum(it.n as i32) }
+//   let n = parse(Bytes, Values)
+//   let middle = median(Values)
+//
+// A Goose program is one instance: its data stacks (where a function
+// keeps an array that grows) are the program's, not each thread's, so a
+// function that uses one is a proc, called on one thread; Goose's own
+// rule is the main thread, which is where ent calls procs (and on many
+// ranks it would be a partition's, which `ent build --ranks` warns of).
+// Declared a fn, the check says what it writes: what gs_stks points to.
+import files
+
+// Whole numbers, as `parse` writes them and `median` reads them.
+buffer Values { value: i64 } capacity 4096
+
+// A whole number mixed (splitmix64's finish). No data stack: a fn, which
+// a `for` over entities may call on all the cores.
+extern fn mix(x: u64) -> u64
+// The squares below n added up, by way of an array on Goose's data
+// stack: a proc, which a `for` over entities calls on the main thread.
+extern proc square_sum(n: i32) -> i64
+// The whole numbers of comma-separated text into `into`, in its place:
+// how many there are; -1 at a byte that is neither digit nor comma (and
+// `into` is empty), -2 where there are more than it holds (and it has
+// those that fit).
+extern proc parse(text: Bytes, into: mut Values) -> i64
+// The median of the values (the lower middle one where they are even),
+// by a sorted copy on Goose's data stack; 0 where there are none.
+extern proc median(values: Values) -> i64

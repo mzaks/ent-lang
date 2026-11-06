@@ -17,6 +17,9 @@ line", "which of these is in stage X", every tick, for every entity. If the
 index is a device, the compiler can't see it. It can't keep the index up to
 date at the right moment, it can't make it on the GPU, and it can't turn your
 plain loop into an index lookup. If it's in the language, it can do all three.
+(It can't inline a device either: a function called per entity is 4–7×
+faster written in ent than behind `extern fn`, measured in
+[post 12](12-goose-and-device-languages.md).)
 
 The rule came from the sync-point model: **a query reads an index as it was
 when the query started**, the same as lookups. What a query writes reaches the

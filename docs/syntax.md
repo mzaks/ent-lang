@@ -65,26 +65,35 @@ implementation is any of:
 - `m.o`, `m.a`: an object or archive built elsewhere, linked as it is.
 - `m.build`: one shell command that builds such an object or archive. It
   runs in the module's directory, with `ENT_OUTPUT` (the file to write),
-  `ENT_INCLUDE` (the directory of the generated headers) and `ENT_CC`,
-  `ENT_CXX` (the compilers `tools/ent` uses) set. What it needs linked
+  `ENT_INCLUDE` (the directory of the generated headers), `ENT_CC`,
+  `ENT_CXX` (the compilers `tools/ent` uses) and `ENT_CPU` (the processor
+  the program is made for, as `ENT_CFLAGS` names it: `-march=native`, say,
+  else nothing) set. What it needs linked
   that is known only as it builds (where its compiler keeps its own
   libraries, say) it may write to `ENT_LINK`, as `m.link` says it
   (`examples/mojo`, devices in Mojo, one of them computing on the GPU
   with answers that come in as entities some ticks later;
   `examples/rust`, a device in Rust, a crate built by cargo, its
-  functions checked against their declarations by way of bindgen).
+  functions checked against their declarations by way of bindgen;
+  `examples/goose`, a device in Goose, made into C and compiled with a
+  shim that includes `ent_extern.h`).
 
 Next to any of them, `m.link` names the libraries the module needs, as
 arguments for the linker (`-lraylib -lm`).
 Next to an `m.build`, `m.emit` is one shell command, run as `m.build` is,
 that writes the module's LLVM IR (text or bitcode) to `ENT_OUTPUT`
-instead, for the check of its extern fns (below; `examples/mojo`). A Rust
-crate needs none.
+instead, for the check of its extern fns (below; `examples/mojo`), with
+`ENT_CLANG` set as well, the clang whose LLVM reads it (for a language
+made into C: `examples/goose`). A Rust crate needs none.
 
 `tools/ent` compiles the program itself with the LLVM its IR was made
 with, and hands the modules' C and C++ and the link to the machine's own
 compiler (`cc`, `c++`, or what `ENT_CC` and `ENT_CXX` name), which knows
-where the machine's libraries are.
+where the machine's libraries are. The program is made for any machine of
+its kind unless `ENT_CFLAGS` names a processor (`-march=native`); the
+modules' C and C++ are made for the same one, and so are the Goose and
+Rust examples' (by `ENT_CPU`). A Mojo module is made for this machine's,
+Mojo's own default.
 
 So a device may be written in any language that can define a C function:
 the contract is the C calling convention, with what the headers declare.

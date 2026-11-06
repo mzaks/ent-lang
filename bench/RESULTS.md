@@ -4734,3 +4734,50 @@ every step, as often as it is read). 100 steps, s, the best of three:
 | indexes found | 0.65 | 0.14 |
 
 The same said either way.
+
+## 2026-11-06: device code in ent, C, Rust and Goose
+
+`bench/devices/run.sh`: the same program (`drive.ent`) with a module `dev`
+in each language, the same declarations, and the same algorithm in each
+(written as that language's programmer would: a VLA in C, a `Vec` in
+Rust, a growing array on the data stack in Goose; no array in ent, whose
+fns have none). Per entity, 1M calls of an `extern fn` (ent: its own fn);
+on a buffer, one call of an `extern proc` (ent: its own proc). ms, the
+best of 10; every language gives the same sums. Built for this processor
+(`ENT_CFLAGS=-march=native`, which device code now follows: C and C++ by
+`tools/ent`, a module's .build by `ENT_CPU`), one core pinned / all cores
+(`--parallel`), Ryzen AI 9 HX 370, on mains power, no clamp:
+
+| | ent | C | Rust | Goose |
+|---|---:|---:|---:|---:|
+| mix, splitmix64's finish | **0.24** / 0.25 | 0.89 / 0.33 | 0.89 / 0.62 | 1.00 / 0.32 |
+| square_sum(n % 200), an array | **2.0** / 0.46 | 15.4 / 1.9 | 15.1 / 2.6 | 14.6 / 14.5 (a proc) |
+| median16, 16 numbers sorted on the stack | — | 111 / 8.9 | **96** / 8.2 | 110 / 9.5 |
+| parse 1M comma-separated numbers (5.9 MB) | 4.8 | 2.7 | **2.5** | 2.6 |
+| median of 1M, quickselect on a copy | 12.2 | 6.9 | **6.8** | 7.0 |
+| 3 by 3 blur of 2048 × 2048 bytes | 14.6 | **6.7** | 7.8 | 8.0 |
+
+Built for any x86-64, one core, what differs: ent's mix 0.80 (no 64-bit
+vector multiply), square_sum C 54.7, Rust 29.1, Goose 54.1; the rest
+within a few percent of the table.
+
+- **A fn per entity is best in ent.** Its fns are inlined into the `for`
+  and vectorised; an extern fn is a call per entity, through a module LLVM
+  sees only as an object: 3.7× for mix, 7× for square_sum (where ent
+  writes no array: LLVM sums the squares without one).
+- **Over a buffer, ent's procs are half as fast** as all three others:
+  parse 1.8×, median 1.8×, blur 2.2×. To look into: what each row read
+  and `+=` costs in a proc's loop.
+- **Goose, Rust and C are one speed here**, within 20% either way. Goose's
+  data stack against Rust's `Vec` and C's VLA: a tie built for this
+  processor, and level with C (both 2× behind Rust) built for any.
+  Goose's own suite (`bench/results.md` of aardappel/goose) has it ahead
+  of Rust by 1.3-2.3× where programs build structures of many small parts
+  (records, interp, words); device code that reads a buffer and writes
+  one does not.
+- **The cost of Goose is threads.** square_sum keeps an array on Goose's
+  data stack, so it is a proc and runs on one core: 14.5 ms where C takes
+  1.9 and Rust 2.6 on all cores. Without one (median16, a fixed array on
+  the native stack) it is a fn and on all cores like the others.
+- Goose computes `u8 + u8` in 8 bits (no promotion, its §6.2): the blur's
+  first version wrapped and gave another sum; one `as u32` mended it.
