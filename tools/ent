@@ -62,7 +62,7 @@ cannot be bound, a thread for each performance core). A thread without work wait
 more and then sleeps, so that it is awake for the next parallel loop
 after a short stretch on one core, and what the program does on one core
 for longer (drawing, say) has the machine to itself (on a Mac, and in
-a program with a window, it sleeps at once). OMP_NUM_THREADS,
+a program with a window or the http device, it sleeps at once). OMP_NUM_THREADS,
 OMP_PLACES, OMP_PROC_BIND or KMP_AFFINITY, and KMP_BLOCKTIME or
 OMP_WAIT_POLICY, where the program runs, say otherwise. A loop runs on many threads from a million entities on (fewer
 where its body calls out or has a loop of a count known as it runs, or loops
@@ -1888,9 +1888,13 @@ def build(arguments, output, directory):
             # partitions would each bind theirs to the same CPUs. What
             # the environment says holds over all of this.
             bind = "0" if arguments.ranks else "1"
-            # (The window module: devices/window.ent, or one standing in
-            # for it, as the tests' window without a window.)
-            windowed = any(os.path.basename(path) == "window.ent"
+            # (A program whose main thread waits on the world outside:
+            # the window module (devices/window.ent, or one standing in
+            # for it, as the tests' window without a window), or the http
+            # device, whose frames are a poll of a few milliseconds:
+            # threads waiting five for the next loop would never sleep,
+            # and spend a core each for nothing.)
+            windowed = any(os.path.basename(path) in ("window.ent", "http.ent")
                            for path in made_of(arguments)[0])
             wait = "0" if windowed else "5"
             source.write(
