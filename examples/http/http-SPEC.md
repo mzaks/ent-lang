@@ -89,7 +89,9 @@ The questions this example is meant to answer:
 | `crawl_lean.ent` | crawl_mock.ent without the optional systems (§8, K7). |
 | `crawl_combined.ent` | Four of the pipeline's systems as one (§8, K10). |
 | `scan_links.ent` | The link scanner alone, every link of every page (§8, K12). |
-| `test/Integration/Inputs/http/serve.py` | The device tests' server (§7.2, C2); the crawl's own server comes in C3. |
+| `robots.ent` | Fns: a robots.txt's rules for the crawler and whether they allow a path (§8.2, K11). |
+| `serve.c` | The crawl's own server (§7.2, C3): answers a site as its manifest says. |
+| `test/Integration/Inputs/http/serve.py` | The device tests' server (§7.2, C2). |
 | `check/` | The check scripts (§8). |
 | `bench/http/` | `mock.py` (§9.1, built in C1); the C reference crawler, the setups of the other crawlers (C3, C4). |
 | `sites.md` | The public sites crawled by hand, why they may be, and the results (§9.3). |
@@ -115,7 +117,7 @@ As built in C1 (the files say each field's meaning).
 | tag `Known` | | Not a duplicate: the ask for its URL that later ones are duplicates of. |
 | unique `Net` | `timeout, slow_after, retries, backoff, redirects` | The pipeline's settings. |
 | unique `Now` | | The time, as the device says (the mock's own clock). |
-| buffer `History` | `ask, at, status` | A row for each answer (the talk's history). |
+| buffer `History` | `ask, sent, at, status` | A row for each answer and each try that failed (status 0): when it was sent and answered (the talk's history). |
 | index `ByUrl`, `Kept` | | Hash indexes by URL of every ask, and of the known ones. |
 
 `enum Method { Get, Head, Post, Put, Patch, Delete, Options }` (another
@@ -134,6 +136,8 @@ whose `hops` is one more.
 | component `At` | `host: entity` | The host it goes to. |
 | component `Host` | `name, busy: i32` | A host it may go to (one entity each, from `allow`), and how many asks to it are out. |
 | relation `(Ask)-[Links]->(Ask)` | | Page links to page: the found graph, for the report. |
+| component `Robots` | `ask, known, rules, delay: f64, next: f64` | On a `Host`: the ask for its robots.txt, whether it is known (answered or failed for good), its rules for the crawler (none where it was not a 200), its `Crawl-delay` and when the next ask may go. |
+| tag `RobotsAsk`, `Disallowed` | | The ask for a robots.txt (nothing holds it back); an ask robots.txt does not allow (held for good). |
 | component `Ending` | `word` | How an ask ended, for the report. |
 | unique `Rules` | `seed, allow, max_depth, per_host` | The crawl's settings (crawl.conf). |
 | unique `Level`, `Open` | | How deep the links followed are so far; asks not settled. |
@@ -168,7 +172,8 @@ systems that can be left out with no other change (K7).
 | `retry` | `Failed`, `Got` with 5xx or 429 | Removes `Sent` and the answer, bumps `tries` and `next_at` (backoff doubling); past the limit adds `GaveUp`. | |
 | `follow_redirect` | `Got` with 3xx and a location | Spawns the next `Ask` (`hops` one more) up to `Net.redirects`, else `RedirectLimit`. | |
 | `log` | `Got` (`on added`) | One line for each answer. | yes |
-| `history` | `Got` (`on added`) | A row of `History` for each answer. | yes |
+| `history` | `Got`, `Failed` (`on added`) | A row of `History` for each answer and each failed try. | yes |
+| `say_history` | `History` | At the end, a line `history sent at status url` for each row (for K9). | yes |
 | `clean_up` | `Handled` (`on added`) | Drops the body (gives its bytes back). | yes |
 
 Sending and receiving are the device's: `mock_send`, `answer` and `fill`
@@ -178,10 +183,12 @@ Sending and receiving are the device's: `mock_send`, `answer` and `fill`
 
 | System | Reads | Does | Opt. |
 |---|---|---|---|
-| `setup` | crawl.conf | Sets `Rules` and `Net`, spawns a `Host` for each allowed host and the seed's `Ask` with `Depth 0` (the talk's UI event to request data). | |
+| `setup` | crawl.conf | Sets `Rules` and `Net`, spawns a `Host` for each allowed host with the ask for its robots.txt (`Depth 0`), and the seed's `Ask` with `Depth 0` (the talk's UI event to request data). | |
 | `inherit_depth`, `take_depth` | an `Ask` without `Depth` | A redirect's ask is as deep as its origin (two steps: a query that gives entities a `Depth` does not read that of others). | |
-| `place` | an `Ask` without `At` | Its host, by the hash index `HostByName`; an ask to a host not allowed is destroyed. | |
+| `place` | an `Ask` without `At` | Its host, by the hash index `HostByName`, once the host's robots.txt is known (`Held` till then); an ask to a host not allowed is destroyed, one robots.txt does not allow is `Disallowed`, `Handled` and held for good. | |
+| `read_robots` | `Robots`, the robots ask's `Got` or `Failed` | Once it is answered or has failed for good (after `retry`): its rules (robots.ent) where it answered 200, none else; the host's `known`. | |
 | `be_polite` | `Host`, `At`, `Sent` | At most `per_host` asks out to a host at once: the others `Held`, the oldest let go first (`in turn by serial`). | yes |
+| `pace` | `Robots`, `At` | A host's `Crawl-delay`: of its asks due, the oldest goes once the host's time has come, which is then that much later; the others wait for it (`next_at`). | yes |
 | `settle` | `Got`, `GaveUp` | Every answer but a page whose links are to be followed is `Handled` as it is. | |
 | `extract_links` | `Got` 200 with HTML, `Depth`, `Level` | Scans the body for links (§7.3); for each to an allowed host an `Ask` with `Depth d + 1`, or an edge to the one `ByUrl` has (its depth lowered); adds `Handled`. Only once every ask less deep is settled, and not at `max_depth`. | |
 | `merge` | duplicates | A duplicate's depth and the links to it go to the ask it is one of. | |
@@ -191,9 +198,12 @@ Sending and receiving are the device's: `mock_send`, `answer` and `fill`
 ### 5.3 Order and the end
 
 One frame (crawl_mock.ent): `inherit_depth take_depth place drop_stale
-be_polite mock_send answer fill time_out warn_slow retry follow_redirect
-settle extract_links number_asks drop_duplicates merge forget_duplicates
-log history clean_up advance_level advance`. The order is the talk's
+be_polite pace mock_send answer fill time_out warn_slow retry
+read_robots follow_redirect settle extract_links number_asks
+drop_duplicates merge forget_duplicates log history clean_up
+advance_level advance`. crawl_live.ent has `send receive fetch` where
+the mock has `drop_stale mock_send answer fill`, `cancel_late` after
+`time_out`, and no `advance` (the clock is the machine's). The order is the talk's
 diagram, so a reader can follow it; the compiler keeps it where systems
 touch the same data.
 
@@ -281,8 +291,12 @@ fn header(headers: text, name: text) -> text     // in ent-lang
   rows; they cannot be put on the entities by handle, as a `for` sets
   only its own entity's fields (§10.4).
 - Procs run on the main thread, which curl's multi interface wants.
-- The crawler will open one session with `follow` 0, so its pipeline
-  sees every redirect (C3).
+- The crawler opens one session with `follow` 0, so its pipeline sees
+  every redirect (live.ent, C3): `send` starts each due ask, `receive`
+  polls (5 ms at most; where nothing runs it waits a millisecond) and
+  sets `Now` from the machine's clock, `fetch` gives each sent ask its
+  `Got` or `Failed`, `cancel_late` stops at the device what `time_out`
+  gave up on. `live.conf` names the proxy and the connections.
 
 ## 7. Inputs
 
@@ -315,8 +329,17 @@ N bytes with their FNV-1a, a status, repeated headers, n redirects of a
 given status, a delay, cookies set and asked for, gzip and brotli
 bodies. It runs the test's program and stops.
 
-For the crawl and its benchmark (C3) it must not be the bottleneck of
-§9: a small C server on epoll or nginx. Decided in C3.
+For the crawl and its benchmark (C3): `serve.c`, a C server on epoll
+(threads with a socket each on one port), in the repo, no
+dependencies. It reads the site's manifest, the file the mock reads,
+and answers as the mock does: the status, type, location and body,
+after the page's delay (a heap of answers due), 503 for the first
+`fails` asks of a page, 404 for any other URL; HTTP/1.1 with
+keep-alive. A request names the whole URL, as to a proxy, so the
+crawlers keep the site's own URLs (`http://site.test/...`) and go
+through their proxy setting; `--log` writes when each request came
+and was answered. (nginx would need scripting for the delays and the
+fails.) `www/` and its `rules.txt` stay for crawlers that want files.
 
 ### 7.3 Links
 
@@ -367,10 +390,10 @@ and K11 run on live too.
 | K5 | No page beyond `max_depth` is fetched. No other host is fetched. |
 | K6 | Slow pages are warned about once each. Pages past the timeout end as `Timeout`. |
 | K7 | Built without the optional systems (`warn_slow`, `log`, `history`, `clean_up`, `be_polite`), the program compiles with no change to the other systems and gives the same report (less what those systems add). |
-| K8 | Live and mock give the same report on the same site. |
-| K9 | Politeness: no host sees more than its limit in flight or more sends per interval than allowed (from `history`). |
+| K8 | Live and mock give the same report on the same site: crawl_live against serve.c, the site's times a tenth as long. |
+| K9 | Politeness: no host sees more than its limit in flight or more sends per interval than allowed (from `history`): asks out at once at most `per_host`, sends at least robots.txt's `Crawl-delay` apart. |
 | K10 | `crawl_combined.ent`, with `time_out`, `warn_slow`, `retry` and `follow_redirect` as one system, gives the same report. (With the live device `send` and `receive` join them, C3.) |
-| K11 | `robots.txt`: disallowed paths are never asked for; `Crawl-delay` is kept; a missing `robots.txt` allows all; one that times out holds the host until it answers or fails. |
+| K11 | `robots.txt`: disallowed paths are never asked for; `Crawl-delay` is kept; a missing `robots.txt` allows all; one that times out holds the host until it answers or fails. (site.py `--robots none`, `rules`, `slow`, `timeout`; the report says `disallowed URL` for each.) |
 | K12 | The link scanner finds exactly the links of a page of every case in §7.3 (a generated page per case, plus saved real pages with their expected links). |
 
 ## 9. Benchmarks
@@ -467,7 +490,7 @@ shape (a request component in, a completion buffer out, polled with a
 wait) is a candidate for that proposal, with `console` (`Print`) as the
 simple case.
 
-### 10.4 Met in C1
+### 10.4 Met in C1 and C3
 
 What the crawler ran into, for the open-topics list; each was worked
 around in the example, not in the compiler:
@@ -493,9 +516,21 @@ around in the example, not in the compiler:
   entities that sent them by handle (a hash index finds the entity, but
   nothing may set its fields there): each entity asks the device for its
   own answer instead (§6.2), which is the better shape anyway.
-- **No running sum in an `on added` for**, no `else if let`, no `var`
-  of text, no `let` of a unique's text, no `while` in a fn (loops over
-  texts are fns calling themselves).
+- **No running sum in an `on added` for**, no `let` of a unique's text.
+  (`else if let` and `while` in a fn, missing in C1, work now: robots.ent
+  and crawl.ent's `place` have them.)
+- **A `var` holds no text of any length, and says so only when it is
+  typed.** `var all: text = ""` is an error, but `var all = ""` is a
+  `text[N]` the size of the literal, and `all = all + rule` keeps cutting
+  it to that: robots.txt's rules came out as `a` and nothing was
+  disallowed, silently (C3). Texts built in a loop are fns calling
+  themselves (robots.ent, `rules_from`). The cut should be an error, or
+  the var a `text`.
+- **A relation's mending walked far for room** (fixed in C3). The sort
+  of `Links` was 30 s of 52 at 10⁶ pages, though it sorted anew only 20
+  times: the mending before each (devices/edges.c) looked for room past
+  every empty run of the 2M keys, its budget counting edges moved and
+  not keys passed. Now 25.5 s for the whole crawl, from 62.
 - **URLs:** percent-decoding of unreserved bytes (§7.3) is not done;
   site.py makes no links that need it.
 
@@ -506,7 +541,7 @@ around in the example, not in the compiler:
 | **C0** | §10.1 decided and, if a language feature, built with its own tests. | `extract_links` can make a URL `text`. |
 | **C1** | `site.py`, `pipeline.ent`, `crawl.ent`, `mock.ent`, `crawl_mock.ent`, `crawl_combined.ent`, `check/`. | K1 to K7, K10 and K12 (generated cases) pass on the mock; mock throughput measured. |
 | **C2** | `devices/http` and the local server with its httpbin endpoints and TLS listener. | D1 to D10 pass (done: test/Integration/http_device.test). |
-| **C3** | `crawl_live.ent`, `robots.txt`, `bench/http/crawl.c`. | K8, K9 and K11 pass; the live benchmark against C is measured and written down. |
+| **C3** | `crawl_live.ent`, `robots.txt`, `bench/http/crawl.c`. | K8, K9 and K11 pass (done: check/crawl.py --live); the live benchmark against C is measured and written down. |
 | **C4** | The other crawlers' setups, the mirrored real site. | §9.2 measured and written down, every crawler verified first. |
 | **C5** | `sites.md`, crawls of the public sites. | §9.3 run; what it found is in K12 and D1 to D10. |
 | **C6** | A live window (Clay, `layout`, `window`): requests in flight, slow ones, errors, history. | Shows a crawl as it runs. |
@@ -516,7 +551,9 @@ around in the example, not in the compiler:
 1. §10.1: language feature or stopgap? (The preferred way is the
    feature. It decides C0.)
 2. Does the live server go in C (in the repo) or use nginx, and
-   go-httpbin for the device tests or our own endpoints?
+   go-httpbin for the device tests or our own endpoints? (Decided: our
+   own endpoints in Python for the device tests, C2; serve.c for the
+   crawl, C3.)
 3. Keep every `Ask` as history (the report needs the graph) or destroy
    finished ones and keep only `history` rows? (C1 keeps them.)
 4. The user agent string and the project URL in it for §9.3.

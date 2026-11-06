@@ -1,0 +1,104 @@
+// The live device's ent side (http-SPEC.md, §6.2): where the mock
+// (mock.ent) answers asks from a site in memory, these hand them to the
+// http device (devices/http.ent, on libcurl) and take its answers. The
+// pipeline's other systems are the same either way; this knows nothing
+// of crawling.
+//
+// What it is to do, from `live.conf` (`key value` lines): `proxy`, the
+// proxy every request goes through (none where it is not given; the
+// checks and benches name the local server of serve.c there, so the
+// site keeps its own URLs), and `connections`, how many requests are out
+// at once at most, to a host and in all.
+import text
+import files
+import clock
+import http
+import urls
+import pipeline
+
+// The device's session, and the machine's time at the start (`Now`
+// counts from it).
+unique Web { session: i64, started: f64 }
+
+// The value of `key` in a file of `key value` lines ("" where it has
+// none).
+fn live_setting(conf: text, key: text) -> text {
+  let at = find("\n" + conf, "\n" + key + " ", 0)
+  if at < 0 { "" }
+  else {
+    let from = at + len(key) + 1
+    slice(conf, from, or_end(find(conf, "\n", from), len(conf)))
+  }
+}
+
+fn method_name(m: Method) -> text {
+  if m == Method.Get { "GET" } else if m == Method.Head { "HEAD" }
+  else if m == Method.Post { "POST" } else if m == Method.Put { "PUT" }
+  else if m == Method.Patch { "PATCH" } else if m == Method.Delete { "DELETE" }
+  else { "OPTIONS" }
+}
+
+fn failure_of(f: HttpFailure) -> Failure {
+  if f == HttpFailure.Refused { Failure.Refused }
+  else if f == HttpFailure.Timeout { Failure.Timeout }
+  else if f == HttpFailure.Dns { Failure.Dns }
+  else if f == HttpFailure.Tls { Failure.Tls }
+  else if f == HttpFailure.TooBig { Failure.TooBig }
+  else { Failure.Other }
+}
+
+system connect() {
+  let conf = read_text("live.conf")
+  let connections = number(live_setting(conf, "connections")) as i32
+  let most = if connections > 0 { connections } else { 64 }
+  Web.session = http_session("ent-crawl/0.1", false, most, most, false, true, "",
+                             live_setting(conf, "proxy"))
+  Web.started = wait_until(0.0)
+}
+
+// An ask that is due, not held and no duplicate goes out now: its
+// redirects are the pipeline's to follow (`follow` 0), its body at most
+// 16 MB.
+system send() {
+  for me, a: Ask, t: Twin without Sent, Held where a.next_at <= Now && t.of == none {
+    let handle = http_start(Web.session, method_name(a.method), a.url, a.headers,
+                            a.body, Net.timeout, 16777216, 0)
+    me.add(Sent { at: Now, handle: handle })
+  }
+}
+
+// The transfers driven, waiting a little for one to end (or, where none
+// runs, for the next thing due); then the time.
+system receive() {
+  if http_running() > 0 { http_poll(0.005, Done) }
+  else { wait_until(Web.started + Now + 0.001) }
+  Now = wait_until(0.0) - Web.started
+}
+
+// Each ask that was sent takes its own answer, once it has one.
+system fetch() {
+  for me, s: Sent without Got, Failed {
+    let status = http_status(s.handle)
+    if status >= 0 {
+      let failure = http_failure(s.handle)
+      if failure == HttpFailure.Ok {
+        me.add(Got { at: Now, status: status, headers: http_headers(s.handle),
+                     body: http_body(s.handle), location: http_location(s.handle) })
+      } else {
+        me.add(Failed { at: Now, kind: failure_of(failure) })
+      }
+      http_forget(s.handle)
+    }
+  }
+}
+
+// An ask that the pipeline gave up waiting for (`time_out`) is stopped at
+// the device too. (One the device answered is forgotten already.)
+system cancel_late() {
+  for s: Sent, f: Failed on added Failed {
+    http_cancel(s.handle)
+    http_forget(s.handle)
+  }
+}
+
+system hang_up() { http_close(Web.session) }

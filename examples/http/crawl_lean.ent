@@ -22,6 +22,7 @@ schedule frame() {
   fill()
   time_out()
   retry()
+  read_robots()
   follow_redirect()
   settle()
   extract_links()

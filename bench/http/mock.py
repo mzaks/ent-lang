@@ -39,6 +39,8 @@ def program_for(pages, where):
     with open(os.path.join(EXAMPLE, "crawl_mock.ent")) as f:
         text = f.read()
     capacity = 1 << max(12, (pages * 11 // 10).bit_length())
+    # (Without the history said at the end, which only the checks read.)
+    text = text.replace(" say_history()", "")
     text = text.replace("default_capacity 262144",
                         f"default_capacity {capacity}\n"
                         f"capacity Links {capacity * 8}\n"

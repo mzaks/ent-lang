@@ -1,0 +1,158 @@
+// robots.txt as the crawler keeps it (http-SPEC.md, §8.2, K11; RFC 9309):
+// the group of rules for the crawler's own name, or else the group for
+// `*`; of its `Allow` and `Disallow` rules the one that matches most of
+// the path says (an `Allow` where two match as much); `*` in a rule
+// matches any bytes and a `$` at its end the end of the path; an empty
+// `Disallow` is no rule. `Crawl-delay` in seconds, a fraction too. Fns
+// only, as urls.ent.
+import text
+import urls
+
+fn blank(c: i8) -> bool { c == ' ' || c == '\t' || c == '\r' }
+
+// `t` without the blanks at its ends.
+fn trimmed_blanks(t: text) -> text {
+  var from = 0
+  var to = len(t)
+  while from < to && blank(t[from]) { from += 1 }
+  while to > from && blank(t[to - 1]) { to -= 1 }
+  slice(t, from, to)
+}
+
+// A number of seconds as written: digits, and a fraction after a '.'.
+fn seconds(t: text) -> f64 {
+  let dot = or_end(find(t, ".", 0), len(t))
+  var value = number(slice(t, 0, dot)) as f64
+  var unit: f64 = 0.1
+  for i in dot + 1..len(t) {
+    let c = t[i]
+    if c >= '0' && c <= '9' {
+      value = value + ((c - '0') as f64) * unit
+      unit = unit / 10.0
+    }
+  }
+  value
+}
+
+// A line of robots.txt, from byte `at` to `end`: its key (lower case)
+// and value, without a comment and the blanks at their ends; no key
+// where it has no ':'.
+fn line_of(body: text, at: i32, end: i32) -> (text, text) {
+  let line = before(slice(body, at, end), "#")
+  let colon = find(line, ":", 0)
+  if colon <= 0 { ("", "") }
+  else {
+    (lower(trimmed_blanks(slice(line, 0, colon))),
+     trimmed_blanks(slice(line, colon + 1, len(line))))
+  }
+}
+
+// Whether a group of `body` names `agent`.
+fn names(body: text, agent: text) -> bool {
+  var named = false
+  var at = 0
+  while at < len(body) {
+    let end = or_end(find(body, "\n", at), len(body))
+    let (key, value) = line_of(body, at, end)
+    if key == "user-agent" && lower(value) == agent { named = true }
+    at = end + 1
+  }
+  named
+}
+
+// Whether the `User-agent` line `who` puts the lines after it in the
+// group that is kept: the agent's own where one names it, else `*`'s.
+fn kept_group(who: text, agent: text, named: bool) -> bool {
+  if named { lower(who) == agent } else { who == "*" }
+}
+
+// The rules of the group kept, from byte `at` on: `agents` where the
+// line before was a `User-agent` line, `ours` where the lines are of the
+// group kept. (A fn calling itself: a `var` holds no text of any length.)
+fn rules_from(body: text, agent: text, named: bool, at: i32, agents: bool,
+              ours: bool) -> text {
+  if at >= len(body) { "" }
+  else {
+    let end = or_end(find(body, "\n", at), len(body))
+    let (key, value) = line_of(body, at, end)
+    if len(key) == 0 { rules_from(body, agent, named, end + 1, agents, ours) }
+    else if key == "user-agent" {
+      let kept = kept_group(value, agent, named)
+      rules_from(body, agent, named, end + 1, true, (agents && ours) || kept)
+    } else {
+      let rule = if !ours { "" }
+                 else if key == "allow" { "a " + value + "\n" }
+                 else if key == "disallow" && len(value) > 0 { "d " + value + "\n" }
+                 else { "" }
+      rule + rules_from(body, agent, named, end + 1, false, ours)
+    }
+  }
+}
+
+// The `Crawl-delay` of the group kept, in seconds (0: none).
+fn delay_of(body: text, agent: text, named: bool) -> f64 {
+  var delay: f64 = 0.0
+  var agents = false
+  var ours = false
+  var at = 0
+  while at < len(body) {
+    let end = or_end(find(body, "\n", at), len(body))
+    let (key, value) = line_of(body, at, end)
+    if key == "user-agent" {
+      ours = (agents && ours) || kept_group(value, agent, named)
+      agents = true
+    } else if len(key) > 0 {
+      agents = false
+      if ours && key == "crawl-delay" { delay = seconds(value) }
+    }
+    at = end + 1
+  }
+  delay
+}
+
+// The rules for `agent` (lower case) in the robots.txt `body`: a line
+// each, `a pattern` (allow) or `d pattern` (disallow), and the delay
+// between asks in seconds (0: none).
+fn robots_rules(body: text, agent: text) -> (text, f64) {
+  let named = names(body, agent)
+  (rules_from(body, agent, named, 0, false, false), delay_of(body, agent, named))
+}
+
+// Whether the rule `pattern` (from byte i) matches the start of `path`
+// (from byte j).
+fn matches(pattern: text, i: i32, path: text, j: i32) -> bool {
+  if i == len(pattern) { true }
+  else if pattern[i] == '$' && i + 1 == len(pattern) { j == len(path) }
+  else if pattern[i] == '*' {
+    matches(pattern, i + 1, path, j) || (j < len(path) && matches(pattern, i, path, j + 1))
+  } else {
+    j < len(path) && pattern[i] == path[j] && matches(pattern, i + 1, path, j + 1)
+  }
+}
+
+// Whether `rules` (as robots_rules gives them) let the crawler ask for
+// `path` (with its query).
+fn robots_allow(rules: text, path: text) -> bool {
+  var best = -1
+  var allow = true
+  var at = 0
+  while at < len(rules) {
+    let end = or_end(find(rules, "\n", at), len(rules))
+    let pattern = slice(rules, at + 2, end)
+    if matches(pattern, 0, path, 0) {
+      let a = rules[at] == 'a'
+      if len(pattern) > best || (len(pattern) == best && a) {
+        best = len(pattern)
+        allow = a
+      }
+    }
+    at = end + 1
+  }
+  allow
+}
+
+// The path of an absolute URL, with its query; `/` where it has none.
+fn path_of(url: text) -> text {
+  let path = slice(url, len(origin(url)), len(url))
+  if len(path) == 0 { "/" } else { path }
+}

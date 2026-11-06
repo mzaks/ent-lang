@@ -25,12 +25,14 @@ schedule frame() {
   place()
   drop_stale()
   be_polite()
+  pace()
   mock_send()
   answer()
   fill()
   time_out()
   warn_slow()
   retry()
+  read_robots()
   follow_redirect()
   settle()
   extract_links()
@@ -45,7 +47,7 @@ schedule frame() {
   advance()
 }
 
-schedule finish() { conclude() report() stalled() }
+schedule finish() { conclude() report() say_history() stalled() }
 
 main {
   start()

@@ -11,6 +11,7 @@ import text
 import console
 import files
 import urls
+import robots
 import pipeline
 
 // Links from the seed to here.
@@ -19,6 +20,15 @@ component Depth { d: i32 }
 component At { host: entity }
 // A host it may go to, and how many asks to it are out.
 component Host { name: text, busy: i32 }
+// A host's robots.txt (§8.2, K11): the ask for it; whether it is known
+// (answered, or failed for good); its rules for the crawler (as
+// robots.ent's robots_rules gives them: none, where it was not a 200);
+// the seconds between asks it wants, and when the next may go.
+component Robots { ask: entity, known: bool, rules: text, delay: f64, next: f64 }
+// The ask for a host's robots.txt, which nothing holds back.
+tag RobotsAsk
+// An ask robots.txt does not let the crawler send.
+tag Disallowed
 // A page links to a page.
 relation (Ask)-[Links]->(Ask) capacity 4194304
 // How it ended, for the report: the status, or why there was none.
@@ -65,13 +75,22 @@ system setup() {
   Net.redirects = number(setting(conf, "redirects")) as i32
   Net.backoff = number(setting(conf, "backoff_ms")) as f64 / 1000.0
   let allow = setting(conf, "allow")
+  let seed = normalise(setting(conf, "seed"))
+  let scheme = slice(seed, 0, scheme_end(seed))
   var at = 0
   while at < len(allow) {
     let end = or_end(find(allow, " ", at), len(allow))
-    if end > at { spawn { Host { name: slice(allow, at, end), busy: 0 } } }
+    if end > at {
+      let name = slice(allow, at, end)
+      let robots = spawn { Ask { method: Method.Get, url: scheme + "://" + name + "/robots.txt",
+                                 headers: "", body: "", origin: none, hops: 0, tries: 0,
+                                 next_at: 0.0, serial: 0 },
+                           Twin { of: none }, Depth { d: 0 }, RobotsAsk }
+      spawn { Host { name: name, busy: 0 },
+              Robots { ask: robots, known: false, rules: "", delay: 0.0, next: 0.0 } }
+    }
     at = end + 1
   }
-  let seed = normalise(setting(conf, "seed"))
   spawn { Ask { method: Method.Get, url: seed, headers: "", body: "", origin: none,
                 hops: 0, tries: 0, next_at: 0.0, serial: 0 },
           Twin { of: none },
@@ -90,11 +109,48 @@ system take_depth() {
   for me, i: Inherited without Depth { me.add(Depth { d: i.d }) }
 }
 
-// Each ask to its host; one to a host it may not go to is dropped.
+// Each ask to its host, once the host's robots.txt is known (held back
+// till then); one to a host it may not go to is dropped, one robots.txt
+// does not allow is held for good.
 system place() {
   for me, a: Ask, t: Twin without At where t.of == none {
     let host = HostByName.get(host_of(a.url))
-    if host == none { me.destroy() } else { me.add(At { host: host }) }
+    if host == none {
+      me.destroy()
+    } else if me.has(RobotsAsk) {
+      me.add(At { host: host })
+    } else if let known = Robots(host).known, let rules = Robots(host).rules {
+      if !known {
+        if !me.has(Held) { me.add(Held) }
+      } else {
+        me.add(At { host: host })
+        if robots_allow(rules, path_of(a.url)) {
+          if me.has(Held) { me.remove(Held) }
+        } else {
+          me.add(Disallowed)
+          me.add(Handled)
+          if !me.has(Held) { me.add(Held) }
+        }
+      }
+    }
+  }
+}
+
+// A host's robots.txt once it is answered for good (after `retry`: an
+// answer still there is not to be tried again) or has failed for good:
+// its rules where it answered 200, none else.
+system read_robots() {
+  for r: mut Robots where !r.known {
+    if let status = Got(r.ask).status, let body = Got(r.ask).body {
+      if status == 200 {
+        let (rules, delay) = robots_rules(body, "ent-crawl")
+        r.rules = rules
+        r.delay = delay
+      }
+      r.known = true
+    } else {
+      if let kind = Failed(r.ask).kind { r.known = true }
+    }
   }
 }
 
@@ -103,13 +159,33 @@ system place() {
 system be_polite() {
   for h: mut Host { h.busy = 0 }
   for a: Ask, at: At with Sent without Got, Failed { Host(at.host).busy += 1 }
-  for me, a: Ask, t: Twin, at: At without Sent in turn by a.serial where t.of == none {
+  for me, a: Ask, t: Twin, at: At without Sent, Disallowed in turn by a.serial
+      where t.of == none {
     if let busy = Host(at.host).busy {
       if busy < Rules.per_host {
         Host(at.host).busy += 1
         if me.has(Held) { me.remove(Held) }
       } else if !me.has(Held) {
         me.add(Held)
+      }
+    }
+  }
+}
+
+// An ask to a host with a `Crawl-delay` goes no sooner than that after
+// the one before it went: of those due, the oldest goes once the host's
+// time has come, and the host's next time is then; the others wait for
+// it (`next_at`, which the device's send keeps). (Part of politeness:
+// optional.)
+system pace() {
+  for me, a: mut Ask, at: At without Sent, Held in turn by a.serial {
+    if let delay = Robots(at.host).delay, let next = Robots(at.host).next {
+      if delay > 0.0 {
+        if a.next_at <= Now && next <= Now {
+          Robots(at.host).next max= Now + delay
+        } else if a.next_at < next {
+          a.next_at = next
+        }
       }
     }
   }
@@ -183,7 +259,9 @@ system advance_level() {
 // How each ask ended.
 system conclude() {
   for me, a: Ask, t: Twin, optional g: Got, optional f: Failed where t.of == none {
-    if let status = g.status {
+    if me.has(Disallowed) {
+      me.add(Ending { word: "disallowed" })
+    } else if let status = g.status {
       me.add(Ending { word: "{status}" })
     } else {
       if let kind = f.kind {
@@ -199,7 +277,8 @@ system conclude() {
 // The report, a line each, in no order (check/crawl.py sorts them).
 system report() {
   for me, a: Ask, e: Ending, optional g: Got {
-    put("fetched {a.url} {e.word} {a.tries + 1}")
+    if e.word == "disallowed" { put("disallowed {a.url}") }
+    else { put("fetched {a.url} {e.word} {a.tries + 1}") }
     if let status = g.status, let location = g.location {
       if status >= 300 && status < 400 && len(location) > 0 {
         put("redirect {a.url} {resolve(a.url, location)}")
@@ -209,7 +288,7 @@ system report() {
     if me.has(Slow) { put("slow {a.url}") }
     for (me)-[Links]->(to) {
       if let url = Ask(to).url, let word = Ending(to).word {
-        if !starts(word, "2") && !starts(word, "3") {
+        if !starts(word, "2") && !starts(word, "3") && word != "disallowed" {
           put("broken {url} {word} from {a.url}")
         }
       }

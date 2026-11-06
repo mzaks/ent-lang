@@ -1,0 +1,58 @@
+// A crawl over the network (http-SPEC.md, §6): crawl_mock.ent with the
+// live device's systems (live.ent) where the mock's stand, and the
+// machine's clock. Run where site.py wrote crawl.conf, with a live.conf
+// beside it (`proxy`, `connections`); against a site of site.py, serve.c
+// answers as the mock would:
+//
+//   python3 examples/http/site.py --pages 200 --time-scale 0.1 --out /tmp/site
+//   cc -O2 -o /tmp/serve examples/http/serve.c -lpthread
+//   /tmp/serve --port-file /tmp/site/port /tmp/site/site.manifest &
+//   cd /tmp/site && printf 'proxy http://127.0.0.1:%s\nconnections 64\n' \
+//       $(cat port) > live.conf
+//   ent run -I <repo>/examples/http <repo>/examples/http/crawl_live.ent
+//
+// check/crawl.py --live does that for every site of its checks.
+import console
+import text
+import pipeline
+import crawl
+import live
+
+default_capacity 262144
+
+schedule start() { connect() setup() }
+
+schedule frame() {
+  inherit_depth()
+  take_depth()
+  place()
+  be_polite()
+  pace()
+  send()
+  receive()
+  fetch()
+  time_out()
+  cancel_late()
+  warn_slow()
+  retry()
+  read_robots()
+  follow_redirect()
+  settle()
+  extract_links()
+  number_asks()
+  drop_duplicates()
+  merge()
+  forget_duplicates()
+  log()
+  history()
+  clean_up()
+  advance_level()
+}
+
+schedule finish() { conclude() report() say_history() hang_up() }
+
+main {
+  start()
+  loop { frame() } until Open == 0
+  finish()
+}

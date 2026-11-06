@@ -5,15 +5,26 @@
 
 writes into DIR, all of it from the seed alone:
 
-- `site.manifest`: every URL the site answers, for the mock (mock.ent):
-  a line `url status delay_ms fails type location length`, then `length`
-  bytes of body and a newline. (`-` for no location.)
+- `site.manifest`: every URL the site answers, for the mock (mock.ent)
+  and the live server (serve.c): a line `url status delay_ms fails type
+  location length`, then `length` bytes of body and a newline. (`-` for
+  no location.)
 - `crawl.conf`: what the crawler is to do (crawl.ent reads it).
 - `www/`: the pages as files and `rules.txt` (redirects and faults), for
-  the live server of C3.
+  crawlers that want files.
 - `expected.txt`: the report the crawl must give, worked out here from
-  the site alone, by Python's own URL rules (urllib), not by the
-  crawler's code: the lines of `report` in crawl.ent, sorted.
+  the site alone, by Python's own URL and robots.txt rules (urllib), not
+  by the crawler's code: the lines of `report` in crawl.ent, sorted.
+
+`--robots` says what the site's `/robots.txt` is (§8.2, K11): `none`
+(there is none: a 404, every page may be asked for), `rules` (pages
+under `/private/` and those starting `/p/12` may not be, but for
+`/private/open.html`; another agent's group disallows all; a
+`Crawl-delay`), `slow` (those rules, answered after longer than
+`slow_ms`: the host waits for them) or `timeout` (never answered in
+time: every page may be asked for once it has failed). `--time-scale`
+makes every delay and wait so many times as long (0.1 for a live crawl
+that does not take long).
 
 The pages are on `http://site.test/`; a link to another host is not to
 be followed. What a page links to, and how it writes the link, is drawn
@@ -27,9 +38,27 @@ import heapq
 import os
 import random
 import urllib.parse
+import urllib.robotparser
 
 HOST = "site.test"
 ROOT = f"http://{HOST}/"
+# (The crawler's name, as robots.txt groups know it.)
+AGENT = "ent-crawl"
+
+
+def robots_text(crawl_delay):
+    """The robots.txt of `--robots rules`. (Allow before Disallow, so that
+    urllib's first match and the longest match of RFC 9309, which the
+    crawler keeps, say the same.)"""
+    return ("# For the crawler's checks.\n"
+            "User-agent: other-bot\n"
+            "Disallow: /\n"
+            "\n"
+            "User-agent: *\n"
+            "Allow: /private/open.html\n"
+            "Disallow: /private/\n"
+            "disallow: /p/12\n"
+            f"Crawl-delay: {crawl_delay:g}\n")
 
 
 def normalise(url):
@@ -59,9 +88,11 @@ def resolve(base, ref):
 
 
 class Site:
-    def __init__(self, pages, seed):
+    def __init__(self, pages, seed, robots="none", scale=1.0):
         self.rng = random.Random(seed)
         self.pages = pages
+        self.robots = robots
+        self.scale = scale
         # url path -> dict(status, delay, fails, type, location, body)
         self.answers = {}
         # path -> [(form, target ref as written)]; written into bodies at
@@ -70,6 +101,7 @@ class Site:
 
     def page(self, path, status=200, delay=5, fails=0, kind="text/html",
              location=None, body=""):
+        delay = int(round(delay * self.scale))
         self.answers[path] = dict(status=status, delay=delay, fails=fails,
                                   type=kind, location=location, body=body)
 
@@ -150,8 +182,19 @@ class Site:
         # Pages under /d/ with a <base href> that the relative links of
         # them go by.
         based = [f"/d/{j}/index.html" for j in range(max(2, n // 100))]
+        # Pages robots.txt keeps the crawler from, and one it lets it to.
+        private = []
+        if self.robots != "none":
+            private = [f"/private/{j}.html" for j in range(max(2, n // 100))]
+            private.append("/private/open.html")
+            for path in private:
+                self.page(path, body=f"<p>{path}</p>")
+            text = robots_text(0.2 * self.scale)
+            delay = {"rules": 5, "slow": 2000, "timeout": 5000}[self.robots]
+            self.page("/robots.txt", delay=delay, kind="text/plain", body=text)
 
         extras = (missing + flaky + slow + redirects + pictures + based +
+                  private +
                   ["/broken500.html", "/timeout.html", "/q", "/q?a=1&amp;b=2",
                    "/loop/a", "/r/missing", "/long/0"])
         # Every extra is linked from some plain page.
@@ -192,6 +235,8 @@ class Site:
         index = ["<html><body>"]
         for i in range(min(n, 5)):
             index.append(f'<a href="p/{i}.html">{i}</a>')
+        for path in private:
+            index.append(f'<a href="{path}">private</a>')
         index.append("</body></html>")
         bodies["/"] = "\n".join(index)
         for path, body in bodies.items():
@@ -238,10 +283,18 @@ def crawl(site, conf):
               for path, a in site.answers.items()}
     seed = normalise(conf["seed"])
     allowed = conf["allow"].split()
-    depth, hops = {seed: 0}, {seed: 0}
-    queue, order = [(0, 0, seed)], 0
+    # Each host's robots.txt is asked for first, as deep as the seed; its
+    # rules, where it answered 200 in the end.
+    robots = normalise(ROOT + "robots.txt")
+    depth, hops = {seed: 0, robots: 0}, {seed: 0, robots: 0}
+    queue, order = [(0, 0, robots), (0, 1, seed)], 1
+    rules = None
+    answer = by_url.get(robots)
+    if answer and outcome_of(answer, conf) == "200":
+        rules = urllib.robotparser.RobotFileParser()
+        rules.parse(answer["body"].splitlines())
     edges, limited, redirect_of = set(), set(), {}
-    done = set()
+    done, disallowed = set(), set()
 
     def reach(target, d, h):
         nonlocal order
@@ -255,6 +308,9 @@ def crawl(site, conf):
         if url in done or d > depth[url]:
             continue
         done.add(url)
+        if url != robots and rules and not rules.can_fetch(AGENT, url):
+            disallowed.add(url)
+            continue
         answer = by_url.get(url)
         if answer is None:
             continue
@@ -280,6 +336,10 @@ def crawl(site, conf):
     lines = []
     outcomes = {}
     for url in depth:
+        if url in disallowed:
+            lines.append(f"disallowed {url}")
+            outcomes[url] = "disallowed"
+            continue
         answer = by_url.get(url)
         outcome = outcome_of(answer, conf) if answer else "404"
         outcomes[url] = outcome
@@ -292,7 +352,7 @@ def crawl(site, conf):
         if answer and answer["delay"] > conf["slow_ms"]:
             lines.append(f"slow {url}")
     for source, target in edges:
-        if not outcomes[target].startswith(("2", "3")):
+        if not outcomes[target].startswith(("2", "3", "disallowed")):
             lines.append(f"broken {target} {outcomes[target]} from {source}")
     return sorted(set(lines))
 
@@ -331,16 +391,21 @@ def main():
     parser.add_argument("--timeout-ms", type=int, default=3000)
     parser.add_argument("--slow-ms", type=int, default=1000)
     parser.add_argument("--per-host", type=int, default=64)
+    parser.add_argument("--robots", default="none",
+                        choices=["none", "rules", "slow", "timeout"])
+    parser.add_argument("--time-scale", type=float, default=1.0)
     parser.add_argument("--no-www", action="store_true",
                         help="leave out www/ (the files for the live "
                              "server), for the mock alone")
     args = parser.parse_args()
 
-    site = Site(args.pages, args.seed)
+    site = Site(args.pages, args.seed, args.robots, args.time_scale)
+    scaled = lambda ms: int(round(ms * args.time_scale))
     conf = dict(seed=ROOT, allow=HOST, max_depth=args.depth,
                 retries=args.retries, redirects=args.redirects,
-                timeout_ms=args.timeout_ms, slow_ms=args.slow_ms,
-                per_host=args.per_host, backoff_ms=100)
+                timeout_ms=scaled(args.timeout_ms),
+                slow_ms=scaled(args.slow_ms),
+                per_host=args.per_host, backoff_ms=scaled(100))
     os.makedirs(os.path.join(args.out, "www"), exist_ok=True)
     with open(os.path.join(args.out, "crawl.conf"), "w") as out:
         for key in ("seed", "allow", "max_depth", "retries", "redirects",

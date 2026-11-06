@@ -60,8 +60,9 @@ unique Net { timeout: f64, slow_after: f64, retries: i32, backoff: f64,
 unique Now: f64
 unique Counters { serial: i64, answers: i64 }
 
-// What every answer was, in the order they came (the talk's history).
-buffer History { ask: entity, at: f64, status: i32 } capacity 1048576
+// What every answer was, in the order they came (the talk's history):
+// when it was sent and answered, its status (0: none came, it failed).
+buffer History { ask: entity, sent: f64, at: f64, status: i32 } capacity 1048576
 
 index ByUrl of Ask by url hash
 
@@ -166,10 +167,24 @@ system log() {
   for a: Ask, g: Got on added Got { put("log {a.url} {g.status}") }
 }
 
-// The talk's history: a row for each answer.
+// The talk's history: a row for each answer, and for each try that
+// failed.
 system history() {
-  for me, g: Got on added Got {
-    History += { ask: me, at: g.at, status: g.status }
+  for me, s: Sent, g: Got on added Got {
+    History += { ask: me, sent: s.at, at: g.at, status: g.status }
+  }
+  for me, s: Sent, f: Failed on added Failed {
+    History += { ask: me, sent: s.at, at: f.at, status: 0 }
+  }
+}
+
+// The history said, a line a row: `history sent at status url` (for the
+// checks of politeness, §8.2 K9).
+system say_history() {
+  for i in 0..len(History) {
+    if let url = Ask(History[i].ask).url {
+      put("history {History[i].sent} {History[i].at} {History[i].status} {url}")
+    }
   }
 }
 
