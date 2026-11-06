@@ -1,0 +1,65 @@
+// Loops whose reads and appends are checked once before them
+// (--ent-lower-to-loops, then --ent-loop-checks; loop_checks.test).
+import console
+buffer Pixels { value: u8 } capacity 64
+buffer Out { value: i32 } capacity 64
+buffer Few { value: i32 } capacity 5
+unique Sum { n: i64 }
+
+// Reads one row past each end, which read nought: the rows' ranges are
+// not within the count, so the loop runs as it was.
+proc smooth(from: Pixels, to: mut Out) {
+  to = []
+  for i in 0..len(from) {
+    to += { value: from[i - 1].value as i32 + from[i].value as i32 +
+                   from[i + 1].value as i32 }
+  }
+}
+
+// The same, as rows of `width`, and a loop of three turns inside: the
+// rows of the edges are out, the others within.
+proc blur(from: Pixels, to: mut Out, width: i32) {
+  to = []
+  let height = len(from) / width
+  for y in 0..height {
+    for x in 0..width {
+      var sum = 0
+      for d in 0..3 {
+        sum += from[(y + d - 1) * width + x].value as i32
+      }
+      to += { value: sum }
+    }
+  }
+}
+
+// Stops at the first row over `most`: a `for` with a `break`.
+proc until(from: Pixels, to: mut Out, most: u8) -> i32 {
+  to = []
+  for i in 0..len(from) {
+    if from[i].value > most { break }
+    to += { value: from[i].value as i32 }
+  }
+  len(to)
+}
+
+proc fill(into: mut Few, n: i32) {
+  for i in 0..n { into += { value: i } }
+}
+
+world { for i in 0..48 { Pixels += { value: (i * 37 & 63) as u8 } } }
+
+system show() {
+  smooth(Pixels, Out)
+  var s: i64 = 0
+  for i in 0..len(Out) { s = s * 3 + Out[i].value as i64 }
+  put("smooth {len(Out)} {s}")
+  blur(Pixels, Out, 8)
+  s = 0
+  for i in 0..len(Out) { s = s * 3 + Out[i].value as i64 }
+  put("blur {len(Out)} {s}")
+  put("until {until(Pixels, Out, 60)} {Out[len(Out) - 1].value}")
+  fill(Few, 3)
+  put("few {len(Few)}")
+}
+schedule once() { show() }
+main { once() }

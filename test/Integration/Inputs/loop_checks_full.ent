@@ -1,0 +1,13 @@
+// A loop that appends with room for its first turns only
+// (loop_checks.test): the check before it fails, and the loop as it was
+// stops the program at the row with no room.
+buffer Few { value: i32 } capacity 5
+proc fill(into: mut Few, n: i32) {
+  for i in 0..n { into += { value: i } }
+}
+system twice() {
+  fill(Few, 3)
+  fill(Few, 3)
+}
+schedule once() { twice() }
+main { once() }

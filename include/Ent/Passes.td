@@ -217,7 +217,46 @@ def EntTrace : Pass<"ent-trace", "ModuleOp"> {
                            "::mlir::func::FuncDialect"];
 }
 
-def EntLowerViews : Pass<"ent-lower-views", "::mlir::func::FuncOp"> {
+def EntLoopChecks : Pass<"ent-loop-checks", "ModuleOp"> {
+  let summary = "Check once before a loop what its reads and appends "
+                "would check each turn";
+  let description = [{
+    Changes to the loops `--ent-lower-to-loops` makes, which change
+    nothing in what a program does:
+
+    - A read of a buffer's row checks the row against the count (a row
+      past it reads nought). Where the row is the counter of a loop from
+      zero to below that count (`for i in 0..len(B) { B[i] }`), and
+      nothing in the loop changes the count, the check is `true`.
+    - Each `+=` checks that the buffer has room for a row more: an early
+      way out of the loop, which LLVM does not vectorise. And a read's
+      row picked by `select` is not an address LLVM can follow. So a
+      counted loop (a `for`, also one with a `break`) is made two. Before
+      it: whether there is room for its turns times the rows a turn
+      appends at most, and whether the rows it reads, made of its
+      counter, counters of loops inside it and values from before it by
+      `+`, `-` and `*`, are within their counts by their ranges. Where so,
+      a copy of the loop without those checks, its counts appended to
+      kept in values of the function's own (so in registers); where not,
+      the loop as it was. So a program out of room still stops at the row
+      it would have. The loops so made two are the innermost with such
+      checks that do not take a constant number of turns.
+
+    Run it after `--ent-lower-to-loops`, before `--ent-lower-views`.
+  }];
+  let options = [
+    Option<"guards", "guards", "bool", /*default=*/"true",
+           "Drop reads' checks that cannot fail">,
+    Option<"once", "once", "bool", /*default=*/"true",
+           "Check a loop's reads and appends once, before it">
+  ];
+  let dependentDialects = [
+    "::mlir::arith::ArithDialect", "::mlir::memref::MemRefDialect",
+    "::mlir::scf::SCFDialect"
+  ];
+}
+
+def EntLowerViews : Pass<"ent-lower-views", "ModuleOp"> {
   let summary = "Read and write the world's columns by their addresses";
   let description = [{
     After `--ent-lower-to-loops` a column is a `memref.view` of the world's
@@ -232,7 +271,24 @@ def EntLowerViews : Pass<"ent-lower-views", "::mlir::func::FuncOp"> {
     `llvm.store`), and drops the views nothing else uses. It changes
     nothing in what the program does; run it last before the conversion
     to the LLVM dialect.
+
+    Each such load and store of the world is told LLVM's type-based alias
+    analysis (TBAA) which part of the world it is in: the views of the
+    world, by their bytes, those that overlap taken together; a part of
+    single values (a count, a unique's field) a type of its own, and all
+    the rows one type. So LLVM knows that a store to a row does not change
+    a count, and keeps a count in a register through a loop. (Rows of one
+    buffer and another's are not told apart: that let LLVM make a loop of
+    scattered writes into scatters, slower here than one at a time.)
+    What is read or written otherwise is told nothing, and may be any of
+    them. Only with `tbaa` (tools/ent: ENT_TBAA=1): measured on
+    2026-11-06 it paid in one loop and cost in another, and nothing either
+    way in entsat, the epidemic or beecs (bench/RESULTS.md).
   }];
+  let options = [
+    Option<"tbaa", "tbaa", "bool", /*default=*/"false",
+           "Tell LLVM which part of the world each load and store is in">
+  ];
   let dependentDialects = [
     "::mlir::LLVM::LLVMDialect", "::mlir::arith::ArithDialect",
     "::mlir::memref::MemRefDialect"

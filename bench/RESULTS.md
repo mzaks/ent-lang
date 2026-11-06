@@ -4781,3 +4781,93 @@ within a few percent of the table.
   the native stack) it is a fn and on all cores like the others.
 - Goose computes `u8 + u8` in 8 bits (no promotion, its §6.2): the blur's
   first version wrapped and gave another sum; one `as u32` mended it.
+
+## 2026-11-06: why ent's procs over buffers are slow; TBAA tried
+
+`bench/devices` had ent's procs at about half the speed of C, Rust and
+Goose over a buffer. The blur's IR, each pixel: every read of `from[i]`
+compares with the buffer's count, takes row 0 where it is past it, and
+gives nought then (a row outside reads nought, the language's rule); the
+count is loaded again from the world each time; each `to += { .. }`
+checks the capacity (a way out that calls `puts` and `abort`) and stores
+the count back. LLVM cannot keep the counts in registers: all is one
+block of memory to it, and a byte stored to a row may be a count.
+
+The same blur in C, shaped as ent's (clang, native, one core, 2048 × 2048):
+
+| | ms |
+|---|---:|
+| counts in the world, guarded reads, an append each pixel | 10.5 |
+| the same with the counts in locals | 2.6 |
+| the same, the count stored each pixel, `puts` + `abort` on overflow | 3.4 |
+| guarded reads, written by index | 2.5 |
+| plain C (clang vectorises it) | 0.6 |
+
+(gcc -O2 makes plain C 6.1 ms: it does not vectorise this loop, and
+`bench/devices` had C compiled by the machine's `cc`, gcc here.)
+
+So `--ent-lower-views` can now tell LLVM's type-based alias analysis
+which part of the world each load and store is in (`ENT_TBAA=1`). Telling
+every view apart let LLVM make entsat's loops over the trail (`Vars[..]
+.target = ..`) into gathers and byte scatters, 3% slower in all and up to
+17% on a problem; so a count or a unique's field is a type of its own and
+all rows one type. ms or s, one core, native, the same answers and the
+same search:
+
+| | told nothing | TBAA |
+|---|---:|---:|
+| blur (bench/devices) | 14.6 ms | 13.6 ms |
+| median, quickselect | 12.1 ms | 15.1 ms |
+| parse | 4.8 ms | 4.8 ms |
+| entsat, eight problems of 1.6 to 8 s | 36.29 s | 36.17 s |
+| epidemic, 100,000 people, a day | 1.1 ms | 1.1 ms |
+| beecs, 100, a year | 17.9 ms | 17.6 ms |
+
+The counts now stay in registers, but the blur's loop is still not
+vectorised: LLVM says "early exit loop with more than one early exit"
+(one capacity check for each of its two `+=`), and with one `+=` gives no
+reason. The median's scan loops come out another shape with the count
+held, and slower. Not chosen for all, then: `ENT_TBAA=1` asks for it.
+What is left between ent and C here is the language's guards (a read past
+the rows is nought, a row more stops the program) and the shape they give
+the loops, not the counts.
+
+## 2026-11-06: reads and appends checked once before a loop
+
+`--ent-loop-checks` (lib/Ent/Transforms/LoopChecks.cpp, after
+`--ent-lower-to-loops`; `ENT_LOOP_CHECKS=0` leaves it out) changes no
+answer and moves the guards of the section above out of the loops:
+
+- A read `B[i]` in `for i in 0..len(B)`, where nothing in the loop
+  changes B's count, cannot be past the rows: its guard goes.
+- A counted loop (a `for`, also one with a `break`) whose turns append or
+  read rows made of its counter, the counters of loops inside it and
+  values from before it (`+`, `-`, `*`) is made two. Before it: room for
+  its turns times the `+=` in a turn, and the reads' rows within their
+  counts by their ranges (each part within an i32, so nothing wraps).
+  Where so, a copy without those checks, the counts it appends to in
+  locals; where not, the loop as it was, so a program out of room stops
+  at the same row with the same words. Reads past the ends (a blur's
+  edge rows) make only those turns of the outer loop take the slow copy.
+
+ms or s, one core, native, the same sums, answers and search:
+
+| | before | checked once |
+|---|---:|---:|
+| blur 2048 × 2048 (bench/devices) | 14.6 ms | **0.48 ms** |
+| parse 1M numbers, alone | 3.8 ms | **3.0 ms** |
+| parse in bench/devices | 4.8 ms | 3.9 ms |
+| median, quickselect | 12.1 ms | 12.3 ms |
+| entsat, eight problems | 36.23 s | **35.08 s** (−3.2%, all eight faster) |
+| epidemic, 100,000 people, a day | 1.2 ms | 1.2 ms |
+| beecs, 100, a year | 17.8 ms | 17.5 ms |
+
+The blur's x loop is now vectorised (LLVM had said "unsafe indirect
+dependence": a row picked by `select` is no address it can follow) and
+beats the plain C built by clang (0.6 ms) and by gcc (6.7 ms). Built for
+any x86-64 it takes 3.25 ms. The median is untouched: its scans move
+`i` and `j` by hand, which have no range before the loop, so its reads
+keep their guards. Parse in `bench/devices` is slower native (3.9 ms)
+than for any x86-64 (3.1 ms); alone it is 3.0 native, so that is the
+program around it, not the loop. With `ENT_TBAA=1` on top nothing more
+was gained, so TBAA stays as it was: asked for.

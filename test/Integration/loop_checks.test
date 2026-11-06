@@ -1,0 +1,34 @@
+// Loops checked once (--ent-loop-checks): a loop's appends and the rows it
+// reads are checked before it, and where they fit a copy of the loop runs
+// without the checks. Inputs/loop_checks.ent reads past both ends (the
+// loop as it was runs), within (the copy runs) and stops at a `break`;
+// it prints the same with the pass and without it.
+// RUN: %ent run %S/Inputs/loop_checks.ent | FileCheck %s
+// RUN: env ENT_LOOP_CHECKS=0 %ent run %S/Inputs/loop_checks.ent | FileCheck %s
+
+// CHECK:      smooth 48 -6765819593161918289
+// CHECK-NEXT: blur 48 -2327059975331467712
+// CHECK-NEXT: until 19 26
+// CHECK-NEXT: few 3
+// CHECK-NOT:  {{.}}
+
+// The loop made two: the copy without the check of room, its count kept
+// in a value of the function's own; the loop as it was with it.
+// RUN: %ent build %S/Inputs/loop_checks.ent -o %t.exe --keep %t.dir
+// RUN: ent-opt %t.dir/loop_checks.mlir --ent-lower-to-loops=fuse-systems=1 --symbol-dce --ent-loop-checks | FileCheck %s --check-prefix=IR
+
+// IR-LABEL: func.func private @ent_fill
+// IR:         %[[LOCAL:.*]] = memref.alloca() : memref<1xi64>
+// IR:         scf.if
+// IR:           scf.for
+// IR-NOT:         cf.assert
+// IR:             memref.store {{.*}}, %[[LOCAL]]
+// IR:         } else {
+// IR:           scf.for
+// IR:             cf.assert {{.*}} "no room for another row: the buffer @Few holds 5
+// IR-LABEL: func.func
+
+// Room for three, then for two more only: the check before the loop
+// fails, and the loop as it was stops the program at the sixth row.
+// RUN: %ent build %S/Inputs/loop_checks_full.ent -o %t.full.exe
+// RUN: not --crash %t.full.exe

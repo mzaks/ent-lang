@@ -1562,7 +1562,15 @@ def build(arguments, output, directory):
     # to load.)
     if gpu:
         os.environ.setdefault("CUDA_PATH", "/opt/cuda")
-    views = ["--cse", "--ent-lower-views"]
+    # (ENT_TBAA=1: the loads and stores of the world tell LLVM which part
+    # of it they are in, a count or the rows; not yet chosen for all, see
+    # bench/RESULTS.md.)
+    # (ENT_LOOP_CHECKS=0: each append checked and each read guarded, as
+    # before --ent-loop-checks; to compare.)
+    checks = ([] if os.environ.get("ENT_LOOP_CHECKS") == "0"
+              else ["--ent-loop-checks"])
+    views = checks + ["--cse", "--ent-lower-views" + (
+        "=tbaa=1" if os.environ.get("ENT_TBAA") == "1" else "")]
     if gpu:
         passes += views + before
     link = []
