@@ -1,0 +1,2 @@
+# The http device sends and answers through libcurl (https://curl.se/libcurl).
+-lcurl

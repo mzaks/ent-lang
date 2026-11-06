@@ -39,5 +39,6 @@ python3 bench/http/mock.py 10000 100000    # pages a second, bench/http/RESULTS.
 The report: `fetched URL status-or-why tries`, `redirect URL target`,
 `redirect-limit URL`, `slow URL`, `broken URL why from PAGE`.
 
-Next (C2): the device, `devices/http` on libcurl, with every method, and
-the same crawler on the network.
+The device for the network is `devices/http` (libcurl, any method; its
+checks are test/Integration/http_device.test). Next (C3): the same
+crawler on it, against a local server, and its benchmark against C.

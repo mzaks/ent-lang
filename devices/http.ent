@@ -1,0 +1,128 @@
+// HTTP: requests sent and answered through libcurl's multi interface
+// (https://curl.se/libcurl), any method, headers and body, HTTP/1.1 and
+// HTTP/2, TLS, cookies, redirects, gzip, brotli and zstd bodies.
+//
+//   import http
+//   system open() { Web.session = http_session("my-agent/1", true, 8, 256,
+//                                              true, true, "", "") }
+//   system send() {
+//     for e, r: Request without Sent {
+//       let h = http_start(Web.session, "GET", r.url, "", "", 10.0, 0, 0)
+//       e.add(Sent { handle: h })
+//     }
+//   }
+//   system receive() {
+//     http_poll(0.05, Done)          // waits at most 50 ms for answers
+//     for e, s: Sent without Got {
+//       let status = http_status(s.handle)     // -1: not yet
+//       if status >= 0 { e.add(Got { status: status, body: http_body(s.handle) }) }
+//     }
+//   }
+//
+// A request is started, runs while the program does other things, and
+// is answered in a later `http_poll`: a row of `Done` for it, with its
+// status (or why there was none). Its body and headers are then asked
+// for by its handle, as texts, until the program forgets it. Procs, on
+// the program's main thread, as libcurl's multi interface wants.
+//
+// Implemented in devices/http.c; linked with libcurl (http.link).
+import text
+
+// Why a request had no answer (`Ok`: it had one, its status says which).
+enum HttpFailure { Ok, Refused, Timeout, Dns, Tls, TooBig, Other }
+
+// The requests answered since the last poll: its handle, the status of
+// the last response (0 where there was none), why there was none, the
+// seconds to the first byte of it and to the end, and whether its body
+// was cut at `max_body`.
+buffer Done { handle: i64, status: i32, failure: HttpFailure, first_byte: f64,
+              total: f64, cut: bool } capacity 4096
+
+// A session: what its requests share. `cookies` keeps a jar (what
+// servers set is sent back to them); at most `per_host` connections to a
+// host and `total` in all (0: no limit); `http2` asks for HTTP/2 (else
+// HTTP/1.1 only); `verify_tls` checks servers' certificates, against
+// `ca_file` where it is not empty (a PEM file), else the system's;
+// `proxy` where it is not empty ("http://host:port"). Gives its number;
+// several may be open at once.
+extern proc http_session(user_agent: text, cookies: bool, per_host: i32,
+                         total: i32, http2: bool, verify_tls: bool,
+                         ca_file: text, proxy: text) -> i64
+
+// Starts a request of a session: `method` by name ("GET", "HEAD",
+// "POST", "PUT", "PATCH", "DELETE", "OPTIONS" or any other), `headers`
+// as "Name: value" lines (each ended by "\n" or "\r\n"), `body` its bytes
+// (none: no body), at most `timeout` seconds in all (0: none), a body
+// kept up to `max_body` bytes (0: all), following at most `follow`
+// redirects itself (0: each 3xx is the answer). Gives its handle, never
+// 0 (a request it could not start is answered at the next poll, failed).
+extern proc http_start(session: i64, method: text, url: text, headers: text,
+                       body: text, timeout: f64, max_body: i64,
+                       follow: i32) -> i64
+
+// Stops a request that is not answered yet; it is not answered then.
+extern proc http_cancel(handle: i64)
+
+// Waits for answers, at most `wait` seconds (none where some came
+// already), and puts a row in `done` for each, in place of what it had.
+// How many there are: at most as many as `done` holds, the rest at the
+// next poll. Where no request is running it does not wait.
+extern proc http_poll(wait: f64, done: mut Done) -> i32
+
+// Of one request, by its handle, once it is answered (the same as its
+// row of `Done` says): its status (-1 while it runs; 0 where there was
+// no response), why there was none, whether its body was cut, and the
+// seconds to the first byte and to the end. So a `for` over the
+// entities that sent requests can ask for each its own answer.
+extern proc http_status(handle: i64) -> i32
+extern proc http_failure(handle: i64) -> HttpFailure
+extern proc http_cut(handle: i64) -> bool
+extern proc http_first_byte(handle: i64) -> f64
+extern proc http_total(handle: i64) -> f64
+
+// How many requests are started and not answered yet.
+extern proc http_running() -> i32
+
+// What an answered request got: the body (decoded, where the server
+// sent it compressed), the headers of the last response (as received,
+// each line ended by "\r\n", without its status line), the URL that
+// answered (after redirects followed), and where a redirect goes
+// (`Location`, made absolute; none where it is no redirect). None (no
+// bytes) of a handle not answered or forgotten.
+extern proc http_body(handle: i64) -> text
+extern proc http_headers(handle: i64) -> text
+extern proc http_url(handle: i64) -> text
+extern proc http_location(handle: i64) -> text
+
+// Forgets an answered request (polled or not): its body and headers are
+// given back, and its handle is none from then on.
+extern proc http_forget(handle: i64)
+
+// Closes a session: its requests are stopped and forgotten.
+extern proc http_close(session: i64)
+
+// `t` from `from` to `to` without spaces, tabs and "\r" at either end.
+fn trimmed(t: text, from: i32, to: i32) -> text {
+  if from < to && (t[from] == ' ' || t[from] == '\t' || t[from] == '\r') {
+    trimmed(t, from + 1, to)
+  } else if to > from && (t[to - 1] == ' ' || t[to - 1] == '\t' || t[to - 1] == '\r') {
+    trimmed(t, from, to - 1)
+  } else {
+    slice(t, from, to)
+  }
+}
+
+// The value of the header `name` (in any case) in `headers` as
+// `http_headers` gives them: the first of that name, without the spaces
+// around it; none where there is none.
+fn header(headers: text, name: text) -> text {
+  let low = "\n" + lower(headers)
+  let wanted = "\n" + lower(name) + ":"
+  let at = find(low, wanted, 0)
+  if at < 0 { "" }
+  else {
+    let start = at + len(wanted) - 1
+    let end = find(headers, "\n", start)
+    trimmed(headers, start, if end < 0 { len(headers) } else { end })
+  }
+}

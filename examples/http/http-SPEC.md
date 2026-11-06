@@ -84,12 +84,12 @@ The questions this example is meant to answer:
 | `crawl.ent` | The crawler's layer: link extraction, hosts, depth, politeness, the report (§4.2, §5.2). Knows nothing of sockets. |
 | `mock.ent` | The mock: loads the manifest, answers request data from it with a simulated clock (§6.1). |
 | `live.ent` | The live device's ent side (§6.2). |
-| `devices/http.ent`, `devices/http.c` | The HTTP client device, a module from the start (§6.2), with its own tests in `test/Integration/` (D1 to D10, §8.1). |
+| `devices/http.ent`, `devices/http.c` | The HTTP client device, a module from the start (§6.2), with its own tests in `test/Integration/http_device.test` (D1 to D10, §8.1; built in C2). |
 | `crawl_mock.ent`, `crawl_live.ent` | The two programs: the same layers, another schedule (§6). |
 | `crawl_lean.ent` | crawl_mock.ent without the optional systems (§8, K7). |
 | `crawl_combined.ent` | Four of the pipeline's systems as one (§8, K10). |
 | `scan_links.ent` | The link scanner alone, every link of every page (§8, K12). |
-| `server/` | The local server (§7.2): the generated site plus the endpoints the device tests need. |
+| `test/Integration/Inputs/http/serve.py` | The device tests' server (§7.2, C2); the crawl's own server comes in C3. |
 | `check/` | The check scripts (§8). |
 | `bench/http/` | `mock.py` (§9.1, built in C1); the C reference crawler, the setups of the other crawlers (C3, C4). |
 | `sites.md` | The public sites crawled by hand, why they may be, and the results (§9.3). |
@@ -105,7 +105,7 @@ As built in C1 (the files say each field's meaning).
 | `Ask` | `method: Method, url, headers, body, origin: entity, hops, tries, next_at: f64, serial` | Request data: what is wanted (the talk's base URL, path, method, parameters and payload, here as one URL plus headers and body), what caused it (`origin`: the ask a redirect came from), redirects followed to get here, tries again so far, not to be sent before `next_at`, the order asks were made in. |
 | `Twin` | `of: entity` | Every ask has one: the older ask for the same URL of which it is a duplicate, or none. |
 | `Sent` | `at: f64, handle: i64` | Handed to the device. |
-| `Got` | `at: f64, status: i32, headers, body, location` | A response; `location` for redirects. (`cut`, for a body past the limit, comes with the device, C2.) |
+| `Got` | `at: f64, status: i32, headers, body, location` | A response; `location` for redirects. (`cut`, for a body past the limit, comes with the live device, C3.) |
 | `Failed` | `at: f64, kind: Failure` | No HTTP response: timed out, refused, DNS, TLS (the talk's OS-level errors). |
 | tag `Slow` | | Sent long ago and no answer yet (a warning, not a timeout). |
 | tag `GaveUp` | | Tries again used up. |
@@ -163,7 +163,7 @@ systems that can be left out with no other change (K7).
 | `number_asks` | `Ask` with serial 0 | Gives it the next serial. | |
 | `drop_duplicates` | new asks, `Kept`, `ByUrl` | The talk's "drop the new one": an ask for a URL a known ask has is its duplicate (`Twin.of`); of new asks for one URL all but the one `ByUrl` names first. Two `get`s, no loop over the asks. | |
 | `forget_duplicates` | `Twin` | Destroys the duplicates, after the program had them in the frame. | |
-| `time_out` | `Sent` without an answer, `Now` | Adds `Failed { kind: Timeout }`. (Cancels at the device: C2.) | |
+| `time_out` | `Sent` without an answer, `Now` | Adds `Failed { kind: Timeout }`. (Cancels at the device: C3.) | |
 | `warn_slow` | `Sent` without an answer, `Now` | Adds `Slow` past `slow_after`, once. | yes |
 | `retry` | `Failed`, `Got` with 5xx or 429 | Removes `Sent` and the answer, bumps `tries` and `next_at` (backoff doubling); past the limit adds `GaveUp`. | |
 | `follow_redirect` | `Got` with 3xx and a location | Spawns the next `Ask` (`hops` one more) up to `Net.redirects`, else `RedirectLimit`. | |
@@ -227,50 +227,62 @@ That is the talk's offline bypass, as a schedule.
 
 ### 6.2 Live: the `http` device
 
-`devices/http.ent` and `devices/http.c`, on libcurl's multi interface,
-as `extern proc`s (no world for device C). A module any program can
-import, not only the crawler. Sketch:
+`devices/http.ent` and `devices/http.c`, on libcurl's multi interface
+(linked by `http.link`), as `extern proc`s (no world for device C). A
+module any program can import, not only the crawler. Built in C2; the
+module's comments say each proc exactly.
 
 ```
-// A session: settings its requests share, and a cookie jar. Several
-// sessions may be open at once (a crawler and an API client in one
-// program).
-extern proc http_session(user_agent: text, cookies: bool,
-                         per_host: i32, total: i32,        // connections
-                         http2: bool, verify_tls: bool,
-                         proxy: text) -> i64
+enum HttpFailure { Ok, Refused, Timeout, Dns, Tls, TooBig, Other }
+buffer Done { handle: i64, status: i32, failure: HttpFailure,
+              first_byte: f64, total: f64, cut: bool } capacity 4096
 
-// Starts a request; gives its handle. `method` is a name ("GET",
-// "PROPFIND", ..). `headers` is "Name: value" lines. `follow` > 0 lets
-// the device follow that many redirects itself; 0 hands every 3xx to
-// the program.
-extern proc http_start(session: i64, method: text[16], url: text,
-                       headers: text, body: text, timeout: f64,
-                       max_body: i32, follow: i32) -> i64
+extern proc http_session(user_agent: text, cookies: bool, per_host: i32,
+                         total: i32, http2: bool, verify_tls: bool,
+                         ca_file: text, proxy: text) -> i64
+extern proc http_start(session: i64, method: text, url: text, headers: text,
+                       body: text, timeout: f64, max_body: i64,
+                       follow: i32) -> i64
 extern proc http_cancel(handle: i64)
-
-// Waits at most `wait` seconds for answers. Gives a row in `done` for
-// each (handle, status, failure, time to first byte, total time, `cut`).
-// How many answered.
 extern proc http_poll(wait: f64, done: mut Done) -> i32
-// What an answered request got, as texts (§10.1); then it is gone.
+extern proc http_running() -> i32
+// Of one request, once answered (-1 while it runs):
+extern proc http_status(handle: i64) -> i32
+extern proc http_failure(handle: i64) -> HttpFailure
+extern proc http_cut(handle: i64) -> bool
+extern proc http_first_byte(handle: i64) -> f64
+extern proc http_total(handle: i64) -> f64
 extern proc http_body(handle: i64) -> text
 extern proc http_headers(handle: i64) -> text
+extern proc http_url(handle: i64) -> text
+extern proc http_location(handle: i64) -> text
 extern proc http_forget(handle: i64)
-
 extern proc http_close(session: i64)
+fn header(headers: text, name: text) -> text     // in ent-lang
 ```
 
-- Procs run on the main thread, which curl multi needs.
-- `http_poll` blocks in `curl_multi_poll` up to `wait`, the time to the
-  next `Attempt.next_at` or timeout, so `main` does not spin.
-- Response headers come back as received, one line each. A fn in the
-  module (`header(headers, name)`), written in ent with `find`, `slice`
-  and `lower`, finds one by name.
-- The crawler opens one session with `follow` 0, so its pipeline sees
-  every redirect.
-- The exact parameters are settled at C2 and written in the module's
-  comments, as the other devices do.
+- A session is a multi handle (its connection limits, HTTP/2
+  multiplexing) and a share handle (DNS, TLS sessions, and the cookie
+  jar where it has one).
+- `method` by name: GET and HEAD as curl has them, POST by its body (so
+  303 turns it into a GET, 307 and 308 keep it), any other as a custom
+  request. No `Expect: 100-continue` unless the headers ask for it.
+  Compressed bodies (gzip, brotli, zstd) are asked for and decoded.
+- `follow` n: curl follows n redirects and then gives the 3xx as the
+  answer (not a failure); `follow` 0 gives each 3xx to the program,
+  with `http_location` absolute.
+- A body past `max_body` is cut there (the transfer stopped) and marked
+  `cut`; the status is kept.
+- How the answers come to the entities: `http_poll` waits (in
+  `curl_multi_poll`, at most `wait`, not at all where none runs) and
+  drives the transfers; then a `for` over the entities that sent asks
+  the device for each its own answer by handle (`http_status` and the
+  rest). The rows of `Done` are there for a program that wants them as
+  rows; they cannot be put on the entities by handle, as a `for` sets
+  only its own entity's fields (§10.4).
+- Procs run on the main thread, which curl's multi interface wants.
+- The crawler will open one session with `follow` 0, so its pipeline
+  sees every redirect (C3).
 
 ## 7. Inputs
 
@@ -293,17 +305,18 @@ extern proc http_close(session: i64)
 
 ### 7.2 The live server
 
-Serves `DIR/www` with the redirect rules, faults and a `robots.txt` on
-`127.0.0.1`. It must not be the bottleneck of §9: a small C server on
-epoll or an existing one (nginx, if the faults can be expressed there).
-Decided in C2.
+For the device tests (§8.1, built in C2):
+`test/Integration/Inputs/http/serve.py`, Python's own `http.server`
+(no packages), on `127.0.0.1` plain and with TLS (a self-signed
+certificate for 127.0.0.1, `cert.pem`, which the tests trust or not),
+and a port nothing listens on. Its endpoints are an httpbin's: echo a
+request (method, header lines as received, body), the FNV-1a of a body,
+N bytes with their FNV-1a, a status, repeated headers, n redirects of a
+given status, a delay, cookies set and asked for, gzip and brotli
+bodies. It runs the test's program and stops.
 
-For the device tests (§8.1) it also has the endpoints of an httpbin:
-echo a request's method, headers and body; give a status; set and ask
-for cookies; redirect n times; delay; send a gzip body; send a large
-body. [go-httpbin](https://github.com/mccutchen/go-httpbin) has them
-all and could stand in for this part, with a TLS listener in front
-(self-signed, trusted by the test).
+For the crawl and its benchmark (C3) it must not be the bottleneck of
+§9: a small C server on epoll or nginx. Decided in C3.
 
 ### 7.3 Links
 
@@ -475,6 +488,11 @@ around in the example, not in the compiler:
   where no key was written (docs/indexes.md, 5.1): 0.11 s for both. And
   a write to any field of `Ask` (`serial`, `tries`) counted as a write
   of its key; now only `url` does.
+- **A field of another entity is set only in a `for`, and only
+  combined** (`+=`, `max=`). So the rows of `Done` cannot be put on the
+  entities that sent them by handle (a hash index finds the entity, but
+  nothing may set its fields there): each entity asks the device for its
+  own answer instead (§6.2), which is the better shape anyway.
 - **No running sum in an `on added` for**, no `else if let`, no `var`
   of text, no `let` of a unique's text, no `while` in a fn (loops over
   texts are fns calling themselves).
@@ -487,7 +505,7 @@ around in the example, not in the compiler:
 |---|---|---|
 | **C0** | §10.1 decided and, if a language feature, built with its own tests. | `extract_links` can make a URL `text`. |
 | **C1** | `site.py`, `pipeline.ent`, `crawl.ent`, `mock.ent`, `crawl_mock.ent`, `crawl_combined.ent`, `check/`. | K1 to K7, K10 and K12 (generated cases) pass on the mock; mock throughput measured. |
-| **C2** | `devices/http` and the local server with its httpbin endpoints and TLS listener. | D1 to D10 pass. |
+| **C2** | `devices/http` and the local server with its httpbin endpoints and TLS listener. | D1 to D10 pass (done: test/Integration/http_device.test). |
 | **C3** | `crawl_live.ent`, `robots.txt`, `bench/http/crawl.c`. | K8, K9 and K11 pass; the live benchmark against C is measured and written down. |
 | **C4** | The other crawlers' setups, the mirrored real site. | §9.2 measured and written down, every crawler verified first. |
 | **C5** | `sites.md`, crawls of the public sites. | §9.3 run; what it found is in K12 and D1 to D10. |

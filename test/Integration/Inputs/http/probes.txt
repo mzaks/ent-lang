@@ -1,0 +1,53 @@
+# name|session|method|url|headers|body|timeout ms|max body|follow|phase|want
+# D1: every method, and one by name; HEAD without a body.
+get|plain|GET|/anything||||0|0|0|GET /anything
+head|plain|HEAD|/anything||||0|0|0|
+post|plain|POST|/anything||posted|0|0|0|0|POST /anything
+put|plain|PUT|/anything||put body|0|0|0|0|PUT /anything
+patch|plain|PATCH|/anything||patched|0|0|0|0|PATCH /anything
+delete|plain|DELETE|/anything||||0|0|0|DELETE /anything
+options|plain|OPTIONS|/anything||||0|0|0|OPTIONS /anything
+propfind|plain|PROPFIND|/anything||||0|0|0|PROPFIND /anything
+# D2: headers as sent, a repeated one too; response headers in order.
+sent-headers|plain|GET|/anything|X-One: 1\nX-Twice: a\r\nX-Twice: b\n||0|0|0|0|X-One: 1\r\nX-Twice: a\r\nX-Twice: b\r\n
+got-headers|plain|GET|/headers||||0|0|0|X-Twice: one\r\nX-Twice: two\r\nX-Once:   spaced
+# D3: bodies byte for byte, both ways: empty, small, binary with zero bytes, 10 MB.
+empty-body|plain|POST|/sum|||0|0|0|0|length 0 fnv 14695981039346656037
+binary-body|plain|POST|/sum||@binary.bin|0|0|0|0|sum:@binary.bin
+big-body|plain|PUT|/sum||@big.bin|0|0|0|0|sum:@big.bin
+small-bytes|plain|GET|/bytes/100||||0|0|0|fnv
+big-bytes|plain|GET|/bytes/10485760||||0|0|0|fnv
+# D4: statuses as given, none a failure.
+status-200|plain|GET|/status/200||||0|0|0|
+status-201|plain|GET|/status/201||||0|0|0|
+status-204|plain|GET|/status/204||||0|0|0|
+status-299|plain|GET|/status/299||||0|0|0|
+status-304|plain|GET|/status/304||||0|0|0|
+status-404|plain|GET|/status/404||||0|0|0|status 404
+status-418|plain|GET|/status/418||||0|0|0|
+status-500|plain|GET|/status/500||||0|0|0|
+status-503|plain|GET|/status/503||||0|0|0|
+status-599|plain|GET|/status/599||||0|0|0|status 599
+# D5: redirects: each to the program, n followed, then the 3xx; 303 makes POST a GET, 307 and 308 keep it.
+redirect-none|plain|GET|/redirect/3||||0|0|0|
+redirect-all|plain|GET|/redirect/3||||0|5|0|done GET
+redirect-two|plain|GET|/redirect/3||||0|2|0|
+post-303|plain|POST|/redirect/1?code=303||sent|0|0|5|0|done GET
+post-307|plain|POST|/redirect/1?code=307||sent|0|0|5|0|done POST
+post-308|plain|POST|/redirect/1?code=308||sent|0|0|5|0|done POST
+# D6: a timeout, a refused port, an unknown host.
+timeout|plain|GET|/delay/3000|||500|0|0|0|
+refused|plain|GET|closed:/||||0|0|0|
+dns|plain|GET|http://nothing.invalid/||||0|0|0|
+# D7: TLS: not trusted, trusted.
+tls-untrusted|untrusted|GET|tls:/anything||||0|0|0|
+tls-trusted|plain|GET|tls:/anything||||0|0|0|GET /anything
+# D8: cookies: a session with a jar sends back what was set, one without does not.
+jar-set|jar|GET|/cookies/set?flavour=oat||||0|0|0|
+plain-set|plain|GET|/cookies/set?flavour=oat||||0|0|0|
+jar-get|jar|GET|/cookies||||0|0|1|flavour=oat
+plain-get|plain|GET|/cookies||||0|0|1|
+# D9: compressed bodies decoded; a body over max_body cut.
+gzip|plain|GET|/gzip||||0|0|0|gzipped body, decoded
+brotli|plain|GET|/brotli||||0|0|0|brotli body, decoded
+cut|plain|GET|/bytes/100000|||0|1000|0|0|

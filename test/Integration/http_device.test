@@ -1,0 +1,55 @@
+// The http device (devices/http.ent, on libcurl) against a local server
+// (Inputs/http/serve.py: plain, TLS with a self-signed certificate, a
+// port nothing listens on), checks D1 to D10 of examples/http/http-SPEC.md
+// §8.1. Needs libcurl, and no network beyond 127.0.0.1 (the unknown host
+// is of `.invalid`, which no resolver knows).
+// RUN: rm -rf %t && mkdir -p %t && cp %S/Inputs/http/probes.txt %t/
+// RUN: %python %S/Inputs/http/serve.py %t -- %ent run %S/Inputs/http/device.ent > %t.out
+// RUN: sort %t.out | FileCheck %s
+// RUN: %python %S/Inputs/http/serve.py %t -- %ent run %S/Inputs/http/many.ent | FileCheck %s --check-prefix=MANY
+
+// CHECK: big-body 200 ok cut=false length={{[0-9]+}} found=true
+// CHECK: big-bytes 200 ok cut=false length=10485760 found=true
+// CHECK: binary-body 200 ok cut=false length={{[0-9]+}} found=true
+// CHECK: brotli 200 ok cut=false length=20 found=true
+// CHECK: cut 200 ok cut=true length=1000
+// CHECK: delete 200 ok cut=false length={{[0-9]+}} found=true
+// CHECK: dns 0 dns
+// CHECK: empty-body 200 ok cut=false length={{[0-9]+}} found=true
+// CHECK: get 200 ok cut=false length={{[0-9]+}} found=true
+// CHECK: got-headers 200 ok cut=false length=5 found=true
+// CHECK: gzip 200 ok cut=false length=21 found=true
+// CHECK: head 200 ok cut=false length=0 found=true
+// CHECK: jar-get 200 ok cut=false length=11 found=true
+// CHECK: jar-set 200 ok
+// CHECK: options 200 ok cut=false length={{[0-9]+}} found=true
+// CHECK: patch 200 ok cut=false length={{[0-9]+}} found=true
+// CHECK: plain-get 200 ok cut=false length=0 found=true
+// CHECK: plain-set 200 ok
+// CHECK: post 200 ok cut=false length={{[0-9]+}} found=true
+// CHECK: post-303 200 ok cut=false length=8 found=true
+// CHECK: post-307 200 ok cut=false length=9 found=true
+// CHECK: post-308 200 ok cut=false length=9 found=true
+// CHECK: propfind 200 ok cut=false length={{[0-9]+}} found=true
+// CHECK: put 200 ok cut=false length={{[0-9]+}} found=true
+// CHECK: redirect-all 200 ok cut=false length=8 found=true location=
+// CHECK: redirect-none 302 ok cut=false length=0 found=true location=http://127.0.0.1:{{[0-9]+}}/redirect/2
+// CHECK: redirect-two 302 ok cut=false length=0 found=true location=http://127.0.0.1:{{[0-9]+}}/redirect/0
+// CHECK: refused 0 refused
+// CHECK: sent-headers 200 ok cut=false length={{[0-9]+}} found=true
+// CHECK: small-bytes 200 ok cut=false length=100 found=true
+// CHECK: status-200 200 ok
+// CHECK: status-201 201 ok
+// CHECK: status-204 204 ok cut=false length=0
+// CHECK: status-299 299 ok
+// CHECK: status-304 304 ok cut=false length=0
+// CHECK: status-404 404 ok cut=false length=10 found=true
+// CHECK: status-418 418 ok
+// CHECK: status-500 500 ok
+// CHECK: status-503 503 ok
+// CHECK: status-599 599 ok cut=false length=10 found=true
+// CHECK: timeout 0 timeout
+// CHECK: tls-trusted 200 ok cut=false length={{[0-9]+}} found=true
+// CHECK: tls-untrusted 0 tls
+
+// MANY: many: 10000 answered, 10000 right, 0 running

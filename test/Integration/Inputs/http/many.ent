@@ -1,0 +1,67 @@
+// Many requests at once through the http device (test/Integration/
+// http_device.test, http-SPEC.md §8.1 D10): 10,000, over at most 256
+// connections, each answered with its own body (`n I` for /n/I), so
+// handles are not mixed up.
+import console
+import text
+import files
+import http
+
+default_capacity 16384
+
+component Ask { i: i32 }
+component Sent { handle: i64 }
+component Answer { right: bool }
+unique Web { session: i64, base: text, left: i32, polls: i32 }
+unique Count { answered: i32, right: i32 }
+
+system setup() {
+  Web.session = http_session("ent-test/1", false, 256, 256, false, true, "", "")
+  Web.base = read_text("server.url")
+  Web.left = 1
+  for i in 0..10000 { spawn { Ask { i: i } } }
+}
+
+system send() {
+  for e, a: Ask without Sent {
+    let h = http_start(Web.session, "GET", Web.base + "/n/{a.i}", "", "", 30.0, 0, 0)
+    e.add(Sent { handle: h })
+  }
+}
+
+system receive() {
+  let n = http_poll(0.05, Done)
+  Web.polls += 1
+}
+
+system fetch() {
+  for e, a: Ask, s: Sent without Answer {
+    let status = http_status(s.handle)
+    if status >= 0 {
+      e.add(Answer { right: status == 200 && http_body(s.handle) == "n {a.i}" })
+      http_forget(s.handle)
+    }
+  }
+}
+
+system tally() {
+  let answered = for a: Answer { }
+  let right = for a: Answer where a.right { }
+  Count.answered = answered
+  Count.right = right
+  Web.left = 10000 - answered
+}
+
+system said() {
+  put("many: {Count.answered} answered, {Count.right} right, {http_running()} running")
+}
+
+schedule start() { setup() }
+schedule frame() { send() receive() fetch() tally() }
+schedule finish() { said() }
+
+main {
+  start()
+  loop { frame() } until Web.left == 0 || Web.polls > 20000
+  finish()
+}

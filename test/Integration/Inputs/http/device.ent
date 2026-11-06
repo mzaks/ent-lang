@@ -1,0 +1,169 @@
+// The http device against the local server (test/Integration/
+// http_device.test, http-SPEC.md §8.1): the requests of probes.txt, a
+// line each, sent in phases (one starts when those before are answered),
+// each answer said as a line: its name, status, why there was none,
+// whether the body was cut, its length, and whether what it should have
+// is there.
+//
+// Line: name|session|method|url|headers|body|timeout ms|max body|follow|
+// phase|want. Session: jar (cookies, trusts cert.pem), plain (no
+// cookies, trusts cert.pem), untrusted (the system's certificates). URL:
+// /path on the server, tls:/path on its TLS listener, closed: a port
+// nothing listens on, or a whole URL. `\n` and `\r` in headers and want
+// are those bytes. Body @file: that file's bytes. Want: a text the
+// headers and body have; `fnv`: the body's FNV-1a is its X-Fnv header;
+// `sum:@file`: the body is the server's `length .. fnv ..` of the file.
+import console
+import text
+import files
+import http
+
+default_capacity 16384
+
+component Probe { name: text, session: i32, method: text, url: text,
+                  headers: text, body: text, timeout: f64, max_body: i64,
+                  follow: i32, phase: i32, want: text }
+component Sent { handle: i64 }
+component Answer { status: i32, failure: HttpFailure, cut: bool, body: text,
+                  headers: text, location: text }
+
+unique Web { jar: i64, plain: i64, untrusted: i64, base: text, tls: text,
+             closed: text, phase: i32, left: i32 }
+
+fn fnv_from(t: text, from: i32, to: i32, h: u64) -> u64 {
+  var x = h
+  for i in from..to { x = (x ^ ((t[i] as u8) as u64)) * 0x100000001b3 }
+  x
+}
+fn fnv(t: text) -> u64 { fnv_from(t, 0, len(t), 0xcbf29ce484222325) }
+
+// The field `k` of a line, fields between '|'.
+fn field(line: text, k: i32, from: i32) -> text {
+  let end = find(line, "|", from)
+  let stop = if end < 0 { len(line) } else { end }
+  if k == 0 { slice(line, from, stop) }
+  else if end < 0 { "" }
+  else { field(line, k - 1, end + 1) }
+}
+
+fn replaced(t: text, what: text, by: text, from: i32) -> text {
+  let at = find(t, what, from)
+  if at < 0 { slice(t, from, len(t)) }
+  else { slice(t, from, at) + by + replaced(t, what, by, at + len(what)) }
+}
+fn unescaped(t: text) -> text {
+  replaced(replaced(t, "\\n", "\n", 0), "\\r", "\r", 0)
+}
+
+fn starts(t: text, prefix: text) -> bool {
+  len(t) >= len(prefix) && slice(t, 0, len(prefix)) == prefix
+}
+
+fn url_of(url: text, base: text, tls: text, closed: text) -> text {
+  if starts(url, "tls:") { tls + slice(url, 4, len(url)) }
+  else if starts(url, "closed:") { closed + slice(url, 7, len(url)) }
+  else if starts(url, "/") { base + url }
+  else { url }
+}
+
+fn session_number(name: text) -> i32 {
+  if name == "jar" { 0 } else if name == "plain" { 1 } else { 2 }
+}
+
+system setup() {
+  Web.jar = http_session("ent-test/1", true, 8, 64, true, true, "cert.pem", "")
+  Web.plain = http_session("ent-test/1", false, 8, 64, true, true, "cert.pem", "")
+  Web.untrusted = http_session("ent-test/1", false, 8, 64, true, true, "", "")
+  Web.base = read_text("server.url")
+  Web.tls = read_text("server_tls.url")
+  Web.closed = read_text("closed.url")
+  Web.left = 1
+  let all = read_text("probes.txt")
+  var at = 0
+  while at < len(all) {
+    let end = find(all, "\n", at)
+    let stop = if end < 0 { len(all) } else { end }
+    let line = slice(all, at, stop)
+    if len(line) > 0 && line[0] != '#' {
+      let given = field(line, 5, 0)
+      let body = if starts(given, "@") { read_text(slice(given, 1, len(given))) }
+                 else { given }
+      let asked = field(line, 10, 0)
+      let file = if starts(asked, "sum:@") { read_text(slice(asked, 5, len(asked))) }
+                 else { "" }
+      let want = if starts(asked, "sum:@") { "length {len(file)} fnv {fnv(file)}" }
+                 else { unescaped(asked) }
+      spawn {
+        Probe { name: field(line, 0, 0), session: session_number(field(line, 1, 0)),
+                method: field(line, 2, 0), url: field(line, 3, 0),
+                headers: unescaped(field(line, 4, 0)), body: body,
+                timeout: number(field(line, 6, 0)) as f64 / 1000.0,
+                max_body: number(field(line, 7, 0)),
+                follow: number(field(line, 8, 0)) as i32,
+                phase: number(field(line, 9, 0)) as i32, want: want }
+      }
+    }
+    at = stop + 1
+  }
+}
+
+system send() {
+  for e, p: Probe without Sent where p.phase <= Web.phase {
+    let session = if p.session == 0 { Web.jar }
+                  else if p.session == 1 { Web.plain }
+                  else { Web.untrusted }
+    let h = http_start(session, p.method, url_of(p.url, Web.base, Web.tls, Web.closed),
+                       p.headers, p.body, p.timeout, p.max_body, p.follow)
+    e.add(Sent { handle: h })
+  }
+}
+
+system receive() { http_poll(0.05, Done) }
+
+// Each request asks for its own answer, once there is one.
+system fetch() {
+  for e, s: Sent without Answer {
+    let status = http_status(s.handle)
+    if status >= 0 {
+      e.add(Answer { status: status, failure: http_failure(s.handle),
+                     cut: http_cut(s.handle), body: http_body(s.handle),
+                     headers: http_headers(s.handle),
+                     location: http_location(s.handle) })
+    }
+  }
+}
+
+fn failure_name(f: HttpFailure) -> text {
+  if f == HttpFailure.Ok { "ok" } else if f == HttpFailure.Refused { "refused" }
+  else if f == HttpFailure.Timeout { "timeout" } else if f == HttpFailure.Dns { "dns" }
+  else if f == HttpFailure.Tls { "tls" } else if f == HttpFailure.TooBig { "too-big" }
+  else { "other" }
+}
+
+fn has_want(want: text, headers: text, body: text) -> bool {
+  if want == "fnv" { "{fnv(body)}" == header(headers, "X-Fnv") }
+  else { find(headers + "\n" + body, want, 0) >= 0 }
+}
+
+system report() {
+  for p: Probe, s: Sent, a: Answer on added Answer {
+    put("{p.name} {a.status} {failure_name(a.failure)} cut={a.cut} length={len(a.body)} found={has_want(p.want, a.headers, a.body)} location={a.location}")
+    http_forget(s.handle)
+  }
+}
+
+system advance() {
+  let open = for p: Probe without Answer where p.phase <= Web.phase { }
+  let left = for p: Probe without Answer { }
+  if open == 0 { Web.phase += 1 }
+  Web.left = left
+}
+
+schedule frame() { send() receive() fetch() report() advance() }
+
+schedule start() { setup() }
+
+main {
+  start()
+  loop { frame() } until Web.left == 0
+}
