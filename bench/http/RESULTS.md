@@ -504,6 +504,32 @@ work done anyway, in one place). The mock at 10⁵: 0.70 to 0.75 s on
 one core (the URLs joined, then cut again), 0.67 to 0.57 s on all
 (pages are read on many threads).
 
+### The open asks counted as they change
+
+`advance_level` counted the open asks over every ask not settled, each
+frame: at 10⁶ pages, 50,000 frames, 2.7 s of the crawl (`--trace`). Now
+it counts as they change: the asks kept (`on added Known`) and settled
+(`on added Handled`), and those not settled at the level or less by a
+flag of each ask's `Depth` (set when it is kept, gets a depth or a
+lower one, or the level comes to it; cleared when it is settled), a
+sweep only when the level moves. Checked first against the counts it
+replaces at every frame (crawl checks, the mock at 10⁵, live at 10⁶):
+the same. `advance_level` is 0.12 s at 10⁶.
+
+| pages | crawler | wall s | CPU s | peak MB |
+|---|---|---|---|---|
+| 10⁴ | ent, before | 1.042 | 0.167 | 59 |
+| 10⁴ | ent | 1.045 | 0.173 | 62 |
+| 10⁵ | ent, before | 2.802 | 1.657 | 343 |
+| 10⁵ | ent | 2.792 | 1.658 | 334 |
+| 10⁶ | ent, before | 36.656 | 22.965 | 2,416 |
+| 10⁶ | ent | 33.732 | 19.708 | 2,477 |
+| 10⁶ | ent-par | 33.528 | 20.105 | 2,511 |
+| 10⁶ | C | 27.869 | 16.024 | 622 |
+
+At 10⁶ ent takes 1.21 times C's time (1.32 before); at 10⁵ and 10⁴ the
+frames were few and short enough that the count did not show.
+
 ## Against other crawlers (§9.2, C4)
 
 `others.py`: wget, Scrapy, Colly and spider crawl the generated site

@@ -14,8 +14,9 @@ import urls
 import robots
 import pipeline
 
-// Links from the seed to here.
-component Depth { d: i32 }
+// Links from the seed to here; whether it is counted in `AtLevel`
+// (advance_level).
+component Depth { d: i32, open: bool }
 // The host it goes to.
 component At { host: entity }
 // A host it may go to; its number among them; how many asks to it are
@@ -92,7 +93,7 @@ system setup() {
       let robots = spawn { Ask { method: Method.Get, url: scheme + "://" + name + "/robots.txt",
                                  headers: "", body: "", origin: none, hops: 0, tries: 0,
                                  next_at: 0.0, serial: 0 },
-                           Twin { of: none }, Depth { d: 0 }, RobotsAsk }
+                           Twin { of: none }, Depth { d: 0, open: false }, RobotsAsk }
       hosts += 1
       spawn { Host { name: name, number: hosts, busy: 0, turns: 0, let_go: 0 },
               Robots { ask: robots, known: false, rules: "", delay: 0.0, next: 0.0 } }
@@ -102,7 +103,7 @@ system setup() {
   spawn { Ask { method: Method.Get, url: seed, headers: "", body: "", origin: none,
                 hops: 0, tries: 0, next_at: 0.0, serial: 0 },
           Twin { of: none },
-          Depth { d: 0 } }
+          Depth { d: 0, open: false } }
 }
 
 // A redirect's ask is as deep as the one redirected. (In two steps: a
@@ -116,7 +117,7 @@ system inherit_depth() {
   }
 }
 system take_depth() {
-  for me, i: Inherited without Depth on added Inherited { me.add(Depth { d: i.d }) }
+  for me, i: Inherited without Depth on added Inherited { me.add(Depth { d: i.d, open: false }) }
 }
 
 // Each ask to its host, once the host's robots.txt is known (held back
@@ -312,7 +313,7 @@ system extract_links() {
         spawn { Ask { method: Method.Get, url: target, headers: "",
                       body: "", origin: me, hops: 0, tries: 0,
                       next_at: 0.0, serial: 0 },
-                Twin { of: none }, Depth { d: d.d + 1 },
+                Twin { of: none }, Depth { d: d.d + 1, open: false },
                 LinkedFrom { page: me } }
       } else {
         Depth(known).d min= d.d + 1
@@ -361,12 +362,35 @@ system merge() {
 }
 
 // One level deeper once every ask at this one is settled; how many asks
-// are open.
+// are open. Counted as they change, not over every ask each frame: the
+// asks kept (no duplicate: `Known`, which none loses) and how many of
+// them were settled; those not settled at the level or less (each
+// ask's `open` says whether it is one: it is made one when it is kept,
+// gets a depth or a lower one, or the level comes to it, and none when
+// it is settled; a depth is only ever lowered, the level only raised).
+// The asks without a depth yet (redirects, till take_depth) are few.
+unique Kept_n: i64
+unique Settled_n: i64
+unique AtLevel: i32
 system advance_level() {
-  let open = for a: Ask, t: Twin, d: Depth without Handled where d.d <= Level && t.of == none { }
+  Kept_n += for me with Known on added Known { }
+  Settled_n += for me with Known, Handled on added Handled { }
+  for me, d: mut Depth with Known on added Known, added Depth, changed d.d, added Handled {
+    let open = d.d <= Level && !me.has(Handled)
+    if open != d.open {
+      d.open = open
+      AtLevel += if open { 1 } else { -1 }
+    }
+  }
   let unplaced = for a: Ask, t: Twin without Depth where t.of == none { }
-  let left = for a: Ask, t: Twin without Handled where t.of == none { }
-  if open + unplaced == 0 && left > 0 { Level += 1 }
+  let left = (Kept_n - Settled_n) as i32
+  if AtLevel + unplaced == 0 && left > 0 {
+    Level += 1
+    for d: mut Depth with Known without Handled where d.d <= Level && !d.open {
+      d.open = true
+      AtLevel += 1
+    }
+  }
   Open = left
 }
 

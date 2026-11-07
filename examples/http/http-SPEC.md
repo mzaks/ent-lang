@@ -201,7 +201,7 @@ Sending and receiving are the device's: `mock_send`, `answer` and `fill`
 | `due_pages` | `Html`, `Depth`, `Level` | Marks a page `Due` once every ask less deep is settled: as it gets `Html` or a (lower) `Depth` where its level is there, and the pages that waited when `Level` changes (on added / changed, and a scan only when the level moved). | |
 | `extract_links` | `Due` | For each link `read_links` kept an `Ask` with `Depth d + 1` and `LinkedFrom`, or an edge to the one `Kept` has (its depth lowered); adds `Handled`. On added `Due`, and not at `max_depth`. (Only this waits for the level: at its end, a level's pages are due at once.) | |
 | `merge` | duplicates, `LinkedFrom` | A duplicate's depth and the link that made it go to the ask it is one of; an ask that is none is linked to from its page. | |
-| `advance_level` | `Depth`, `Handled` | One level deeper once every ask at this one is settled; `Open`. | |
+| `advance_level` | `Known`, `Depth`, `Handled` | One level deeper once every ask at this one is settled; `Open`. Counted as they change (the asks kept, and settled; each ask's `Depth.open`, whether it is one at the level or less not settled), not over every ask each frame. | |
 | `conclude`, `report` | `Got`, `Failed`, `Links` | At the end: `Ending`, then a line for every ask, redirect, redirect not followed, slow ask and broken link (with the page that links to it). | |
 
 ### 5.3 Order and the end
