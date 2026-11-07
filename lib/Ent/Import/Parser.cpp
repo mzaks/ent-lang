@@ -859,6 +859,13 @@ private:
   bool isAnyText(const Expr &expr);
   bool mayBeAssigned(const Expr &expr);
   LogicalResult keepsNoText(llvm::SMLoc at, StringRef component);
+  bool isTextLiteral(const Expr &expr);
+  bool mayViewAssigned(const Expr &expr);
+  bool importsText();
+  static constexpr const char *varKeepsAssigned =
+      "a var does not keep the text a unique or a 'mut' binding holds: "
+      "that may be given another meanwhile. Keep a copy of a capacity "
+      "('as text[N]')";
   /// Set while the value a fn gives back is emitted, where that is a
   /// text of any length.
   bool givesText = false;
@@ -11117,16 +11124,58 @@ LogicalResult Parser::parseVar() {
   FailureOr<ExprPtr> value = parseStatementValue();
   if (failed(value))
     return failure();
+  // `var line = "..."`: a text that grows as it is joined to, where the
+  // module `text` keeps texts of any length; without it the var says its
+  // capacity (a literal's own would cut what is put in it later).
+  if (!type && isTextLiteral(**value)) {
+    if (!importsText())
+      return error((*value)->loc,
+                   "a var of text says how many bytes it holds ('var " +
+                       *name + ": text[N] = ...'), or 'import text' for "
+                       "one of any length");
+    type = StringType::get(context);
+  }
   FailureOr<mlir::Value> emitted = emit(**value, type);
   if (failed(emitted))
     return failure();
   if (type && emitted->getType() != type)
     return error((*value)->loc, "value has a different type than the var");
-  if (isa<StringType>(emitted->getType()))
-    return error((*value)->loc, "a var does not hold a text of any length; "
-                                "one of a capacity it does ('as text[N]')");
+  if (isa<StringType>(emitted->getType()) && mayViewAssigned(**value))
+    return error((*value)->loc, varKeepsAssigned);
   bind(*name, Variable::ofVar(*emitted));
   return success();
+}
+
+/// A text written out: a literal, or one with values put in.
+bool Parser::isTextLiteral(const Expr &expr) {
+  if (expr.kind == Expr::String)
+    return true;
+  return expr.kind == Expr::Binary && expr.op == Token::Plus &&
+         llvm::all_of(expr.operands, [&](const ExprPtr &part) {
+           return part->kind == Expr::Format || isTextLiteral(*part);
+         });
+}
+
+/// Whether the text `expr` gives may be the very one a field holds that
+/// can be assigned (mayBeAssigned): not where it is joined, which makes
+/// a text of its own.
+bool Parser::mayViewAssigned(const Expr &expr) {
+  if (expr.kind == Expr::String)
+    return false;
+  if (expr.kind == Expr::Binary && expr.op == Token::Plus) {
+    Type type = typeOf(expr);
+    if (!type || isa<StringType, TextType>(type))
+      return false;
+  }
+  return mayBeAssigned(expr);
+}
+
+/// Whether the module being read may have texts of any length.
+bool Parser::importsText() {
+  return current->name == "text" ||
+         llvm::any_of(current->imports, [](SourceModule *module) {
+           return module->name == "text";
+         });
 }
 
 /// Every `var` in scope with what it holds here, outermost first.
@@ -12977,6 +13026,28 @@ LogicalResult Parser::parseNameStatement() {
     if (failed(value))
       return failure();
     Variable &target = scopes[scope][name];
+    if (isa<StringType>(target.value.getType())) {
+      // A var holds the text it is given, owning none: what joining
+      // makes is kept till the schedule ends (no copy, nothing given
+      // back).
+      if (op->first == Token::Assign && mayViewAssigned(**value))
+        return error((*value)->loc, varKeepsAssigned);
+      if (op->first != Token::Assign && op->first != Token::PlusAssign ||
+          op->second)
+        return error(at, "a text can be assigned ('=') or added to ('+=')");
+      Type type = target.value.getType();
+      FailureOr<mlir::Value> rhs = emit(**value, type);
+      if (failed(rhs))
+        return failure();
+      if (rhs->getType() != type)
+        return mismatch((*value)->loc, rhs->getType(), type);
+      target.value =
+          op->first == Token::Assign
+              ? *rhs
+              : TextJoinOp::create(builder, loc(at), type, target.value, *rhs)
+                    .getResult();
+      return success();
+    }
     return emitAssignment(
         at, op->first, op->second, [&] { return target.value.getType(); },
         [&]() -> mlir::Value { return target.value; },
@@ -13346,10 +13417,8 @@ LogicalResult Parser::emitLet(const Let &let, bool isVar) {
   for (mlir::Value value : values) {
     if (!isa<StringType>(value.getType()))
       continue;
-    if (isVar)
-      return error(let.value->loc, "a var does not hold a text of any "
-                                   "length; one of a capacity it does ('as "
-                                   "text[N]')");
+    if (isVar && mayViewAssigned(*let.value))
+      return error(let.value->loc, varKeepsAssigned);
     if (mayBeAssigned(*let.value))
       return error(let.value->loc,
                    "a 'let' does not keep the text a unique or a 'mut' "

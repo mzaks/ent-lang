@@ -922,7 +922,10 @@ of a depth.
   with `=`, `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`,
   `min=`, `max=` (a text with `=` and
   `+=`). It has the type of the value it starts with, or the one written:
-  `var best: i64 = 0`, `var line: text[30] = ""`. See Vars below.
+  `var best: i64 = 0`, `var line: text[30] = ""`; one that starts with a
+  text written out, `var line = ""` or `"{n}:"`, is a `text` of any
+  length (it needs `import text`; without, it says its capacity). See
+  Vars below.
 - `binding.field = expr`, and `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`,
   `^=`, `<<=`, `>>=`, `min=`, `max=`.
 - Uniques: `Clock.frame += 1`, `Score += 10` (the shorthand's value).
@@ -1341,9 +1344,13 @@ component is removed or its entity destroyed.
 - When `main` is done, what fields and uniques still hold is given back.
   (A C host's world keeps what it holds.)
 - A value of it is what a field holds or a literal is, seen, not a
-  copy: a `var` does not hold one, and a `let` does not keep the text of
-  a unique or of a `mut` binding, which may be given another while the
-  `let` is there. (`t as text[N]` is a copy.)
+  copy: a `let` or a `var` does not keep the text of a unique or of a
+  `mut` binding, which may be given another while it is there. (`t as
+  text[N]` is a copy; so is what is joined, `"" + t`.)
+- A `var` of it grows as it is joined to (`var all = ""`, then
+  `all += line + "\n"` in a loop): it holds what joining made, kept as
+  that is, till the schedule is done; each `+=` is a copy of all it has.
+  A field that is given it takes its copy.
 - In the C header such a column is an array of `const ent_text *` (none:
   no bytes), which C reads and leaves to the program to change.
 - The module `text` keeps the bytes (`devices/text.ent`, with its C): a

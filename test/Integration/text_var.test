@@ -1,0 +1,24 @@
+// A var of text: `var s = "..."` grows as it is joined to (it was a
+// text[N] the literal's size, which cut what came after); a fn gives one
+// back; a field keeps a copy; nothing is held or kept at the end.
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: %ent build %S/Inputs/text_var.ent -o %t/text_var
+// RUN: %ent build --parallel %S/Inputs/text_var.ent -o %t/text_var_parallel
+// RUN: env ENT_TEXT_REPORT=1 %t/text_var > %t/out 2> %t/err
+// RUN: FileCheck %s --input-file=%t/out
+// RUN: FileCheck %s --check-prefix=HELD --input-file=%t/err
+// RUN: %t/text_var_parallel | cmp - %t/out
+
+// CHECK:      r1: even0 odd even2 odd
+// CHECK-NEXT: one
+// CHECK-NEXT: -
+// CHECK-NEXT: three
+// CHECK-NEXT: -
+// CHECK-NEXT: four
+// CHECK:      big 200000 57
+// CHECK-DAG:  alpha alpha,alpha,alpha
+// CHECK-DAG:  beta beta,beta
+// CHECK:      r2: even0 odd even2 odd
+// CHECK:      big 200000 57
+// HELD:       texts held: 0
+// HELD-NEXT:  texts kept: 0

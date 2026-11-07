@@ -1,0 +1,64 @@
+// A var of text grows as it is joined to: in a loop, in the branches of
+// an `if`, in a fn and in a `for` (text_var.test).
+import console
+import text
+
+component Word { w: text, n: i32 } capacity 8
+component Line { all: text } capacity 8
+unique Round: i32
+
+fn or_end(i: i32, n: i32) -> i32 { if i < 0 { n } else { i } }
+
+// The words of `t` that are not `skip`, a line each.
+fn lines(t: text, skip: text) -> text {
+  var out = ""
+  var at = 0
+  while at < len(t) {
+    let end = or_end(find(t, " ", at), len(t))
+    let word = slice(t, at, end)
+    if word == skip { out += "-\n" } else { out += word + "\n" }
+    at = end + 1
+  }
+  out
+}
+
+system setup() {
+  spawn { Word { w: "alpha", n: 3 } }
+  spawn { Word { w: "beta", n: 2 } }
+}
+
+system grow() {
+  Round += 1
+  var s = "r{Round}:"
+  var i = 0
+  while i < 4 {
+    if i % 2 == 0 { s += " even{i}" } else { s = s + " odd" }
+    i += 1
+  }
+  put(s)
+  put(lines("one two three two four", "two"))
+  // Joined past any room a schedule's texts start in.
+  var big = ""
+  var k = 0
+  while k < 20000 { big += "0123456789"; k += 1 }
+  put("big {len(big)} {big[199999]}")
+}
+
+fn repeated(t: text, n: i32) -> text {
+  var all = t
+  var k = 1
+  while k < n { all += "," + t; k += 1 }
+  all
+}
+
+// One a word, kept in a field (a copy of what the var holds).
+system words() {
+  for me, w: Word without Line {
+    me.add(Line { all: repeated(w.w, w.n) })
+  }
+  for w: Word, l: Line { put("{w.w} {l.all}") }
+}
+
+schedule start() { setup() }
+schedule frame() { grow() words() }
+main { start() loop { frame() } until Round == 2 }

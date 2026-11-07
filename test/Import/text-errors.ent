@@ -1,14 +1,38 @@
 // RUN: ent-translate --import-ent %s -I %S/../../devices -split-input-file -verify-diagnostics
 
-// A text of any length is held by a field, and seen where it is used: a
-// var does not hold one.
+// A var holds a text of any length, but not the one a 'mut' binding
+// holds: that may be given another meanwhile.
 import text
 component Label { name: text }
 system s() {
-  for l: Label {
-    // expected-error @+1 {{a var does not hold a text of any length; one of a capacity it does ('as text[N]')}}
+  for l: mut Label {
+    // expected-error @+1 {{a var does not keep the text a unique or a 'mut' binding holds: that may be given another meanwhile. Keep a copy of a capacity ('as text[N]')}}
     var kept = l.name
   }
+}
+
+// -----
+
+// Nor given it later; joined to it, it is (the join is a text of its own).
+import text
+component Label { name: text }
+system s() {
+  for l: mut Label {
+    var kept = "<"
+    kept += l.name
+    kept = kept + l.name + ">"
+    // expected-error @+1 {{a var does not keep the text a unique or a 'mut' binding holds: that may be given another meanwhile. Keep a copy of a capacity ('as text[N]')}}
+    kept = l.name
+  }
+}
+
+// -----
+
+// Without the module `text`, a var of text says its capacity: a
+// literal's own would cut what it is given later.
+system s() {
+  // expected-error @+1 {{a var of text says how many bytes it holds ('var line: text[N] = ...'), or 'import text' for one of any length}}
+  var line = "a"
 }
 
 // -----
