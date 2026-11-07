@@ -606,4 +606,5 @@ around in the example, not in the compiler:
 4. The user agent string and the project URL in it for §9.3.
 5. Which of the other crawlers are worth their setup: all four, or
    start with Scrapy and spider and add the others if the numbers are
-   interesting?
+   interesting? (Decided: all four, C4; on the generated site first,
+   the mirror of a real one as a step of its own.)

@@ -474,3 +474,91 @@ At 64 connections 2.88 to 2.78 s on one core, and 3.29 to 2.80 s on
 all: the parallel build no longer looks the asks over on its threads
 each frame. At 256 and 1024 as before. The mock as before: 10⁴ 0.059 /
 0.073 s, 10⁵ 0.688 / 0.683.
+
+## Against other crawlers (§9.2, C4)
+
+`others.py`: wget, Scrapy, Colly and spider crawl the generated site
+through serve.c as crawl.c and crawl_live do, each told to do the same
+crawl as near as it can be (README.md: versions, setups). 64 requests
+out at once (wget: one). Single-threaded crawlers on one core (CPU 2),
+the others on four (CPUs 0 to 3); the server on 4 to 11.
+
+**What each asked for**, by the server's log, against crawl.c (a retry
+is an ask; URLs: the distinct ones):
+
+| pages | crawler | URLs | asks | not asked | more |
+|---|---|---|---|---|---|
+| 10⁴ | C | 10,528 | 10,669 | | |
+| 10⁴ | ent, ent-par | 10,528 | 10,669 | 0 | 0 |
+| 10⁴ | wget | 10,528 | 10,688 | 0 | 0 |
+| 10⁴ | Scrapy | 10,528 | 10,669 | 0 | 0 |
+| 10⁴ | Colly | 10,528 | 10,855 | 0 | 0 |
+| 10⁴ | spider | 10,627 | 10,880 | 98 | 197 |
+| 10⁵ | C | 105,487 | 106,964 | | |
+| 10⁵ | ent, ent-par | 105,487 | 106,964 | 0 | 0 |
+| 10⁵ | wget | 105,487 | 107,089 | 0 | 0 |
+| 10⁵ | Scrapy | 105,487 | 106,964 | 0 | 0 |
+| 10⁵ | Colly | 105,487 | 109,762 | 0 | 0 |
+| 10⁵ | spider | 106,406 | 108,868 | 1,005 | 1,924 |
+
+- **Scrapy** asks exactly what C does, once its spider looks at a link's
+  host without the port: `allow_domains` takes `site.test:80` for
+  another host, and every page only linked that way was lost.
+- **wget** asks some pages twice: those it reached by a redirect and
+  by a link (0.1%).
+- **Colly** asks a hop of a redirect chain again where a page links to
+  it: it follows redirects inside Go's HTTP client, which its dedupe
+  does not see (2.8% more asks). Its setup puts URLs in their normal
+  form before visiting them (Colly knows `HTTP://SITE.TEST:80/x#f` and
+  `http://site.test/x` as two), visits one at a time (it looks whether a
+  URL was visited and marks it in two steps, and async pages raced:
+  2,400 asks twice), and counts retries by URL (a request a page visits
+  shares the page's context).
+- **spider** resolves the relative links of a page it reached by a
+  redirect against the URL it asked for, not where the redirect ended
+  (the 404s more: `/r/61/9664.html` for `/p/9664.html`), and leaves
+  most images out though told to take resources. Its own retry backoff
+  (a second, doubling up to a minute) took a crawl of 10⁴ pages from
+  1.5 s to 18 s; its setup retries after 10 ms as the others do. It
+  still retries the redirect chains over the limit, half a second
+  apart (2.5 s of its wall time at either size).
+
+**Measured** (median of 3; URLs/s: the distinct URLs it asked for):
+
+| pages | crawler | wall s | CPU s | peak MB | URLs/s |
+|---|---|---|---|---|---|
+| 10⁴ | C | 1.014 | 0.130 | 26 | 10,379 |
+| 10⁴ | ent | 1.042 | 0.183 | 64 | 10,106 |
+| 10⁴ | ent-par | 1.038 | 0.176 | 65 | 10,140 |
+| 10⁴ | wget | 8.731 | 0.318 | 26 | 1,206 |
+| 10⁴ | Scrapy | 11.721 | 11.575 | 102 | 898 |
+| 10⁴ | Colly | 0.653 | 1.294 | 219 | 16,111 |
+| 10⁴ | spider | 3.271 | 0.370 | 26 | 3,249 |
+| 10⁴ | spider, in memory | 3.251 | 0.355 | 20 | 3,269 |
+| 10⁵ | C | 2.237 | 1.149 | 112 | 47,155 |
+| 10⁵ | ent | 2.785 | 1.663 | 379 | 37,871 |
+| 10⁵ | ent-par | 2.794 | 1.713 | 381 | 37,751 |
+| 10⁵ | wget | 84.603 | 3.056 | 118 | 1,247 |
+| 10⁵ | Scrapy | 155.012 | 154.316 | 193 | 681 |
+| 10⁵ | Colly | 5.945 | 13.762 | 2,223 | 17,745 |
+| 10⁵ | spider | 282.389 | 284.379 | 440 | 377 |
+| 10⁵ | spider, in memory | 4.283 | 2.750 | 52 | 24,843 |
+
+- ent comes after C only: at 10⁵ 2.1 times as fast as Colly (on one
+  core, Colly on four, with 8 times its CPU time and 6 times its
+  memory), 1.5 times spider at its best, 30 times wget and 56 times
+  Scrapy. Its memory is the most after Colly's: the asks are kept for
+  the report (§12, question 3), with their texts.
+- Colly at 10⁴ is faster than C and ent: they take a page's links only
+  once every ask less deep is settled (so that each URL's depth is its
+  least), and a slow page holds its level; Colly does not wait.
+- Scrapy is Python bound (its CPU time is its wall time); wget waits
+  on its one connection.
+- spider keeps at most 15,000 URLs it visited in memory, by default,
+  and the rest in SQLite on disk (`LINKS_VISITED_MEMORY_LIMIT`): past
+  that a crawl of 10⁵ pages takes 280 s of CPU. "In memory" raises the
+  limit.
+
+Not yet: 10⁶ pages (Scrapy and wget would take some 25 and 15 minutes a
+run), and the second site, a mirror of a public practice site (§9.3),
+which is to be fetched once by hand.

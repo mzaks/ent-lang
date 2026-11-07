@@ -13,7 +13,8 @@
 // listens on is written to FILE (and said on stdout) once it does. It
 // runs until SIGINT or SIGTERM; then, with --log, it writes a line for
 // every request it answered: when it came and when its answer went (in
-// seconds since the start), the URL and the status.
+// seconds since the start), the URL (as asked, where it is no page) and
+// the status.
 //
 // Each thread has its own listening socket on the one port
 // (SO_REUSEPORT) and its own epoll; an answer that is to wait is kept in
@@ -168,6 +169,10 @@ typedef struct {
   Page *page; // NULL: 404
   int status, head;
   double came;
+  // (The URL asked for, for the log, where it is no page: a 404 is
+  // answered at once, while the request is still there.)
+  const char *asked;
+  int asked_length;
 } Due;
 
 typedef struct {
@@ -314,8 +319,8 @@ static void write_answer(Thread *t, Due d) {
   if (logging) {
     char line[2304];
     int m = snprintf(line, sizeof line, "%.6f %.6f %.*s %d\n", d.came, now(),
-                     d.page ? (int)d.page->url_length : 1,
-                     d.page ? d.page->url : "-", d.status);
+                     d.page ? (int)d.page->url_length : d.asked_length,
+                     d.page ? d.page->url : d.asked, d.status);
     grow(&t->log.text, &t->log.room, t->log.length + m);
     memcpy(t->log.text + t->log.length, line, m);
     t->log.length += m;
@@ -386,7 +391,7 @@ static void take_requests(Thread *t, Connection *c) {
       url_length = sizeof url - 1;
     Page *page = find_page(url, url_length);
     Due d = {.fd = c->fd, .uses = c->uses, .page = page, .head = head,
-             .came = now()};
+             .came = now(), .asked = url, .asked_length = (int)url_length};
     d.status = page ? page->status : 404;
     if (page && atomic_fetch_add(&page->asked, 1) < page->fails)
       d.status = 503;
