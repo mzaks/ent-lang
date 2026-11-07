@@ -18,12 +18,13 @@ import pipeline
 component Depth { d: i32 }
 // The host it goes to.
 component At { host: entity }
-// A host it may go to; how many asks to it are out (or let go and not
-// sent yet); how many of its asks were given a turn, and how many of
-// them let go (be_polite).
-component Host { name: text, busy: i32, turns: i64, let_go: i64 }
-// An ask's place among its host's, in the order they were made.
-component Turn { n: i64 }
+// A host it may go to; its number among them; how many asks to it are
+// out (or let go and not sent yet); how many of its asks were given a
+// turn, and how many of them let go (be_polite).
+component Host { name: text, number: i64, busy: i32, turns: i64, let_go: i64 }
+// An ask's place among its host's, in the order they were made; and the
+// same with its host's number above it, by which `ByTurn` finds it.
+component Turn { n: i64, key: i64 }
 // A host's robots.txt (§8.2, K11): the ask for it; whether it is known
 // (answered, or failed for good); its rules for the crawler (as
 // robots.ent's robots_rules gives them: none, where it was not a 200);
@@ -38,8 +39,8 @@ tag Disallowed
 relation (Ask)-[Links]->(Ask) capacity 4194304
 // The page whose link made this ask: the edge is connected once the ask
 // is known to be no duplicate, to the ask it is one of where it is (so
-// nothing reads `Links` before the report, and it is not sorted while
-// the crawl goes on).
+// nothing reads `Links` before the report, which sorts it, once: a
+// relation only `for`s along its edges read is sorted before them).
 component LinkedFrom { page: entity }
 // How it ended, for the report: the status, or why there was none.
 component Ending { word: text }
@@ -88,6 +89,7 @@ system setup() {
   let seed = normalise(setting(conf, "seed"))
   let scheme = slice(seed, 0, scheme_end(seed))
   var at = 0
+  var hosts = 0
   while at < len(allow) {
     let end = or_end(find(allow, " ", at), len(allow))
     if end > at {
@@ -96,7 +98,8 @@ system setup() {
                                  headers: "", body: "", origin: none, hops: 0, tries: 0,
                                  next_at: 0.0, serial: 0 },
                            Twin { of: none }, Depth { d: 0 }, RobotsAsk }
-      spawn { Host { name: name, busy: 0, turns: 0, let_go: 0 },
+      hosts += 1
+      spawn { Host { name: name, number: hosts, busy: 0, turns: 0, let_go: 0 },
               Robots { ask: robots, known: false, rules: "", delay: 0.0, next: 0.0 } }
     }
     at = end + 1
@@ -185,28 +188,44 @@ system read_robots() {
 
 // At most `per_host` asks out to a host at once; the others held back,
 // the oldest let go first. Each ask, as it comes, takes the next turn at
-// its host and waits; each frame a host lets go as many more turns as it
-// has room for. (So no frame puts the waiting asks in order: an ask let
-// go is one whose turn has come.)
-system be_polite() {
+// its host and waits (`take_turns`); each frame a host lets go as many
+// more turns as it has room for, those asks found by their turn
+// (`ByTurn`): a queue for each host, so no frame looks at the asks that
+// still wait.
+fn turn_key(host: i64, n: i64) -> i64 { host * 4294967296 + n }
+system take_turns() {
   for me, a: Ask, at: At without Sent, Held, Turn in turn by a.serial {
-    if let n = Host(at.host).turns {
+    if let n = Host(at.host).turns, let number = Host(at.host).number {
       Host(at.host).turns = n + 1
-      me.add(Turn { n: n })
+      me.add(Turn { n: n, key: turn_key(number, n) })
       me.add(Held)
     }
   }
+}
+index ByTurn of Turn by key hash unique
+// The asks whose turn came this frame. (As many as may go at once: the
+// mock, which holds none back, says more.)
+buffer LetGo { who: entity } capacity 65536
+system be_polite() {
   for h: mut Host { h.busy = 0 }
   for a: Ask, at: At with Going { Host(at.host).busy += 1 }
-  for h: mut Host {
+  LetGo = []
+  // (By number: in a `for` by a field, rows given to a buffer are there
+  // at once, so a host may give several.)
+  for h: mut Host by h.number {
     let more = h.let_go + (Rules.per_host - h.busy) as i64
-    if more > h.let_go { h.let_go = if more < h.turns { more } else { h.turns } }
-  }
-  for me, a: Ask, at: At, t: Turn with Held without Disallowed {
-    if let let_go = Host(at.host).let_go {
-      if t.n < let_go { me.remove(Held) }
+    if more > h.let_go {
+      let to = if more < h.turns { more } else { h.turns }
+      var n = h.let_go
+      while n < to {
+        let ask = ByTurn.get(turn_key(h.number, n))
+        if ask != none { LetGo += { who: ask } }
+        n += 1
+      }
+      h.let_go = to
     }
   }
+  for me with Held in LetGo { me.remove(Held) }
 }
 
 // An ask to a host with a `Crawl-delay` goes no sooner than that after

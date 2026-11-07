@@ -11,8 +11,9 @@ import urls
 
 default_capacity 262144
 // (The mock holds no ask back by host: many are going at once, a third
-// of the pages at 10^5.)
+// of the pages at 10^5, and as many let go in a frame.)
 capacity Going 131072
+capacity LetGo 131072
 
 // The four of pipeline.ent in one.
 system handle_answers() {
@@ -70,6 +71,7 @@ schedule frame() {
   take_depth()
   place()
   drop_stale()
+  take_turns()
   be_polite()
   ready()
   pace()

@@ -1,0 +1,12 @@
+// A relation that only `for`s along its edges read is sorted before
+// them, not after each system that connects or despawns; a connect that
+// finds it full of edges whose ends are gone sorts it then. Sorted anew
+// each time, and with threads, the same.
+// RUN: %ent run %S/Inputs/relation_lazy.ent 2>/dev/null > %t.out
+// RUN: env ENT_EDGES_ANEW=1 %ent run %S/Inputs/relation_lazy.ent 2>/dev/null | cmp - %t.out
+// RUN: %ent run --parallel %S/Inputs/relation_lazy.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK: step 5 edges 24 forward 8 loops 16
+// CHECK-NEXT: step 10 edges 24 forward 8 loops 16
+// CHECK-NEXT: step 17 edges 24 forward 8 loops 16

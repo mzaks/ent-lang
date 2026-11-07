@@ -26,6 +26,7 @@ schedule frame() {
   inherit_depth()
   take_depth()
   place()
+  take_turns()
   be_polite()
   ready()
   pace()

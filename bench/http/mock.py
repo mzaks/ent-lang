@@ -42,6 +42,7 @@ def program_for(pages, where):
     # (Without the history said at the end, which only the checks read.)
     text = text.replace(" say_history()", "")
     text = text.replace("capacity Going 131072", f"capacity Going {capacity // 2}")
+    text = text.replace("capacity LetGo 131072", f"capacity LetGo {capacity // 2}")
     text = text.replace("default_capacity 262144",
                         f"default_capacity {capacity}\n"
                         f"capacity Links {capacity * 8}\n"

@@ -557,11 +557,15 @@ around in the example, not in the compiler:
   go and not answered) and each step done once per event an `on added`
   or `on changed` loop (with running sums and sends to a field read
   allowed there, in the compiler): 5.0 s (RESULTS.md, "Live, with the
-  states few asks are in kept apart"). Left: `Links` kept in order
-  after every system that connects (1.2 s, read only by the report),
-  taking links out of pages, held asks each looking at their host's
-  turn every frame (no queue by host), and `receive` (the pages
-  waiting for their level cost little: held apart, 20 ms less).
+  states few asks are in kept apart"). Then `Links`, read only by the
+  report, sorted only before it (in the compiler: a relation that only
+  `for`s along its edges read is sorted before them, not after every
+  system that connects), and a queue for each host (`ByTurn`, a hash
+  index of the asks' turns: the asks whose turn came found by it, not
+  every held ask looking at its host each frame): 3.7 s (RESULTS.md,
+  "Live, Links sorted once and a queue for each host"). Left: `receive`
+  and taking links out of pages (the pages waiting for their level cost
+  little: held apart, 20 ms less).
 - **Two spawns alike in what they require went to one archetype** (fixed
   in C3): asks spawned with `LinkedFrom`, which `merge` removes, and the
   seed's without it, both required `Ask, Twin, Depth`; the compiler made
@@ -583,7 +587,7 @@ around in the example, not in the compiler:
 | **C0** | §10.1 decided and, if a language feature, built with its own tests. | `extract_links` can make a URL `text`. |
 | **C1** | `site.py`, `pipeline.ent`, `crawl.ent`, `mock.ent`, `crawl_mock.ent`, `crawl_combined.ent`, `check/`. | K1 to K7, K10 and K12 (generated cases) pass on the mock; mock throughput measured. |
 | **C2** | `devices/http` and the local server with its httpbin endpoints and TLS listener. | D1 to D10 pass (done: test/Integration/http_device.test). |
-| **C3** | `crawl_live.ent`, `robots.txt`, `bench/http/crawl.c`. | K8, K9 and K11 pass (done: check/crawl.py --live); the live benchmark against C is measured and written down (done: bench/http/live.py, RESULTS.md: C 2.3 s at 10⁵ pages, ent 5.5 to 22.7 s, per-frame work over every waiting ask; after the first fixes 4.8 to 10.6 s, then 4.7 to 7.4 s, then 4.2 to 5.0 s). |
+| **C3** | `crawl_live.ent`, `robots.txt`, `bench/http/crawl.c`. | K8, K9 and K11 pass (done: check/crawl.py --live); the live benchmark against C is measured and written down (done: bench/http/live.py, RESULTS.md: C 2.3 s at 10⁵ pages, ent 5.5 to 22.7 s, per-frame work over every waiting ask; after the first fixes 4.8 to 10.6 s, then 4.7 to 7.4 s, then 4.2 to 5.0 s, then 3.2 to 4.1 s). |
 | **C4** | The other crawlers' setups, the mirrored real site. | §9.2 measured and written down, every crawler verified first. |
 | **C5** | `sites.md`, crawls of the public sites. | §9.3 run; what it found is in K12 and D1 to D10. |
 | **C6** | A live window (Clay, `layout`, `window`): requests in flight, slow ones, errors, history. | Shows a crawl as it runs. |

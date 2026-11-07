@@ -2688,6 +2688,12 @@ static bool ranksMode = false;
 /// rows (see WorldArchetype::partitionRows), and everything over
 /// distributed archetypes goes through each rank's own from the start.
 static int64_t partitionCount = 0;
+/// The relations sorted only before a query that goes along their edges
+/// (see findLazySorts), not when a query that changes them ends.
+static llvm::DenseSet<Attribute> lazySorts;
+static bool sortsLazily(const WorldRelation &relation);
+static void callSort(IRRewriter &rewriter, Location loc,
+                     const WorldRelation &relation, Value arena);
 /// A call of a C function of the runtime (devices/gpu.c, devices/ranks.c),
 /// declared where it is not yet.
 static func::CallOp callGpu(IRRewriter &rewriter, Location loc,
@@ -9073,9 +9079,28 @@ static void appendEdge(IRRewriter &rewriter, Location loc,
                               arith::ConstantIntOp::create(
                                   rewriter, loc, relation.capacity, 64)));
     rewriter.setInsertionPointToStart(ifFull.thenBlock());
-    callEdges(rewriter, loc,
-              rewriter.getBlock()->getParentOp()->getParentOfType<ModuleOp>(),
-              layout, world, relation, "ent_edges_squeeze");
+    ModuleOp module =
+        rewriter.getBlock()->getParentOp()->getParentOfType<ModuleOp>();
+    if (sortsLazily(relation)) {
+      // (One sorted only before it is read may be full of edges
+      // connected since and of edges whose ends are gone: sorted, it
+      // holds only those that are; squeezed only where that is all.)
+      memref::StoreOp::create(
+          rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+          world.edgesClean(relation), ValueRange{zero});
+      callSort(rewriter, loc, relation, world.getArena());
+      Value left =
+          memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero});
+      auto ifStill = scf::IfOp::create(
+          rewriter, loc,
+          arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sge,
+                                left,
+                                arith::ConstantIntOp::create(
+                                    rewriter, loc, relation.capacity, 64)));
+      rewriter.setInsertionPointToStart(ifStill.thenBlock());
+    }
+    callEdges(rewriter, loc, module, layout, world, relation,
+              "ent_edges_squeeze");
     rewriter.setInsertionPointAfter(ifFull);
   }
   Value count = memref::LoadOp::create(rewriter, loc, counter,
@@ -9336,6 +9361,114 @@ static void callSort(IRRewriter &rewriter, Location loc,
                      const WorldRelation &relation, Value arena) {
   func::CallOp::create(rewriter, loc, sortFunctionName(relation), TypeRange{},
                        ValueRange{arena});
+}
+
+static bool sortsLazily(const WorldRelation &relation) {
+  return lazySorts.contains(RelationOp(relation.op).getSymNameAttr());
+}
+
+/// The query `op` is in, if any, and not in another.
+static QueryOp outermostQuery(Operation *op) {
+  QueryOp query = op->getParentOfType<QueryOp>();
+  while (query)
+    if (QueryOp outer = query->getParentOfType<QueryOp>())
+      query = outer;
+    else
+      break;
+  return query;
+}
+
+/// The relations whose edges are sorted only before a query that goes
+/// along them (see sortBeforeReaders), not when a query that connects
+/// ends, nor before every schedule: those that nothing but such queries
+/// reads, of systems on the CPU, on one process. Where many queries
+/// connect and one at the end reads, as the crawler's links, which only
+/// the report reads, the edges are sorted once, not after every connect
+/// (where each sort mends what changed: 23,202 times, 0.79 s of 5.3 at
+/// 10^5 pages). What reads them otherwise (a relation index, an order, a
+/// tree, a reaction to connects, a system written in C, the world's
+/// archetypes sorted by it) wants them sorted as they change.
+static void findLazySorts(ModuleOp module, const WorldLayout &layout,
+                          bool gpu) {
+  lazySorts.clear();
+  if (gpu || ranksMode || partitionCount > 0)
+    return;
+  for (ExternOp external : module.getOps<ExternOp>())
+    if (!external.hasContract())
+      return;
+  for (const WorldRelation &relation : layout.relations) {
+    RelationOp op = relation.op;
+    if (relation.linked || !relation.orders.empty() ||
+        relation.hasLocations() || relation.walkStateOffset ||
+        relation.connectedOffset || relation.childTicksOffset ||
+        relation.touchedOffset)
+      continue;
+    if (llvm::any_of(layout.archetypes, [&](const WorldArchetype &archetype) {
+          return archetype.isSorted() &&
+                 archetype.sortedBy == op.getSymNameAttr();
+        }))
+      continue;
+    std::optional<SymbolTable::UseRange> uses =
+        SymbolTable::getSymbolUses(op.getSymNameAttr(), module);
+    if (!uses)
+      continue;
+    bool onlyQueries = true;
+    for (const SymbolTable::SymbolUse &use : *uses) {
+      Operation *user = use.getUser();
+      if (isa<ConnectOp>(user))
+        continue;
+      if (isa<EdgesOp>(user)) {
+        QueryOp query = outermostQuery(user);
+        if (query && query->getParentOfType<SystemOp>())
+          continue;
+      }
+      onlyQueries = false;
+      break;
+    }
+    if (onlyQueries)
+      lazySorts.insert(op.getSymNameAttr());
+  }
+}
+
+/// The relations sorted lazily that `query` goes along.
+static llvm::SetVector<Attribute> lazyReads(QueryOp query) {
+  llvm::SetVector<Attribute> read;
+  if (lazySorts.empty())
+    return read;
+  query.walk([&](EdgesOp edges) {
+    Attribute relation = edges.getRelationAttr().getAttr();
+    if (lazySorts.contains(relation))
+      read.insert(relation);
+  });
+  return read;
+}
+
+/// Before each of `queries` (or, given `at`, before it, once for all of
+/// them), the relations sorted lazily that they go along.
+static void sortBeforeReaders(IRRewriter &rewriter, ArrayRef<QueryOp> queries,
+                              const WorldLayout &layout, Value arena,
+                              Operation *at = nullptr) {
+  OpBuilder::InsertionGuard guard(rewriter);
+  llvm::SetVector<Attribute> all;
+  for (QueryOp query : queries) {
+    if (query->getParentOfType<QueryOp>())
+      continue;
+    llvm::SetVector<Attribute> read = lazyReads(query);
+    if (at) {
+      all.insert(read.begin(), read.end());
+      continue;
+    }
+    rewriter.setInsertionPoint(query);
+    for (Attribute relation : read)
+      callSort(rewriter, query.getLoc(),
+               layout.getRelation(cast<StringAttr>(relation)), arena);
+  }
+  if (at) {
+    rewriter.setInsertionPoint(at);
+    for (Attribute relation : all)
+      callSort(rewriter, at->getLoc(),
+               layout.getRelation(cast<StringAttr>(relation)), arena);
+  }
 }
 
 /// Move the rows of `archetype` (one a sorted tree or a clustered index
@@ -14370,6 +14503,24 @@ static void appendLooped(IRRewriter &rewriter, SaPlaceOp place,
                                              relation.capacity)));
       OpBuilder::InsertionGuard full(rewriter);
       rewriter.setInsertionPointToStart(ifFull.thenBlock());
+      if (sortsLazily(relation)) {
+        // (Sorted first, as one connect does where it is full.)
+        memref::StoreOp::create(
+            rewriter, loc, arith::ConstantIntOp::create(rewriter, loc, 0, 64),
+            world.edgesClean(relation), ValueRange{zero});
+        callSort(rewriter, loc, relation, world.getArena());
+        Value left = world.toIndex(
+            loc,
+            memref::LoadOp::create(rewriter, loc, counter, ValueRange{zero}));
+        auto ifStill = scf::IfOp::create(
+            rewriter, loc,
+            arith::CmpIOp::create(
+                rewriter, loc, arith::CmpIPredicate::ugt,
+                arith::AddIOp::create(rewriter, loc, left, edges),
+                arith::ConstantIndexOp::create(rewriter, loc,
+                                               relation.capacity)));
+        rewriter.setInsertionPointToStart(ifStill.thenBlock());
+      }
       callEdges(rewriter, loc,
                 rewriter.getBlock()->getParentOp()->getParentOfType<ModuleOp>(),
                 layout, world, relation, "ent_edges_squeeze");
@@ -16002,10 +16153,12 @@ static void commitStructure(IRRewriter &rewriter, Location loc,
                    world.getArena()});
   }
   // Then the changed relations are sorted, which also drops edges to the
-  // entities just despawned.
+  // entities just despawned (but those sorted before a query that reads
+  // them).
   for (Attribute relation : changedRelations)
-    callSort(rewriter, loc, layout.getRelation(cast<StringAttr>(relation)),
-             world.getArena());
+    if (!lazySorts.contains(relation))
+      callSort(rewriter, loc, layout.getRelation(cast<StringAttr>(relation)),
+               world.getArena());
 }
 
 /// The trees whose children are ordered by a field that `query` may write
@@ -23279,6 +23432,9 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
   for (QueryOp query : queries)
     noteOrderWrites(rewriter, query, layout, world, changedRelations,
                     insertionPoint);
+  // A relation sorted lazily that one of them goes along: before them all.
+  sortBeforeReaders(rewriter, queries, layout, world.getArena(),
+                    insertionPoint);
 
   // The rows each archetype has, for its loop and the sends' buffers.
   SmallVector<std::pair<const WorldArchetype *, Value>> visited;
@@ -23443,8 +23599,9 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
     op->removeAttr(kReducedAttr);
   rewriter.setInsertionPoint(insertionPoint);
   for (Attribute relation : changedRelations)
-    callSort(rewriter, loc, layout.getRelation(cast<StringAttr>(relation)),
-             world.getArena());
+    if (!lazySorts.contains(relation))
+      callSort(rewriter, loc, layout.getRelation(cast<StringAttr>(relation)),
+               world.getArena());
 
   for (RunOp run : runs)
     rewriter.eraseOp(run);
@@ -27864,6 +28021,7 @@ struct EntLowerToLoops
     for (const WorldRelation &relation : layout->relations)
       emitSortFunction(rewriter, module, *layout, relation, arenaType,
                        sortsApart, parallelMinEvents);
+    findLazySorts(module, *layout, gpu);
     LoopOptions options{parallelEntities, parallelMinEntities,
                         parallelMinEvents, parallelMinLevel, explain,
                         directApplies};
@@ -27969,10 +28127,12 @@ struct EntLowerToLoops
       SmallVector<StageOp> stages(func.getOps<StageOp>());
       for (StageOp stage : stages)
         lowerStage(rewriter, stage, parallelStages);
-      // Edges the host connected since the last frame are sorted first.
+      // Edges the host connected since the last frame are sorted first
+      // (but those sorted before a query that reads them).
       rewriter.setInsertionPointToStart(&func.getBody().front());
       for (const WorldRelation &relation : layout->relations)
-        callSort(rewriter, func.getLoc(), relation, arena);
+        if (!sortsLazily(relation))
+          callSort(rewriter, func.getLoc(), relation, arena);
       guardSchedule(rewriter, func, condition);
       // (What the fused loops look up.)
       if (fuse)
@@ -28019,10 +28179,14 @@ struct EntLowerToLoops
         for (Operation *op : before) {
           rewriter.setInsertionPoint(op);
           for (Attribute relation : unsorted)
-            callSort(rewriter, op->getLoc(),
-                     layout->getRelation(cast<StringAttr>(relation)), arena);
+            if (!lazySorts.contains(relation))
+              callSort(rewriter, op->getLoc(),
+                       layout->getRelation(cast<StringAttr>(relation)),
+                       arena);
         }
       }
+      // A relation sorted lazily, before each query that goes along it.
+      sortBeforeReaders(rewriter, queries, *layout, arena);
       // (What each query becomes is marked as its own: lookups are
       // merged within it, see lowerLookups.)
       int64_t scope = 0;

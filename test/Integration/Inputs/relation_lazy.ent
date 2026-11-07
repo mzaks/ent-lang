@@ -1,0 +1,55 @@
+// A relation that only `for`s along its edges read is sorted before
+// such a `for`, not after every system that connects or despawns
+// (test/Integration/relation_lazy.test). Each step a new generation of
+// nodes, linked from the one before (outside a `for`) and to itself (in
+// one); the one before that is destroyed. So the edges of the dead pile
+// up between readings, more than the relation holds: a connect that
+// finds it full sorts it, which drops them.
+import console
+component N { id: i64, gen: i64 } capacity 64
+relation (N)-[L]->(N) capacity 48
+buffer Last { who: entity } capacity 8
+unique Step: i64
+unique Edges: i64
+unique Forward: i64
+unique Loops: i64
+world {
+  for i in 0..8 { Last += { who: spawn { N { id: i, gen: 0 } } } }
+}
+system grow() {
+  Step += 1
+  let s = Step
+  for i in 0..8 {
+    let e = spawn { N { id: i, gen: s } }
+    connect (Last[i].who)-[L]->(e)
+    Last[i].who = e
+  }
+}
+system loops() {
+  let s = Step
+  for me, n: N where n.gen == s { connect (me)-[L]->(me) }
+}
+system prune() {
+  let s = Step
+  for me, n: N where n.gen < s - 1 { me.destroy() }
+}
+system read() {
+  Edges = 0
+  Forward = 0
+  Loops = 0
+  for me, n: N {
+    for (me)-[L]->(t: N) {
+      Edges += 1
+      if t.id == n.id && t.gen == n.gen + 1 { Forward += 1 }
+      if t.gen == n.gen { Loops += 1 }
+    }
+  }
+  put("step {Step} edges {Edges} forward {Forward} loops {Loops}")
+}
+schedule step() { grow() loops() prune() }
+schedule look() { read() }
+main {
+  step() step() step() step() step() look()
+  step() step() step() step() step() look()
+  step() step() step() step() step() step() step() look()
+}

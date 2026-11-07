@@ -14,6 +14,7 @@ ent.relation @Syn (w: f32) capacity 1000
 // per-row flags at 4224 and per-edge target ids and values at 7296 and
 // 12416.
 // CHECK-LABEL: func.func private @push(
+// CHECK:      call @ent_sort_Syn(
 // CHECK:      scf.for %[[ROW:.*]] =
 // The row's flag: "did not run the loop", then "ran it".
 // CHECK:        memref.store %{{.*}}, %[[FLAGS:.*]][%[[ROW]]] : memref<100xi32>
@@ -72,9 +73,11 @@ ent.system @learn() {
   }
 }
 
-// A frame starts by sorting edges the host connected.
+// A frame starts by sorting edges the host connected, but those of a
+// relation that only loops along its edges read: each such loop sorts
+// them before it (@push, @learn).
 // CHECK-LABEL: func.func @frame(
-// CHECK-NEXT:   call @ent_sort_Syn(
+// CHECK-NEXT:   call @push(
 // The sort: only when unclean; offsets by source (set to 0, counted,
 // added up), then a stable scatter from the last edge back, and the
 // edges back into the table.
@@ -169,12 +172,16 @@ ent.system @pull() {
   }
 }
 
-// A query that disconnects or connects sorts when it ends.
+// A query that disconnects marks the edges unclean; where only loops
+// along the edges read them, it sorts them before it goes along them, not
+// when it ends: the next such loop sorts what it changed.
 // CHECK-LABEL: func.func private @prune(
+// CHECK:        call @ent_sort_Syn(
 // CHECK:        scf.for
 // CHECK:          arith.constant 1 : i8
 // CHECK:          arith.constant 0 : i64
-// CHECK:      call @ent_sort_Syn(
+// CHECK-NOT:  call @ent_sort_Syn(
+// CHECK:      return
 // ACCESS: remark: reads entities, Syn.edges, A.id, A.count; writes Syn.edges, Syn.w, entities, A.count, A.id, A.N.v
 ent.system @prune() {
   ent.query (%n: !ent.ref<@N>) {

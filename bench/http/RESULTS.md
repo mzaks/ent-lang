@@ -306,3 +306,57 @@ every other kind's: so the live crawl holds less than before (312 MB
 where 340). The mock lets every ask go at once: a third of the pages
 are going at its most (36,207 at 10⁵, 360,260 at 10⁶), and it gives
 `Going` half the asks' capacity; 589 MB at 10⁵ where 565.
+
+### Live, Links sorted once and a queue for each host
+
+- **`Links` sorted once.** Nothing reads it but the report, a `for`
+  along its edges; it was put in order after every system that connects
+  (23,202 times, 0.79 s at 10⁵ pages and 64 connections). The compiler
+  now sorts a relation that only such `for`s read before them, not
+  after each change (docs/syntax.md, "Relations that change"): once, at
+  the report, 1.5 ms. A connect that finds it full sorts it first,
+  which drops the edges of entities gone.
+- **A queue for each host.** `take_turns` gives each ask, as it comes,
+  its host's next turn and a key, the host's number above the turn;
+  `ByTurn` is a hash index of those keys. `be_polite` finds the asks
+  whose turn came by it (a buffer of them, `LetGo`, then `for .. in
+  LetGo`), where every held ask looked at its host's turn every frame:
+  0.56 to 0.02 s. (`take_turns` still looks at every ask with a host for
+  those without a turn, 0.15 s: the asks are one family of archetypes
+  where `Turn` is held optionally, and a `for` by a field does not react
+  yet.)
+
+Traced at 10⁵ pages and 64 connections: 5.1 to 3.7 s; `receive` 2.1 s
+and `extract_links` 0.7 s are most of what is left. Measured (C in the
+same run):
+
+| pages | connections | crawler | wall s | CPU s | peak MB | pages/s |
+|---|---|---|---|---|---|---|
+| 10⁴ | 64 | C | 1.060 | 0.251 | 24 | 9,928 |
+| 10⁴ | 64 | ent | 1.176 | 0.361 | 70 | 8,954 |
+| 10⁴ | 64 | ent-par | 1.223 | 0.515 | 71 | 8,605 |
+| 10⁴ | 256 | C | 1.086 | 0.271 | 24 | 9,691 |
+| 10⁴ | 256 | ent | 1.202 | 0.391 | 70 | 8,761 |
+| 10⁴ | 256 | ent-par | 1.253 | 0.510 | 71 | 8,401 |
+| 10⁴ | 1024 | C | 1.188 | 0.376 | 24 | 8,861 |
+| 10⁴ | 1024 | ent | 1.248 | 0.499 | 71 | 8,435 |
+| 10⁴ | 1024 | ent-par | 1.314 | 0.587 | 73 | 8,011 |
+| 10⁵ | 64 | C | 2.415 | 1.288 | 72 | 43,684 |
+| 10⁵ | 64 | ent | 3.703 | 2.573 | 478 | 28,487 |
+| 10⁵ | 64 | ent-par | 4.144 | 3.301 | 479 | 25,454 |
+| 10⁵ | 256 | C | 2.257 | 1.517 | 75 | 46,730 |
+| 10⁵ | 256 | ent | 3.170 | 2.458 | 434 | 33,278 |
+| 10⁵ | 256 | ent-par | 3.460 | 2.835 | 431 | 30,487 |
+| 10⁵ | 1024 | C | 3.194 | 2.482 | 75 | 33,031 |
+| 10⁵ | 1024 | ent | 4.100 | 3.420 | 445 | 25,727 |
+| 10⁵ | 1024 | ent-par | 4.428 | 3.769 | 439 | 23,820 |
+
+Peak memory is not to be compared with the tables before: transparent
+huge pages are on (`always`), and what the arena's pages come to
+depends on how much memory is free. The program before these two
+changes, measured the same hour: 441 MB at 10⁵ and 64 connections; `Links`
+sorted once 434, with the queue (its index and buffer) 474.
+
+The mock (few frames) is as it was: 10⁴ 0.113 / 0.164 s (one core / all
+cores), 10⁵ 1.754 / 1.927, 10⁶ 22.937 / 22.555. It lets every ask go at
+once, so it gives `LetGo` half the asks' capacity, as `Going`.

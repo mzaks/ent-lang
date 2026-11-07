@@ -2552,6 +2552,19 @@ sort anew would (every entity and edge); `ENT_EDGES_ANEW=1` in the environment s
 hold the two against each other. (A program run by a C host keeps its
 edges side by side, as its header says.)
 
+When this is done: where a `for` that connects or disconnects ends (and
+when a schedule starts, for what the host connected). But a relation
+that nothing reads but `for`s along its edges (`for (e)-[R]->(t)`, of
+systems on the CPU, built for one process; no index of it, no tree, no
+`on` its connects, no extern system without its access said) is put in
+order only before such a `for`, once for all that changed since: the
+edges connected wait after the runs, those of entities gone stay till
+then. Where it is full before that, a connect puts it in order first,
+which drops those (`test/Integration/relation_lazy.test`). So the
+crawler's links (examples/http), connected all crawl long and read only
+by the report, are sorted once, not 23,202 times (0.79 s of the live
+crawl's 5.3 at 10⁵ pages).
+
 #### Indexes found by the compiler
 
 Where a `for` visits every entity of its archetypes to find those whose
