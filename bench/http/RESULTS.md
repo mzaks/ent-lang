@@ -475,6 +475,35 @@ all: the parallel build no longer looks the asks over on its threads
 each frame. At 256 and 1024 as before. The mock as before: 10⁴ 0.059 /
 0.073 s, 10⁵ 0.688 / 0.683.
 
+### Links read as a page comes
+
+At a level's end every page of the next level was due at once, and
+`extract_links` scanned them all in one frame: at 10⁶ pages 2.15 s,
+over the 2 s an ask is given (curl is not driven meanwhile), so 64
+asks answered were said to have timed out and asked again (C4, below).
+Now `read_links` scans a page as it comes, keeps the URLs to allowed
+hosts in `Html` (a line each: `var links = ""` grows, which needed the
+compiler) and lets the body go; at the level's end `extract_links` only
+makes the asks and edges. By `--trace` at 10⁶ pages, the longest frame
+is 1.21 s, `extract_links` 0.75 s of it and ByUrl's index growing
+0.22 s.
+
+| pages | crawler | asks | wall s | CPU s | peak MB |
+|---|---|---|---|---|---|
+| 10⁴ | ent, before | 10,669 | 1.051 | 0.177 | 62 |
+| 10⁴ | ent | 10,669 | 1.042 | 0.167 | 59 |
+| 10⁵ | ent, before | 106,964 | 2.783 | 1.644 | 375 |
+| 10⁵ | ent | 106,964 | 2.802 | 1.657 | 343 |
+| 10⁶ | ent, before | 1,069,255 | 36.517 | 22.817 | 2,825 |
+| 10⁶ | ent | 1,069,191 | 36.656 | 22.965 | 2,416 |
+| 10⁶ | C | 1,069,191 | 27.775 | 15.920 | 623 |
+
+The asks are C's again, and the bodies waiting for their level are not
+kept (15% less memory at 10⁶); the time is as it was (the frame was
+work done anyway, in one place). The mock at 10⁵: 0.70 to 0.75 s on
+one core (the URLs joined, then cut again), 0.67 to 0.57 s on all
+(pages are read on many threads).
+
 ## Against other crawlers (§9.2, C4)
 
 `others.py`: wget, Scrapy, Colly and spider crawl the generated site
@@ -577,7 +606,8 @@ and exec keeps it.)
   `--trace`); curl is not driven meanwhile, and the asks sent at that
   frame's start are over their 2 s when it is: curl says they timed out
   though their answers wait, and they are asked again. It is the only
-  frame over 0.75 s.
+  frame over 0.75 s. (Since, the links are read as a page comes, above:
+  the frame is 1.21 s, and the asks are C's.)
 - Colly at 10⁴ is faster than C and ent: they take a page's links only
   once every ask less deep is settled (so that each URL's depth is its
   least), and a slow page holds its level; Colly does not wait.

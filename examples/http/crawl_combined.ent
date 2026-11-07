@@ -82,6 +82,7 @@ schedule frame() {
   read_robots()
   classify()
   settle()
+  read_links()
   due_pages()
   extract_links()
   number_asks()

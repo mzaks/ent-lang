@@ -243,14 +243,15 @@ system pace() {
   }
 }
 
-// A page: an answer of 200 with HTML, which may have links to follow.
-// (Said once, as it comes: not looked at again each frame it waits for
-// the level.) One as deep as may be is settled there.
-tag Html
+// A page: an answer of 200 with HTML, which may have links to follow
+// (read_links reads them as it comes: the URLs to hosts the crawl may go
+// to, a line each). (Said once, as it comes: not looked at again each
+// frame it waits for the level.) One as deep as may be is settled there.
+component Html { links: text }
 system classify() {
   for me, g: Got, optional d: Depth on added Got {
     if g.status == 200 && is_html(g.headers) {
-      me.add(Html)
+      me.add(Html { links: "" })
       if let deep = d.d { if deep >= Rules.max_depth { me.add(Handled) } }
     }
   }
@@ -273,36 +274,55 @@ system due_pages() {
   }
 }
 
-// The links of a page due: an ask for each URL not asked for yet, an
-// edge to each.
-system extract_links() {
-  for me, a: Ask, g: Got, d: Depth with Html without Handled
-      where d.d < Rules.max_depth on added Due {
+// The links of a page, read as it comes (§7.3); its body is not kept
+// then. The asks wait for its level (due_pages), so that a level's end
+// does only them.
+system read_links() {
+  for me, a: Ask, g: Got, h: mut Html without Handled on added Html {
     let page = uncommented(g.body, 0)
     let low = lower(page)
     let (base, skip) = base_of(a.url, page, low)
+    var links = ""
     var at = 0
     while at >= 0 {
       let (target, here) = next_link(base, page, low, at, skip)
       if len(target) > 0 && HostByName.get(host_of(target)) != none {
-        // (Only an ask known to be no duplicate: one made this frame may
-        // yet be one, and a new ask for its URL is merged with it.)
-        let known = Kept.get(target)
-        if known == none {
-          spawn { Ask { method: Method.Get, url: target, headers: "",
-                        body: "", origin: me, hops: 0, tries: 0,
-                        next_at: 0.0, serial: 0 },
-                  Twin { of: none }, Depth { d: d.d + 1 },
-                  LinkedFrom { page: me } }
-        } else {
-          Depth(known).d min= d.d + 1
-          connect (me)-[Links]->(known)
-        }
+        links += target + "\n"
       }
       at = if here < 0 { -1 } else { here + 1 }
     }
+    h.links = links
+  }
+  for g: mut Got with Html on added Html { g.body = "" }
+}
+
+// The links of a page due: an ask for each URL not asked for yet, an
+// edge to each.
+system extract_links() {
+  for me, h: Html, d: Depth without Handled
+      where d.d < Rules.max_depth on added Due {
+    var at = 0
+    while at < len(h.links) {
+      let end = find(h.links, "\n", at)
+      let target = slice(h.links, at, end)
+      // (Only an ask known to be no duplicate: one made this frame may
+      // yet be one, and a new ask for its URL is merged with it.)
+      let known = Kept.get(target)
+      if known == none {
+        spawn { Ask { method: Method.Get, url: target, headers: "",
+                      body: "", origin: me, hops: 0, tries: 0,
+                      next_at: 0.0, serial: 0 },
+                Twin { of: none }, Depth { d: d.d + 1 },
+                LinkedFrom { page: me } }
+      } else {
+        Depth(known).d min= d.d + 1
+        connect (me)-[Links]->(known)
+      }
+      at = end + 1
+    }
     me.add(Handled)
   }
+  for h: mut Html with Handled on added Handled { h.links = "" }
 }
 
 // Every other answer is settled as it comes: given up, an error, a

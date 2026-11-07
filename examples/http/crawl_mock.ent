@@ -42,6 +42,7 @@ schedule frame() {
   follow_redirect()
   classify()
   settle()
+  read_links()
   due_pages()
   extract_links()
   number_asks()
