@@ -93,7 +93,7 @@ system setup() {
       let robots = spawn { Ask { method: Method.Get, url: scheme + "://" + name + "/robots.txt",
                                  headers: "", body: "", origin: none, hops: 0, tries: 0,
                                  next_at: 0.0, serial: 0 },
-                           Twin { of: none }, Depth { d: 0, open: false }, RobotsAsk }
+                           Twin { of: none }, New, Depth { d: 0, open: false }, RobotsAsk }
       hosts += 1
       spawn { Host { name: name, number: hosts, busy: 0, turns: 0, let_go: 0 },
               Robots { ask: robots, known: false, rules: "", delay: 0.0, next: 0.0 } }
@@ -102,7 +102,7 @@ system setup() {
   }
   spawn { Ask { method: Method.Get, url: seed, headers: "", body: "", origin: none,
                 hops: 0, tries: 0, next_at: 0.0, serial: 0 },
-          Twin { of: none },
+          Twin { of: none }, New,
           Depth { d: 0, open: false } }
 }
 
@@ -187,8 +187,8 @@ system read_robots() {
 // gives `At` once it may go, with `Held` where it may not), takes the
 // next turn at its host and waits (`take_turns`); each frame a host lets
 // go as many more turns as it has room for, those asks found by their
-// turn (`ByTurn`): a queue for each host, so no frame looks at the asks
-// that still wait.
+// turn (`ByTurn`, of the asks that wait alone): a queue for each host,
+// so no frame looks at the asks that still wait.
 fn turn_key(host: i64, n: i64) -> i64 { host * 4294967296 + n }
 system take_turns() {
   for me, a: Ask, at: At without Sent, Held, Turn in turn by a.serial on added At {
@@ -199,7 +199,7 @@ system take_turns() {
     }
   }
 }
-index ByTurn of Turn by key hash unique
+index ByTurn of Turn, Held by key hash unique
 // The asks whose turn came this frame. (As many as may go at once: the
 // mock, which holds none back, says more.)
 buffer LetGo { who: entity } capacity 65536
@@ -313,7 +313,7 @@ system extract_links() {
         spawn { Ask { method: Method.Get, url: target, headers: "",
                       body: "", origin: me, hops: 0, tries: 0,
                       next_at: 0.0, serial: 0 },
-                Twin { of: none }, Depth { d: d.d + 1, open: false },
+                Twin { of: none }, New, Depth { d: d.d + 1, open: false },
                 LinkedFrom { page: me } }
       } else {
         Depth(known).d min= d.d + 1

@@ -7,8 +7,8 @@
 // and answers (mock.ent, or the live device of C3).
 //
 // What a program does with it:
-// - spawns an `Ask` (with `tries` 0, `next_at` 0 and `serial` 0, and a
-//   `Twin` of none);
+// - spawns an `Ask` (with `tries` 0, `next_at` 0 and `serial` 0, a
+//   `Twin` of none and the tag `New`);
 // - holds asks back from sending with the tag `Held`;
 // - runs `ready` before the device's send (which sends asks that are
 //   `Going` and not `Sent`);
@@ -78,7 +78,9 @@ unique Counters { serial: i64, answers: i64 }
 // when it was sent and answered, its status (0: none came, it failed).
 buffer History { ask: entity, sent: f64, at: f64, status: i32 } capacity 1048576
 
-index ByUrl of Ask by url hash
+// An ask made and not yet known to be no duplicate (drop_duplicates).
+tag New
+index ByUrl of Ask, New by url hash
 
 // Whether a status asks to be tried again.
 fn retryable(status: i32) -> bool { status >= 500 || status == 429 }
@@ -113,7 +115,8 @@ system number_asks() {
 
 // The talk's "drop the new one": an ask for a URL an ask has that came
 // before (`Known`) is a duplicate of it; of new asks for one URL, all
-// but the one ByUrl names first are duplicates of that one. (A field of
+// but the one ByUrl names first are duplicates of that one. (ByUrl has
+// the new asks alone: those of a frame, not every one.) (A field of
 // `Twin`, not a component it is given: so the asks are found by `get`
 // of the two indexes, not by a loop over all of them.)
 tag Known
@@ -125,6 +128,7 @@ system drop_duplicates() {
     let first = if known != none { known } else { ByUrl.get(u) }
     if first != me && first != none { t.of = first } else { me.add(Known) }
   }
+  for me with Known, New on added Known { me.remove(New) }
 }
 
 system forget_duplicates() {
@@ -186,7 +190,7 @@ system follow_redirect() {
       } else {
         spawn { Ask { method: a.method, url: target, headers: a.headers, body: "",
                       origin: me, hops: a.hops + 1, tries: 0, next_at: 0.0,
-                      serial: 0 }, Twin { of: none } }
+                      serial: 0 }, Twin { of: none }, New }
       }
     }
    }
@@ -219,7 +223,11 @@ system say_history() {
   }
 }
 
-// The talk's clean-up: an answer the program is done with keeps no body.
+// The talk's clean-up: an answer the program is done with keeps no body
+// and no headers.
 system clean_up() {
-  for g: mut Got with Handled on added Handled { g.body = "" }
+  for g: mut Got with Handled on added Handled {
+    g.body = ""
+    g.headers = ""
+  }
 }

@@ -57,7 +57,7 @@ system handle_answers() {
       } else {
         spawn { Ask { method: a.method, url: target, headers: a.headers, body: "",
                       origin: me, hops: a.hops + 1, tries: 0, next_at: 0.0,
-                      serial: 0 }, Twin { of: none } }
+                      serial: 0 }, Twin { of: none }, New }
       }
     }
    }

@@ -549,6 +549,57 @@ asks for; now it is looked up once and not counted without it.
 | 10⁶ | ent | 33.462 | 19.502 | 2,385 |
 | 10⁶ | C | 27.854 | 15.916 | 620 |
 
+### Where the memory is
+
+ent's peak at 10⁶ pages was 2.4 GB, C's 0.6. By the pages of the world
+that are in memory at the crawl's end (`ENT_LAYOUT_MAP` for where each
+array of the world starts, /proc's pagemap for which pages are in),
+with transparent huge pages off (`PR_SET_THP_DISABLE`), before and after
+the changes below:
+
+| | 10⁶, before MB | 10⁶, after MB |
+|---|---|---|
+| hash indexes (Kept, ByUrl, ByTurn, HostByName) | 486 | 367 (before ByTurn's change) |
+| `Ask`'s columns (one archetype, its tags and optional components columns) | 253 | 254 |
+| event logs of reactive `for`s | 188 | 201 |
+| stamps (a column for each component of each archetype) | 181 | 190 |
+| sends to other entities, gathered (`appendN`) | 108 | 102 |
+| `Links` | 34 | 34 |
+| `History` | 24 | 24 |
+| texts held by fields (the heap) | 277 | 242 |
+| in all (VmRSS) | 1,599 | 1,460 |
+
+The machine has huge pages `always`: a page of the world first written
+is 2 MB, and an array hardly used costs that much (at 10⁵ every array
+of a host's, for one host). The crawl with them off, the same program:
+
+| pages | huge pages | wall s | CPU s | peak MB |
+|---|---|---|---|---|
+| 10⁵ | on | 2.747 | 1.620 | 340 |
+| 10⁵ | off | 2.803 | 1.668 | 178 |
+| 10⁶ | on | 33.709 | 19.690 | 2,468 |
+| 10⁶ | off | 34.765 | 20.768 | 1,878 |
+
+Changed in the crawler: `ByUrl` (which of new asks for a URL is first)
+holds the new asks alone (a tag `New` until `Known`), not every one;
+`ByTurn` (the hosts' queues) the asks waiting alone (`Held`); an answer
+settled gives up its headers as it did its body.
+
+| pages | crawler | wall s | CPU s | peak MB |
+|---|---|---|---|---|
+| 10⁴ | ent | 1.040 | 0.172 | 57 |
+| 10⁵ | ent, before | 2.759 | 1.631 | 338 |
+| 10⁵ | ent | 2.752 | 1.618 | 328 |
+| 10⁶ | ent, before | 33.462 | 19.502 | 2,385 |
+| 10⁶ | ent | 33.554 | 19.715 | 2,305 |
+| 10⁶ | ent-par | 33.117 | 20.216 | 2,198 |
+| 10⁶ | C | 27.700 | 15.839 | 623 |
+
+What is left is the language's: a hash index's slots (36 bytes each,
+and four times the keys where they grew past half), a stamp column for
+every component of an archetype and event logs an eighth of its
+capacity, and huge pages for arrays hardly used.
+
 ## Against other crawlers (§9.2, C4)
 
 `others.py`: wget, Scrapy, Colly and spider crawl the generated site
