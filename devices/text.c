@@ -33,12 +33,23 @@ static void ent_text_report(void) {
   // done: none.)
   fprintf(stderr, "texts kept: %ld\n", ent_text_kept + ent_text_in_arenas());
 }
-static void ent_text_count(long by) {
-  static int asked;
-  if (!__atomic_exchange_n(&asked, 1, __ATOMIC_RELAXED) &&
-      getenv("ENT_TEXT_REPORT"))
+// (Counted only where the report is asked for: whether it is, is looked
+// up once, and after that read, not written, by every thread.)
+static int ent_text_reporting; // 0: not looked up yet, 1: no, 2: yes
+static int ent_text_reports(void) {
+  int state = __atomic_load_n(&ent_text_reporting, __ATOMIC_RELAXED);
+  if (state)
+    return state == 2;
+  int want = getenv("ENT_TEXT_REPORT") ? 2 : 1, none = 0;
+  if (__atomic_compare_exchange_n(&ent_text_reporting, &none, want, 0,
+                                  __ATOMIC_RELAXED, __ATOMIC_RELAXED) &&
+      want == 2)
     atexit(ent_text_report);
-  __atomic_add_fetch(&ent_text_held, by, __ATOMIC_RELAXED);
+  return __atomic_load_n(&ent_text_reporting, __ATOMIC_RELAXED) == 2;
+}
+static void ent_text_count(long by) {
+  if (ent_text_reports())
+    __atomic_add_fetch(&ent_text_held, by, __ATOMIC_RELAXED);
 }
 
 static const ent_text *ent_text_of(uint64_t view) {

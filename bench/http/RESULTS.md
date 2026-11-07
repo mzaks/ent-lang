@@ -530,6 +530,25 @@ the same. `advance_level` is 0.12 s at 10⁶.
 At 10⁶ ent takes 1.21 times C's time (1.32 before); at 10⁵ and 10⁴ the
 frames were few and short enough that the count did not show.
 
+### `send`, and what is left
+
+`send` (1.0 s at 10⁶ by `--trace`) looks only at the asks going (`Going`
+is kept apart: 64 at most); its time is `http_start`, curl making each
+request ready, as C's does. By perf at 10⁵ (samples at 4 kHz), curl's
+are the same in both (2,244 in ent, 2,444 in C), as are its clock reads
+(443, 492); ent's own code is 2,578 and C's 317 (with C's `memmem` in
+libc), the gap. One thing there: each text a field took or gave back
+was counted with two atomic writes, for a report only `ENT_TEXT_REPORT`
+asks for; now it is looked up once and not counted without it.
+
+| pages | crawler | wall s | CPU s | peak MB |
+|---|---|---|---|---|
+| 10⁵ | ent, before | 2.792 | 1.658 | 334 |
+| 10⁵ | ent | 2.759 | 1.631 | 338 |
+| 10⁶ | ent, before | 33.732 | 19.708 | 2,477 |
+| 10⁶ | ent | 33.462 | 19.502 | 2,385 |
+| 10⁶ | C | 27.854 | 15.916 | 620 |
+
 ## Against other crawlers (§9.2, C4)
 
 `others.py`: wget, Scrapy, Colly and spider crawl the generated site

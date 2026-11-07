@@ -4310,7 +4310,8 @@ LogicalResult Parser::parseIndex() {
     // Made: the slots as many as twice the keys at least (a power of two,
     // 64 at least, at most `slots`), from as many as twice those it had
     // last (`hint`), four times as many where the keys come to more than
-    // half; how many keys there are.
+    // half; how many keys there are. (More keys than half of `slots`: the
+    // program stops.)
     out << "proc " << n << "_build(order: mut " << n << ", tags: mut " << n
         << "_tags, list: mut " << n << "_list, held: mut " << of.front()
         << ", slots: i32, hint: i64) -> i64 {\n"
@@ -4333,7 +4334,11 @@ LogicalResult Parser::parseIndex() {
         << "        }\n"
         << "      }\n"
         << "      again = keys * 2 > size as i64\n"
-        << "      if again { size = min(size * 4, slots) }\n"
+        // (Where the slots it may have are too few, it asks for twice as
+        // many: more than its buffer holds, which stops the program and
+        // says so, not a loop for ever.)
+        << "      if again { size = if size >= slots { slots * 2 } else { "
+           "min(size * 4, slots) } }\n"
         << "    }\n";
     if (unique) {
       out << "    for k in 0..len(list) {\n";
