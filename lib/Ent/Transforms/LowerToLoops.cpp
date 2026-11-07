@@ -27737,8 +27737,11 @@ struct EntLowerToLoops
       if (query && (query.getCascade() || query.hasBy()))
         op->setAttr(kUnobservedAttr, rewriter.getUnitAttr());
     });
-    // What is sent from a loop of a query's body (see kLoopedAttr).
+    // What is sent from a loop of a query's body (see kLoopedAttr). (In
+    // a reactive query, only where it is walked in row order, which is
+    // decided below: its lists then fill as a scan's do.)
     bool refused = false;
+    SmallVector<Operation *> reactiveLooped;
     module.walk([&](Operation *op) {
       if (!isa<ApplyOp, AccumulateOp>(op))
         return;
@@ -27779,11 +27782,13 @@ struct EntLowerToLoops
         return;
       if (!inLoop && !overSet)
         return;
-      if (query.getCascade() || !getTriggers(query).empty()) {
+      if (query.getCascade()) {
         op->emitError("is in a loop of the body of a 'for' that goes along a "
                       "tree or waits for changes: it may run at most once "
                       "per entity there");
         refused = true;
+      } else if (!getTriggers(query).empty()) {
+        reactiveLooped.push_back(op);
       }
       op->setAttr(kLoopedAttr, rewriter.getUnitAttr());
     });
@@ -28021,7 +28026,10 @@ struct EntLowerToLoops
     // would land before those of the next), and what it changes is
     // pending in the order of the rows. Not where it sends values to be
     // combined when it ends (each waits in a slot of its row), nor where
-    // it gives rows or edges from a loop of its body.
+    // it gives rows from a loop of its body. (Whole numbers sent from a
+    // loop of its body, and the edges one op connects there, are sent in
+    // the order of the rows and then of the loop's turns, as a scan's
+    // lists have them.)
     if (!gpu && !ranksMode)
       module.walk([&](QueryOp query) {
         if (query.isTurn() || query.getCascade() || query.hasBy() ||
@@ -28049,13 +28057,16 @@ struct EntLowerToLoops
         // combined when it ends, so that no entity reads what another
         // sent. Not values of a unique, nor fractions.)
         SmallVector<ApplyOp> deferred;
+        bool looped = false;
         query.getBody().walk([&](Operation *op) {
           if (isa<ApplyOp, AccumulateOp>(op) && !op->hasAttr(kOrderFreeAttr)) {
             auto apply = dyn_cast<ApplyOp>(op);
-            if (apply && apply.getRule() != "set" &&
-                isa<IntegerType>(apply.getValue().getType()) &&
-                !apply->hasAttr(kLoopedAttr) && !inLoop(op))
+            bool whole = apply && apply.getRule() != "set" &&
+                         isa<IntegerType>(apply.getValue().getType());
+            if (whole && !apply->hasAttr(kLoopedAttr) && !inLoop(op))
               deferred.push_back(apply);
+            else if (whole && apply->hasAttr(kLoopedAttr) && inLoop(op))
+              looped = true;
             else
               blocked = true;
           }
@@ -28066,7 +28077,8 @@ struct EntLowerToLoops
                                ? Attribute(cast<AppendOp>(op).getBufferAttr())
                                : Attribute(cast<ConnectOp>(op).getRelationAttr());
           auto &seen = isa<AppendOp>(op) ? buffers : relations;
-          if (!seen.insert(into).second || inLoop(op))
+          if (!seen.insert(into).second ||
+              (inLoop(op) && isa<AppendOp>(op)))
             blocked = true;
           given.push_back(op);
         });
@@ -28079,8 +28091,8 @@ struct EntLowerToLoops
         // before its own.)
         bool running = false;
         query.getBody().walk([&](RunningOp) { running = true; });
-        if (blocked ||
-            (given.empty() && !structural && !running && deferred.empty()))
+        if (blocked || (given.empty() && !structural && !running &&
+                        deferred.empty() && !looped))
           return;
         for (ApplyOp apply : deferred)
           apply->setAttr(kLoopedAttr, rewriter.getUnitAttr());
@@ -28109,6 +28121,15 @@ struct EntLowerToLoops
       }
       connect->setAttr(kLoopedAttr, rewriter.getUnitAttr());
     });
+    for (Operation *op : reactiveLooped)
+      if (!op->getParentOfType<QueryOp>()->hasAttr(kRowOrderedAttr)) {
+        op->emitError("is in a loop of the body of a 'for' that goes along a "
+                      "tree or waits for changes: it may run at most once "
+                      "per entity there (only a whole number sent with +=, "
+                      "-=, min= or max= where the 'for' is walked in row "
+                      "order)");
+        refused = true;
+      }
     if (refused)
       return signalPassFailure();
     // Lookups and applies through a trusted end of an edge.

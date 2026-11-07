@@ -434,3 +434,43 @@ At 10⁵ ent takes 1.09 to 1.28 times as long as C (1.3 to 1.5 before),
 and holds less at its peak (374 MB where 480, the same hour's runs).
 The mock, which makes far more texts a frame, gains most: 10⁴ 0.113 to
 0.058 s, 10⁵ 1.754 to 0.684 s on one core (0.068 / 0.704 on all).
+
+### Pages due, not looked over
+
+`extract_links` went over every ask each frame that something might be
+due, for the few with `Html` and without `Handled` (9% of the user time
+at 10⁵ pages and 64 connections, 0.12 s). Now `due_pages` marks a page
+`Due` as it gets `Html` or a lower depth where its level is there, and
+looks the waiting ones over only when `Level` changes (12 times in that
+crawl); `extract_links` runs `on added Due`. That needed the compiler:
+a reactive `for` that sends whole numbers (`min=`) and connects from a
+loop of its body is now walked in the order of the rows, as one that
+does so outside a loop was (docs/syntax.md). What is left of
+`extract_links` is the links themselves: `next_link` 0.13 s, `Kept.get`
+0.05 s (C: 0.17 s in all).
+
+| pages | connections | crawler | wall s | CPU s | peak MB | pages/s |
+|---|---|---|---|---|---|---|
+| 10⁴ | 64 | C | 1.011 | 0.126 | 24 | 10,411 |
+| 10⁴ | 64 | ent | 1.046 | 0.162 | 63 | 10,066 |
+| 10⁴ | 64 | ent-par | 1.041 | 0.169 | 65 | 10,118 |
+| 10⁴ | 256 | C | 1.041 | 0.147 | 24 | 10,117 |
+| 10⁴ | 256 | ent | 1.052 | 0.196 | 62 | 10,010 |
+| 10⁴ | 256 | ent-par | 1.051 | 0.196 | 65 | 10,013 |
+| 10⁴ | 1024 | C | 1.085 | 0.214 | 24 | 9,701 |
+| 10⁴ | 1024 | ent | 1.084 | 0.260 | 70 | 9,715 |
+| 10⁴ | 1024 | ent-par | 1.087 | 0.258 | 71 | 9,689 |
+| 10⁵ | 64 | C | 2.252 | 1.165 | 76 | 46,848 |
+| 10⁵ | 64 | ent | 2.783 | 1.652 | 378 | 37,903 |
+| 10⁵ | 64 | ent-par | 2.795 | 1.695 | 377 | 37,746 |
+| 10⁵ | 256 | C | 2.032 | 1.327 | 76 | 51,911 |
+| 10⁵ | 256 | ent | 2.322 | 1.595 | 352 | 45,422 |
+| 10⁵ | 256 | ent-par | 2.314 | 1.627 | 359 | 45,593 |
+| 10⁵ | 1024 | C | 2.864 | 2.178 | 76 | 36,835 |
+| 10⁵ | 1024 | ent | 3.129 | 2.392 | 356 | 33,716 |
+| 10⁵ | 1024 | ent-par | 3.115 | 2.440 | 361 | 33,869 |
+
+At 64 connections 2.88 to 2.78 s on one core, and 3.29 to 2.80 s on
+all: the parallel build no longer looks the asks over on its threads
+each frame. At 256 and 1024 as before. The mock as before: 10⁴ 0.059 /
+0.073 s, 10⁵ 0.688 / 0.683.

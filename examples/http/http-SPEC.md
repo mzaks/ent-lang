@@ -197,7 +197,8 @@ Sending and receiving are the device's: `mock_send`, `answer` and `fill`
 | `pace` | `Robots`, `At` | A host's `Crawl-delay`: of its asks due, the oldest goes once the host's time has come, which is then that much later; the others wait for it (`next_at`). | yes |
 | `classify` | `Got`, on added | `Html` where it is a 200 with HTML (the headers lowered and searched once). | |
 | `settle` | `Got`, `GaveUp`, `Html` | Every answer but a page whose links are to be followed is `Handled` as it is. | |
-| `extract_links` | `Html`, `Depth`, `Level` | Scans the body for links (§7.3); for each to an allowed host an `Ask` with `Depth d + 1` and `LinkedFrom`, or an edge to the one `Kept` has (its depth lowered); adds `Handled`. Only once every ask less deep is settled, and not at `max_depth`. | |
+| `due_pages` | `Html`, `Depth`, `Level` | Marks a page `Due` once every ask less deep is settled: as it gets `Html` or a (lower) `Depth` where its level is there, and the pages that waited when `Level` changes (on added / changed, and a scan only when the level moved). | |
+| `extract_links` | `Due` | Scans the body for links (§7.3); for each to an allowed host an `Ask` with `Depth d + 1` and `LinkedFrom`, or an edge to the one `Kept` has (its depth lowered); adds `Handled`. On added `Due`, and not at `max_depth`. | |
 | `merge` | duplicates, `LinkedFrom` | A duplicate's depth and the link that made it go to the ask it is one of; an ask that is none is linked to from its page. | |
 | `advance_level` | `Depth`, `Handled` | One level deeper once every ask at this one is settled; `Open`. | |
 | `conclude`, `report` | `Got`, `Failed`, `Links` | At the end: `Ending`, then a line for every ask, redirect, redirect not followed, slow ask and broken link (with the page that links to it). | |
@@ -206,9 +207,9 @@ Sending and receiving are the device's: `mock_send`, `answer` and `fill`
 
 One frame (crawl_mock.ent): `inherit_depth take_depth place drop_stale
 be_polite pace mock_send answer fill time_out warn_slow retry
-read_robots follow_redirect classify settle extract_links number_asks
-drop_duplicates merge forget_duplicates log history clean_up
-advance_level advance`. crawl_live.ent has `send receive fetch` where
+read_robots follow_redirect classify settle due_pages extract_links
+number_asks drop_duplicates merge forget_duplicates log history
+clean_up advance_level advance`. crawl_live.ent has `send receive fetch` where
 the mock has `drop_stale mock_send answer fill`, `cancel_late` after
 `time_out`, and no `advance` (the clock is the machine's). The order is the talk's
 diagram, so a reader can follow it; the compiler keeps it where systems

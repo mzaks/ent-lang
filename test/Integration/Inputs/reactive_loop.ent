@@ -1,0 +1,57 @@
+// A reactive `for` that sends whole numbers and connects edges from a
+// loop of its body (test/Integration/reactive_loop.test): walked in the
+// order of the rows, so that what it sends is combined, and its edges
+// land, as a scan's over the same entities. Also from a log too small
+// for a step's events (`log 4`), which scans then.
+import console
+component Node { n: i64, key: i64, best: i64, hits: i64 } capacity 256
+tag Ready
+tag Late
+relation (Node)-[Points]->(Node) capacity 4096
+buffer All { who: entity } capacity 64
+unique Step: i64
+world {
+  for i in 0..40 {
+    let e = spawn { Node { n: i, key: (i * 17) % 40, best: 1000, hits: 0 } }
+    All += { who: e }
+  }
+}
+system go() {
+  Step += 1
+  let s = Step
+  // (Not in the order of the rows: the walk puts them in it.)
+  for me, a: Node without Ready by a.key {
+    if a.n % 5 == s % 5 { me.add(Ready) }
+  }
+  for me, a: Node without Late {
+    if a.n % 3 == s % 3 { me.add(Late) }
+  }
+}
+system point() {
+  for me, a: Node with Ready on added Ready {
+    var k = 0
+    while k < 3 {
+      let other = All[(a.n * 7 + k * 11 + Step) % 40].who
+      Node(other).best min= a.n * 10 + k
+      connect (me)-[Points]->(other)
+      k += 1
+    }
+  }
+}
+system late() {
+  for me, a: Node with Late on added Late log 4 {
+    for k in 0..2 {
+      let other = All[(a.n * 3 + k * 13) % 40].who
+      Node(other).hits += a.n + k
+    }
+  }
+}
+system say() {
+  for me, a: Node {
+    put("node {a.n} best {a.best} hits {a.hits}")
+    for (me)-[Points]->(o, q: Node) { put("  points {q.n}") }
+  }
+}
+schedule frame() { go() point() late() }
+schedule end() { say() }
+main { frame() frame() frame() frame() frame() frame() frame() end() }

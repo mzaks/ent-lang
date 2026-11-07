@@ -315,11 +315,13 @@ for with Enemy { Count += 1 }     // nor the entity
   to a field it also reads), it takes the rows the log names, puts them
   in order and runs its body for them so, on one thread: what it does
   comes out as a scan's would (whole numbers sent to a field it reads
-  wait for its end, as they do in a scan). It still goes through all of
-  them where it sends fractions to a field it also reads, sends with
-  `=`, gives rows to one buffer or edges to one relation from two
-  places or from a loop of its body, or reacts to an ancestor's events
-  (`via`). Whole numbers sent with `+=`, `-=`, `min=` or `max=`, and
+  wait for its end, as they do in a scan; so do whole numbers sent from
+  a loop of its body, and the edges one place connects there land in
+  the order of the rows and then of the loop's turns). It still goes
+  through all of them where it sends fractions to a field it also
+  reads, sends with `=`, gives rows to one buffer or edges to one
+  relation from two places, gives rows from a loop of its body, or
+  reacts to an ancestor's events (`via`). Whole numbers sent with `+=`, `-=`, `min=` or `max=`, and
   how many entities it ran for, come to the same in any order: those
   are combined as it goes, on one thread.
 
@@ -1057,9 +1059,11 @@ of a depth.
   else): the same sums to the last bit, on any number of threads. Values sent one right after another to fields of one
   component of the same entity by the same rule (`Pull(o).fx += a
   Pull(o).fy += b`) go on one list together, as one entry, and are
-  combined together. Not in a `for` that goes along a tree or waits
-  for changes; and a value is not sent from a loop inside a `for` over
-  edges (a `for` over edges sends once for each edge).
+  combined together. Not in a `for` that goes along a tree, nor in one
+  that waits for changes but for whole numbers sent with `+=`, `-=`,
+  `min=` or `max=` where it is walked in the order of the rows (see the
+  reactive `for` above); and a value is not sent from a loop inside a
+  `for` over edges (a `for` over edges sends once for each edge).
 - A `for` over entities gives a number where the value of a statement
   is worked out (of a `let`, a `var`, an assignment, the condition of a
   `loop` or a `while`): how many entities its body ran for (an `i32`;

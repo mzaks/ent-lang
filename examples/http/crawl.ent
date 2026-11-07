@@ -256,11 +256,28 @@ system classify() {
   }
 }
 
-// The links of a page, once every ask less deep is settled: an ask for
-// each URL not asked for yet, an edge to each.
+// A page is due for its links once every ask less deep is settled: as
+// it comes, gets its depth or a lower one where its level is there, and
+// those that waited when the level changes (a dozen times in a crawl of
+// 10^5 pages), not looked over each frame.
+tag Due
+unique Swept: i32
+system due_pages() {
+  for me, d: Depth with Html without Handled, Due where d.d <= Level
+      on added Html, added Depth, changed d.d {
+    me.add(Due)
+  }
+  if Swept != Level {
+    Swept = Level
+    for me, d: Depth with Html without Handled, Due where d.d <= Level { me.add(Due) }
+  }
+}
+
+// The links of a page due: an ask for each URL not asked for yet, an
+// edge to each.
 system extract_links() {
   for me, a: Ask, g: Got, d: Depth with Html without Handled
-      where d.d <= Level && d.d < Rules.max_depth {
+      where d.d < Rules.max_depth on added Due {
     let page = uncommented(g.body, 0)
     let low = lower(page)
     let (base, skip) = base_of(a.url, page, low)

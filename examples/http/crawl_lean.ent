@@ -30,6 +30,7 @@ schedule frame() {
   follow_redirect()
   classify()
   settle()
+  due_pages()
   extract_links()
   number_asks()
   drop_duplicates()

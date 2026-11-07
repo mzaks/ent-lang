@@ -1,0 +1,18 @@
+// A reactive `for` that sends whole numbers (`min=`, `+=`) and connects
+// edges from a loop of its body is walked in the order of the rows: what
+// it sends waits on lists and its edges land as a scan's over the same
+// entities would have them, also from a log too small for a step's
+// events, and with threads.
+// RUN: %ent run %S/Inputs/reactive_loop.ent 2>/dev/null > %t.out
+// RUN: sed -e 's/  for me, a: Node with Ready on added Ready {/  for me, a: Node with Ready where !me.has(Done) {\n    me.add(Done)/' \
+// RUN:     -e 's/  for me, a: Node with Late on added Late log 4 {/  for me, a: Node with Late where !me.has(LateDone) {\n    me.add(LateDone)/' \
+// RUN:     -e 's/^tag Late$/tag Late\ntag Done\ntag LateDone/' \
+// RUN:     %S/Inputs/reactive_loop.ent > %t.scan.ent
+// RUN: %ent run %t.scan.ent 2>/dev/null | cmp - %t.out
+// RUN: %ent run --parallel %S/Inputs/reactive_loop.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK: node 0 best 50 hits 10
+// CHECK-NEXT:   points 5
+// CHECK-NEXT:   points 16
+// CHECK-NEXT:   points 27
