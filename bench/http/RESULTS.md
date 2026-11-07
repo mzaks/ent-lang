@@ -325,9 +325,7 @@ are going at its most (36,207 at 10⁵, 360,260 at 10⁶), and it gives
   for those without a turn, 0.15 s: the asks are one family of
   archetypes where `Turn` is held optionally. A `for` by a field may now
   react, and `take_turns` is `on added At`, going over the asks given a
-  host since; measured while this machine's cores were held at 0.6 GHz,
-  it took 47 ms where the systems not changed took 4.5 times as long as
-  at full speed: about a tenth of what it took. To be measured again.)
+  host since: 0.15 s to 9 ms, see below.)
 
 Traced at 10⁵ pages and 64 connections: 5.1 to 3.7 s; `receive` 2.1 s
 and `extract_links` 0.7 s are most of what is left. Measured (C in the
@@ -363,3 +361,35 @@ sorted once 434, with the queue (its index and buffer) 474.
 The mock (few frames) is as it was: 10⁴ 0.113 / 0.164 s (one core / all
 cores), 10⁵ 1.754 / 1.927, 10⁶ 22.937 / 22.555. It lets every ask go at
 once, so it gives `LetGo` half the asks' capacity, as `Going`.
+
+### Live, `take_turns` on added
+
+`take_turns` goes over the asks given a host since the frame before (a
+`for` by a field that reacts, `on added At`), not every ask with a host:
+traced at 10⁵ pages and 64 connections, 0.15 s to 9 ms; the whole crawl
+3.37 s traced, `receive` 1.99 s and `extract_links` 0.66 s of it.
+Measured (C in the same run):
+
+| pages | connections | crawler | wall s | CPU s | peak MB | pages/s |
+|---|---|---|---|---|---|---|
+| 10⁴ | 64 | C | 1.010 | 0.127 | 23 | 10,419 |
+| 10⁴ | 64 | ent | 1.087 | 0.203 | 72 | 9,687 |
+| 10⁴ | 64 | ent-par | 1.093 | 0.289 | 72 | 9,633 |
+| 10⁴ | 256 | C | 1.048 | 0.145 | 23 | 10,049 |
+| 10⁴ | 256 | ent | 1.065 | 0.194 | 71 | 9,888 |
+| 10⁴ | 256 | ent-par | 1.111 | 0.265 | 74 | 9,479 |
+| 10⁴ | 1024 | C | 1.087 | 0.208 | 23 | 9,688 |
+| 10⁴ | 1024 | ent | 1.129 | 0.286 | 71 | 9,326 |
+| 10⁴ | 1024 | ent-par | 1.134 | 0.317 | 73 | 9,287 |
+| 10⁵ | 64 | C | 2.252 | 1.155 | 75 | 46,836 |
+| 10⁵ | 64 | ent | 3.334 | 2.238 | 480 | 31,639 |
+| 10⁵ | 64 | ent-par | 3.718 | 2.870 | 485 | 28,374 |
+| 10⁵ | 256 | C | 2.029 | 1.318 | 76 | 51,983 |
+| 10⁵ | 256 | ent | 2.875 | 2.135 | 442 | 36,687 |
+| 10⁵ | 256 | ent-par | 3.082 | 2.457 | 438 | 34,221 |
+| 10⁵ | 1024 | C | 2.899 | 2.207 | 76 | 36,391 |
+| 10⁵ | 1024 | ent | 3.759 | 3.040 | 439 | 28,059 |
+| 10⁵ | 1024 | ent-par | 3.958 | 3.355 | 437 | 26,650 |
+
+At 10⁴ ent is within 3 to 8% of C; at 10⁵ it takes 1.3 to 1.5 times
+as long, most of the rest being `receive`.
