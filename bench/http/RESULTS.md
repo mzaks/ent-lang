@@ -498,8 +498,12 @@ is an ask; URLs: the distinct ones):
 | 10⁵ | ent, ent-par | 105,487 | 106,964 | 0 | 0 |
 | 10⁵ | wget | 105,487 | 107,089 | 0 | 0 |
 | 10⁵ | Scrapy | 105,487 | 106,964 | 0 | 0 |
-| 10⁵ | Colly | 105,487 | 109,762 | 0 | 0 |
+| 10⁵ | Colly | 105,487 | 107,808 | 0 | 0 |
 | 10⁵ | spider | 106,406 | 108,868 | 1,005 | 1,924 |
+| 10⁶ | C | 1,054,531 | 1,069,191 | | |
+| 10⁶ | ent, ent-par | 1,054,531 | 1,069,255 | 0 | 0 |
+| 10⁶ | Colly (killed at 14 GB) | 621,793 | 635,222 | 432,738 | 0 |
+| 10⁶ | spider, in memory | 1,064,055 | 1,088,288 | 9,978 | 19,502 |
 
 - **Scrapy** asks exactly what C does, once its spider looks at a link's
   host without the port: `allow_domains` takes `site.test:80` for
@@ -508,7 +512,8 @@ is an ask; URLs: the distinct ones):
   by a link (0.1%).
 - **Colly** asks a hop of a redirect chain again where a page links to
   it: it follows redirects inside Go's HTTP client, which its dedupe
-  does not see (2.8% more asks). Its setup puts URLs in their normal
+  does not see (1 to 3% more asks, from run to run: which hop a page
+reaches first races). Its setup puts URLs in their normal
   form before visiting them (Colly knows `HTTP://SITE.TEST:80/x#f` and
   `http://site.test/x` as two), visits one at a time (it looks whether a
   URL was visited and marks it in two steps, and async pages raced:
@@ -523,32 +528,56 @@ is an ask; URLs: the distinct ones):
   still retries the redirect chains over the limit, half a second
   apart (2.5 s of its wall time at either size).
 
-**Measured** (median of 3; URLs/s: the distinct URLs it asked for):
+**Measured** (median of 3; URLs/s: the distinct URLs it asked for).
+Peak memory is the crawler's own: `others.py` starts each from a process
+forked while it is small. (Measured first from the script itself, after
+it had read the logs, every peak was at least what the script held,
+some 110 MB at 10⁵: a child's peak starts at what it was forked from,
+and exec keeps it.)
 
 | pages | crawler | wall s | CPU s | peak MB | URLs/s |
 |---|---|---|---|---|---|
-| 10⁴ | C | 1.014 | 0.130 | 26 | 10,379 |
-| 10⁴ | ent | 1.042 | 0.183 | 64 | 10,106 |
-| 10⁴ | ent-par | 1.038 | 0.176 | 65 | 10,140 |
-| 10⁴ | wget | 8.731 | 0.318 | 26 | 1,206 |
-| 10⁴ | Scrapy | 11.721 | 11.575 | 102 | 898 |
-| 10⁴ | Colly | 0.653 | 1.294 | 219 | 16,111 |
-| 10⁴ | spider | 3.271 | 0.370 | 26 | 3,249 |
-| 10⁴ | spider, in memory | 3.251 | 0.355 | 20 | 3,269 |
-| 10⁵ | C | 2.237 | 1.149 | 112 | 47,155 |
-| 10⁵ | ent | 2.785 | 1.663 | 379 | 37,871 |
-| 10⁵ | ent-par | 2.794 | 1.713 | 381 | 37,751 |
-| 10⁵ | wget | 84.603 | 3.056 | 118 | 1,247 |
-| 10⁵ | Scrapy | 155.012 | 154.316 | 193 | 681 |
-| 10⁵ | Colly | 5.945 | 13.762 | 2,223 | 17,745 |
-| 10⁵ | spider | 282.389 | 284.379 | 440 | 377 |
-| 10⁵ | spider, in memory | 4.283 | 2.750 | 52 | 24,843 |
+| 10⁴ | C | 1.025 | 0.127 | 15 | 10,274 |
+| 10⁴ | ent | 1.051 | 0.177 | 62 | 10,021 |
+| 10⁴ | ent-par | 1.038 | 0.173 | 65 | 10,146 |
+| 10⁴ | wget | 8.784 | 0.378 | 12 | 1,199 |
+| 10⁴ | Scrapy | 12.031 | 11.881 | 100 | 875 |
+| 10⁴ | Colly | 0.647 | 1.304 | 225 | 16,271 |
+| 10⁴ | spider | 3.255 | 0.362 | 19 | 3,265 |
+| 10⁴ | spider, in memory | 3.263 | 0.338 | 18 | 3,256 |
+| 10⁵ | C | 2.252 | 1.169 | 69 | 46,851 |
+| 10⁵ | ent | 2.783 | 1.644 | 375 | 37,910 |
+| 10⁵ | ent-par | 2.773 | 1.687 | 383 | 38,035 |
+| 10⁵ | wget | 85.358 | 3.700 | 74 | 1,236 |
+| 10⁵ | Scrapy | 155.883 | 155.192 | 196 | 677 |
+| 10⁵ | Colly | 6.245 | 13.699 | 2,232 | 16,892 |
+| 10⁵ | spider | 284.997 | 286.592 | 438 | 373 |
+| 10⁵ | spider, in memory | 4.037 | 2.768 | 32 | 26,358 |
+| 10⁶ | C | 27.703 | 15.897 | 622 | 38,066 |
+| 10⁶ | ent | 36.517 | 22.817 | 2,825 | 28,878 |
+| 10⁶ | ent-par | 36.034 | 23.508 | 2,865 | 29,265 |
+| 10⁶ | Colly | killed at 14 GB after 14 s | 50.7 | | |
+| 10⁶ | spider, in memory | 23.016 | 36.816 | 233 | 46,232 |
 
-- ent comes after C only: at 10⁵ 2.1 times as fast as Colly (on one
+- ent comes after C only at 10⁵: 2.2 times as fast as Colly (on one
   core, Colly on four, with 8 times its CPU time and 6 times its
-  memory), 1.5 times spider at its best, 30 times wget and 56 times
+  memory), 1.5 times spider at its best, 31 times wget and 56 times
   Scrapy. Its memory is the most after Colly's: the asks are kept for
-  the report (§12, question 3), with their texts.
+  the report (§12, question 3), with their texts (some 2.7 KB an ask;
+  C keeps 0.6).
+- At 10⁶ spider (in memory, on four cores) is the fastest, 1.2 times C
+  and 1.6 times ent, in 233 MB; it still leaves out 1% (images) and
+  asks 2% more (404s). C and ent take 12 and 13 times as long as at
+  10⁵, spider 6 times (its 3 s of redirect retries are the same at any
+  size). Colly does not finish: its memory reaches the 14 GB the run
+  was given (`MemoryMax`) after 620,000 URLs.
+- ent at 10⁶ asks 64 pages twice. When a level is settled, the links
+  of all the next level's pages are taken in one frame (2.15 s at
+  27.6 s, `extract_links` 1.63 s and ByUrl's index growing 0.23 s, by
+  `--trace`); curl is not driven meanwhile, and the asks sent at that
+  frame's start are over their 2 s when it is: curl says they timed out
+  though their answers wait, and they are asked again. It is the only
+  frame over 0.75 s.
 - Colly at 10⁴ is faster than C and ent: they take a page's links only
   once every ask less deep is settled (so that each URL's depth is its
   least), and a slow page holds its level; Colly does not wait.
@@ -559,6 +588,10 @@ is an ask; URLs: the distinct ones):
   that a crawl of 10⁵ pages takes 280 s of CPU. "In memory" raises the
   limit.
 
-Not yet: 10⁶ pages (Scrapy and wget would take some 25 and 15 minutes a
-run), and the second site, a mirror of a public practice site (§9.3),
-which is to be fetched once by hand.
+- wget ends with 4 (a network failure): the site's pages that never
+  answer.
+
+Not measured at 10⁶: wget and Scrapy (some 15 and 25 minutes a run,
+and 30 and 55 times slower at 10⁵ already) and spider by default (its
+SQLite took 280 s at 10⁵). Not yet: the second site, a mirror of a
+public practice site (§9.3), which is to be fetched once by hand.

@@ -40,6 +40,7 @@ bench/http/README.md says how they are made and their versions.
 
 import argparse
 import collections
+import json
 import os
 import shutil
 import statistics
@@ -142,17 +143,64 @@ def crawl(name, work, site, connections, log=None):
         with open(os.path.join(site, "live.conf"), "w") as f:
             f.write(f"proxy {proxy}\nconnections {connections}\n")
         command, env = commands(name, work, site, connections, proxy)
-        start = time.perf_counter()
-        process = subprocess.Popen(command, cwd=site, env=env,
-                                   stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL)
-        _, status, usage = os.wait4(process.pid, 0)
-        seconds = time.perf_counter() - start
+        result = LAUNCHER.run(command, site, env)
     finally:
         server.terminate()
         server.wait()
-    return (seconds, usage.ru_utime + usage.ru_stime, usage.ru_maxrss / 1024,
-            os.waitstatus_to_exitcode(status))
+    return result
+
+
+class Launcher:
+    """Starts the crawlers from a process forked while this one is
+    small. (A child's peak memory starts at what it was forked from,
+    and exec keeps it: run from here, after the logs are read, no
+    crawler would show less than this script holds.)"""
+
+    def __init__(self):
+        ask_r, ask_w = os.pipe()
+        tell_r, tell_w = os.pipe()
+        self.pid = os.fork()
+        if self.pid == 0:
+            os.close(ask_w)
+            os.close(tell_r)
+            self.serve(os.fdopen(ask_r), os.fdopen(tell_w, "w"))
+            os._exit(0)
+        os.close(ask_r)
+        os.close(tell_w)
+        self.ask, self.tell = os.fdopen(ask_w, "w"), os.fdopen(tell_r)
+
+    @staticmethod
+    def serve(asks, tells):
+        devnull = os.open(os.devnull, os.O_RDWR)
+        for line in asks:
+            command, cwd, env = json.loads(line)
+            start = time.perf_counter()
+            pid = os.fork()
+            if pid == 0:
+                os.chdir(cwd)
+                os.dup2(devnull, 0)
+                os.dup2(devnull, 1)
+                os.dup2(devnull, 2)
+                try:
+                    os.execvpe(command[0], command, env)
+                finally:
+                    os._exit(127)
+            _, status, usage = os.wait4(pid, 0)
+            seconds = time.perf_counter() - start
+            tells.write(json.dumps([
+                seconds, usage.ru_utime + usage.ru_stime,
+                usage.ru_maxrss / 1024,
+                os.waitstatus_to_exitcode(status)]) + "\n")
+            tells.flush()
+
+    def run(self, command, cwd, env):
+        """Wall s, CPU s, peak MB and exit status of one run."""
+        self.ask.write(json.dumps([command, cwd, env]) + "\n")
+        self.ask.flush()
+        return tuple(json.loads(self.tell.readline()))
+
+
+LAUNCHER = None
 
 
 def asked(log):
@@ -167,6 +215,8 @@ def asked(log):
 
 
 def main():
+    global LAUNCHER
+    LAUNCHER = Launcher()
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("pages", nargs="*", type=int, default=[10000, 100000])
     parser.add_argument("--connections", type=int, default=64)
@@ -175,7 +225,9 @@ def main():
     parser.add_argument("--keep", help="where to keep sites and programs")
     args = parser.parse_args()
     names = [n for n in NAMES if n == "c" or n in args.only]
-    work = args.keep or tempfile.mkdtemp(prefix="ent-http-others-")
+    # (Absolute: the crawlers run in the site's directory.)
+    work = os.path.abspath(args.keep or
+                           tempfile.mkdtemp(prefix="ent-http-others-"))
     os.makedirs(work, exist_ok=True)
     subprocess.run(["cc", "-O2", "-march=native", "-o",
                     os.path.join(work, "serve"),
@@ -215,19 +267,21 @@ def main():
             print(verified[-1], flush=True)
         # Timed.
         for name in names:
-            runs = sorted(crawl(name, work, site, args.connections)[:3]
+            runs = sorted(crawl(name, work, site, args.connections)
                           for _ in range(args.rounds))
-            seconds, cpu, peak = runs[len(runs) // 2]
+            seconds, cpu, peak, _ = runs[len(runs) // 2]
+            codes = sorted({code for *_, code in runs} - {0})
             urls = len(counts[name])
             measured.append(
                 f"| {pages} | {args.connections} | {name} | {seconds:.3f} | "
-                f"{cpu:.3f} | {peak:.0f} | {urls / seconds:,.0f} |")
+                f"{cpu:.3f} | {peak:.0f} | {urls / seconds:,.0f} | "
+                f"{', '.join(map(str, codes))} |")
             print(measured[-1], flush=True)
     print("\n| pages | crawler | exit | URLs | asks | not asked | more "
           "| e.g. |\n|---|---|---|---|---|---|---|---|")
     print("\n".join(verified))
     print("\n| pages | connections | crawler | wall s | CPU s | peak MB "
-          "| URLs/s |\n|---|---|---|---|---|---|---|")
+          "| URLs/s | exit |\n|---|---|---|---|---|---|---|---|")
     print("\n".join(measured))
     if not args.keep:
         shutil.rmtree(work)

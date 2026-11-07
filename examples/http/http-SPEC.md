@@ -589,7 +589,7 @@ around in the example, not in the compiler:
 | **C1** | `site.py`, `pipeline.ent`, `crawl.ent`, `mock.ent`, `crawl_mock.ent`, `crawl_combined.ent`, `check/`. | K1 to K7, K10 and K12 (generated cases) pass on the mock; mock throughput measured. |
 | **C2** | `devices/http` and the local server with its httpbin endpoints and TLS listener. | D1 to D10 pass (done: test/Integration/http_device.test). |
 | **C3** | `crawl_live.ent`, `robots.txt`, `bench/http/crawl.c`. | K8, K9 and K11 pass (done: check/crawl.py --live); the live benchmark against C is measured and written down (done: bench/http/live.py, RESULTS.md: C 2.3 s at 10⁵ pages, ent 5.5 to 22.7 s, per-frame work over every waiting ask; after the first fixes 4.8 to 10.6 s, then 4.7 to 7.4 s, then 4.2 to 5.0 s, then 3.2 to 4.1 s). |
-| **C4** | The other crawlers' setups, the mirrored real site. | §9.2 measured and written down, every crawler verified first. |
+| **C4** | The other crawlers' setups, the mirrored real site. | §9.2 measured and written down, every crawler verified first (done on the generated site, bench/http/others.py, RESULTS.md: at 10⁵ C 2.3 s, ent 2.8, spider 4.0, Colly 6.2, wget 85, Scrapy 156; at 10⁶ spider 23, C 28, ent 37, Colly out of 14 GB; the mirror open). |
 | **C5** | `sites.md`, crawls of the public sites. | §9.3 run; what it found is in K12 and D1 to D10. |
 | **C6** | A live window (Clay, `layout`, `window`): requests in flight, slow ones, errors, history. | Shows a crawl as it runs. |
 
@@ -602,7 +602,8 @@ around in the example, not in the compiler:
    own endpoints in Python for the device tests, C2; serve.c for the
    crawl, C3.)
 3. Keep every `Ask` as history (the report needs the graph) or destroy
-   finished ones and keep only `history` rows? (C1 keeps them.)
+   finished ones and keep only `history` rows? (C1 keeps them: some
+   2.7 KB an ask, 2.8 GB at 10⁶ pages, C 0.6 GB.)
 4. The user agent string and the project URL in it for §9.3.
 5. Which of the other crawlers are worth their setup: all four, or
    start with Scrapy and spider and add the others if the numbers are
