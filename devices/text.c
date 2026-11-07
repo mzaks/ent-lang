@@ -26,11 +26,12 @@ static const struct {
 // tests of what is given back).
 #include <stdio.h>
 static long ent_text_held, ent_text_kept;
+static long ent_text_in_arenas(void);
 static void ent_text_report(void) {
   fprintf(stderr, "texts held: %ld\n", ent_text_held);
   // (Those made by joining, and not given back when their schedule was
   // done: none.)
-  fprintf(stderr, "texts kept: %ld\n", ent_text_kept);
+  fprintf(stderr, "texts kept: %ld\n", ent_text_kept + ent_text_in_arenas());
 }
 static void ent_text_count(long by) {
   static int asked;
@@ -102,7 +103,113 @@ static void ent_text_push(ent_text_made **list, ent_text_made *made) {
     ;
 }
 
+// Where one partition runs (no ranks, or one), what a thread makes is cut
+// from an arena of its own, its blocks one after another in chunks, and
+// given back all at once: the arenas start again from their newest
+// chunk, the older ones and the blocks too big for a chunk freed.
+typedef struct ent_text_chunk {
+  struct ent_text_chunk *next;
+  size_t room;
+  char bytes[];
+} ent_text_chunk;
+typedef struct ent_text_arena {
+  ent_text_chunk *chunk; // (the newest; the older ones after it)
+  size_t used;
+  ent_text_chunk *big; // (one a block)
+  long count;
+  struct ent_text_arena *next; // (every thread's)
+} ent_text_arena;
+static ent_text_arena *ent_text_arenas;
+static __thread ent_text_arena *ent_text_mine;
+enum { ent_text_first_chunk = 1 << 16, ent_text_most_chunk = 1 << 22 };
+
+static ent_text_chunk *ent_text_chunk_new(size_t room, ent_text_chunk *next) {
+  ent_text_chunk *chunk = malloc(sizeof(ent_text_chunk) + room);
+  if (!chunk)
+    abort();
+  chunk->next = next;
+  chunk->room = room;
+  return chunk;
+}
+
+static ent_text *ent_text_cut_out(uint32_t length) {
+  ent_text_arena *arena = ent_text_mine;
+  if (!arena) {
+    arena = calloc(1, sizeof(ent_text_arena));
+    if (!arena)
+      abort();
+    arena->next = __atomic_load_n(&ent_text_arenas, __ATOMIC_RELAXED);
+    while (!__atomic_compare_exchange_n(&ent_text_arenas, &arena->next, arena,
+                                        1, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
+      ;
+    ent_text_mine = arena;
+    ent_text_count(0); // (said at the end where asked)
+  }
+  ++arena->count;
+  // (The length, the bytes and a 0, 8-byte aligned.)
+  size_t size = (sizeof(uint32_t) + (size_t)length + 1 + 7) & ~(size_t)7;
+  if (size > ent_text_most_chunk / 4) {
+    arena->big = ent_text_chunk_new(size, arena->big);
+    ent_text *text = (ent_text *)arena->big->bytes;
+    text->length = length;
+    text->bytes[length] = 0;
+    return text;
+  }
+  if (!arena->chunk || arena->used + size > arena->chunk->room) {
+    size_t room = arena->chunk ? arena->chunk->room * 2 : ent_text_first_chunk;
+    while (room < size)
+      room *= 2;
+    if (room > ent_text_most_chunk)
+      room = ent_text_most_chunk;
+    arena->chunk = ent_text_chunk_new(room, arena->chunk);
+    arena->used = 0;
+  }
+  ent_text *text = (ent_text *)(arena->chunk->bytes + arena->used);
+  arena->used += size;
+  text->length = length;
+  text->bytes[length] = 0;
+  return text;
+}
+
+static void ent_text_chunks_free(ent_text_chunk *chunk) {
+  while (chunk) {
+    ent_text_chunk *next = chunk->next;
+    free(chunk);
+    chunk = next;
+  }
+}
+
+// Every arena given back. (Only while no thread makes texts: when a
+// schedule is done, its parallel loops are.)
+static void ent_text_arenas_reset(void) {
+  for (ent_text_arena *arena =
+           __atomic_load_n(&ent_text_arenas, __ATOMIC_ACQUIRE);
+       arena; arena = arena->next) {
+    if (!arena->count)
+      continue;
+    if (arena->chunk) {
+      ent_text_chunks_free(arena->chunk->next);
+      arena->chunk->next = 0;
+    }
+    ent_text_chunks_free(arena->big);
+    arena->big = 0;
+    arena->used = 0;
+    arena->count = 0;
+  }
+}
+
+static long ent_text_in_arenas(void) {
+  long count = 0;
+  for (ent_text_arena *arena =
+           __atomic_load_n(&ent_text_arenas, __ATOMIC_ACQUIRE);
+       arena; arena = arena->next)
+    count += arena->count;
+  return count;
+}
+
 static ent_text *ent_text_make(uint32_t length) {
+  if (ent_partitions_here() <= 1)
+    return ent_text_cut_out(length);
   ent_text_made *made = malloc(sizeof(ent_text_made) + length + 1);
   if (!made)
     abort();
@@ -175,8 +282,10 @@ uint64_t ent_text_keep(uint64_t view) {
 void ent_text_release(void) {
   ent_text_free(__atomic_exchange_n(&ent_text_all_made, 0, __ATOMIC_ACQUIRE));
   int partitions = ent_partitions_here();
-  if (partitions <= 1)
+  if (partitions <= 1) {
+    ent_text_arenas_reset();
     return;
+  }
   // (This partition has given back in this round; the last to do so ends
   // it, and what was made in the one before is given back.)
   while (__atomic_test_and_set(&ent_text_rounds_lock, __ATOMIC_ACQUIRE))
@@ -201,6 +310,7 @@ void ent_text_release(void) {
 // Every partition of the process done: what threads of parallel loops
 // made is nobody's any more (devices/ranks.c).
 void ent_text_release_all(void) {
+  ent_text_arenas_reset();
   for (int round = 0; round < 3; ++round)
     ent_text_free(
         __atomic_exchange_n(&ent_text_made_in[round], 0, __ATOMIC_ACQUIRE));

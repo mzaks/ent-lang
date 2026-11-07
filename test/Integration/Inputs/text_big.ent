@@ -1,0 +1,24 @@
+// A text read that is larger than the room a schedule's texts start
+// with, texts joined that outgrow their rooms, and some larger than any
+// room (text_big.test).
+import console
+import text
+import files
+
+unique Round: i32
+
+fn doubled(t: text, n: i32) -> text {
+  if n == 0 { t } else { doubled(t + t + "!", n - 1) }
+}
+
+system grow() {
+  Round += 1
+  let read = read_text("big.txt")
+  let t = doubled("0123456789abcdef", 18)
+  let at = find(t, "f!0", 0)
+  let last = t[len(t) - 1]
+  put("{Round}: read {len(read)}, {len(t)} bytes, {at} {last}")
+}
+
+schedule frame() { grow() }
+main { loop { frame() } until Round == 3 }

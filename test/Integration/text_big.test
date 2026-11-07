@@ -1,0 +1,19 @@
+// Texts that are made while a schedule runs are cut from rooms of its,
+// one after the other, and given back when it is done: a text larger
+// than the room there is gets a room as large, one larger than any a
+// room of its own. Three rounds of a file of 300 kB read first, then
+// texts joined from 33 bytes to 4.4 MB; nothing kept at the end.
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: %ent build %S/Inputs/text_big.ent -o %t/text_big
+// RUN: %ent build --parallel %S/Inputs/text_big.ent -o %t/text_big_parallel
+// RUN: head -c 300000 /dev/zero | tr '\0' 'a' > %t/big.txt
+// RUN: cd %t && env -u ENT_PROGRAM_DIR ENT_TEXT_REPORT=1 %t/text_big > %t/out 2> %t/err
+// RUN: FileCheck %s --input-file=%t/out
+// RUN: FileCheck %s --check-prefix=HELD --input-file=%t/err
+// RUN: cd %t && env -u ENT_PROGRAM_DIR ENT_TEXT_REPORT=1 %t/text_big_parallel 2> %t/perr | cmp - %t/out
+// RUN: FileCheck %s --check-prefix=HELD --input-file=%t/perr
+
+// CHECK:      1: read 300000, 4456447 bytes, 31 33
+// CHECK-NEXT: 2: read 300000, 4456447 bytes, 31 33
+// CHECK-NEXT: 3: read 300000, 4456447 bytes, 31 33
+// HELD:       texts kept: 0

@@ -106,7 +106,8 @@ fn origin(url: text) -> text {
 
 // The host of an absolute URL (as `normalise` makes it).
 fn host_of(url: text) -> text {
-  slice(origin(url), scheme_end(url) + 3, len(origin(url)))
+  let o = origin(url)
+  slice(o, scheme_end(url) + 3, len(o))
 }
 
 // Where a link `link` on the page at `base` (an absolute URL) goes, or

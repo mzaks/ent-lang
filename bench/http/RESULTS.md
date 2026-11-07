@@ -393,3 +393,44 @@ Measured (C in the same run):
 
 At 10⁴ ent is within 3 to 8% of C; at 10⁵ it takes 1.3 to 1.5 times
 as long, most of the rest being `receive`.
+
+### Texts made cut from arenas
+
+`receive` is the device and the network, as much as C's: profiled at
+10⁵ pages and 64 connections, curl takes 0.51 s of ent's user time and
+0.48 s of C's, and both wait 1.1 s. What C did not spend was text: each
+text made while a schedule ran (a slice, a join, a body read) had a
+malloc of its own, two atomic adds and a push onto a list, and the list
+was walked and freed when the schedule was done; `ent_text_make` and
+`ent_text_release` with malloc and free were a fifth of the user time.
+Now a thread cuts them from rooms of its own, one after the other, and
+they are given back all at once (devices/text.c; a partitioned run on
+ranks keeps its lists). User time 1.73 to 1.36 s. (`allowed`, which
+joined the allow list for each link, is a `HostByName` lookup now, as C
+has it; within noise once joining is cheap.)
+
+| pages | connections | crawler | wall s | CPU s | peak MB | pages/s |
+|---|---|---|---|---|---|---|
+| 10⁴ | 64 | C | 1.020 | 0.133 | 24 | 10,321 |
+| 10⁴ | 64 | ent | 1.049 | 0.176 | 63 | 10,033 |
+| 10⁴ | 64 | ent-par | 1.059 | 0.232 | 62 | 9,939 |
+| 10⁴ | 256 | C | 1.046 | 0.146 | 24 | 10,069 |
+| 10⁴ | 256 | ent | 1.064 | 0.201 | 64 | 9,897 |
+| 10⁴ | 256 | ent-par | 1.074 | 0.220 | 63 | 9,801 |
+| 10⁴ | 1024 | C | 1.076 | 0.213 | 24 | 9,784 |
+| 10⁴ | 1024 | ent | 1.091 | 0.262 | 68 | 9,650 |
+| 10⁴ | 1024 | ent-par | 1.070 | 0.268 | 68 | 9,843 |
+| 10⁵ | 64 | C | 2.246 | 1.147 | 70 | 46,962 |
+| 10⁵ | 64 | ent | 2.879 | 1.777 | 374 | 36,640 |
+| 10⁵ | 64 | ent-par | 3.289 | 2.415 | 379 | 32,069 |
+| 10⁵ | 256 | C | 2.043 | 1.334 | 76 | 51,639 |
+| 10⁵ | 256 | ent | 2.337 | 1.628 | 350 | 45,141 |
+| 10⁵ | 256 | ent-par | 2.450 | 1.812 | 351 | 43,050 |
+| 10⁵ | 1024 | C | 2.863 | 2.160 | 76 | 36,843 |
+| 10⁵ | 1024 | ent | 3.132 | 2.416 | 354 | 33,682 |
+| 10⁵ | 1024 | ent-par | 3.216 | 2.551 | 346 | 32,804 |
+
+At 10⁵ ent takes 1.09 to 1.28 times as long as C (1.3 to 1.5 before),
+and holds less at its peak (374 MB where 480, the same hour's runs).
+The mock, which makes far more texts a frame, gains most: 10⁴ 0.113 to
+0.058 s, 10⁵ 1.754 to 0.684 s on one core (0.068 / 0.704 on all).

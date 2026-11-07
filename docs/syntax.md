@@ -1309,7 +1309,10 @@ component is removed or its entity destroyed.
   What joining makes is nobody's: the world keeps it until the schedule
   that runs is done, and a field that is given it takes its copy. (What
   is joined right where a field is given it, `t.words = a + b` or `+=`,
-  is made as the field's own: nothing is kept for it.)
+  is made as the field's own: nothing is kept for it.) What is kept is
+  cut from rooms of the thread that made it, one after the other, and
+  given back all at once: a text joined costs its copy, not an
+  allocation of its own.
 - A fn or proc takes and gives them: a literal, a `text` it was given,
   one it joined, or a `text[N]` of its own, which is then kept like a
   joined one. An extern fn or proc
