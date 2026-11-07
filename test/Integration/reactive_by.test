@@ -1,0 +1,18 @@
+// Reactive `for`s by a field, in turn and not: the entities with an
+// event since they last ran, in the order of the field; from the logs, or
+// every entity's stamps on a first run and where a log lost events. The
+// same as `for`s by the field that find the same entities by a `where`
+// (on the first run, every entity: spawning stamps its fields changed),
+// and with threads.
+// RUN: %ent run %S/Inputs/reactive_by.ent 2>/dev/null > %t.out
+// RUN: sed -e 's/in turn by a.key on added Hit log 4 {/in turn by a.key where a.late < 0 {/' \
+// RUN:     -e 's/in turn by a.key on added Hit {/in turn by a.key where a.got < 0 {/' \
+// RUN:     -e 's/  for a: A by a.key on changed a.bumps {/  let s = Step\n  for me, a: A by a.key where s == 1 || (me.has(Hit) \&\& a.n % 3 == s % 3) {/' \
+// RUN:     %S/Inputs/reactive_by.ent > %t.scan.ent
+// RUN: %ent run %t.scan.ent 2>/dev/null | cmp - %t.out
+// RUN: %ent run --parallel %S/Inputs/reactive_by.ent 2>/dev/null | cmp - %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK: a 0 key 0 got 34 late 34 bumps 0
+// CHECK-NEXT: a 1 key 17 got 5 late 5 bumps 3
+// CHECK: order

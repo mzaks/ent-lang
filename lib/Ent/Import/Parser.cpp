@@ -11902,8 +11902,6 @@ LogicalResult Parser::parseFor() {
     where = std::move(*condition);
   }
   SmallVector<Attribute> triggers;
-  if (by && token.isKeyword("on"))
-    return error("a 'for' that goes by a field does not react ('on') yet");
   if (consumeKeyword("on")) {
     do {
       llvm::SMLoc triggerAt = token.loc;

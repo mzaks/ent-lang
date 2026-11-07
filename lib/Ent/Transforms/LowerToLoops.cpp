@@ -14133,15 +14133,17 @@ static Value rowList(IRRewriter &rewriter, Location loc, QueryOp query,
 
 static void walkLogs(IRRewriter &rewriter, QueryOp query,
                      const WorldLayout &layout, WorldAccess &world, Value tick,
-                     Value seen, bool parallel) {
+                     Value seen, bool parallel, bool gatherOnly = false) {
   Location loc = query.getLoc();
   SmallVector<Trigger> triggers = getTriggers(query);
   auto index =
       query->getAttrOfType<IntegerAttr>(WorldLayout::kReactiveIndexAttr);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-  // (Where the order of the rows shows: the rows first, then the bodies.)
-  bool ordered = query->hasAttr(kRowOrderedAttr);
+  // (Where the order of the rows shows: the rows first, then the bodies.
+  // With `gatherOnly`, the rows only, on the lists of rowList: a query by
+  // a field puts their entities in its order.)
+  bool ordered = query->hasAttr(kRowOrderedAttr) || gatherOnly;
   assert(!(ordered && parallel) && "a row-ordered walk on several threads");
   for (unsigned k = 0; k < triggers.size(); ++k) {
     Stamp stamp = getStamp(triggers[k]);
@@ -14239,7 +14241,7 @@ static void walkLogs(IRRewriter &rewriter, QueryOp query,
     rewriter.setInsertionPointAfter(segments);
     hoistResourceReads(rewriter, segments, world);
   }
-  if (!ordered)
+  if (!ordered || gatherOnly)
     return;
   // The rows gathered, in order, and the body for each.
   for (const WorldArchetype &archetype : layout.archetypes) {
@@ -19915,6 +19917,23 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
   }
   Operation *module = ArchetypeOp(matched.front()->op)->getParentOp();
   rewriter.setInsertionPoint(query);
+  // Reactive (of its own entity's events, see the verifier): it starts by
+  // taking the tick it last started at and advancing the counter, as any
+  // reactive query does (lowerQuery), and lists only the entities with an
+  // event since, from its logs, or, on its first run or where a log lost
+  // events, from every entity's stamps.
+  SmallVector<Trigger> triggers = getTriggers(query);
+  bool reacts = !triggers.empty();
+  Value seen;
+  if (reacts) {
+    Value last = world.lastTick(query);
+    Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
+    seen = memref::LoadOp::create(rewriter, loc, last, ValueRange{zero});
+    Value next = world.currentTick(loc);
+    memref::StoreOp::create(rewriter, loc, next, last, ValueRange{zero});
+    memref::StoreOp::create(rewriter, loc, next, world.tickCounter(),
+                            ValueRange{zero});
+  }
   Value tick = world.hasStamps() ? world.currentTick(loc) : Value();
   if (options.gpu) {
     // (No hash index answers it there: it goes by where the entities are
@@ -19968,21 +19987,104 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
   // holds the same entities and is up to date (--ent-indexes), as it has
   // them: the same order.
   const WorldBuffer *byIndex = nullptr;
-  if (FlatSymbolRefAttr name = query.getByIndex(); name && !spread)
+  if (FlatSymbolRefAttr name = query.getByIndex(); name && !spread && !reacts)
     byIndex = &layout.getBuffer(name.getAttr());
   // Or, of a `for` whose `where` asks for a key a hash index by it holds
   // (QueryOp::kViaHashAttr), those of the index's entities that have it,
   // then put in the order they are stored (see `index ... hash`).
   const WorldBuffer *viaHash = nullptr;
-  if (FlatSymbolRefAttr name = query.getViaHash(); name && !spread)
+  if (FlatSymbolRefAttr name = query.getViaHash(); name && !spread && !reacts)
     viaHash = &layout.getBuffer(name.getAttr());
   else
     query.dropEquals();
+  if (reacts && spread) {
+    query.emitError("goes 'by' a field and reacts, over entities on many "
+                    "ranks: not supported yet");
+    return;
+  }
   llvm::DenseMap<const WorldArchetype *, Value> startCounts;
+  for (const WorldArchetype *archetype : matched)
+    startCounts[archetype] = world.count(loc, *archetype);
+  // Of a row: whether it has and lacks what the query asks of it in the
+  // archetype's bytes (`with`, `without`, `any`, where they are held
+  // optionally); whether an event of the query's fired for it since
+  // `seen`; and its key and id listed at `at`.
+  auto presentAsAsked = [&](const WorldArchetype &archetype,
+                            const PresenceTest &test, Value row) -> Value {
+    auto has = [&](FlatSymbolRefAttr component) -> Value {
+      Value byte = memref::LoadOp::create(
+          rewriter, loc,
+          world.column(archetype, component.getAttr(),
+                       rewriter.getStringAttr("")),
+          ValueRange{row});
+      return arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::ne, byte,
+          arith::ConstantIntOp::create(rewriter, loc, 0, 8));
+    };
+    Value keep = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+    auto also = [&](Value term) {
+      keep = arith::AndIOp::create(rewriter, loc, keep, term);
+    };
+    for (FlatSymbolRefAttr component : test.present)
+      also(has(component));
+    for (FlatSymbolRefAttr component : test.absent)
+      also(arith::XOrIOp::create(
+          rewriter, loc, has(component),
+          arith::ConstantIntOp::create(rewriter, loc, 1, 1)));
+    for (const auto &group : test.anyPresent) {
+      Value any = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
+      for (FlatSymbolRefAttr component : group)
+        any = arith::OrIOp::create(rewriter, loc, any, has(component));
+      also(any);
+    }
+    return keep;
+  };
+  auto stampsOf = [&](const WorldArchetype &archetype) {
+    SmallVector<const WorldColumn *> columns;
+    for (const Trigger &trigger : triggers)
+      if (const WorldColumn *column = archetype.findStamp(getStamp(trigger)))
+        columns.push_back(column);
+    return columns;
+  };
+  auto firedAt = [&](const WorldArchetype &archetype, Value row) -> Value {
+    Value fired = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
+    for (const WorldColumn *column : stampsOf(archetype))
+      fired = arith::OrIOp::create(
+          rewriter, loc, fired,
+          arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::sgt,
+              memref::LoadOp::create(rewriter, loc,
+                                     world.stamps(archetype, *column),
+                                     ValueRange{row}),
+              seen));
+    return fired;
+  };
+  auto listAt = [&](const WorldArchetype &archetype, Value row, Value at) {
+    Value stored = memref::LoadOp::create(
+        rewriter, loc, world.column(archetype, byComponent, byField),
+        ValueRange{row});
+    memref::StoreOp::create(
+        rewriter, loc,
+        keyOf(stored, archetype.find(byComponent, byField)->type), keys,
+        ValueRange{at});
+    memref::StoreOp::create(rewriter, loc, world.entityId(loc, archetype, row),
+                            ids, ValueRange{at});
+  };
+  // (Reactive: listed from every row's stamps on a first run or where
+  // events were lost, else from the logs.)
+  scf::IfOp scanOrWalk;
+  if (reacts) {
+    Value scan = openLogs(rewriter, query, layout, world, seen).first;
+    scanOrWalk = scf::IfOp::create(rewriter, loc, scan,
+                                   /*withElseRegion=*/true);
+    rewriter.setInsertionPoint(scanOrWalk.thenBlock()->getTerminator());
+  }
   for (const WorldArchetype *archetype : matched) {
-    Value rows = world.count(loc, *archetype);
-    startCounts[archetype] = rows;
+    Value rows = startCounts[archetype];
     if (byIndex || viaHash || listed)
+      continue;
+    // (No event of the query's is stamped on these.)
+    if (reacts && stampsOf(*archetype).empty())
       continue;
     Value from = zero;
     if (spread) {
@@ -20035,53 +20137,20 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
     // as the asks waiting to be sent among all there were, the sort is
     // of the few).
     PresenceTest test = getPresenceTest(query, ArchetypeOp(archetype->op));
-    if (!test.empty() && !spread) {
-      auto has = [&](FlatSymbolRefAttr component, Value row) -> Value {
-        Value byte = memref::LoadOp::create(
-            rewriter, loc,
-            world.column(*archetype, component.getAttr(),
-                         rewriter.getStringAttr("")),
-            ValueRange{row});
-        return arith::CmpIOp::create(
-            rewriter, loc, arith::CmpIPredicate::ne, byte,
-            arith::ConstantIntOp::create(rewriter, loc, 0, 8));
-      };
+    if ((reacts || !test.empty()) && !spread) {
       auto sift = scf::ForOp::create(
           rewriter, loc, from, rows, one, ValueRange{before},
           [&](OpBuilder &, Location, Value row, ValueRange at) {
-            Value keep = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
-            auto also = [&](Value term) {
-              keep = arith::AndIOp::create(rewriter, loc, keep, term);
-            };
-            for (FlatSymbolRefAttr component : test.present)
-              also(has(component, row));
-            for (FlatSymbolRefAttr component : test.absent)
-              also(arith::XOrIOp::create(
-                  rewriter, loc, has(component, row),
-                  arith::ConstantIntOp::create(rewriter, loc, 1, 1)));
-            for (const auto &group : test.anyPresent) {
-              Value any = arith::ConstantIntOp::create(rewriter, loc, 0, 1);
-              for (FlatSymbolRefAttr component : group)
-                any = arith::OrIOp::create(rewriter, loc, any,
-                                           has(component, row));
-              also(any);
-            }
+            Value keep = presentAsAsked(*archetype, test, row);
+            if (reacts)
+              keep = arith::AndIOp::create(rewriter, loc, keep,
+                                           firedAt(*archetype, row));
             auto ifKeep = scf::IfOp::create(rewriter, loc, keep,
                                             /*withElseRegion=*/false);
             {
               OpBuilder::InsertionGuard inner(rewriter);
               rewriter.setInsertionPointToStart(ifKeep.thenBlock());
-              Value stored = memref::LoadOp::create(
-                  rewriter, loc,
-                  world.column(*archetype, byComponent, byField),
-                  ValueRange{row});
-              memref::StoreOp::create(
-                  rewriter, loc,
-                  keyOf(stored, archetype->find(byComponent, byField)->type),
-                  keys, ValueRange{at[0]});
-              memref::StoreOp::create(rewriter, loc,
-                                      world.entityId(loc, *archetype, row),
-                                      ids, ValueRange{at[0]});
+              listAt(*archetype, row, at[0]);
             }
             scf::YieldOp::create(
                 rewriter, loc,
@@ -20122,6 +20191,64 @@ static void lowerOrdered(IRRewriter &rewriter, QueryOp query,
         arith::AddIOp::create(rewriter, loc, before,
                               arith::SubIOp::create(rewriter, loc, rows, from)),
         cells, ValueRange{zero});
+  }
+  if (reacts) {
+    // The rows the logs name (each once: an entity's latest event, of the
+    // first trigger that fired for it), as they are stored, and of those
+    // the ones that have and lack what the query asks.
+    rewriter.setInsertionPoint(scanOrWalk.elseBlock()->getTerminator());
+    walkLogs(rewriter, query, layout, world, tick, seen, /*parallel=*/false,
+             /*gatherOnly=*/true);
+    for (const WorldArchetype *archetype : matched) {
+      if (stampsOf(*archetype).empty())
+        continue;
+      Value list = rowList(rewriter, loc, query, *archetype);
+      Value count = arith::IndexCastOp::create(
+          rewriter, loc, index,
+          callSends(rewriter, loc, world, "ent_rows_sort", {list},
+                    /*gives=*/true));
+      Value before =
+          memref::LoadOp::create(rewriter, loc, cells, ValueRange{zero});
+      PresenceTest test = getPresenceTest(query, ArchetypeOp(archetype->op));
+      // (Its body made in place: what it calls is declared in the module
+      // it is in.)
+      auto gather = scf::ForOp::create(rewriter, loc, zero, count, one,
+                                       ValueRange{before});
+      {
+        OpBuilder::InsertionGuard inner(rewriter);
+        rewriter.setInsertionPointToStart(gather.getBody());
+        if (!gather.getBody()->empty() &&
+            isa<scf::YieldOp>(gather.getBody()->back()))
+          rewriter.setInsertionPoint(gather.getBody()->getTerminator());
+        Value k = gather.getInductionVar();
+        Value at = gather.getRegionIterArgs().front();
+        Value row = arith::IndexCastOp::create(
+            rewriter, loc, index,
+            callSends(rewriter, loc, world, "ent_rows_at",
+                      {list, arith::IndexCastOp::create(rewriter, loc, i64, k)},
+                      /*gives=*/true));
+        Value keep = presentAsAsked(*archetype, test, row);
+        auto ifKeep = scf::IfOp::create(rewriter, loc, keep,
+                                        /*withElseRegion=*/false);
+        {
+          OpBuilder::InsertionGuard listing(rewriter);
+          rewriter.setInsertionPointToStart(ifKeep.thenBlock());
+          listAt(*archetype, row, at);
+        }
+        Value next = arith::SelectOp::create(
+            rewriter, loc, keep, arith::AddIOp::create(rewriter, loc, at, one),
+            at);
+        if (!gather.getBody()->empty() &&
+            isa<scf::YieldOp>(gather.getBody()->back()))
+          rewriter.eraseOp(gather.getBody()->getTerminator());
+        rewriter.setInsertionPointToEnd(gather.getBody());
+        scf::YieldOp::create(rewriter, loc, ValueRange{next});
+      }
+      memref::StoreOp::create(rewriter, loc, gather.getResult(0), cells,
+                              ValueRange{zero});
+    }
+    rewriter.setInsertionPointAfter(scanOrWalk);
+    closeLogs(rewriter, query, layout, world);
   }
   if (listed) {
     // The buffer's entities, in its rows' order.

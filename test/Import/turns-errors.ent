@@ -47,12 +47,3 @@ system s() {
     Rows[0].n = 1
   }
 }
-
-// -----
-
-component Thing { born: i32 }
-system s() {
-  // expected-error @+1 {{a 'for' that goes by a field does not react ('on') yet}}
-  for t: Thing in turn by t.born on changed t.born {
-  }
-}

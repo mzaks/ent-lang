@@ -477,7 +477,14 @@ after the filters, where `top down` stands for a tree:
   it sends to, read a unique it adds into, or read a buffer it gives rows
   to (as a `for` along a tree does not). Who is destroyed, or moved by
   `add` and `remove`, is so when the `for` ends, and what is spawned is
-  not visited.
+  not visited. A `for` by a field (or `in turn by`) may react to its own
+  entity's events too (`for a: mut Ask in turn by a.serial on added At`,
+  the `on` after the `by` and its `where`): the entities the log names,
+  or on a first run and where the log lost events those whose stamps say
+  so, put in the field's order, the rest as without `on` (not to the
+  events of another entity along a tree, nor on many processes; the
+  crawler's turns at its hosts, examples/http/crawl.ent,
+  `test/Integration/reactive_by.test`).
 - `in turn by name.field` makes each entity a `for` of its own, one
   after another in that order. Whatever the body does is done when the
   next entity's turn comes, and whatever it reads is as it is then:

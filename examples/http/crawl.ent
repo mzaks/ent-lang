@@ -187,14 +187,15 @@ system read_robots() {
 }
 
 // At most `per_host` asks out to a host at once; the others held back,
-// the oldest let go first. Each ask, as it comes, takes the next turn at
-// its host and waits (`take_turns`); each frame a host lets go as many
-// more turns as it has room for, those asks found by their turn
-// (`ByTurn`): a queue for each host, so no frame looks at the asks that
-// still wait.
+// the oldest let go first. Each ask, as it is given its host (`place`
+// gives `At` once it may go, with `Held` where it may not), takes the
+// next turn at its host and waits (`take_turns`); each frame a host lets
+// go as many more turns as it has room for, those asks found by their
+// turn (`ByTurn`): a queue for each host, so no frame looks at the asks
+// that still wait.
 fn turn_key(host: i64, n: i64) -> i64 { host * 4294967296 + n }
 system take_turns() {
-  for me, a: Ask, at: At without Sent, Held, Turn in turn by a.serial {
+  for me, a: Ask, at: At without Sent, Held, Turn in turn by a.serial on added At {
     if let n = Host(at.host).turns, let number = Host(at.host).number {
       Host(at.host).turns = n + 1
       me.add(Turn { n: n, key: turn_key(number, n) })

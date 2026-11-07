@@ -1,0 +1,55 @@
+// Reactive `for`s by a field (test/Integration/reactive_by.test): the
+// entities with an event since the `for` last ran, in the order of the
+// field, from the logs; on the first run, or where a log lost events
+// (`log 4`), from every entity's stamps. The same as a `for` by the field
+// over the same entities without `on`.
+import console
+component A { n: i64, key: i64, got: i64, late: i64, bumps: i64 } capacity 256
+tag Hit
+tag Seen
+buffer Order { who: entity, key: i64 } capacity 4096
+unique Counter: i64
+unique Late: i64
+unique Step: i64
+world {
+  for i in 0..40 {
+    spawn { A { n: i, key: (i * 17) % 40, got: -1, late: -1, bumps: 0 } }
+  }
+}
+system go() {
+  Step += 1
+  let s = Step
+  for me, a: mut A without Hit {
+    if a.n % 7 == s % 7 { me.add(Hit) }
+  }
+  for a: mut A with Hit {
+    if a.n % 3 == s % 3 { a.bumps += 1 }
+  }
+}
+// In turn: each sees what those before it did.
+system number() {
+  for a: mut A with Hit in turn by a.key on added Hit {
+    a.got = Counter
+    Counter += 1
+  }
+}
+// From a log too small for a step's events: scans then.
+system late() {
+  for a: mut A with Hit in turn by a.key on added Hit log 4 {
+    a.late = Late
+    Late += 1
+  }
+}
+// Not in turn, on a change of a field, giving rows where it stands.
+system listing() {
+  for a: A by a.key on changed a.bumps {
+    Order += { who: none, key: a.key * 100 + a.bumps }
+  }
+}
+system say() {
+  for a: A by a.n { put("a {a.n} key {a.key} got {a.got} late {a.late} bumps {a.bumps}") }
+  for r in 0..len(Order) { put("order {Order[r].key}") }
+}
+schedule frame() { go() number() late() listing() }
+schedule end() { say() }
+main { frame() frame() frame() frame() frame() frame() frame() frame() end() }

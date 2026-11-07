@@ -321,10 +321,13 @@ are going at its most (36,207 at 10⁵, 360,260 at 10⁶), and it gives
   `ByTurn` is a hash index of those keys. `be_polite` finds the asks
   whose turn came by it (a buffer of them, `LetGo`, then `for .. in
   LetGo`), where every held ask looked at its host's turn every frame:
-  0.56 to 0.02 s. (`take_turns` still looks at every ask with a host for
-  those without a turn, 0.15 s: the asks are one family of archetypes
-  where `Turn` is held optionally, and a `for` by a field does not react
-  yet.)
+  0.56 to 0.02 s. (`take_turns` still looked at every ask with a host
+  for those without a turn, 0.15 s: the asks are one family of
+  archetypes where `Turn` is held optionally. A `for` by a field may now
+  react, and `take_turns` is `on added At`, going over the asks given a
+  host since; measured while this machine's cores were held at 0.6 GHz,
+  it took 47 ms where the systems not changed took 4.5 times as long as
+  at full speed: about a tenth of what it took. To be measured again.)
 
 Traced at 10⁵ pages and 64 connections: 5.1 to 3.7 s; `receive` 2.1 s
 and `extract_links` 0.7 s are most of what is left. Measured (C in the

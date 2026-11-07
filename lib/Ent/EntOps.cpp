@@ -2470,9 +2470,15 @@ LogicalResult QueryOp::verify() {
     if (getCascade())
       return emitOpError("goes 'by' a field and cascades along a tree; "
                          "it has one order");
+    // (Reactive, of its own entity's events: the entities they name are
+    // put in the order. Not of another entity's, along a tree.)
     if ((*this)->hasAttr(kTriggersAttr))
-      return emitOpError("goes 'by' a field and is reactive, which is not "
-                         "supported yet");
+      for (const Trigger &trigger : getTriggers(*this))
+        if (trigger.via || trigger.where != Trigger::Own ||
+            trigger.kind == Trigger::Connected)
+          return emitOpError("goes 'by' a field and reacts to an event of "
+                             "another entity along a tree, which is not "
+                             "supported yet");
     if (!llvm::is_contained(getRequired(), getByComponent()))
       return emitOpError("goes by a field of ")
              << getByComponent()
