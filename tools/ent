@@ -564,6 +564,11 @@ def machine_features(clang, cflags):
                     if word == "-target-feature")
 
 
+# Headers the devices' C uses, kept in the repository (StringZilla, for
+# devices/text.c: see devices/stringzilla/README.md).
+VENDORED = ["-I", os.path.join(ROOT, "devices", "stringzilla", "include")]
+
+
 def cpu_flags():
     """The flags of ENT_CFLAGS that say what processor the program is made
     for (-march=native, say): its modules' C and C++ are made for the same
@@ -1358,7 +1363,7 @@ def check_externs(clang, cc, cxx, sources, crates, emits, fns, directory,
         ir_path = os.path.join(directory, "externs.%d.ll" % index)
         compiled = subprocess.run(
             [clang, "-O2", "-S", "-emit-llvm", "-w", "-x", language,
-             "-I", directory, *flags, source, "-o", ir_path]
+             "-I", directory, *VENDORED, *flags, source, "-o", ir_path]
             + host_includes(cxx if language == "c++" else cc, language),
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         if compiled.returncode:
@@ -1678,11 +1683,11 @@ def build(arguments, output, directory):
                 cuda = ["-DENT_GPU", "-I", os.path.join(
                     os.environ.get("CUDA_PATH", "/opt/cuda"), "include")]
             mpi = mpi_flags()[0] if arguments.ranks else []
-            run([cc, "-O2", *cpu_flags(), "-I", directory, *cuda, *mpi,
-                 "-c", path, "-o", built], env=host)
+            run([cc, "-O2", *cpu_flags(), "-I", directory, *VENDORED, *cuda,
+                 *mpi, "-c", path, "-o", built], env=host)
         elif extension == ".cpp":
-            run([cxx, "-O2", *cpu_flags(), "-I", directory, "-c", path,
-                 "-o", built], env=host)
+            run([cxx, "-O2", *cpu_flags(), "-I", directory, *VENDORED, "-c",
+                 path, "-o", built], env=host)
         else:
             with open(path) as source:
                 command = source.read().strip()

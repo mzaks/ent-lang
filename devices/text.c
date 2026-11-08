@@ -8,6 +8,20 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+// (StringZilla, where it is found: searches and the bytes made lower case
+// by the processor's vector instructions, those the compiler is told of.)
+#if defined(__has_include)
+#if __has_include("stringzilla/find.h")
+#include "stringzilla/find.h"
+#include "stringzilla/memory.h"
+// (Where it has vector code for the processor: without, the C library's
+// memchr, which picks its own as the program runs, is as fast.)
+#if SZ_USE_HASWELL || SZ_USE_SKYLAKE || SZ_USE_ICELAKE || SZ_USE_NEON ||      \
+    SZ_USE_SVE
+#define ENT_TEXT_STRINGZILLA 1
+#endif
+#endif
+#endif
 
 typedef struct {
   uint32_t length;
@@ -472,6 +486,11 @@ ENT_TEXT_SAME_RESULT int32_t ent_text_find(const ent_text *text,
     return -1;
   if (!what->length)
     return from;
+#ifdef ENT_TEXT_STRINGZILLA
+  sz_cptr_t found = sz_find(text->bytes + from, text->length - from,
+                            what->bytes, what->length);
+  return found ? (int32_t)(found - text->bytes) : -1;
+#endif
   // (Not memmem: Windows has none.)
   const char *at = text->bytes + from, *end = text->bytes + text->length;
   while ((size_t)(end - at) >= what->length) {
@@ -512,6 +531,17 @@ ENT_TEXT_SAME_RESULT const ent_text *ent_text_lower(const ent_text *text) {
   if (first == text->length)
     return text->length ? text : 0;
   ent_text *low = ent_text_new(text->length);
+#ifdef ENT_TEXT_STRINGZILLA
+  static char table[256];
+  static int made;
+  if (!made) {
+    for (int c = 0; c < 256; ++c)
+      table[c] = (char)(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    made = 1;
+  }
+  sz_lookup(low->bytes, text->length, text->bytes, table);
+  return low;
+#endif
   for (uint32_t i = 0; i < text->length; ++i) {
     char c = text->bytes[i];
     low->bytes[i] = c >= 'A' && c <= 'Z' ? (char)(c - 'A' + 'a') : c;

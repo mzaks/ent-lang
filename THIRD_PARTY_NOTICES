@@ -489,3 +489,17 @@ in this repository; examples/beecs/reference/fetch.sh fetches them.
   GNU General Public License, version 3. The license's text is in
   examples/beecs/COPYING. The files in examples/beecs are under it and
   not under the MIT License.
+
+
+11. StringZilla (Ash Vardanian)
+-------------------------------
+
+Used in: devices/text.c (a text's find and lower), by way of the headers
+of StringZilla v5.3.1 (github.com/ashvardanian/StringZilla) in
+devices/stringzilla/include, as they are. Not modified.
+
+  Copyright (C) Ash Vardanian and the StringZilla contributors
+
+  Apache License, Version 2.0. The license's text is in
+  devices/stringzilla/LICENSE. The files in devices/stringzilla are under
+  it and not under the MIT License.

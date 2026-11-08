@@ -711,6 +711,41 @@ call (`tcp_v4_rcv`, `ep_poll_callback`, waking its thread), so it pays
 the server's side of receiving too, which another machine would. What
 io_uring saves, the way in and out of a call, is about 1% here.
 
+### ent's own work per page (2026-11-08)
+
+Where ent's user time goes past C's (`perf record --call-graph dwarf`,
+10⁵ pages): its own code, about 276 ms, `read_links` 100 of it and
+`extract_links` 72; by function the text library (`ent_text_hash` 36,
+`make` 22, `lower` 15, `find` 12, `join` 11, `slice` 10), `apart` moves
+(`ent.pending` 36: `ready` adding and taking away `Going`) and spawning
+an ask for each new link (45). A text is already cut from an arena
+(`make` is a nanosecond or so), so a slice that is a view of its text
+(a text's length is in its block, so a view would be a new kind of
+value everywhere) is not worth it for the copies it saves; C does the
+same work (it lowers each page and makes a URL from pieces), through
+`malloc`. Done:
+
+- A text key's two hashes in one pass (`ent_text_hash_pair`; 9ae7b01),
+  its blocks read by two 8-byte loads, not by way of the stack: hashing
+  3.6 to 1.9% of the crawl's user cycles, the hashes as they were.
+- `find` and `lower` by StringZilla (devices/stringzilla, v5.3.1,
+  vendored), where the processor flags give it vector code (AVX-512
+  here): `memchr` and `memcmp` gone from under `find`, `lower` by a
+  table in vector registers. User cycles 6.17 to 5.88 G (-4.6%); `find`
+  and `lower` give what they gave (90,000 random cases).
+- (Tried: `memmem` in `find`, the C library's; no gain.)
+
+| pages | | before | after | C |
+|---|---|---|---|---|
+| 10⁵ | user s | 1.08-1.11 | 1.00-1.05 | 0.78 |
+| 10⁵ | wall s | 2.72-2.75 | 2.63-2.65 | 2.29 |
+| 10⁶ | user s | 14.30 | 13.67 | 11.7 |
+| 10⁶ | wall s | 33.0 | 32.3 | 27.9 |
+
+The reports the same. What is left of ent's own: the spawn of an ask
+for each link, the `apart` moves, and the many small texts `normalise`
+makes for each link.
+
 ## Against other crawlers (§9.2, C4)
 
 `others.py`: wget, Scrapy, Colly and spider crawl the generated site
