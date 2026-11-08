@@ -353,19 +353,82 @@ static inline uint64_t ent_text_mix(uint64_t a, uint64_t b) {
   __uint128_t product = (__uint128_t)a * b;
   return (uint64_t)product ^ (uint64_t)(product >> 64);
 }
+#define ENT_TEXT_SECRET0 0x2d358dccaa6c78a5ull
+#define ENT_TEXT_SECRET1 0x8bb84b93962eacc9ull
+#define ENT_TEXT_SECRET2 0x4b33a62ed433d4a3ull
+// (The `n` bytes at `p`, 0 to 8, as a little-endian word with 0 after
+// them: in registers, by loads that overlap, not by way of the stack.)
+static inline uint64_t ent_text_word(const unsigned char *p, uint64_t n) {
+  uint64_t word;
+  uint32_t low, high;
+  if (n >= 8) {
+    memcpy(&word, p, 8);
+    return word;
+  }
+  if (n >= 4) {
+    memcpy(&low, p, 4);
+    memcpy(&high, p + n - 4, 4);
+    return (uint64_t)low | ((uint64_t)high << (8 * (n - 4)));
+  }
+  if (n == 0)
+    return 0;
+  return (uint64_t)p[0] | ((uint64_t)p[n / 2] << (8 * (n / 2))) |
+         ((uint64_t)p[n - 1] << (8 * (n - 1)));
+}
+// (A block of 16 bytes from `from` on: whole ones read as they are, the
+// last, shorter, with 0 after it.)
+static inline void ent_text_block(const ent_text *text, uint64_t from,
+                                  uint64_t words[2]) {
+  const unsigned char *p = (const unsigned char *)text->bytes + from;
+  uint64_t left = text->length - from;
+  if (left >= 16) {
+    words[0] = ent_text_word(p, 8);
+    words[1] = ent_text_word(p + 8, 8);
+  } else if (left > 8) {
+    words[0] = ent_text_word(p, 8);
+    words[1] = ent_text_word(p + 8, left - 8);
+  } else {
+    words[0] = ent_text_word(p, left);
+    words[1] = 0;
+  }
+}
 int64_t ent_text_hash(uint64_t view, int64_t seed) {
   const ent_text *text = ent_text_of(view);
-  const uint64_t secret0 = 0x2d358dccaa6c78a5ull,
-                 secret1 = 0x8bb84b93962eacc9ull,
-                 secret2 = 0x4b33a62ed433d4a3ull;
   uint64_t length = text->length, hash = (uint64_t)seed;
   for (uint64_t from = 0; from < length; from += 16) {
-    uint64_t words[2] = {0, 0};
-    memcpy(words, text->bytes + from, length - from < 16 ? length - from : 16);
-    hash = ent_text_mix(words[0] ^ secret1, words[1] ^ hash);
+    uint64_t words[2];
+    ent_text_block(text, from, words);
+    hash = ent_text_mix(words[0] ^ ENT_TEXT_SECRET1, words[1] ^ hash);
   }
-  return (int64_t)ent_text_mix(hash ^ secret0, length ^ secret2);
+  return (int64_t)ent_text_mix(hash ^ ENT_TEXT_SECRET0,
+                               length ^ ENT_TEXT_SECRET2);
 }
+
+// Two hashes of a text in one pass over its bytes, as ent_text_hash gives
+// them by `seed` and by `other` (a text key's hash and its check, see
+// `index ... hash`): the first, and the second kept for this thread till
+// ent_text_hash_second takes it, which the compiler calls right after.
+#ifdef _MSC_VER
+static __declspec(thread) int64_t ent_text_second;
+#else
+static _Thread_local int64_t ent_text_second;
+#endif
+int64_t ent_text_hash_pair(uint64_t view, int64_t seed, int64_t other) {
+  const ent_text *text = ent_text_of(view);
+  uint64_t length = text->length, hash = (uint64_t)seed,
+           more = (uint64_t)other;
+  for (uint64_t from = 0; from < length; from += 16) {
+    uint64_t words[2];
+    ent_text_block(text, from, words);
+    hash = ent_text_mix(words[0] ^ ENT_TEXT_SECRET1, words[1] ^ hash);
+    more = ent_text_mix(words[0] ^ ENT_TEXT_SECRET1, words[1] ^ more);
+  }
+  ent_text_second = (int64_t)ent_text_mix(more ^ ENT_TEXT_SECRET0,
+                                          length ^ ENT_TEXT_SECRET2);
+  return (int64_t)ent_text_mix(hash ^ ENT_TEXT_SECRET0,
+                               length ^ ENT_TEXT_SECRET2);
+}
+int64_t ent_text_hash_second(void) { return ent_text_second; }
 
 int8_t ent_text_equal(uint64_t a, uint64_t b) {
   const ent_text *left = ent_text_of(a), *right = ent_text_of(b);

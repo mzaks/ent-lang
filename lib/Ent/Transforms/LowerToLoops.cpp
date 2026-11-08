@@ -25401,6 +25401,8 @@ static void declareTextRuntime(IRRewriter &rewriter, ModuleOp module,
   declare("ent_text_drop", {i64}, {});
   declare("ent_text_length", {i64}, {i32});
   declare("ent_text_hash", {i64, i64}, {i64});
+  declare("ent_text_hash_pair", {i64, i64, i64}, {i64});
+  declare("ent_text_hash_second", {}, {i64});
   declare("ent_text_at", {i64, i64}, {i8});
   declare("ent_text_equal", {i64, i64}, {i8});
   declare("ent_text_cut", {i64, i64, i32}, {});
@@ -25482,9 +25484,94 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
                   ArrayRef<Value> args) {
     return func::CallOp::create(rewriter, loc, name, results, args);
   };
+  // Two hashes of one text by constant seeds in one block (a text key's
+  // hash and its check): made in one pass over its bytes, where the first
+  // is, the second's uses given the other (`paired`, erased after).
+  llvm::DenseMap<Operation *, TextHashOp> pairedWith;
+  llvm::DenseSet<Operation *> paired;
+  // (A seed known before: a constant, or constants xored, as `hash_of(t,
+  // seed)` makes it, through casts between signed and not.)
+  std::function<std::optional<int64_t>(Value)> seedOf =
+      [&](Value seed) -> std::optional<int64_t> {
+    APInt bits;
+    if (matchPattern(seed, m_ConstantInt(&bits)))
+      return bits.getSExtValue();
+    if (auto cast = seed.getDefiningOp<UnrealizedConversionCastOp>();
+        cast && cast->getNumOperands() == 1)
+      return seedOf(cast->getOperand(0));
+    if (auto x = seed.getDefiningOp<arith::XOrIOp>()) {
+      auto l = seedOf(x.getLhs()), r = seedOf(x.getRhs());
+      if (l && r)
+        return *l ^ *r;
+    }
+    return std::nullopt;
+  };
+  {
+    // (One text: the same value, or two made by the same op from the same
+    // operands, a read of one place, where nothing between the two hashes
+    // writes: a field read for each.)
+    auto reads = [](Operation *op) {
+      if (isMemoryEffectFree(op))
+        return true;
+      auto effects = dyn_cast<MemoryEffectOpInterface>(op);
+      return effects && effects.onlyHasEffect<MemoryEffects::Read>();
+    };
+    // (Two values the same: one, or made alike from the same, a few ops
+    // deep, by ops that write nothing.)
+    std::function<bool(Value, Value, int)> same = [&](Value x, Value y,
+                                                      int depth) {
+      if (x == y)
+        return true;
+      Operation *p = x.getDefiningOp(), *q = y.getDefiningOp();
+      if (!depth || !p || !q || p->getNumRegions() || q->getNumRegions() ||
+          !reads(p) || p->getNumOperands() != q->getNumOperands() ||
+          cast<OpResult>(x).getResultNumber() !=
+              cast<OpResult>(y).getResultNumber() ||
+          !OperationEquivalence::isEquivalentTo(
+              p, q, OperationEquivalence::ignoreValueEquivalence, nullptr,
+              OperationEquivalence::IgnoreLocations))
+        return false;
+      for (auto [u, v] : llvm::zip(p->getOperands(), q->getOperands()))
+        if (!same(u, v, depth - 1))
+          return false;
+      return true;
+    };
+    auto sameText = [&](TextHashOp a, TextHashOp b) {
+      if (!same(a.getValue(), b.getValue(), 8))
+        return false;
+      // (Nothing between the first's text and the second hash writes.)
+      Operation *from = a.getValue().getDefiningOp();
+      if (!from || from->getBlock() != a->getBlock())
+        from = a;
+      for (Operation *op = from->getNextNode(); op && op != b.getOperation();
+           op = op->getNextNode())
+        if (!reads(op) && !isa<TextHashOp>(op))
+          return false;
+      return true;
+    };
+    llvm::DenseMap<Block *, SmallVector<TextHashOp>> open;
+    for (Operation *op : ops) {
+      auto hash = dyn_cast<TextHashOp>(op);
+      if (!hash || !seedOf(hash.getSeed()))
+        continue;
+      SmallVector<TextHashOp> &waiting = open[op->getBlock()];
+      auto match = llvm::find_if(waiting, [&](TextHashOp earlier) {
+        return earlier->isBeforeInBlock(op) && sameText(earlier, hash);
+      });
+      if (match == waiting.end()) {
+        waiting.push_back(hash);
+        continue;
+      }
+      pairedWith[*match] = hash;
+      paired.insert(op);
+      waiting.erase(match);
+    }
+  }
   // The bytes of each text the program has written, once.
   llvm::StringMap<std::string> constants;
   for (Operation *op : ops) {
+    if (paired.contains(op))
+      continue;
     // (A join that is a field's own is lowered with what takes it.)
     if (llvm::any_of(joinedToOwn, [&](auto &pair) {
           return pair.second.getOperation() == op;
@@ -25597,6 +25684,18 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
       rewriter.replaceOp(op, call(loc, "ent_text_at", {rewriter.getI8Type()},
                                   {address(loc, at.getValue()), index})
                                  .getResults());
+    } else if (auto hash = dyn_cast<TextHashOp>(op);
+               hash && pairedWith.count(op)) {
+      TextHashOp other = pairedWith.lookup(op);
+      Value both = call(loc, "ent_text_hash_pair", {i64},
+                        {address(loc, hash.getValue()), hash.getSeed(),
+                         arith::ConstantIntOp::create(
+                             rewriter, loc, i64, *seedOf(other.getSeed()))})
+                       .getResult(0);
+      Value second =
+          call(loc, "ent_text_hash_second", {i64}, {}).getResult(0);
+      rewriter.replaceAllUsesWith(other.getResult(), second);
+      rewriter.replaceOp(op, both);
     } else if (auto hash = dyn_cast<TextHashOp>(op)) {
       rewriter.replaceOp(op,
                          call(loc, "ent_text_hash", {i64},
@@ -25646,6 +25745,8 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
       rewriter.eraseOp(op);
     }
   }
+  for (Operation *op : paired)
+    rewriter.eraseOp(op);
 }
 
 /// Replace `run` by a call of its system, guarded by its condition if it
