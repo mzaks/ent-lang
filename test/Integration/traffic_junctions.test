@@ -10,6 +10,6 @@
 // RUN:   | mlir-translate --mlir-to-llvmir | FileCheck %s
 
 // CHECK-DAG: declare void @ent_window_draw_shapes(
-// CHECK-DAG: define void @town.think(
-// CHECK-DAG: define void @town.cross(
-// CHECK-DAG: define void @town.round(
+// CHECK-DAG: define internal void @town.think(
+// CHECK-DAG: define internal void @town.cross(
+// CHECK-DAG: define internal void @town.round(

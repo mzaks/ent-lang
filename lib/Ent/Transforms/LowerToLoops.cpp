@@ -28524,6 +28524,12 @@ struct EntLowerToLoops
       auto [func, arena] = convertToFunc(
           rewriter, system, system.getSymName(), system.getBody(), arenaType);
       func.setPrivate();
+      // (Internal to the program whatever its name: no C calls a system,
+      // and one named as a C library's function, `close` say, kept by
+      // that name would be what the OpenMP runtime calls in its place.)
+      func->setAttr("llvm.linkage",
+                    LLVM::LinkageAttr::get(rewriter.getContext(),
+                                           LLVM::Linkage::Internal));
       WorldAccess world(rewriter, *layout, arena);
       // (Its queries' loops address the GPU's copy of the world.)
       std::optional<WorldAccess> device;

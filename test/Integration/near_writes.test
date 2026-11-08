@@ -23,7 +23,7 @@
 // IR:       math.cttz
 // IR:       ent.buffer.set
 
-// LOW: func.func private @count({{.*}}) attributes {ent.trace = "system"}
+// LOW: func.func private @count({{.*}}) attributes {ent.trace = "system", llvm.linkage = #llvm.linkage<internal>}
 // LOW: func.func private @fill({{.*}}) attributes {ent.no_gather,
 
 // CHECK:      same lists 400 of 400, pairs 1599
