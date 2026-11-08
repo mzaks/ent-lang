@@ -3848,6 +3848,36 @@ the index costs as before (`bench/hash/run.py`: as fits 0.27 / 0.28,
 `incremental` 0.20 / 0.22, `rebuild` 1.26 / 1.21 ms a frame, 1,000 teams,
 one in 1,000 changing).
 
+**2026-11-08.** Keys found had become three times as slow (4M at random
+113 ns, 1,000 4.7) while keys not there were as they were. Since the
+index is kept by what changed (d163a48, 2026-11-06), the rows of
+entities that went or got another key stay till it is made anew, and
+`get` went along the key's whole list asking each row's entity where it
+is now: its row (`who`), the entity's place, its row field, the next
+row, four loads more each waiting for the one before, every one a miss
+at 4 million. Now a `unique` index
+where no row is stale (as many rows as entities with its components:
+each has one that stands) gives the first row's entity, without the
+walk; the check is two counts, read before the loop. A slot is now its
+first row alone (1219e19), so a found key is still a hop more than on
+10-23 (tags, the slot's head, then the row's key and entity):
+
+| keys | found: 10-23 | before | now | not there: now |
+|---|---|---|---|---|
+| 1,000 in a row | 2.5 | 4.4 | 2.9 | 2.5 |
+| 1,000 at random | 2.7 | 4.7 | 3.4 | 3.5 |
+| 200,000 in a row | 4.2 | 9.9 | 7.7 | 2.6 |
+| 200,000 at random | 4.7 | 11 | 8.6 | 3.5 |
+| 4,000,000 in a row | 30 | 94 | 69 | 4.2 |
+| 4,000,000 at random | 35 | 113 | 76 | 5.9 |
+
+Tried and not kept: a table 7/8 full at most, as a SwissTable is (made
+for twice its keys, grown 2x past 7/8): 200,000 at random 8.6 to 10
+found and 3.5 to 7.3 not there (262,144 slots, not 524,288; linear
+probing makes long runs at 76%), slower than absl there (5.8). It saves
+little: an empty slot is 5 bytes (its head and tag), where absl's is a
+byte and a whole key and value; 4 million keys are 8.4M slots either way.
+
 ## 2026-10-24: graph kernels against GAP
 
 `bench/graph/run.py`: two kernels of the GAP Benchmark Suite (gapbs at

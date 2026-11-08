@@ -24508,9 +24508,47 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
                                           rewriter.getIndexType(), row);
       };
       Value none = world.noEntity(loc);
+      // (Under `unique`, where every row stands for its entity still: the
+      // list has as many rows as there are entities with the index's
+      // components, as each of them has one row that stands. Not where
+      // such a component is optional somewhere, or for partitions, whose
+      // counts are kept otherwise.)
+      auto info = BufferOp(slots.op)->getAttrOfType<DictionaryAttr>("ent.index");
+      Value clean;
+      ModuleOp program = op->getParentOfType<ModuleOp>();
+      if (info.get("unique") &&
+          !program->hasAttr(WorldLayout::kPartitionsAttr)) {
+        SmallVector<StringAttr> of;
+        for (Attribute component : cast<ArrayAttr>(info.get("of")))
+          of.push_back(cast<StringAttr>(component));
+        Value entities = arith::ConstantIndexOp::create(rewriter, loc, 0);
+        bool counted = true;
+        for (const WorldArchetype &archetype : layout.archetypes) {
+          ArchetypeOp archetypeOp(archetype.op);
+          auto has = [&](StringAttr component) {
+            return archetypeOp.contains(FlatSymbolRefAttr::get(component));
+          };
+          if (!llvm::all_of(of, has))
+            continue;
+          if (llvm::any_of(of, [&](StringAttr component) {
+                return archetypeOp.isOptional(FlatSymbolRefAttr::get(component));
+              }))
+            counted = false;
+          entities = arith::AddIOp::create(rewriter, loc, entities,
+                                           world.count(loc, archetype));
+        }
+        if (counted)
+          clean = arith::CmpIOp::create(
+              rewriter, loc, arith::CmpIPredicate::eq, entities,
+              world.toIndex(loc, memref::LoadOp::create(
+                                     rewriter, loc, world.bufferCount(list),
+                                     ValueRange{arith::ConstantIndexOp::create(
+                                         rewriter, loc, 0)})));
+      }
       // Where the key is there: of the rows of its list that stand for
-      // their entities still, the entity stored first; none where it is
-      // not, without reading the slot further.
+      // their entities still, the entity stored first (where all stand,
+      // under `unique`, the first row's); none where it is not, without
+      // reading the slot further.
       auto walked = scf::IfOp::create(rewriter, loc, TypeRange{none.getType()},
                                       found.found, /*withElseRegion=*/true);
       {
@@ -24519,6 +24557,16 @@ static void lowerBuffers(IRRewriter &rewriter, func::FuncOp func,
         scf::YieldOp::create(rewriter, loc, none);
         rewriter.setInsertionPointToStart(walked.thenBlock());
         Value head = load(slots, "head", found.slot);
+        if (clean) {
+          auto first = scf::IfOp::create(rewriter, loc,
+                                         TypeRange{none.getType()}, clean,
+                                         /*withElseRegion=*/true);
+          scf::YieldOp::create(rewriter, loc, first.getResult(0));
+          rewriter.setInsertionPointToStart(first.thenBlock());
+          scf::YieldOp::create(rewriter, loc,
+                               load(list, "who", toIndex(head)));
+          rewriter.setInsertionPointToStart(first.elseBlock());
+        }
         auto walk = scf::WhileOp::create(
             rewriter, loc, TypeRange{i32, none.getType(), i64},
             ValueRange{

@@ -177,11 +177,18 @@ Built (2026-10-23, `docs/syntax.md`, Hash indexes):
   where several have it; `none` where none has it. Lowered where it is
   (`ent.index.get`): along the key's list, the rows that stand for
   their entities still (see the kept item below), each entity found
-  where it is stored now. Against
+  where it is stored now. Under `unique`, where the list has as many
+  rows as there are entities with the index's components (each has one
+  row that stands, so none is stale), the first row's entity alone: no
+  walk (not where one of them is optional somewhere, or for
+  partitions). Against
   absl::flat_hash_map by the same loop (`bench/hash/get.py` and
-  `swiss.cpp`): keys not there faster from 200,000 keys on (3.4 ns
-  where 5.8, at 4 million 4.0 where 9.5), keys found 1 to 1.5 ns
-  slower in the cache and as fast beyond it (35 ns where 33).
+  `swiss.cpp`, 2026-10-23, when the slot held its key and entity): keys
+  not there faster from 200,000 keys on (3.4 ns where 5.8, at 4 million
+  4.0 where 9.5), keys found 1 to 1.5 ns slower in the cache and as fast
+  beyond it (35 ns where 33). Now a slot is its first row alone, a hop
+  more: found 3.4 ns at 1,000 at random, 8.6 at 200,000, 76 at 4
+  million (bench/RESULTS.md, 2026-11-08).
 - `for x: C where x.key == value` (or `value == x.key`, or one of the
   conditions `&&` joins), where the value is the same for all its
   entities (literals, consts, enum cases, locals not declared `var`):
