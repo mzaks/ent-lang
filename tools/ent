@@ -379,7 +379,8 @@ def cache_key(arguments):
         note_file(os.path.join(ROOT, "devices", "ranks.c"))
     note("parallel", arguments.parallel, os.environ.get("ENT_CFLAGS", ""),
          os.environ.get("ENT_PIECES", ""), os.environ.get("ENT_SPLIT", ""),
-         os.environ.get("ENT_PARALLEL_MIN", ""), os.cpu_count())
+         os.environ.get("ENT_PARALLEL_MIN", ""), os.cpu_count(),
+         os.environ.get("ENT_ATOMIC_SENDS", ""))
 
     # (The C that keeps what a `for` sends from a loop.)
     note_file(os.path.join(ROOT, "devices", "sends.c"))
@@ -1587,6 +1588,10 @@ def build(arguments, output, directory):
         least = os.environ.get("ENT_PARALLEL_MIN", "")
         least = (" parallel-min-entities=%d parallel-min-events=%d"
                  % (int(least), int(least))) if least else ""
+        # (ENT_ATOMIC_SENDS=1: what is sent combined atomically where it
+        # is sent, to measure what the order costs; not the same bytes.)
+        if os.environ.get("ENT_ATOMIC_SENDS") == "1":
+            least += " atomic-sends=1"
         passes = ["--ent-schedule",
                   lowering + "=fuse-systems=1 parallel-entities=1 "
                   "parallel-stages=1" + least + gpu + ranks + tuning,

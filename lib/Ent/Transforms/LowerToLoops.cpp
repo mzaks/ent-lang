@@ -7207,9 +7207,14 @@ static void combineAtRow(IRRewriter &rewriter, Location loc,
   // (On the GPU, where many send at once: no events, no tree ordered by
   // it, see checkGpuStamps.)
   if (atomic) {
+    // (A fraction added, only with atomic-sends: in the order threads
+    // come.)
     memref::AtomicRMWOp::create(
         rewriter, loc,
-        atomicKind(rule, hasNoSign(target.find(component, fieldName)->type)),
+        isa<FloatType>(value.getType()) && rule == "add"
+            ? arith::AtomicRMWKind::addf
+            : atomicKind(rule,
+                         hasNoSign(target.find(component, fieldName)->type)),
         value, field, ValueRange{row});
     return;
   }
@@ -15825,7 +15830,14 @@ static void lowerStateAccess(IRRewriter &rewriter, SaAccumulateOp accumulate,
       // gpuAccumulateCells. A fraction's `min=`, `max=`: its bits in their
       // order, see orderedBits.)
       Value stored = world.toStorage(loc, given);
-      if (auto fraction = dyn_cast<FloatType>(stored.getType())) {
+      auto fraction = dyn_cast<FloatType>(stored.getType());
+      if (fraction && accumulate.getRule() == "add") {
+        // (Only with atomic-sends: in the order threads come.)
+        memref::AtomicRMWOp::create(
+            rewriter, loc, arith::AtomicRMWKind::addf, stored,
+            world.ownResourceField(resource, accumulate.getFieldAttr()),
+            ValueRange{zero});
+      } else if (fraction) {
         Value bits = arith::BitcastOp::create(
             rewriter, loc, rewriter.getIntegerType(fraction.getWidth()),
             stored);
@@ -27943,6 +27955,18 @@ struct EntLowerToLoops
       if (query && (query.getCascade() || query.hasBy()))
         op->setAttr(kUnobservedAttr, rewriter.getUnitAttr());
     });
+    // (atomic-sends, for measurement: what nothing else in a query of
+    // many entities at once touches is combined where it is sent,
+    // atomically, as a `gpu` system's whole numbers are.)
+    if (atomicSends)
+      module.walk([&](Operation *op) {
+        if (!isa<ApplyOp, AccumulateOp>(op) || !op->hasAttr(kUnobservedAttr))
+          return;
+        auto query = op->getParentOfType<QueryOp>();
+        if (query && !query.isTurn() && !query.getCascade() &&
+            !query.hasBy() && !query->hasAttr(QueryOp::kTriggersAttr))
+          op->setAttr(kAtomicAttr, rewriter.getUnitAttr());
+      });
     // What is sent from a loop of a query's body (see kLoopedAttr). (In
     // a reactive query, only where it is walked in row order, which is
     // decided below: its lists then fill as a scan's do.)

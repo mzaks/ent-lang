@@ -107,6 +107,13 @@ def EntLowerToLoops : Pass<"ent-lower-to-loops", "ModuleOp"> {
            "Emit a remark for each state and access op (ent.sa) where it "
            "is lowered: how it was resolved, and the facts it was "
            "resolved from">,
+    Option<"atomicSends", "atomic-sends", "bool", /*default=*/"false",
+           "For measuring what the order of sends costs, never for "
+           "programs: what a query sends or accumulates, where nothing else "
+           "in it touches the field, is combined atomically where it is sent "
+           "(fractions added in whatever order threads come), not in the "
+           "order of the rows at its end; no events, no trees ordered by it. "
+           "Not the same bytes on another number of threads">,
     Option<"tune", "tune", "std::string", /*default=*/"\"\"",
            "A JSON file of choices for loops over entities, by their sites "
            "(`tools/ent build --tune`, from a trace): whether each runs on "
