@@ -3,8 +3,8 @@
 // overlap stop the program, as does a row past an entity's window.
 // RUN: %ent build %S/Inputs/windows.ent -o %t.one
 // RUN: %ent build %S/Inputs/windows.ent --parallel -o %t.all
-// RUN: not --crash %t.one > %t.one.out
-// RUN: not --crash %t.all > %t.all.out
+// RUN: not %t.one > %t.one.out
+// RUN: not %t.all > %t.all.out
 // RUN: diff %t.one.out %t.all.out
 // RUN: FileCheck %s --input-file=%t.one.out
 // CHECK: day 1: bees 6022623 old 0 check 295054712
@@ -12,6 +12,6 @@
 // CHECK-NOT: day 3
 // RUN: sed -e 's/for i in 1..len(w)/for i in 1..len(w) + 1/' %S/Inputs/windows.ent > %t.past.ent
 // RUN: %ent build %t.past.ent -o %t.past
-// RUN: not --crash %t.past > %t.past.out
+// RUN: not %t.past > %t.past.out
 // RUN: FileCheck %s --check-prefix=PAST --allow-empty --input-file=%t.past.out
 // PAST-NOT: day 1

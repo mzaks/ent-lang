@@ -13,6 +13,6 @@
 // Windows that overlap still stop the program.
 // RUN: sed -e 's/w: mut Cells\[h.start, h.size\]/w: mut Cells[h.start, h.size + 1]/' %S/Inputs/window_reads.ent > %t.over.ent
 // RUN: %ent build %t.over.ent -o %t.over
-// RUN: not --crash %t.over > %t.over.out
+// RUN: not %t.over > %t.over.out
 // RUN: FileCheck %s --check-prefix=OVER --allow-empty --input-file=%t.over.out
 // OVER-NOT: day 1

@@ -1761,7 +1761,8 @@ def build(arguments, output, directory):
         # IR, and for LLVM to read.)
         ([] if gpu else views) + after +
         (["--ent-trace"] if arguments.trace else []) +
-        ["--convert-scf-to-cf", "--convert-to-llvm"] + finish +
+        # (A failed check says why on stderr: see --ent-stops.)
+        ["--ent-stops", "--convert-scf-to-cf", "--convert-to-llvm"] + finish +
         ["--reconcile-unrealized-casts",
          # (Each instruction with the line of the .ent it was made from,
          # for a profiler or a debugger to say: line tables only.)

@@ -9,6 +9,7 @@ add_mlir_library(MLIREntTransforms
   OmpNowait.cpp
   PrintAccess.cpp
   Schedule.cpp
+  Stops.cpp
   Trace.cpp
 
   DEPENDS

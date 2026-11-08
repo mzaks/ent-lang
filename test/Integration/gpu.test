@@ -80,8 +80,8 @@
 // RUN: sed -e 's/^system grow()/gpu system grow()/' -e 's/^system sum()/gpu system sum()/' %S/Inputs/windows.ent > %t.windows.ent
 // RUN: %ent build %t.windows.ent --gpu -o %t.windows.gpu
 // RUN: %ent build %t.windows.ent --gpu --parallel -o %t.windows.gpupar
-// RUN: not --crash %t.windows.gpu > %t.windows.gpu.out
-// RUN: not --crash %t.windows.gpupar > %t.windows.gpupar.out
+// RUN: not %t.windows.gpu > %t.windows.gpu.out
+// RUN: not %t.windows.gpupar > %t.windows.gpupar.out
 // RUN: FileCheck %s --check-prefix=WINDOWS --input-file=%t.windows.gpu.out
 // RUN: FileCheck %s --check-prefix=WINDOWS --input-file=%t.windows.gpupar.out
 // WINDOWS: day 1: bees 6022623 old 0 check 295054712
@@ -104,8 +104,8 @@
 // RUN: sed -e 's/^system lay()/gpu system lay()/' %S/Inputs/buffer_rows.ent > %t.rows.ent
 // RUN: %ent build %t.rows.ent --gpu -o %t.rows.gpu
 // RUN: %ent build %t.rows.ent --gpu --parallel -o %t.rows.gpupar
-// RUN: not --crash %t.rows.gpu > %t.rows.gpu.out
-// RUN: not --crash %t.rows.gpupar > %t.rows.gpupar.out
+// RUN: not %t.rows.gpu > %t.rows.gpu.out
+// RUN: not %t.rows.gpupar > %t.rows.gpupar.out
 // RUN: FileCheck %s --check-prefix=ROWS --input-file=%t.rows.gpu.out
 // RUN: FileCheck %s --check-prefix=ROWS --input-file=%t.rows.gpupar.out
 // ROWS: day 1: stubs 639985 rows 80000 check 1272241970273
@@ -389,9 +389,9 @@
 // second, which stops the program, on the GPU as on the CPU.
 // RUN: %ent build %S/Inputs/gpu_window_clash.ent -o %t.wclash.cpu
 // RUN: %ent build %S/Inputs/gpu_window_clash.ent --gpu -o %t.wclash.gpu
-// (Unbuffered: what the program says before it stops is kept.)
-// RUN: not --crash stdbuf -o0 %t.wclash.cpu > %t.wclash.cpu.out
-// RUN: not --crash stdbuf -o0 %t.wclash.gpu > %t.wclash.gpu.out
+// (Why it stops is said on stderr, after what it wrote.)
+// RUN: not %t.wclash.cpu > %t.wclash.cpu.out 2>&1
+// RUN: not %t.wclash.gpu > %t.wclash.gpu.out 2>&1
 // RUN: diff %t.wclash.cpu.out %t.wclash.gpu.out
 // RUN: FileCheck %s --check-prefix=WCLASH --input-file=%t.wclash.gpu.out
 // WCLASH: day 0: 35986500500

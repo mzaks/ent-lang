@@ -193,6 +193,27 @@ def EntOmpNowait : Pass<"ent-omp-nowait"> {
   let dependentDialects = ["::mlir::omp::OpenMPDialect"];
 }
 
+def EntStops : Pass<"ent-stops", "ModuleOp"> {
+  let summary = "Say why the program stops where a check fails";
+  let description = [{
+    A check the lowering makes (`cf.assert`: no room for another row, a
+    hash index without slots enough, ...) becomes, through
+    `--convert-to-llvm`, a `puts` of its message and an `abort`: the
+    message goes to stdout, where a pipe or a file keeps it in a buffer
+    that `abort` throws away, so the program stopped without a word
+    (status 134, or 250 seen as a byte). This pass calls `ent_stop`
+    (devices/memory.c) before each, on the CPU, where the check fails:
+    it writes out what the program wrote, says `ent: ` and the message on
+    stderr and exits with 3, as the program's other stops do (a unique
+    index's duplicate). The assert stays, after it, not reached.
+
+    Run it before `--convert-scf-to-cf`.
+  }];
+  let dependentDialects = ["::mlir::LLVM::LLVMDialect",
+                           "::mlir::scf::SCFDialect",
+                           "::mlir::arith::ArithDialect"];
+}
+
 def EntTrace : Pass<"ent-trace", "ModuleOp"> {
   let summary = "Time systems, schedules, sorts and parallel loops as they run";
   let description = [{

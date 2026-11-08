@@ -1834,7 +1834,10 @@ to a device at once (all there is to draw), in place of a call for each.
 - `buffer Name { field: type, ... } capacity N`, at the top level. A
   field is a number, a bool, an enum or an entity. It holds at most `N`
   rows; a row
-  more stops the program, which says so. `capacity Name N` gives a
+  more stops the program, which says so (as every check the compiler
+  makes, a spawn past an archetype's capacity too: after what the
+  program wrote, `ent: ` and why on stderr, and exit status 3).
+  `capacity Name N` gives a
   buffer that was declared before, a module's too, another capacity.
 - `Name += { field: value, ... }` gives it a row after those it has:
   every field, in any order. Outside a `for` the row is there at once.

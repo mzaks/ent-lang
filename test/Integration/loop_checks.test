@@ -31,4 +31,4 @@
 // Room for three, then for two more only: the check before the loop
 // fails, and the loop as it was stops the program at the sixth row.
 // RUN: %ent build %S/Inputs/loop_checks_full.ent -o %t.full.exe
-// RUN: not --crash %t.full.exe
+// RUN: not %t.full.exe

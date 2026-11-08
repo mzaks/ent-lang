@@ -175,6 +175,15 @@ void ent_index_duplicate(int64_t key, int64_t has_key, int64_t a, int64_t b) {
   exit(3);
 }
 
+// Where a check the compiler made fails (no room for another row, ...;
+// see --ent-stops): what the program wrote before, then why, and the
+// program stops, as at a unique index's duplicate.
+void ent_stop(const char *message) {
+  fflush(stdout);
+  fprintf(stderr, "%s\n", message);
+  exit(3);
+}
+
 void ent_world_free(void *world) {
   (void)world;
   if (ent_world_base)

@@ -11,10 +11,10 @@
 // CHECK: day 3: check 291952754
 // RUN: sed -e 's/h.size\] top down/h.size + 1] top down/' %S/Inputs/window_kinds.ent > %t.tree.ent
 // RUN: %ent build %t.tree.ent -o %t.tree
-// RUN: not --crash %t.tree
+// RUN: not %t.tree
 // RUN: sed -e 's/h.size\] by h.number/h.size + 1] by h.number/' %S/Inputs/window_kinds.ent > %t.by.ent
 // RUN: %ent build %t.by.ent -o %t.by
-// RUN: not --crash %t.by
+// RUN: not %t.by
 // RUN: sed -e 's/h.size\] on changed/h.size + 1] on changed/' %S/Inputs/window_kinds.ent > %t.on.ent
 // RUN: %ent build %t.on.ent -o %t.on
-// RUN: not --crash %t.on
+// RUN: not %t.on

@@ -33,8 +33,9 @@
 // CHECK-NEXT:   seen 6
 // CHECK-NOT:  {{.}}
 
-// More rows than it holds stop the program. (What it says then,
-// Transforms/lower-buffers.mlir has: it is lost where the output is not
-// a terminal.)
+// More rows than it holds stop the program, which says why on stderr
+// (also where its output is not a terminal) and exits with 3.
 // RUN: %ent build %S/Inputs/buffers_full.ent -o %t.full.exe
-// RUN: not --crash %t.full.exe
+// RUN: sh -c '%t.full.exe > /dev/null 2> %t.full.err; test $? = 3'
+// RUN: FileCheck %s --check-prefix=FULL --input-file=%t.full.err
+// FULL: ent: no room for another row: the buffer @Few holds 2

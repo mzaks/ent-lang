@@ -2,7 +2,7 @@
 // tree_moves.ent): the node goes to the order's end with all that is
 // below it. Coming to the node itself on the way is a cycle.
 // RUN: %ent build %S/Inputs/tree_moves.ent -o %t.exe 2>/dev/null
-// RUN: not --crash %t.exe > %t.out 2>&1
+// RUN: not %t.exe > %t.out 2>&1
 // RUN: FileCheck %s --input-file=%t.out
 
 // CHECK:      1: root 1
