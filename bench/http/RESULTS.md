@@ -600,6 +600,69 @@ and four times the keys where they grew past half), a stamp column for
 every component of an archetype and event logs an eighth of its
 capacity, and huge pages for arrays hardly used.
 
+### The world's memory: hash slots, huge pages, event logs
+
+The three left above, in the language (2026-11-08), each measured on
+the one before; the crawler is the same program. Live, 64 out, on CPU 2,
+on mains; reports the same as before (at 10⁶ less the `slow` lines,
+which go by time):
+
+| pages | compiler | wall s | CPU s | peak MB |
+|---|---|---|---|---|
+| 10⁵ | before | 2.719 | 1.582 | 342 |
+| 10⁵ | hash slots | 2.697 | 1.557 | 318 |
+| 10⁵ | and huge pages | 2.705 | 1.585 | 155 |
+| 10⁵ | and logs | 2.691 | 1.562 | 143 |
+| 10⁶ | before | 33.699 | 19.790 | 2,286 |
+| 10⁶ | hash slots | 33.239 | 19.195 | 2,057 |
+| 10⁶ | and huge pages | 33.453 | 19.574 | 1,606 |
+| 10⁶ | and logs | 32.937 | 18.979 | 1,453 |
+| 10⁶ | C | 27.700 | 15.839 | 623 |
+
+- **Hash slots.** A slot is the first row of its key's list alone, 4
+  bytes (and its tag): the key, how many have it and the last are read
+  in that row. It held the key, both ends, the count and the entity,
+  36 bytes of a text's key; the entity and the row before were never
+  read. The table is made for four times the keys it had, twice as
+  many where they come to half (it was twice, then four times as many
+  over again): a key has 2 to 4 slots, not 2 to 8. And where mending
+  it stops for a key too many, it is made for the keys it has: it
+  started again from 64 slots, four times as many each try, a pass over
+  all its rows each. `get` (bench/hash/get.py, ns a lookup, before and
+  after; both three times the 2026-10-23 numbers found at 4 million,
+  so something else since):
+
+  | keys | found, before | found | not there, before | not there |
+  |---|---|---|---|---|
+  | 1,000 in a row | 4.35 | 4.62 | 2.34 | 2.30 |
+  | 1,000 at random | 4.66 | 5.13 | 3.34 | 3.29 |
+  | 200,000 in a row | 9.92 | 10.03 | 2.44 | 2.41 |
+  | 200,000 at random | 10.57 | 11.05 | 3.32 | 3.43 |
+  | 4,000,000 in a row | 93.91 | 96.22 | 3.22 | 2.79 |
+  | 4,000,000 at random | 113.19 | 114.31 | 4.38 | 5.36 |
+
+- **Huge pages.** The program tells devices/memory.c where each array
+  of the world starts (`ent_world_pages`), and the first 4 MB of each
+  are kept in small pages (`MADV_NOHUGEPAGE`), the rest left to the
+  system: an array hardly used costs the pages written, not 2 MB, and
+  one gone over much has huge pages beyond its first 4 MB.
+  `ENT_HUGE_PAGES=all` leaves all to the system, `=none` none. The
+  same programs, all to the system against the rule: `get` at 4
+  million keys at random 4.21 against 4.33 s (with none huge 4.58);
+  the LJ melt 0.809 against 0.814 s, 36 against 26 MB; the epidemic at
+  10⁶ people, 30 days, one core 7.8 against 7.9 ms a day, 633 against
+  597 MB (4 threads 4.1 against 4.2, 931 against 892).
+- **Event logs.** A log is an eighth of the rows of the largest
+  archetype that has its stamp, not of all of them: the asks are in
+  several (tags apart), each with room for 2 million, and the hosts' had
+  as much again, so 24 logs of a million entries (12 bytes each),
+  264 MB, now 72.
+
+The stamps are as they were: 8 bytes a row of each archetype a reactive
+`for` watches, for each thing it watches (99 columns here). A 4-byte
+tick would halve them, but wraps: a program that runs for hours would
+see old events as new.
+
 ## Against other crawlers (§9.2, C4)
 
 `others.py`: wget, Scrapy, Colly and spider crawl the generated site

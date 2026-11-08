@@ -563,8 +563,11 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     end += 8;
   });
   // Event logs: a capacity per stamp, the largest any trigger asks for
-  // (`log N`), or by default an eighth of the entities that can carry the
-  // stamp; rounded up to a power of two so positions wrap with a mask.
+  // (`log N`), or by default an eighth of the entities of the largest
+  // archetype that can carry the stamp (not of all of them: an entity is
+  // in one at a time, and a kind of entity in several archetypes, by its
+  // tags apart, would have a log as long as all their rooms); rounded up
+  // to a power of two so positions wrap with a mask.
   ArrayRef<Stamp> stamps = layout.stamps.getStamps();
   SmallVector<std::optional<int64_t>> asked(stamps.size());
   module.walk([&](QueryOp query) {
@@ -581,7 +584,7 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     int64_t entities = 0;
     for (const WorldArchetype &archetype : layout.archetypes)
       if (layout.stamps.stores(archetype.op, stamp))
-        entities += archetype.capacity;
+        entities = std::max(entities, archetype.capacity);
     // (Connects: of as many entities as the relation has edges.)
     if (stamp.kind == Trigger::Connected)
       entities = layout.getRelation(stamp.component).capacity;

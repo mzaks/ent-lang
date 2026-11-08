@@ -138,15 +138,21 @@ Built (2026-10-23, `docs/syntax.md`, Hash indexes):
   same, a chance of 2^-128; the index does not hold the text).
 - Slots of keys (open addressing, a power-of-two table twice the
   entities there may be, at least, linear probing) and a row for each
-  entity (`Name_list`, in the order they are stored, with its place
-  there): those of a key are a list, from the key's slot, in the order
-  they are stored as made. A key many entities have is one slot, and
+  entity (`Name_list`, in the order they are stored, with its key and
+  its place there): those of a key are a list, from the key's slot, in
+  the order they are stored as made. A slot is the first row of its
+  key's list alone (4 bytes): the key, how many have it and the last of
+  them are read in that row. (It held the key, the first and last rows,
+  the count and the entity, 28 bytes of a number's key and 36 of a
+  text's, and the entity and the row before were not read: the crawler
+  at 10^6 pages went from 2.29 to 2.06 GB at its peak, lookups as fast;
+  bench/http/RESULTS.md, 2026-11-08.) A key many entities have is one slot, and
   its list: one slot an entity would put them all in one run of slots
   (200,000 entities of 7 keys took a second to make so).
-- The slots: twice the keys at least (a power of two, 64 at least),
-  from twice those of the last time it was made, four times as many
-  where the keys come to more than half; made anew where a key more
-  would come to that as it is mended. A key's home is the hash's high
+- The slots: four times the keys of the last time it was made, at
+  least (a power of two, 64 at least), twice as many where the keys
+  come to more than half; made anew where a key more would come to
+  that as it is mended: a key has two to four slots. A key's home is the hash's high
   bits (multiply-shift): with the low bits, runs of whole numbers
   landed on half as many homes in a small table (`bench/hash/homes.c`).
 - The hash: rapidhash's mix (one 64 by 64 bit multiply, the halves of

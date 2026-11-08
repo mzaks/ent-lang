@@ -4005,19 +4005,16 @@ LogicalResult Parser::parseIndex() {
   bool textKey = hashed && isa<TextType, StringType>(keyType);
   Type storedKey =
       textKey ? Type(builder.getIntegerType(64, /*isSigned=*/false)) : keyType;
-  record.fields.push_back({"key", storedKey});
-  if (textKey)
-    record.fields.push_back({"check", storedKey});
   if (hashed) {
-    // (A hash index's slots: a key's, with the first and the last row of
-    // its list and how many it has; the entities are rows of `N_list`.)
+    // (A hash index's slots: a key's, the first row of its list, or -1
+    // where it is empty; the entities are rows of `N_list`, and the key,
+    // how many have it and the last of them are in its first row: a slot
+    // of 4 bytes, so that the slots may be many.)
     record.fields.push_back({"head", builder.getI32Type()});
-    record.fields.push_back({"last", builder.getI32Type()});
-    record.fields.push_back({"count", builder.getI32Type()});
-    // (The entity, where the key has one: what `get` gives without its
-    // list.)
-    record.fields.push_back({"one", EntityType::get(context)});
   } else {
+    record.fields.push_back({"key", storedKey});
+    if (textKey)
+      record.fields.push_back({"check", storedKey});
     record.fields.push_back({"who", EntityType::get(context)});
     record.fields.push_back({"place", builder.getI64Type()});
     for (const Copy &copy : copies)
@@ -4073,7 +4070,7 @@ LogicalResult Parser::parseIndex() {
     setFamilies[*name + "_bits"] = true;
   }
   // A hash index: its entities, a row each, with its key (a text's
-  // hashes), the rows before and after it of its key, and what it copies
+  // hashes), the row after it of its key, and what it copies
   // (the room put in where the capacity is known); rows of those that
   // went stay till it is made anew.
   if (hashed) {
@@ -4084,7 +4081,10 @@ LogicalResult Parser::parseIndex() {
       listed.fields.push_back({"check", storedKey});
     listed.fields.push_back({"place", builder.getI64Type()});
     listed.fields.push_back({"next", builder.getI32Type()});
-    listed.fields.push_back({"prev", builder.getI32Type()});
+    // (Of the first row of a key's list: its last row, and how many rows
+    // it has.)
+    listed.fields.push_back({"tail", builder.getI32Type()});
+    listed.fields.push_back({"count", builder.getI32Type()});
     for (const Copy &copy : copies)
       listed.fields.push_back({copy.name, copy.type});
     SmallVector<Attribute> listNames, listTypes;
@@ -4224,17 +4224,19 @@ LogicalResult Parser::parseIndex() {
     };
     // A table of slots (twice the entities there may be, at least, and a
     // power of two: put in where the capacity is known), each empty
-    // (`head` -1) or a key's (a text's hashes): a key goes into the slot
-    // its hash says, or the next empty one after it (linear probing). The
-    // entities are rows of their own (`N_list`), in the order they are
-    // stored, each with its key, its place and what is copied; those of a
-    // key are a list, from the slot's `head` to its `last` along `next`
-    // (and back along `prev`), in the order they are stored as made.
+    // (`head` -1) or a key's: a key goes into the slot its hash says, or
+    // the next empty one after it (linear probing). The entities are rows
+    // of their own (`N_list`), in the order they are stored, each with its
+    // key (a text's hashes), its place and what is copied; those of a key
+    // are a list, from the slot's `head` along `next`, in the order they
+    // are stored as made, its first row with its last (`tail`) and how
+    // many it has (`count`). A slot is its first row alone: the key is
+    // read there.
     auto hashOf = [&](const std::string &stored) {
       return textKey ? stored : "hash_of(" + stored + ")";
     };
     auto slotOf = [&](const std::string &row) {
-      return n + "_slot(order, " + row + ".key" +
+      return n + "_slot(order, list, " + row + ".key" +
              (textKey ? ", " + row + ".check" : "") + ")";
     };
     // (The other hash of a text: by another seed, written in hex.)
@@ -4265,35 +4267,33 @@ LogicalResult Parser::parseIndex() {
         << "  tags[s].tag = t\n"
         << "  if s < 16 { tags[s + slots].tag = t }\n}\n"
         // The slot of a key, or the empty one it would have.
-        << "fn " << n << "_slot(order: " << n << ", key: " << keyType_
-        << (textKey ? ", check: u64" : "") << ") -> i32 {\n"
+        << "fn " << n << "_slot(order: " << n << ", list: " << n
+        << "_list, key: " << keyType_ << (textKey ? ", check: u64" : "")
+        << ") -> i32 {\n"
         << "  var s = " << n << "_home(order, " << hashOf("key") << ")\n"
-        << "  while order[s].head >= 0 && !(order[s].key == key"
-        << (textKey ? " && order[s].check == check" : "") << ") {\n"
+        << "  while order[s].head >= 0 && !(list[order[s].head].key == key"
+        << (textKey ? " && list[order[s].head].check == check" : "")
+        << ") {\n"
         << "    s = (s + 1) & (len(order) - 1)\n  }\n  s\n}\n"
         // An entity's row at the end of its key's list; whether no other
         // has that key.
         << "proc " << n << "_append(order: mut " << n << ", tags: mut " << n
         << "_tags, list: mut " << n << "_list, r: i32) -> bool {\n"
         << "  let s = " << slotOf("list[r]") << "\n"
-        << "  let fresh = order[s].head < 0\n"
+        << "  let h = order[s].head\n"
+        << "  let fresh = h < 0\n"
         << "  list[r].next = -1\n"
         << "  if !fresh {\n"
-        << "    list[order[s].last].next = r\n"
-        << "    list[r].prev = order[s].last\n"
-        << "    order[s].count += 1\n"
-        << "    order[s].one = none\n"
+        << "    list[list[h].tail].next = r\n"
+        << "    list[h].tail = r\n"
+        << "    list[h].count += 1\n"
         << "  } else {\n"
-        << "    order[s].key = list[r].key\n"
-        << (textKey ? "    order[s].check = list[r].check\n" : "")
         << "    order[s].head = r\n"
-        << "    order[s].count = 1\n"
-        << "    order[s].one = list[r].who\n"
+        << "    list[r].tail = r\n"
+        << "    list[r].count = 1\n"
         << "    " << n << "_mark(tags, s, " << n << "_tag("
         << hashOf("list[r].key") << "), len(order))\n"
-        << "    list[r].prev = -1\n"
-        << "  }\n"
-        << "  order[s].last = r\n  fresh\n}\n";
+        << "  }\n  fresh\n}\n";
     // Under `unique`: where a key's list has two entities, the program
     // stops and says which.
     auto checkUnique = [&](const std::string &indent, const std::string &row) {
@@ -4307,10 +4307,11 @@ LogicalResult Parser::parseIndex() {
              "list[list[first_].next].who)\n"
           << indent << "}\n";
     };
-    // Made: the slots as many as twice the keys at least (a power of two,
-    // 64 at least, at most `slots`), from as many as twice those it had
-    // last (`hint`), four times as many where the keys come to more than
-    // half; how many keys there are. (More keys than half of `slots`: the
+    // Made: the slots as many as four times the keys it had last
+    // (`hint`), at least (a power of two, 64 at least, at most `slots`),
+    // twice as many where the keys come to more than half; how many keys
+    // there are. So a key in two to four slots, as keys come: made anew
+    // where they come to half. (More keys than half of `slots`: the
     // program stops.)
     out << "proc " << n << "_build(order: mut " << n << ", tags: mut " << n
         << "_tags, list: mut " << n << "_list, held: mut " << of.front()
@@ -4318,12 +4319,10 @@ LogicalResult Parser::parseIndex() {
         << "  var keys: i64 = 0\n"
         << "  if len(list) == 0 {\n    order = []\n    tags = []\n  } else {\n"
         << "    var size = 64\n"
-        << "    while (size as i64) < hint * 2 && size < slots { size *= 2 }\n"
+        << "    while (size as i64) < hint * 4 && size < slots { size *= 2 }\n"
         << "    var again = true\n"
         << "    while again {\n"
-        << "      order = [{ key: list[0].key, head: -1, last: -1, count: 0, "
-           "one: none"
-        << (textKey ? ", check: 0" : "") << " }; size]\n"
+        << "      order = [{ head: -1 }; size]\n"
         << "      tags = [{ tag: 128 as u8 }; size + 16]\n"
         << "      keys = 0\n"
         << "      for k in 0..len(list) {\n"
@@ -4338,7 +4337,7 @@ LogicalResult Parser::parseIndex() {
         // many: more than its buffer holds, which stops the program and
         // says so, not a loop for ever.)
         << "      if again { size = if size >= slots { slots * 2 } else { "
-           "min(size * 4, slots) } }\n"
+           "min(size * 2, slots) } }\n"
         << "    }\n";
     if (unique) {
       out << "    for k in 0..len(list) {\n";
@@ -4367,7 +4366,9 @@ LogicalResult Parser::parseIndex() {
           << "  for k in 0..len(changed) {\n"
           << "   if keys >= 0 && ((keys + 1) * 2 > len(order) as i64 || "
              "len(list) as i64 >= most) {\n"
-          << "    keys = -1\n"
+          // (Stopped: how many keys it had, as -2 less that, which the
+          // slots are made anew for.)
+          << "    keys = 0 - keys - 2\n"
           << "   }\n"
           << "   if keys >= 0 {\n"
           << "    let who = changed[k].who\n"
@@ -4383,7 +4384,7 @@ LogicalResult Parser::parseIndex() {
           << "      let at = len(list)\n"
           << "      list += { who: who, key: changed[k].key"
           << (textKey ? ", check: changed[k].check" : "")
-          << ", place: 0, next: -1, prev: -1";
+          << ", place: 0, next: -1, tail: -1, count: 0";
       for (const Copy &copy : copies)
         out << ", " << copy.name << ": changed[k]." << copy.name;
       out << " }\n"
@@ -4424,14 +4425,16 @@ LogicalResult Parser::parseIndex() {
           << "    " << n << "_keys = " << n << "_join(" << n << ", " << n
           << "_tags, " << n << "_list, " << of.front() << ", " << n
           << "_changed, " << n << "_keys, most_)\n"
-          << "    if " << n << "_keys < 0 { " << n << "_whole = false }\n";
+          << "    if " << n << "_keys < 0 {\n"
+          << "      " << n << "_keys = 0 - " << n << "_keys - 2\n"
+          << "      " << n << "_whole = false\n    }\n";
       // (Under `unique`: of the rows of a key that came, those whose
       // entity still names them, no more than one.)
       if (unique)
         out << "    if " << n << "_whole {\n"
             << "     for k in 0..len(" << n << "_changed) {\n"
-            << "      let s = " << n << "_slot(" << n << ", " << n
-            << "_changed[k].key"
+            << "      let s = " << n << "_slot(" << n << ", " << n << "_list, "
+            << n << "_changed[k].key"
             << (textKey ? ", " + n + "_changed[k].check" : "") << ")\n"
             << "      var x = " << n << "[s].head\n"
             << "      var first_ = " << n << "_changed[k].who\n"
@@ -4462,7 +4465,7 @@ LogicalResult Parser::parseIndex() {
         << "_places += 1\n"
         << "    c0." << placeField << " = place_\n"
         << "    " << n << "_list += { who: e, key: " << held
-        << ", place: place_, next: -1, prev: -1" << rest << " }\n  }\n"
+        << ", place: place_, next: -1, tail: -1, count: 0" << rest << " }\n  }\n"
         << "  " << n << "_keys = " << n << "_build(" << n << ", " << n
         << "_tags, " << n << "_list, " << of.front() << ", "
         << kSlotsPlaceholder << ", " << n << "_keys)\n"

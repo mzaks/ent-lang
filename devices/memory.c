@@ -5,7 +5,9 @@
 // The world is as large as its capacities say; the rows it never uses cost
 // address space, not memory. It is mapped (`mmap`) without the system
 // promising the memory up front, and its first pages, which the program
-// sets, are the only ones used at first.
+// sets, are the only ones used at first. The first 4 MB of each of its
+// arrays are kept in small pages, the rest left to the system's huge
+// pages (ent_world_pages, below).
 //
 // With ENT_WORLD_DIR set where the program runs, the world is a file in
 // that directory (made sparse, and gone when the program ends), mapped
@@ -89,6 +91,59 @@ void *ent_world_memory(int64_t bytes) {
   uintptr_t at = ((uintptr_t)base + ENT_WORLD_ALIGNMENT - 1) &
                  ~(uintptr_t)(ENT_WORLD_ALIGNMENT - 1);
   return (void *)at;
+}
+
+// Which pages of the world are huge (2 MB, where the system makes them
+// so: transparent huge pages): the world is told where each of its arrays
+// starts (`starts`, offsets from `world`, the world's length last), and
+// keeps the first ENT_SMALL_PAGES bytes of each in small pages (4 KB).
+// An array the program hardly uses (an archetype of a few entities, a
+// buffer of a few rows, in a world made for millions) then costs the
+// pages it writes, not 2 MB each; one it goes over much has huge pages
+// from there on, which a random read of it finds in fewer steps (a hash
+// index's slots at 4 million keys: 9% faster than in small pages).
+// ENT_HUGE_PAGES=all leaves every page to the system, =none keeps every
+// page small.
+#define ENT_SMALL_PAGES (4 << 20)
+
+void ent_world_pages(void *world, const int64_t *starts, int64_t count) {
+#if defined(_WIN32) || !defined(MADV_NOHUGEPAGE)
+  (void)world, (void)starts, (void)count;
+#else
+  const char *how = getenv("ENT_HUGE_PAGES");
+  const char *directory = getenv("ENT_WORLD_DIR");
+  if ((how && strcmp(how, "all") == 0) || (directory && *directory) ||
+      count < 1)
+    return;
+  uintptr_t base = (uintptr_t)world, page = 4096;
+  int64_t end = starts[count - 1];
+  if (how && strcmp(how, "none") == 0) {
+    madvise((void *)base, (size_t)end, MADV_NOHUGEPAGE);
+    return;
+  }
+  // (From the page an array starts in to the page its first
+  // ENT_SMALL_PAGES end in, or where the next starts; arrays next to
+  // each other in one call.)
+  uintptr_t from = 0, to = 0;
+  for (int64_t i = 0; i + 1 < count; ++i) {
+    int64_t small = starts[i] + ENT_SMALL_PAGES;
+    if (small > starts[i + 1])
+      small = starts[i + 1];
+    uintptr_t first = (base + (uintptr_t)starts[i]) & ~(page - 1);
+    uintptr_t last = (base + (uintptr_t)small + page - 1) & ~(page - 1);
+    if (first <= to) {
+      if (last > to)
+        to = last;
+      continue;
+    }
+    if (to > from)
+      madvise((void *)from, to - from, MADV_NOHUGEPAGE);
+    from = first;
+    to = last;
+  }
+  if (to > from)
+    madvise((void *)from, to - from, MADV_NOHUGEPAGE);
+#endif
 }
 
 #ifdef _WIN32

@@ -2773,10 +2773,10 @@ static void markSetupQueries(ModuleOp module) {
 }
 
 static bool spreads(const WorldArchetype &archetype, QueryOp query);
-/// ENT_LAYOUT_MAP: where each array of the world starts, by name, to
-/// stderr (a line each: offset, name), to tell what the memory of a
-/// running program holds.
-static void printLayoutMap(const WorldLayout &layout) {
+/// Where each array of the world starts, by name, in the order they are
+/// laid out (those at offset 0 left out).
+static std::vector<std::pair<uint64_t, std::string>>
+layoutArrays(const WorldLayout &layout) {
   std::vector<std::pair<uint64_t, std::string>> map;
   auto add = [&](uint64_t offset, const Twine &name) {
     if (offset)
@@ -2863,7 +2863,14 @@ static void printLayoutMap(const WorldLayout &layout) {
   add(layout.locationOffset, "entities.location");
   add(layout.generationOffset, "entities.generation");
   llvm::sort(map);
-  for (auto &[offset, name] : map)
+  return map;
+}
+
+/// ENT_LAYOUT_MAP: where each array of the world starts, by name, to
+/// stderr (a line each: offset, name), to tell what the memory of a
+/// running program holds.
+static void printLayoutMap(const WorldLayout &layout) {
+  for (auto &[offset, name] : layoutArrays(layout))
     llvm::errs() << offset << " " << name << "\n";
 }
 
@@ -19568,15 +19575,23 @@ static HashSlot probeHash(IRRewriter &rewriter, Location loc,
   const WorldBuffer &slots = layout.getBuffer(index);
   const WorldBuffer &tags =
       layout.getBuffer(StringAttr::get(context, index.getValue() + "_tags"));
+  // (A slot is the first row of its key's list: the key, and how many
+  // have it, are read there.)
+  const WorldBuffer &list =
+      layout.getBuffer(StringAttr::get(context, index.getValue() + "_list"));
   auto column = [&](const WorldBuffer &buffer, StringRef name) {
     return world.bufferField(
         buffer, *llvm::find_if(buffer.fields, [&](const WorldColumn &field) {
           return field.field.getValue() == name;
         }));
   };
-  auto load = [&](StringRef name, Value row) {
-    return memref::LoadOp::create(rewriter, loc, column(slots, name),
-                                  ValueRange{row})
+  auto load = [&](StringRef name, Value slot) {
+    Value head = memref::LoadOp::create(rewriter, loc, column(slots, "head"),
+                                        ValueRange{slot});
+    return memref::LoadOp::create(
+               rewriter, loc, column(list, name),
+               ValueRange{arith::IndexCastOp::create(
+                   rewriter, loc, rewriter.getIndexType(), head)})
         .getResult();
   };
   Type i8 = rewriter.getI8Type();
@@ -19733,10 +19748,17 @@ static HashSlot probeHash(IRRewriter &rewriter, Location loc,
                        ValueRange{zero, constant(rewriter.getI1Type(), 0)});
   rewriter.setInsertionPointAfter(some);
   HashSlot found{some.getResult(0), some.getResult(1), Value()};
-  if (counted)
-    found.count =
-        arith::SelectOp::create(rewriter, loc, found.found,
-                                load("count", found.slot), constant(i32, 0));
+  // (Of an empty slot there is no row to read.)
+  if (counted) {
+    auto ifFound = scf::IfOp::create(rewriter, loc, TypeRange{i32},
+                                     found.found, /*withElseRegion=*/true);
+    rewriter.setInsertionPointToStart(ifFound.thenBlock());
+    scf::YieldOp::create(rewriter, loc, load("count", found.slot));
+    rewriter.setInsertionPointToStart(ifFound.elseBlock());
+    scf::YieldOp::create(rewriter, loc, constant(i32, 0));
+    rewriter.setInsertionPointAfter(ifFound);
+    found.count = ifFound.getResult(0);
+  }
   return found;
 }
 
@@ -25834,14 +25856,14 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
   Type wordType = rewriter.getI64Type();
   // (Declared weak: a program linked without devices/memory.c takes the
   // world from the heap.)
-  auto weakDeclaration = [&](StringRef name, Type result, Type argument) {
+  auto weakDeclaration = [&](StringRef name, Type result,
+                             ArrayRef<Type> arguments) {
     if (auto known = module.lookupSymbol<LLVM::LLVMFuncOp>(name))
       return known;
     OpBuilder::InsertionGuard declared(rewriter);
     rewriter.setInsertionPointToStart(module.getBody());
     auto made = LLVM::LLVMFuncOp::create(
-        rewriter, loc, name,
-        LLVM::LLVMFunctionType::get(result, {argument}));
+        rewriter, loc, name, LLVM::LLVMFunctionType::get(result, arguments));
     made.setLinkage(LLVM::Linkage::ExternWeak);
     return made;
   };
@@ -25865,8 +25887,10 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
     return call->getNumResults() ? call.getResult() : Value();
   };
   auto worldMemory =
-      weakDeclaration("ent_world_memory", pointerType, wordType);
-  auto worldFree = weakDeclaration("ent_world_free", voidType, pointerType);
+      weakDeclaration("ent_world_memory", pointerType, {wordType});
+  auto worldFree = weakDeclaration("ent_world_free", voidType, {pointerType});
+  auto worldPages = weakDeclaration("ent_world_pages", voidType,
+                                    {pointerType, pointerType, wordType});
   auto linked = [&](LLVM::LLVMFuncOp function) -> Value {
     Value address = LLVM::AddressOfOp::create(rewriter, loc, pointerType,
                                               function.getSymName());
@@ -25898,6 +25922,39 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
                                     bytes})});
   }
   Value memory = taking.getResult(0);
+  // Where each array starts, told to devices/memory.c, which keeps the
+  // first pages of each small (see ent_world_pages): a table of offsets,
+  // the world's length after them.
+  {
+    std::vector<int64_t> starts;
+    for (auto &[offset, name] : layoutArrays(layout))
+      if (starts.empty() || int64_t(offset) != starts.back())
+        starts.push_back(int64_t(offset));
+    starts.push_back(arenaType.getNumElements());
+    auto tableType = LLVM::LLVMArrayType::get(wordType, starts.size());
+    std::string tableName = "ent_world_starts";
+    {
+      OpBuilder::InsertionGuard global(rewriter);
+      rewriter.setInsertionPointToStart(module.getBody());
+      LLVM::GlobalOp::create(
+          rewriter, loc, tableType, /*isConstant=*/true,
+          LLVM::Linkage::Private, tableName,
+          DenseElementsAttr::get(
+              RankedTensorType::get({int64_t(starts.size())}, wordType),
+              ArrayRef<int64_t>(starts)));
+    }
+    auto told = scf::IfOp::create(rewriter, loc, TypeRange{},
+                                  linked(worldPages),
+                                  /*withElseRegion=*/false);
+    OpBuilder::InsertionGuard branch(rewriter);
+    rewriter.setInsertionPointToStart(told.thenBlock());
+    Value table =
+        LLVM::AddressOfOp::create(rewriter, loc, pointerType, tableName);
+    Value count = arith::ConstantIntOp::create(rewriter, loc,
+                                               int64_t(starts.size()), 64);
+    LLVM::CallOp::create(rewriter, loc, worldPages,
+                         ValueRange{memory, table, count});
+  }
   Value created;
   {
     auto dimensions = LLVM::LLVMArrayType::get(wordType, 1);
