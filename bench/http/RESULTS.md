@@ -677,8 +677,7 @@ CPUs 4-11:
 | 10⁶ | C | 27.9 | 11.7 | 4.35 (27%) | 1.55 / 4.35 |
 | 10⁶ | ent | 33.2 | 14.4 | 4.80 (25%) | 1.52 / 4.56 |
 
-The user time by library at 10⁵ (`perf record -e cycles:u`; the
-kernel's own functions need `perf_event_paranoid` below 2):
+The user time by library at 10⁵ (`perf record -e cycles:u`):
 
 | | C | ent |
 |---|---|---|
@@ -698,6 +697,19 @@ AF_XDP), would not narrow the gap to C and, over loopback, would not run
 in the driver at all; io_uring could at most take some of the system
 quarter both have. Where a real site is crawled, its answers' latency,
 the hosts' politeness and DNS and TLS handshakes come first.
+
+In the kernel (`perf record -g -e cycles`, `perf_event_paranoid` 1, at
+10⁵): of all the crawler's samples, C 35%, ent 30%, nearly all of it
+under two calls, the same for both: `send` (C 28.5%, ent 22.4%, with
+what is under it) and `recv` (5.4, 5.6), and curl's clock reads
+(`clock_gettime`, 5.2, 4.4; mostly the vdso, in user space). `poll`,
+`connect`, `close` under 1% together. By kind, TCP/IP is 19% (C) and
+15% (ent), the scheduler's wakeups 2, memory 2, the way in and out of a
+call 1, copies 1, epoll 1: no one function above 1.5%. Over loopback a
+`send` goes on through the device into the server's socket on the same
+call (`tcp_v4_rcv`, `ep_poll_callback`, waking its thread), so it pays
+the server's side of receiving too, which another machine would. What
+io_uring saves, the way in and out of a call, is about 1% here.
 
 ## Against other crawlers (§9.2, C4)
 
