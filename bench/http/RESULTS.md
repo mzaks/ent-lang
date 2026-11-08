@@ -663,6 +663,42 @@ The stamps are as they were: 8 bytes a row of each archetype a reactive
 tick would halve them, but wraps: a program that runs for hours would
 see old events as new.
 
+### The kernel's share (2026-11-08)
+
+Whether a faster way to the network (XDP, io_uring) would pay: each
+crawler's CPU, user and system apart (`wait4`; `live.py` now prints the
+system seconds too), one live crawl at 64 connections, the server on
+CPUs 4-11:
+
+| pages | crawler | wall s | user s | system s | server user / system s |
+|---|---|---|---|---|---|
+| 10⁵ | C | 2.29 | 0.78 | 0.40 (34%) | 0.15 / 0.44 |
+| 10⁵ | ent | 2.73 | 1.12 | 0.47 (30%) | 0.16 / 0.48 |
+| 10⁶ | C | 27.9 | 11.7 | 4.35 (27%) | 1.55 / 4.35 |
+| 10⁶ | ent | 33.2 | 14.4 | 4.80 (25%) | 1.52 / 4.56 |
+
+The user time by library at 10⁵ (`perf record -e cycles:u`; the
+kernel's own functions need `perf_event_paranoid` below 2):
+
+| | C | ent |
+|---|---|---|
+| the crawler's own code | 0.07 s | 0.40 s |
+| libcurl | 0.31 | 0.35 |
+| libc | 0.32 | 0.29 |
+| vdso (curl reading the clock) | 0.07 | 0.07 |
+
+The kernel is a quarter to a third of either crawler's CPU, and about
+the same for both: sockets and TCP over loopback, as much again on the
+server's side. What ent spends more than C is its own code (0.33 of
+0.34 s more at 10⁵, 2.75 s of user time at 10⁶), not the way to the
+network. Neither is busy all the time (C at 10⁶: 16 CPU s in 28): the
+site's answers take their time. So XDP, a packet path below the kernel's
+TCP (a crawler on it would need a TCP and TLS of its own, through
+AF_XDP), would not narrow the gap to C and, over loopback, would not run
+in the driver at all; io_uring could at most take some of the system
+quarter both have. Where a real site is crawled, its answers' latency,
+the hosts' politeness and DNS and TLS handshakes come first.
+
 ## Against other crawlers (§9.2, C4)
 
 `others.py`: wget, Scrapy, Colly and spider crawl the generated site

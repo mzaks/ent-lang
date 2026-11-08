@@ -70,8 +70,8 @@ def build_ent(source, out, parallel):
 
 
 def run(command, where):
-    """Wall seconds, CPU seconds and peak memory (MB) of one run, and its
-    report."""
+    """Wall seconds, CPU seconds, of them in the system (the kernel: sockets,
+    TCP), and peak memory (MB) of one run, and its report."""
     start = time.perf_counter()
     process = subprocess.Popen(command, cwd=where, stdout=subprocess.PIPE,
                                stderr=subprocess.DEVNULL, text=True)
@@ -82,8 +82,8 @@ def run(command, where):
         raise SystemExit(f"{command[-1]} failed in {where}")
     lines = sorted({line for line in out.splitlines()
                     if line and not line.startswith(("log ", "history "))})
-    return (seconds, usage.ru_utime + usage.ru_stime, usage.ru_maxrss / 1024,
-            lines)
+    return (seconds, usage.ru_utime + usage.ru_stime, usage.ru_stime,
+            usage.ru_maxrss / 1024, lines)
 
 
 def set_conf(where, key, value):
@@ -113,8 +113,8 @@ def main():
     subprocess.run(["cc", "-O2", "-march=native", "-o", crawl_c,
                     os.path.join(HERE, "crawl.c"), "-lcurl"], check=True)
     print("| pages | fetched | connections | crawler | wall s | CPU s | "
-          "peak MB | pages/s |")
-    print("|---|---|---|---|---|---|---|---|")
+          "system s | peak MB | pages/s |")
+    print("|---|---|---|---|---|---|---|---|---|")
     for pages in args.pages:
         site = os.path.join(work, f"site-{pages}")
         if not os.path.exists(os.path.join(site, "expected.txt")):
@@ -155,7 +155,7 @@ def main():
                         f.write(f"proxy http://127.0.0.1:{port}\n"
                                 f"connections {connections}\n")
                     try:
-                        seconds, cpu, peak, got = run(command, site)
+                        seconds, cpu, system, peak, got = run(command, site)
                     finally:
                         server.terminate()
                         server.wait()
@@ -166,12 +166,12 @@ def main():
                             f"{name}, {pages} pages, {connections} "
                             f"connections: not the expected report; "
                             f"missing {missing}, more {more}")
-                    times[name].append((seconds, cpu, peak))
+                    times[name].append((seconds, cpu, system, peak))
             for name in crawlers:
                 runs = sorted(times[name])
-                seconds, cpu, peak = runs[len(runs) // 2]
+                seconds, cpu, system, peak = runs[len(runs) // 2]
                 print(f"| {pages} | {fetched} | {connections} | {name} | "
-                      f"{seconds:.3f} | {cpu:.3f} | {peak:.0f} | "
+                      f"{seconds:.3f} | {cpu:.3f} | {system:.3f} | {peak:.0f} | "
                       f"{fetched / seconds:,.0f} |", flush=True)
     if not args.keep:
         shutil.rmtree(work)
