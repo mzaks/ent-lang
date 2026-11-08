@@ -188,7 +188,9 @@ Built (2026-10-23, `docs/syntax.md`, Hash indexes):
   4.0 where 9.5), keys found 1 to 1.5 ns slower in the cache and as fast
   beyond it (35 ns where 33). Now a slot is its first row alone, a hop
   more: found 3.4 ns at 1,000 at random, 8.6 at 200,000, 76 at 4
-  million (bench/RESULTS.md, 2026-11-08).
+  million (bench/RESULTS.md, 2026-11-08; a slot with its key and entity
+  again: 39 ns at 4 million, the crawler 125 MB more at 10⁶ pages, not
+  kept).
 - `for x: C where x.key == value` (or `value == x.key`, or one of the
   conditions `&&` joins), where the value is the same for all its
   entities (literals, consts, enum cases, locals not declared `var`):

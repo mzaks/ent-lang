@@ -3878,6 +3878,25 @@ probing makes long runs at 76%), slower than absl there (5.8). It saves
 little: an empty slot is 5 bytes (its head and tag), where absl's is a
 byte and a whole key and value; 4 million keys are 8.4M slots either way.
 
+Also tried and not kept: the slot with its key and its first row's
+entity again (16 bytes for a key of 8, 24 for a text's two hashes), so
+that a found key is the tags, then the slot, as on 10-23. Lookups as
+then; the crawler (`crawl_live`, 64 connections, the reports the same)
+pays memory for no time, and most of it is `ByTurn`, by an i64, so a
+wide slot only for keys not texts saves little:
+
+| | 4-byte slots | 16 not texts, 4 texts | 16 all |
+|---|---|---|---|
+| found, 4M at random | 76 ns | 40 | 39 |
+| found, 200,000 at random | 8.6 | 5.9 | 6.0 |
+| crawl 10⁵: peak / wall | 143 MB / 2.72 s | 147 / 2.73 | 152 / 2.75 |
+| crawl 10⁶: peak / wall | 1,386 MB / 33.0 s | 1,475 / 33.3 | 1,534 / 33.0 |
+
+(16 all against a run of the 4-byte slots at 141 and 1,409 MB: +11 and
++125 MB.) The slot stays its first row alone; a wide slot would be a
+choice by index, for one whose `get`s are many and its table larger
+than the cache.
+
 ## 2026-10-24: graph kernels against GAP
 
 `bench/graph/run.py`: two kernels of the GAP Benchmark Suite (gapbs at
