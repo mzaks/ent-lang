@@ -2097,8 +2097,11 @@ def Ent_SaCombineOp : Ent_Op<"sa.combine", [AttrSizedOperandSegments]> {
     apply and archetype combines. And on many ranks, `on_ranks`:
     `"posted"` (to the rank that has the entity, combined there when the
     query ends; whole numbers added, or kept the least or the most, the
-    same in any order) or `"refused"` (the program stops where one would
-    be posted); see ranksPosting.
+    same in any order), `"ordered"` (a fraction, or `=`: every send
+    posted, to this rank too, and each entity's combined in the order of
+    the ranks they came from, each's in its order: one process's) or
+    `"refused"` (atomically, or into a field whose changes are events: the
+    program stops where one would be posted); see ranksPosting.
   }];
   let arguments = (ins I64Attr:$apply, I64Attr:$archetype,
                        FlatSymbolRefAttr:$component, StrAttr:$field,

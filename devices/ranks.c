@@ -1470,8 +1470,13 @@ static void ent_ranks_share_column_untimed(void *column, int64_t each) {
 // (or every rank: of an archetype that is not distributed): each posted to
 // those ranks, on a channel of the program's (one for each field and rule
 // it combines into), and given to them when the `for` ends, where each is
-// combined into the entity's field. Only whole numbers added, or kept the
-// least or the most, which come to the same in any order.
+// combined into the entity's field: channel by channel, each's in the
+// order of the ranks they came from, each's in its order. Whole numbers
+// added, or kept the least or the most, come to the same in any order;
+// sends whose order shows (fractions, `=`) are posted also by the rank that
+// has the entity, to itself, on a channel for each place that sends, and
+// so are combined in one process's order (the ranks hold stretches of the
+// rows in their order).
 
 typedef struct {
   int64_t *words; // channel, id, value
@@ -1598,10 +1603,9 @@ int64_t ent_ranks_got_value(int32_t channel, int64_t i) {
 void ent_ranks_cannot_send(int32_t line) {
   char why[256];
   snprintf(why, sizeof why,
-           "a `for` over distributed entities sends a value that is not a "
-           "whole number added, or kept the least or the most, to an entity "
-           "another rank has or every rank has (line %d): not on many ranks "
-           "yet",
+           "a `for` over distributed entities sends a value atomically, or "
+           "to a field whose changes are events, to an entity another rank "
+           "has or every rank has (line %d): not on many ranks yet",
            line);
   ent_ranks_stop(why);
 }

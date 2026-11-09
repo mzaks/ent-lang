@@ -158,6 +158,15 @@ to the same on any number of ranks:
   an entity of an archetype that is not distributed to every rank; when
   the `for` ends the ranks swap them (`Alltoallv`) and each combines what
   it was given;
+- sends of fractions to entities of any rank (`Cell(other).heat += x`, or
+  kept the least or the most), whose sums depend on their order: every
+  one is posted, also one to an entity of the rank's own (to itself), on
+  a channel for each place in the `for` that sends, and each rank combines
+  what it was given place by place, each place's in the order of the
+  ranks they came from, each rank's in the order of its rows. The ranks
+  hold stretches of the rows in their order, so that is the order one
+  process combines them in, and the bits are one process's (ranks.test,
+  `ranks_sendfloat.ent`, sums of 1e16, -1e16 and tenths);
 - lines it writes out (`put`), each rank's after the ranks' before it, in
   the order of the rows; a `for` that takes turns (`in turn by c.number`)
   writes each rank's in its order;
@@ -207,8 +216,8 @@ emptied or given another's entities; in a `for` that takes turns
 anything written to a unique, a buffer or a set, or sent; in
 one along a tree anything but what each entity does to itself and its
 ancestors. Not yet, and the program stops when it happens: a lookup of an entity another rank has from a `for` over
-entities every rank has or outside a `for`, a send to one of a fraction,
-with `=` or to a field whose changes are events (with the rank, the row
+entities every rank has or outside a `for`, a send to one atomically
+(`ENT_ATOMIC_SENDS=1`) or to a field whose changes are events (with the rank, the row
 and the line of the lowered program), and entities spawned into or gone
 from a distributed archetype after it was placed.
 

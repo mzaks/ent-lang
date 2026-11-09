@@ -2742,13 +2742,26 @@ struct RankChannel {
   StringAttr component, field;
   StringRef rule;
   Type stored;
+  // (Of an "ordered" send merged when the query ends: its apply and
+  // archetype, as one process merges each's sends after another's; else
+  // -1.)
+  int64_t apply = -1;
 };
+/// The apply and archetype whose merge is being lowered (see
+/// RankChannel), else -1.
+static int64_t rankMergedApply = -1;
 static SmallVector<RankChannel> rankChannels;
 /// What a send being lowered does where the entity is not this rank's
 /// alone (see emitLocate): `post` posts it (to the owner, or to every
-/// rank with `all`); without `postable`, the program stops.
+/// rank with `all`); without `postable`, the program stops. With
+/// `ordered` (a send whose order shows: a fraction, or `=`) also a send to
+/// an entity this rank has is posted, to itself, so that each entity is
+/// given its sends in the order of the ranks they came from, each's in its
+/// order: the order of the rows one process goes through (each rank has a
+/// stretch of them, the ranks in its order).
 struct RankPost {
   bool postable = false;
+  bool ordered = false;
   std::function<void(const WorldArchetype &, Value row, bool all)> post;
 };
 static RankPost *rankPost = nullptr;
@@ -5979,6 +5992,10 @@ emitLocate(IRRewriter &rewriter, Location loc, const WorldLayout &layout,
         rankPost->post(archetype, row, /*all=*/true);
         return {};
       }
+      if (rankPost->ordered) {
+        rankPost->post(archetype, row, /*all=*/false);
+        return {};
+      }
       if (rankPost->postable) {
         Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
         Value at = arith::IndexCastOp::create(rewriter, loc,
@@ -6807,23 +6824,29 @@ static Value fromSendBits(IRRewriter &rewriter, Location loc, Value bits,
 /// combined into an entity another rank has (or every rank, of an
 /// archetype not distributed) does. "posted": posted to it on the channel
 /// of the field, rule and stored type (numbered here), combined there
-/// when the query ends (deliverOverRanks); "refused": the program stops.
+/// when the query ends (deliverOverRanks); "ordered": so, and also to
+/// this rank (see RankPost); "refused": the program stops.
 static RankPost ranksPosting(IRRewriter &rewriter, Location loc,
                              FlatSymbolRefAttr component, StringAttr fieldName,
                              StringRef rule, StringRef onRanks, Value id,
                              Value value) {
   RankPost posting;
-  posting.postable = onRanks == "posted";
+  posting.ordered = onRanks == "ordered";
+  posting.postable = onRanks == "posted" || posting.ordered;
   int64_t channel = -1;
   if (posting.postable) {
+    // (Ordered: a channel for each apply merged, given in the order they
+    // were made, which is the order of the merges.)
+    int64_t apply = posting.ordered ? rankMergedApply : -1;
     auto known = llvm::find_if(rankChannels, [&](const RankChannel &c) {
       return c.component == component.getAttr() && c.field == fieldName &&
-             c.rule == rule && c.stored == value.getType();
+             c.rule == rule && c.stored == value.getType() &&
+             c.apply == apply;
     });
     channel = known - rankChannels.begin();
     if (known == rankChannels.end())
       rankChannels.push_back(
-          {component.getAttr(), fieldName, rule, value.getType()});
+          {component.getAttr(), fieldName, rule, value.getType(), apply});
   }
   posting.post = [&rewriter, loc, id, value,
                   channel](const WorldArchetype &archetype, Value row,
@@ -7173,9 +7196,10 @@ static void deliverEdges(IRRewriter &rewriter, Location loc, ModuleOp module,
 
 /// On many ranks, when a query over distributed archetypes ends: what its
 /// sends posted to other ranks given to them (devices/ranks.c), and what
-/// this rank was given combined into its entities, channel by channel.
-/// (In any order: each channel's values are whole numbers added, or kept
-/// the least or the most.)
+/// this rank was given combined into its entities, channel by channel,
+/// each in the order of the ranks they came from, each's in its order
+/// (devices/ranks.c): one process's order, for the channels of sends
+/// whose order shows ("ordered", see RankPost).
 static void deliverOverRanks(IRRewriter &rewriter, Location loc,
                              ModuleOp module, const WorldLayout &layout,
                              WorldAccess &world) {
@@ -7208,8 +7232,7 @@ static void deliverOverRanks(IRRewriter &rewriter, Location loc,
     Value value = callGpu(rewriter, loc, module, "ent_ranks_got_value",
                           ValueRange{number, i}, TypeRange{i64})
                       .getResult(0);
-    if (channel.stored != i64)
-      value = arith::TruncIOp::create(rewriter, loc, channel.stored, value);
+    value = fromSendBits(rewriter, loc, value, channel.stored);
     combineIntoField(rewriter, loc,
                      FlatSymbolRefAttr::get(channel.component), channel.field,
                      channel.rule, /*atomic=*/false, /*trusted=*/false,
@@ -15251,14 +15274,17 @@ static StringRef resolveSend(const ApplyFacts &facts) {
 /// On many ranks, what a value combined into another rank's entity does
 /// (`on_ranks`, see SaCombineOp), where it may be (`posts`): posted where
 /// that comes to the same in any order (a whole number added, or the
-/// least or the most kept; not atomically, nothing stamped); else
-/// refused. Nothing ("") where it may not.
+/// least or the most kept; not atomically, nothing stamped); posted in
+/// order where the order shows (a fraction, or `=`: every send posted,
+/// also to this rank's own entities, see RankPost); else (atomically, or
+/// stamped) refused. Nothing ("") where it may not.
 static StringRef resolveOnRanks(bool posts, bool whole, StringRef rule,
                                 bool atomic, bool changed) {
   if (!posts)
     return "";
-  return whole && rule != "set" && !atomic && !changed ? "posted"
-                                                        : "refused";
+  if (atomic || changed)
+    return "refused";
+  return whole && rule != "set" ? "posted" : "ordered";
 }
 
 /// The facts of a combine into `component`'s `field`, of values stored as
@@ -15553,6 +15579,9 @@ static void lowerStateAccess(IRRewriter &rewriter, SaMergeOp merge,
   Location loc = merge.getLoc();
   OpBuilder::InsertionGuard guard(rewriter);
   rewriter.setInsertionPoint(merge);
+  llvm::SaveAndRestore mergedApply(
+      rankMergedApply,
+      (int64_t(merge.getApply()) << 20) | int64_t(merge.getArchetype()));
   const WorldArchetype &archetype = layout.archetypes[merge.getArchetype()];
   Type stored = merge.getStored();
   Value tick = merge.getTick();

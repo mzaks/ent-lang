@@ -40,10 +40,27 @@
 // RUN: FileCheck %s --check-prefix=SENDS --input-file=%t.sends.four
 // SENDS: day 3: sum 2894930 hub 1498500 3000
 //
-// A fraction sent to another rank's entity stops the program.
-// RUN: %ent run %S/Inputs/ranks_sendfloat.ent
-// RUN: not %ent run %S/Inputs/ranks_sendfloat.ent --ranks 2 2>&1 | FileCheck %s --check-prefix=SENDFLOAT
-// SENDFLOAT: reads or sends to an entity that rank {{[0-9]}} has
+// Fractions sent to entities of any rank, from two places: each entity
+// given them in one process's order (sums of 1e16, -1e16 and tenths, whose
+// bits show the order), on ranks, as partitions and on many threads.
+// RUN: %ent run %S/Inputs/ranks_sendfloat.ent > %t.sendfloat.one
+// RUN: %ent run %S/Inputs/ranks_sendfloat.ent --ranks 2 > %t.sendfloat.two
+// RUN: %ent run %S/Inputs/ranks_sendfloat.ent --ranks 3 > %t.sendfloat.three
+// RUN: %ent run %S/Inputs/ranks_sendfloat.ent --ranks 3 --partitions > %t.sendfloat.parts
+// RUN: env ENT_PARALLEL_MIN=1 %ent run %S/Inputs/ranks_sendfloat.ent --ranks 2 --parallel > %t.sendfloat.parallel
+// RUN: diff %t.sendfloat.one %t.sendfloat.two
+// RUN: diff %t.sendfloat.one %t.sendfloat.three
+// RUN: diff %t.sendfloat.one %t.sendfloat.parts
+// RUN: diff %t.sendfloat.one %t.sendfloat.parallel
+// RUN: FileCheck %s --check-prefix=SENDFLOAT --input-file=%t.sendfloat.three
+// SENDFLOAT: 6 10000000000000050
+// SENDFLOAT: 7 49.4
+// The same from one place, combined where it is sent (direct).
+// RUN: %ent run %S/Inputs/ranks_sendfloat_direct.ent > %t.sendfloatd.one
+// RUN: %ent run %S/Inputs/ranks_sendfloat_direct.ent --ranks 3 > %t.sendfloatd.three
+// RUN: %ent run %S/Inputs/ranks_sendfloat_direct.ent --ranks 3 --partitions > %t.sendfloatd.parts
+// RUN: diff %t.sendfloatd.one %t.sendfloatd.three
+// RUN: diff %t.sendfloatd.one %t.sendfloatd.parts
 //
 // A small city: the setup run whole by every rank, then ties to people
 // of any rank, a tree up to houses that live with their people, rows

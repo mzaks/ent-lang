@@ -1,0 +1,21 @@
+// On many ranks a fraction sent from one place, combined where it is sent
+// (direct): posted, own rank's too, and given in one process's order
+// (ranks.test, explain-state-access.test).
+import console
+component Cell { number: i32, heat: f64 } capacity 100
+distribute Cell by number
+buffer Ids { who: entity } capacity 100
+unique Days: i32
+system send() {
+  for c: Cell {
+    let other = Ids[(c.number * 7) % 10].who
+    Cell(other).heat += 0.1 * (c.number as f64) + 1e16 * ((c.number % 3 - 1) as f64)
+  }
+}
+system report() {
+  Days += 1
+  for c: Cell { if c.number < 10 { put("{c.number} {c.heat}") } }
+}
+schedule day() { send()  report() }
+world { for i in 0..100 { Ids += { who: spawn { Cell { number: i, heat: 0.0 } } } } }
+main { loop { day() } until Days == 2 }

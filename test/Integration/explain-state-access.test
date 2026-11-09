@@ -55,11 +55,16 @@
 // RUN:     -o /dev/null 2>&1 | FileCheck %s --check-prefix=RANKS
 // RANKS: ranks_sends.ent:17:5: remark: sa.combine rows, posted on ranks (direct, posts, whole)
 // RANKS: ranks_sends.ent:17:5: remark: sa.merge rows, posted on ranks, staged rows (posts, ranks, whole)
+// RUN: ent-translate --import-ent %S/Inputs/ranks_sendfloat_direct.ent -I %S/../../devices \
+// RUN:   --mlir-print-debuginfo \
+// RUN:   | ent-opt "--ent-lower-to-loops=fuse-systems=1 ranks=1 explain-state-access=1" \
+// RUN:     -o /dev/null 2>&1 | FileCheck %s --check-prefix=ORDERED
+// ORDERED: ranks_sendfloat_direct.ent:12:5: remark: sa.combine direct, ordered on ranks (direct, posts, unobserved)
 // RUN: ent-translate --import-ent %S/Inputs/ranks_sendfloat.ent -I %S/../../devices \
 // RUN:   --mlir-print-debuginfo \
 // RUN:   | ent-opt "--ent-lower-to-loops=fuse-systems=1 ranks=1 explain-state-access=1" \
-// RUN:     -o /dev/null 2>&1 | FileCheck %s --check-prefix=REFUSED
-// REFUSED: ranks_sendfloat.ent:10:5: remark: sa.combine direct, refused on ranks (direct, posts, unobserved)
+// RUN:     -o /dev/null 2>&1 | FileCheck %s --check-prefix=ORDERED-MERGED
+// ORDERED-MERGED: ranks_sendfloat.ent:12:5: remark: sa.merge rows, ordered on ranks, staged rows (posts, ranks)
 // RUN: ent-translate --import-ent %S/Inputs/ranks_connect.ent -I %S/../../devices \
 // RUN:   --mlir-print-debuginfo \
 // RUN:   | ent-opt "--ent-lower-to-loops=fuse-systems=1 ranks=1 explain-state-access=1" \

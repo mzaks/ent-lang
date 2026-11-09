@@ -1,16 +1,23 @@
-// On many ranks a fraction sent to an entity another rank has would be
-// combined in another order: the program stops (ranks.test).
+// On many ranks a fraction sent to an entity (another rank's or its own)
+// is posted, and each entity is given its sends in the order of the ranks
+// they came from: one process's order, the same bits (ranks.test).
+import console
 component Cell { number: i32, heat: f64 } capacity 100
 distribute Cell by number
 buffer Ids { who: entity } capacity 100
 unique Days: i32
 system send() {
   for c: Cell {
-    let other = Ids[(c.number * 37 + 11) % len(Ids)].who
-    Cell(other).heat += 0.5
+    let other = Ids[(c.number * 7) % 10].who
+    Cell(other).heat += 0.1 * (c.number as f64) + 1e16 * ((c.number % 3 - 1) as f64)
+    let near = Ids[(c.number + 1) % len(Ids)].who
+    Cell(near).heat += 0.3
   }
 }
-system report() { Days += 1 }
+system report() {
+  Days += 1
+  for c: Cell { put("{c.number} {c.heat}") }
+}
 schedule day() { send()  report() }
 world { for i in 0..100 { Ids += { who: spawn { Cell { number: i, heat: 0.0 } } } } }
 main { loop { day() } until Days == 2 }
