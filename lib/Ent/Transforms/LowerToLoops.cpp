@@ -12302,10 +12302,27 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
   // (Built for partitions: by this rank's own edges alone.)
   if (sortsPartitioned(layout, relation)) {
     emitPartitionedSort(rewriter, loc, module, layout, world, relation, keep);
-    // (Every run without room.)
-    if (relation.mended())
-      callEdges(rewriter, loc, module, layout, world, relation,
-                "ent_edges_dense");
+    // (Every run without room: those of the rank's own keys, which alone
+    // have offsets.)
+    if (relation.mended()) {
+      Value arena = worldPointer(rewriter, loc, world.getArena());
+      Value spec = edgesSpec(rewriter, loc, module, layout, world, relation);
+      auto dense = [&](int32_t index, bool target) {
+        for (auto [lo, hi] :
+             ownKeyWindows(rewriter, loc, layout, world, relation, target))
+          callGpu(rewriter, loc, module, "ent_edges_dense_window",
+                  ValueRange{arena, spec,
+                             arith::ConstantIntOp::create(rewriter, loc, index,
+                                                          32),
+                             arith::IndexCastOp::create(
+                                 rewriter, loc, rewriter.getI64Type(), lo),
+                             arith::IndexCastOp::create(
+                                 rewriter, loc, rewriter.getI64Type(), hi)});
+      };
+      dense(0, relation.byTarget);
+      if (relation.hasIndex())
+        dense(1, /*target=*/true);
+    }
     memref::StoreOp::create(rewriter, loc,
                             arith::ConstantIntOp::create(rewriter, loc, 1, 64),
                             world.edgesClean(relation), ValueRange{zero});

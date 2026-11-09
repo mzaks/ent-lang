@@ -156,7 +156,11 @@
 //
 // A build for 4 partitions run by fewer processes: each runs several, as
 // threads (one at a time, ENT_RUNNING=1).
-// RUN: %ent build %S/Inputs/ranks_trace.ent --ranks 4 --partitions -o %t.trace.exe
+// RUN: %ent build %S/Inputs/ranks_trace.ent --ranks 4 --partitions --keep %t.trace.dir -o %t.trace.exe
+// After a sort, a partition sets the run ends of its own keys alone, not
+// every key of the world (16 partitions did the whole world's each):
+// RUN: llvm-dis %t.trace.dir/ranks_trace.bc -o - | FileCheck %s --check-prefix=DENSE --implicit-check-not='call void @ent_edges_dense('
+// DENSE: call void @ent_edges_dense_window(
 // RUN: mpirun -n 1 -x ENT_RUNNING=1 %t.trace.exe > %t.trace.in1
 // RUN: diff %t.trace.one %t.trace.in1
 // RUN: mpirun -n 2 --oversubscribe %t.trace.exe > %t.trace.in2

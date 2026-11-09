@@ -213,6 +213,28 @@ void ent_edges_dense(char *arena, const int64_t *spec) {
   mends[0] = mends[2] = 0;
 }
 
+// ent_edges_dense for the keys from `from` to `to` (not in) alone: built
+// for partitions, a rank's sort keeps the offsets of its own entities'
+// keys only (ent_ranks_sort_offsets), so their ends are all there is to
+// set; going over every key made each partition do the whole world's.
+// `index` 0: the runs by the table's end, 1: the index by target.
+void ent_edges_dense_window(char *arena, const int64_t *spec, int32_t index,
+                            int64_t from, int64_t to) {
+  Edges e = edges_of(arena, spec);
+  if (to > e.keys)
+    to = e.keys;
+  if (!index) {
+    for (int64_t k = from; k < to; k++)
+      set_off(&e, SPEC_ENDS, k, off(&e, SPEC_SORTED, k + 1));
+  } else if (e.index && from < to) {
+    for (int64_t k = from; k < to; k++)
+      set_off(&e, SPEC_INDEX_ENDS, k, off(&e, SPEC_INDEX, k + 1));
+    slots_from(&e, off(&e, SPEC_INDEX, from), off(&e, SPEC_INDEX, to));
+  }
+  int64_t *mends = (int64_t *)(arena + spec[SPEC_MENDS]);
+  mends[0] = mends[2] = 0;
+}
+
 // New starts for runs of `lengths` (keys of them) with room after each:
 // one for every key and an eighth of its length, all of it no more than
 // `room` (each share made smaller where it would be: by how much the
