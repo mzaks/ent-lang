@@ -1,0 +1,48 @@
+// A NaN in fractions' least and greatest (test/Integration/gpu.test):
+// IEEE 754's minimum and maximum, in which a NaN wins, given as the one
+// NaN (the quiet one without a sign) whatever its bits and sign were: the
+// same bits on one core, on many and on the GPU, where they are combined
+// by whole-number atomics of their bits in their order.
+import console
+
+component Dot { x: f64, y: f32 } capacity 100000
+archetype Plain { Dot } capacity 100000
+unique U { frame: i64, posmin: f64, posmax: f64, negmin: f64, negmax: f64,
+           fmin: f32, fmax: f32, plain: f64 }
+
+world {
+  for i in 0..100000 {
+    spawn { Dot { x: (i % 1000) as f64 - 500.0, y: (i % 77) as f32 } }
+  }
+}
+
+gpu system box() {
+  U.posmin = 1.0 / 0.0
+  U.posmax = 0.0 - 1.0 / 0.0
+  U.negmin = 1.0 / 0.0
+  U.negmax = 0.0 - 1.0 / 0.0
+  U.fmin = 1.0 / 0.0
+  U.fmax = 0.0 - 1.0 / 0.0
+  U.plain = 1.0 / 0.0
+  for e, d: Dot {
+    // (One entity in 50,000 gives a NaN: with a payload and no sign, and
+    // with the sign.)
+    let pos = if d.x == 17.0 && d.y == 3.0 { float_of(0x7ff0000000000123) } else { d.x }
+    let neg = if d.x == 17.0 && d.y == 3.0 { float_of(0xfff8000000000456) } else { d.x }
+    U.posmin min= pos
+    U.posmax max= pos
+    U.negmin min= neg
+    U.negmax max= neg
+    U.fmin min= if d.y == 5.0 { (0.0 / 0.0) as f32 } else { d.y }
+    U.fmax max= if d.y == 5.0 { 0.0 - (0.0 / 0.0) as f32 } else { d.y }
+    U.plain min= d.x
+  }
+}
+
+system show() {
+  put("frame {U.frame}: {bits_of(U.posmin)} {bits_of(U.posmax)} {bits_of(U.negmin)} {bits_of(U.negmax)} {bits_of(U.fmin)} {bits_of(U.fmax)} {U.plain}")
+  U.frame += 1
+}
+
+schedule frame() { box() show() }
+main { loop { frame() } until U.frame >= 2 }

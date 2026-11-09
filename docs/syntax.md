@@ -934,7 +934,8 @@ of a depth.
   and `max=` accumulate (combined when the query ends, in a fixed
   order; whole numbers, which come to the same in any order, and the
   least and the greatest of fractions (IEEE-754's, -0 under +0, a NaN
-  kept), which do too, each thread for itself where there are many, and
+  wins and is the one NaN, quiet and without a sign, whatever NaN came:
+  the same bits on every path), which do too, each thread for itself where there are many, and
   those at the end), and `=` sets it to what the last entity that sets it gives, in
   the order of the `for`, when the `for` ends: a number, a bool, an enum
   or an entity (`for b: Box with Main { View.h = b.h }`). Read in the

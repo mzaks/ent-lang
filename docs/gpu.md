@@ -97,7 +97,10 @@ entity and values every entity reads alike:
   fraction's bits in their order (the bits but the sign turned over where
   the sign is set: as whole numbers with a sign they order as the
   fractions do, -0.0 below 0.0), combined by whole numbers' atomics,
-  starting at the infinity on the other side; the CPU turns them back;
+  starting at the infinity on the other side; the CPU turns them back.
+  A NaN is first made the one NaN with the sign that puts it past the
+  infinity on the side the rule keeps, so it wins as on the CPU, which
+  gives the one NaN too: the same bits either way;
 - going along a relation's edges from either end (`for (p)-[w: R]->(o:
   mut C)`, `for (o)-[w: R]->(p)`): the edges' fields, written too
   (`mut w`), the other end's components, and what is sent to it (G2: the

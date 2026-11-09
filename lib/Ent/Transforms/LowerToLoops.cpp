@@ -2414,6 +2414,22 @@ static Value orderedBits(OpBuilder &builder, Location loc, Value bits) {
   return arith::XOrIOp::create(builder, loc, bits, rest);
 }
 
+/// A NaN as the one NaN, the quiet one without a sign (`negative`: with
+/// the sign), whatever its bits were: so `min=` and `max=` of fractions
+/// give the same bits on every path, the CPU's ordered combine, the
+/// GPU's whole-number atomics, whatever NaN came in.
+static Value oneNaN(OpBuilder &builder, Location loc, Value value,
+                    bool negative = false) {
+  auto type = cast<FloatType>(value.getType());
+  Value isNaN = arith::CmpFOp::create(builder, loc, arith::CmpFPredicate::UNO,
+                                      value, value);
+  Value nan = arith::ConstantOp::create(
+      builder, loc, type,
+      builder.getFloatAttr(type, APFloat::getQNaN(type.getFloatSemantics(),
+                                                  negative)));
+  return arith::SelectOp::create(builder, loc, isNaN, nan, value);
+}
+
 /// The atomic operation of a rule, for whole numbers.
 static arith::AtomicRMWKind atomicKind(StringRef rule, bool noSign) {
   if (rule == "min")
@@ -6714,8 +6730,8 @@ static void lowerLookupsOf(IRRewriter &rewriter, func::FuncOp func,
 
 /// `a ⊕ b` under an apply's rule, of two values as they are stored; min
 /// and max are signed for integers (or not, for one of a type without a
-/// sign: `noSign`) and IEEE-754 minimum/maximum (NaN-propagating) for
-/// floats.
+/// sign: `noSign`) and IEEE-754 minimum/maximum for floats (-0 below +0, a
+/// NaN wins), a NaN given as the one NaN (oneNaN).
 static Value combine(IRRewriter &rewriter, Location loc, StringRef rule,
                      Value a, Value b, bool noSign) {
   // (The last one sent.)
@@ -6726,11 +6742,13 @@ static Value combine(IRRewriter &rewriter, Location loc, StringRef rule,
     return isFloat ? arith::AddFOp::create(rewriter, loc, a, b).getResult()
                    : arith::AddIOp::create(rewriter, loc, a, b).getResult();
   if (rule == "min")
-    return isFloat  ? arith::MinimumFOp::create(rewriter, loc, a, b).getResult()
+    return isFloat  ? oneNaN(rewriter, loc,
+                             arith::MinimumFOp::create(rewriter, loc, a, b))
            : noSign ? arith::MinUIOp::create(rewriter, loc, a, b).getResult()
                     : arith::MinSIOp::create(rewriter, loc, a, b).getResult();
   assert(rule == "max" && "the verifier admits add, min and max");
-  return isFloat  ? arith::MaximumFOp::create(rewriter, loc, a, b).getResult()
+  return isFloat  ? oneNaN(rewriter, loc,
+                           arith::MaximumFOp::create(rewriter, loc, a, b))
          : noSign ? arith::MaxUIOp::create(rewriter, loc, a, b).getResult()
                   : arith::MaxSIOp::create(rewriter, loc, a, b).getResult();
 }
@@ -8856,9 +8874,12 @@ static scf::ParallelOp reduceCells(IRRewriter &rewriter, scf::ParallelOp loop,
   rewriter.setInsertionPointAfter(reducing);
   for (auto [i, cell] : llvm::enumerate(cells)) {
     Value result = reducing.getResult(i);
+    // (A NaN as the one NaN, as the ordered combine gives it: oneNaN.)
     if (keyed(reduced[i]))
-      result = fractionOfKey(rewriter, loc, result,
-                             cast<MemRefType>(cell.getType()).getElementType());
+      result = oneNaN(
+          rewriter, loc,
+          fractionOfKey(rewriter, loc, result,
+                        cast<MemRefType>(cell.getType()).getElementType()));
     memref::StoreOp::create(rewriter, loc, result, cell, ValueRange{zero});
   }
   rewriter.eraseOp(loop);
@@ -15855,6 +15876,10 @@ static void lowerStateAccess(IRRewriter &rewriter, SaAccumulateOp accumulate,
             world.ownResourceField(resource, accumulate.getFieldAttr()),
             ValueRange{zero});
       } else if (fraction) {
+        // (A NaN wins, as in the CPU's combine: given the sign that puts
+        // its bits past the infinity on the side the rule keeps.)
+        stored = oneNaN(rewriter, loc, stored,
+                        /*negative=*/accumulate.getRule() == "min");
         Value bits = arith::BitcastOp::create(
             rewriter, loc, rewriter.getIntegerType(fraction.getWidth()),
             stored);

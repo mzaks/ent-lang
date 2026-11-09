@@ -31,6 +31,17 @@
 // RUN: FileCheck %s --check-prefix=EXTREMES --input-file=%t.extremes.gpu
 // EXTREMES: frame 0: -99.999725 99.999466 -1.999995 0.999998 5.0 bits 2147483648 0
 // EXTREMES: frame 2: -20.499931 29.499866 -5.124988 1.624995 5.0 bits 2147483648 0
+// And with a NaN among them, of either sign and any payload: it wins, as
+// the one NaN, on one core, on many and on the GPU.
+// RUN: %ent run %S/Inputs/gpu_nan_extremes.ent > %t.nan.cpu
+// RUN: %ent run %S/Inputs/gpu_nan_extremes.ent --parallel > %t.nan.par
+// RUN: %ent run %S/Inputs/gpu_nan_extremes.ent --gpu > %t.nan.gpu
+// RUN: %ent run %S/Inputs/gpu_nan_extremes.ent --gpu --parallel > %t.nan.gpupar
+// RUN: diff %t.nan.cpu %t.nan.par
+// RUN: diff %t.nan.cpu %t.nan.gpu
+// RUN: diff %t.nan.cpu %t.nan.gpupar
+// RUN: FileCheck %s --check-prefix=NAN --input-file=%t.nan.gpu
+// NAN: frame 1: 9221120237041090560 9221120237041090560 9221120237041090560 9221120237041090560 2143289344 2143289344 -500.0
 
 // A buffer emptied, kept to its first rows and given rows alike outside
 // the `for`s of a `gpu system`, round by round in a `while`: its count the
