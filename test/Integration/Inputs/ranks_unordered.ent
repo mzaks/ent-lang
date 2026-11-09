@@ -1,0 +1,16 @@
+// Built for partitions, cells spawned from the highest number down: a
+// partition before one already spawned into, so the rows would not be in
+// one process's order. The run stops and says so (ranks.test).
+import console
+component Cell { number: i32, value: f64 } capacity 4000
+distribute Cell by number
+unique Total: f64
+system sum() {
+  for c: Cell { Total += c.value }
+  put("total {Total}")
+}
+schedule once() { sum() }
+world {
+  for i in 0..1000 { spawn { Cell { number: 999 - i, value: 1.0 / (i + 1) as f64 } } }
+}
+main { once() }

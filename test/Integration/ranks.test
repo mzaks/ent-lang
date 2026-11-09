@@ -106,6 +106,10 @@
 // setup spread over the ranks too (ENT_BLOCK: values of what they are
 // distributed by a partition).
 // RUN: %ent run %S/Inputs/ranks_spread.ent --ranks 3 --partitions > %t.spread.p3
+// Spawned into a partition before one already spawned into, the rows
+// would not be in one process's order: the run stops and says so.
+// RUN: env ENT_BLOCK=100 not %ent run %S/Inputs/ranks_unordered.ent --ranks 3 --partitions 2>&1 | FileCheck %s --check-prefix=UNORDERED
+// UNORDERED: ent: an entity is spawned into partition 1 after one into partition 2 of the same archetype
 // RUN: diff %t.spread.one %t.spread.p3
 // RUN: %ent run %S/Inputs/ranks_running.ent --ranks 4 --partitions > %t.running.p4
 // RUN: diff %t.running.one %t.running.p4

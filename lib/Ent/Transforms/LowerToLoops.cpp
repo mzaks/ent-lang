@@ -5740,6 +5740,11 @@ static std::pair<Value, Value> spawnPartitioned(IRRewriter &rewriter,
                         ValueRange{index, wide}, TypeRange{i32})
                     .getResult(0);
   }
+  // (Partition by partition, in the order spawned: one process's order of
+  // the rows only where no spawn goes to a partition before one already
+  // spawned into, which the run checks; it stops and says so otherwise.)
+  callGpu(rewriter, loc, module, "ent_ranks_spawn_in_order",
+          ValueRange{index, partition});
   Value p = arith::IndexCastOp::create(rewriter, loc, rewriter.getIndexType(),
                                        partition);
   Value counts = world.array(archetype.partitionCountsOffset, partitionCount,

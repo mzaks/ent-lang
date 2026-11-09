@@ -54,7 +54,11 @@ rank, run on N ranks. No rank ever holds the whole world:
   the entities of a partition are those of a range of the values, in the
   order they were spawned: a block that fits the values spreads them
   evenly, one that does not leaves some partitions empty and others full
-  (a partition that has no room stops the program, which says so).
+  (a partition that has no room stops the program, which says so). The
+  rows go partition by partition, so they are in one process's order (the
+  order spawned) only where no entity is spawned into a partition before
+  one already spawned into: a spawn that would be stops the program, which
+  says so (spawn in the order of what the archetype is distributed by).
 - The setup is spread too: a `for` over distributed entities goes through
   each rank's own from the start. Code outside a `for` runs on every rank:
   each spawns every entity (writing its own), and keeps the edges it

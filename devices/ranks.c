@@ -1169,6 +1169,35 @@ int32_t ent_ranks_partition_of(int32_t archetype, int64_t value) {
   return (int32_t)(p >= ent_ranks ? ent_ranks - 1 : p);
 }
 
+// Built for partitions: a spawn into partition `p` of `archetype`. The
+// rows of a partitioned archetype go partition by partition, each's in the
+// order spawned; that is one process's order (in which the rows go in the
+// order spawned) only where no entity is spawned into a partition before
+// one already spawned into. So the run stops where one is, and says so:
+// the same bytes as one process, or a stop, never other bytes.
+void ent_ranks_spawn_in_order(int32_t archetype, int32_t p) {
+  static _Thread_local int32_t *highest = 0;
+  static _Thread_local int32_t known = 0;
+  if (archetype >= known) {
+    int32_t more = archetype + 16;
+    highest = realloc(highest, sizeof(int32_t) * more);
+    for (int32_t a = known; a < more; ++a)
+      highest[a] = 0;
+    known = more;
+  }
+  if (p < highest[archetype]) {
+    char why[256];
+    snprintf(why, sizeof why,
+             "an entity is spawned into partition %d after one into "
+             "partition %d of the same archetype: its rows would not be in "
+             "the order one process has; spawn them in the order of what "
+             "the archetype is distributed by",
+             (int)p, (int)highest[archetype]);
+    ent_ranks_stop(why);
+  }
+  highest[archetype] = p;
+}
+
 // The rank whose row it is; -1 for an archetype that is not distributed,
 // which every rank has.
 int32_t ent_ranks_owner(int32_t archetype, int64_t row) {
