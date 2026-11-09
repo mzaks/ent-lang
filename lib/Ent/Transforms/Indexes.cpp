@@ -211,6 +211,30 @@ llvm::SmallDenseSet<Attribute> holdersOf(ArrayRef<ArchetypeOp> archetypes,
   return held;
 }
 
+/// Whether the body of `query` sends to one field from two places or
+/// more (two applies to a component's field, or two accumulates to a
+/// unique's). A plain `for` combines those place by place, each place's in
+/// the order of the rows (the tags of sync-points.md: label, then row);
+/// one that goes by its entities' places (via_hash) combines as it goes,
+/// row by row, the places within a row in turn: for fractions added, other
+/// bits. So such a `for` is not answered by a hash index, which must
+/// change how fast it is and nothing else.
+static bool sendsToOneFieldTwice(QueryOp query) {
+  llvm::SmallDenseSet<std::pair<Attribute, Attribute>> seen;
+  WalkResult found = query.getBody().walk([&](Operation *op) {
+    std::pair<Attribute, Attribute> cell;
+    if (auto apply = dyn_cast<ApplyOp>(op))
+      cell = {apply.getComponentAttr(), apply.getFieldAttr()};
+    else if (auto accumulate = dyn_cast<AccumulateOp>(op))
+      cell = {accumulate.getResourceAttr(), accumulate.getFieldAttr()};
+    else
+      return WalkResult::advance();
+    return seen.insert(cell).second ? WalkResult::advance()
+                                    : WalkResult::interrupt();
+  });
+  return found.wasInterrupted();
+}
+
 /// Whether the body of `query` combines into what it also reads: adds to
 /// a unique's field it reads, or sends to a field of a component it reads
 /// or sets (of any entity). A `for` then may not go by a field (see
@@ -778,7 +802,7 @@ struct EntIndexes : public mlir::ent::impl::EntIndexesBase<EntIndexes> {
         // (Of one value, which a hash finds.)
         if (!query.getSlicePart("equals") ||
             !answerable(query, key, held, making) ||
-            combinesIntoWhatItReads(query))
+            combinesIntoWhatItReads(query) || sendsToOneFieldTwice(query))
           return;
         auto component = cast<FlatSymbolRefAttr>(
             query->getAttrOfType<ArrayAttr>(QueryOp::kKeyEqualsAttr)[0]);

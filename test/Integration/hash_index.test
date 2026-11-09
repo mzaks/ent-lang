@@ -9,6 +9,15 @@
 // RUN: cmp %t.one %t.plain
 // RUN: %ent run --parallel %S/Inputs/hash_index.ent 2>/dev/null > %t.all
 // RUN: cmp %t.one %t.all
+// Two sends to one field from one `for`: not answered by the index (a
+// plain `for` combines them place by place), so the same bits.
+// RUN: %ent run %S/Inputs/hash_two_sends_plain.ent > %t.two.plain
+// RUN: %ent run %S/Inputs/hash_two_sends.ent 2>/dev/null > %t.two
+// RUN: %ent run --parallel %S/Inputs/hash_two_sends.ent 2>/dev/null > %t.two.all
+// RUN: cmp %t.two %t.two.plain
+// RUN: cmp %t.two.all %t.two.plain
+// RUN: FileCheck %s --check-prefix=TWO --input-file=%t.two
+// TWO: v 2.0 bits 4611686018427387904
 // And with each index kept another way.
 // RUN: sed -e 's/hash { number/hash incremental { number/' -e 's/side hash rebuild/side hash/' \
 // RUN:   -e 's/name hash incremental/name hash rebuild/' -e 's/boss hash eager/boss hash incremental/' \

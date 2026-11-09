@@ -199,7 +199,10 @@ Built (2026-10-23, `docs/syntax.md`, Hash indexes):
   in the order they are stored; the `where` is still asked. Where the
   index holds the same entities, is kept up to date before the system,
   and nothing in the system before the `for` (or in it, of other
-  entities) changes the key or which entities there are. Where one in
+  entities) changes the key or which entities there are, and no two
+  sends of the `for` go to one field (a `for` the index answers combines
+  row by row as it goes, a plain one place by place: fractions added
+  would come to other bits; 2026-11-09). Where one in
   64 of the entities or more have the key, the `for` looks at all of
   them, as without the index, a loop that costs less than finding each
   by its id; which, it says from the key's slot as it runs.

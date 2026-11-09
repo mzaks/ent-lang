@@ -1,0 +1,22 @@
+// hash_two_sends.ent without its index (hash_index.test).
+import console
+component Item { key: i32, a: f64, b: f64 } capacity 2000
+component Acc { v: f64 } capacity 10
+unique Where { sink: entity }
+system go() {
+  let k = 7
+  for i: Item where i.key == k {
+    Acc(Where.sink).v += i.a
+    Acc(Where.sink).v += i.b
+  }
+}
+system show() { for a: Acc { put("v {a.v} bits {bits_of(a.v)}") } }
+schedule once() { go() show() }
+world {
+  Where.sink = spawn { Acc { v: 0.0 } }
+  for i in 0..1000 { spawn { Item { key: 1000 + i, a: 0.5, b: 0.25 } } }
+  spawn { Item { key: 7, a: 10000000000000000.0, b: 1.0 } }
+  for i in 0..500 { spawn { Item { key: 3000 + i, a: 0.5, b: 0.25 } } }
+  spawn { Item { key: 7, a: -10000000000000000.0, b: 1.0 } }
+}
+main { once() }
