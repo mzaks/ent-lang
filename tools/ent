@@ -1688,10 +1688,15 @@ def build(arguments, output, directory):
                 cuda = ["-DENT_GPU", "-I", os.path.join(
                     os.environ.get("CUDA_PATH", "/opt/cuda"), "include")]
             mpi = mpi_flags()[0] if arguments.ranks else []
-            run([cc, "-O2", *cpu_flags(), "-I", directory, *VENDORED, *cuda,
+            # (Never a multiply and an add made one FMA, as in ent's own
+            # code: a device's results are then the same on a processor
+            # that has FMA and one that has not.)
+            run([cc, "-O2", "-ffp-contract=off", *cpu_flags(), "-I", directory,
+                 *VENDORED, *cuda,
                  *mpi, "-c", path, "-o", built], env=host)
         elif extension == ".cpp":
-            run([cxx, "-O2", *cpu_flags(), "-I", directory, *VENDORED, "-c",
+            run([cxx, "-O2", "-ffp-contract=off", *cpu_flags(), "-I", directory,
+                 *VENDORED, "-c",
                  path, "-o", built], env=host)
         else:
             with open(path) as source:
@@ -1781,7 +1786,7 @@ def build(arguments, output, directory):
          (" features=" + features if features else ""),
          "-o", os.devnull])
 
-    flags = ["-O2", *cflags, "-Wno-override-module", "-c"]
+    flags = ["-O2", "-ffp-contract=off", *cflags, "-Wno-override-module", "-c"]
     if arguments.instrument:
         flags.append("-fprofile-generate=" + instrumented(arguments))
         # Its library, linked by the machine's compiler: kept in by the
