@@ -1,0 +1,39 @@
+// A NaN with a payload (or a sign) already in the unique that `min=` and
+// `max=` fold into, left there by arithmetic before (test/Integration/
+// gpu.test): it wins, as the one NaN. On the GPU the cell the atomics fold
+// into starts at the rule's own infinity, never at the stored value; that
+// is combined with the cell after, on the CPU, by the combine that gives a
+// NaN as the one NaN whatever bits it had.
+import console
+
+component Dot { x: f64 } capacity 100000
+archetype Plain { Dot } capacity 100000
+unique U { frame: i64, lo: f64, hi: f64, lo2: f64, hi2: f64 }
+
+world {
+  for i in 0..100000 {
+    spawn { Dot { x: (i % 1000) as f64 - 500.0 } }
+  }
+}
+
+gpu system box() {
+  // (Not the one NaN: a payload, and one with the sign.)
+  U.lo = float_of(0x7ff0000000000999)
+  U.hi = float_of(0xfff8000000000456)
+  U.lo2 = float_of(0xfff8000000000456)
+  U.hi2 = float_of(0x7ff0000000000999)
+  for e, d: Dot {
+    U.lo min= d.x
+    U.hi max= d.x
+    U.lo2 min= d.x
+    U.hi2 max= d.x
+  }
+}
+
+system show() {
+  put("frame {U.frame}: {bits_of(U.lo)} {bits_of(U.hi)} {bits_of(U.lo2)} {bits_of(U.hi2)}")
+  U.frame += 1
+}
+
+schedule frame() { box() show() }
+main { loop { frame() } until U.frame >= 2 }

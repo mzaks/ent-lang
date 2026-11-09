@@ -42,6 +42,16 @@
 // RUN: diff %t.nan.cpu %t.nan.gpupar
 // RUN: FileCheck %s --check-prefix=NAN --input-file=%t.nan.gpu
 // NAN: frame 1: 9221120237041090560 9221120237041090560 9221120237041090560 9221120237041090560 2143289344 2143289344 -500.0
+// And a NaN with a payload already where they fold into: the one NaN too.
+// RUN: %ent run %S/Inputs/gpu_nan_stored.ent > %t.stored.cpu
+// RUN: %ent run %S/Inputs/gpu_nan_stored.ent --parallel > %t.stored.par
+// RUN: %ent run %S/Inputs/gpu_nan_stored.ent --gpu > %t.stored.gpu
+// RUN: %ent run %S/Inputs/gpu_nan_stored.ent --gpu --parallel > %t.stored.gpupar
+// RUN: diff %t.stored.cpu %t.stored.par
+// RUN: diff %t.stored.cpu %t.stored.gpu
+// RUN: diff %t.stored.cpu %t.stored.gpupar
+// RUN: FileCheck %s --check-prefix=STORED --input-file=%t.stored.gpu
+// STORED: frame 1: 9221120237041090560 9221120237041090560 9221120237041090560 9221120237041090560
 
 // A buffer emptied, kept to its first rows and given rows alike outside
 // the `for`s of a `gpu system`, round by round in a `while`: its count the
