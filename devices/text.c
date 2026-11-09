@@ -114,7 +114,14 @@ static ent_text_made *ent_text_all_made_by[1024];
 // every partition has given back once. What is made in one round is
 // given back when the next ends: every partition has given back since,
 // which none does while it still uses what was made for it.)
+// (Weak: a build without OpenMP has none, and it is then null. On macOS
+// an undefined weak symbol is weak_import, and the link says it may be
+// missing, -Wl,-U, see tools/ent.)
+#if defined(__APPLE__)
+__attribute__((weak_import)) int omp_in_parallel(void);
+#else
 __attribute__((weak)) int omp_in_parallel(void);
+#endif
 static ent_text_made *ent_text_made_in[3];
 static int64_t ent_text_round = 0;
 static char ent_text_gave[1024];

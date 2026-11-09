@@ -2039,6 +2039,11 @@ def build(arguments, output, directory):
     # (The C maths library, which a fraction's `%` calls, fmod: in libc on
     # macOS.)
     maths = [] if sys.platform == "darwin" else ["-lm"]
+    # (devices/text.c asks for OpenMP's omp_in_parallel only where it is
+    # there: a weak symbol, which macOS's linker takes only when told it
+    # may be missing.)
+    if sys.platform == "darwin" and not arguments.windows:
+        maths += ["-Wl,-U,_omp_in_parallel"]
     run([cxx if uses_cxx else cc] + objects + link + maths + ["-o", output],
         env=host)
 
