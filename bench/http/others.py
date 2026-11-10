@@ -4,6 +4,7 @@
 
   python3 bench/http/others.py [pages ...] [--connections 64]
                                [--rounds 3] [--only NAME ...] [--keep DIR]
+                               [--site DIR ...]
 
 For each size (10000 100000 pages by default) site.py makes a site as
 live.py does, and serve.c answers it on 127.0.0.1 (four threads, on CPUs
@@ -22,6 +23,10 @@ answer, as near as each can be told to:
   spider    spider (bench/http/spider), on CPUs 0 to 3
   spider-mem  the same, its visited URLs all kept in memory (by default
             those past 15,000 go to SQLite on disk)
+
+--site crawls a mirror of a real site instead (mirror.py's directory,
+§9.2's second site), its seed and host from its crawl.conf, with no
+delay between asks and no cap on them.
 
 First each crawls once with the server's log on, and what it asked for
 is held against what `c` asked for: the URLs it did not ask for, those
@@ -60,13 +65,15 @@ import live  # noqa: E402  (program_for, build_ent, set_conf)
 NAMES = ["c", "ent", "ent-par", "wget", "scrapy", "colly", "spider",
          "spider-mem"]
 RETRIES, REDIRECTS, TIMEOUT_MS = 2, 3, 2000
+# The site crawled: site.py's, or a mirror's (--site).
+SEED, HOST = "http://site.test/", "site.test"
 
 
 def commands(name, work, site, connections, proxy):
     """The command line and environment of a crawler, run in `site`."""
     env = dict(os.environ)
     one, four = ["taskset", "-c", "2"], ["taskset", "-c", "0-3"]
-    seed, host = "http://site.test/", "site.test"
+    seed, host = SEED, HOST
     if name == "c":
         return one + [os.path.join(work, "crawl_c")], env
     if name in ("ent", "ent-par"):
@@ -223,6 +230,8 @@ def main():
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--only", nargs="*", default=NAMES)
     parser.add_argument("--keep", help="where to keep sites and programs")
+    parser.add_argument("--site", nargs="*", default=[],
+                        help="mirror.py's directories, crawled instead")
     args = parser.parse_args()
     names = [n for n in NAMES if n == "c" or n in args.only]
     # (Absolute: the crawlers run in the site's directory.)
@@ -236,9 +245,34 @@ def main():
                     os.path.join(work, "crawl_c"),
                     os.path.join(HERE, "crawl.c"), "-lcurl"], check=True)
     verified, measured = [], []
-    for pages in args.pages:
-        site = os.path.join(work, f"site-{pages}")
-        if not os.path.exists(os.path.join(site, "expected.txt")):
+    global SEED, HOST
+    sites = [(pages, None) for pages in args.pages] if not args.site else \
+        [(None, os.path.abspath(d)) for d in args.site]
+    for pages, mirror in sites:
+        if mirror:
+            # (A copy, its crawl.conf as the others are told.)
+            name = os.path.basename(mirror.rstrip("/"))
+            site = os.path.join(work, f"site-{name}")
+            os.makedirs(site, exist_ok=True)
+            for f in ("site.manifest", "crawl.conf"):
+                shutil.copy(os.path.join(mirror, f), site)
+            for key, value in (("min_delay_ms", 0), ("max_pages", 0),
+                               ("max_depth", 1000),
+                               ("retries", RETRIES), ("redirects", REDIRECTS),
+                               ("timeout_ms", TIMEOUT_MS)):
+                live.set_conf(site, key, value)
+            with open(os.path.join(site, "crawl.conf")) as f:
+                conf = dict(line.split(" ", 1) for line in
+                            f.read().splitlines() if " " in line)
+            SEED, HOST = conf["seed"], conf["allow"].split()[0]
+            with open(os.path.join(site, "site.manifest"), "rb") as f:
+                pages = name
+                answers = 0
+                for line in f:
+                    answers += 1
+                    f.seek(int(line.split()[-1]) + 1, 1)
+        elif not os.path.exists(os.path.join(site := os.path.join(
+                work, f"site-{pages}"), "expected.txt")):
             subprocess.run([sys.executable, os.path.join(EXAMPLE, "site.py"),
                             "--pages", str(pages), "--depth", "1000",
                             "--time-scale", "0.1", "--slow-ms", "10000",
@@ -246,7 +280,8 @@ def main():
                             "--out", site], check=True)
         live.set_conf(site, "per_host", args.connections)
         if "ent" in names or "ent-par" in names:
-            source = live.program_for(pages, work)
+            source = live.program_for(
+                answers * 4 if mirror else pages, work)
             live.build_ent(source, os.path.join(work, f"crawl_live_ent"),
                            False)
             live.build_ent(source, os.path.join(work, f"crawl_live_ent-par"),

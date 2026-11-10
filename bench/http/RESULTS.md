@@ -865,5 +865,73 @@ and exec keeps it.)
 
 Not measured at 10⁶: wget and Scrapy (some 15 and 25 minutes a run,
 and 30 and 55 times slower at 10⁵ already) and spider by default (its
-SQLite took 280 s at 10⁵). Not yet: the second site, a mirror of a
-public practice site (§9.3), which is to be fetched once by hand.
+SQLite took 280 s at 10⁵). The second site, a mirror of a public
+practice site, is below.
+
+## The second site: a mirror of books.toscrape.com (§9.2, C4; 2026-11-10)
+
+`bench/http/mirror.py` fetched books.toscrape.com once, politely (a
+second between asks at least, 3,204 asks), into a manifest serve.c
+answers from: 1,196 HTML pages (one of them robots.txt's 404), 2,000
+pictures, 4 scripts, 3 style sheets and a favicon, 80 MB of bodies. Then `others.py --site DIR` (5 rounds, the median),
+64 connections, on mains:
+
+| crawler | URLs | wall s | CPU s | peak MB | URLs/s |
+|---|---|---|---|---|---|
+| c | 3,204 | 0.152 | 0.131 | 14 | 21,134 |
+| ent | 3,204 | 0.140 | 0.125 | 65 | 22,898 |
+| ent-par | 3,204 | 0.142 | 0.118 | 58 | 22,603 |
+| wget | 3,215 | 0.402 | 0.189 | 11 | 8,004 |
+| scrapy | 3,196 | 5.528 | 5.470 | 126 | 578 |
+| colly | 3,196 | 0.907 | 2.007 | 121 | 3,525 |
+| spider | 1,204 | 0.051 | 0.104 | 20 | 23,738 |
+
+ent and C ask for the same 3,204 URLs as mirror.py did, each once. What
+the others did differently, from the server's log:
+
+- wget reads the CSS too and asks for the fonts it names (11 URLs more,
+  each a 404 from the mirror: mirror.py, like ent, does not read CSS);
+  it ends with 8 (an error answer).
+- Scrapy and Colly miss 8 URLs the others ask for (style sheets among
+  them, by the log's examples): their setups follow `<a href>` and
+  `src`, not `<link href>`.
+- spider asks for none of the 2,000 pictures, though it is run with
+  `--resources` (`with_full_resources`): its time is of some 1,200
+  URLs, not 3,204.
+
+A site this small is mostly start-up: ent ~ C here, the order of the
+others as on the generated site.
+
+## C5: crawls of public sites (2026-11-10)
+
+examples/http/sites.md has the sites, why each may be crawled, the rules
+(robots.txt, one ask a second to a host at least, a user agent naming
+the project, caps), and what was found. In short: on quotes and books
+the crawler, its link scanner and a crawl of the mirror give what
+mirror.py (Python's standard library, none of the crawler's code) gave,
+line for line; crawler-test.com found what the generated site had not:
+
+- links the scanner read wrong (spaces around `=`, `&nbsp;`, spaces and
+  bytes past ASCII in URLs, `href=` in scripts and inside another
+  attribute's value): each now a case of site.py's /cases.html, and
+  done alike in crawl.c;
+- a crawl that never ended: a redirect to a host the crawl may not go
+  to was kept (and counted) in the frame it was made and destroyed in
+  the next, never counted settled, so `Open` stayed above nought (4 at
+  crawler-test.com). The mock said `stalled`, but no generated site had
+  such a redirect; /cases.html has one now.
+
+What the scanner's new rules cost, at 10⁵ pages over 64 connections (5
+runs each, the medians, the generated site of before):
+
+| | wall s | user s |
+|---|---|---|
+| ent, links as before | 2.649 | 1.013 |
+| ent, links as now | 2.653 | 1.039 |
+| C (its scanner as now) | 2.326 | 0.820 |
+
+A byte of a text was a call of devices/text.c, so the new loops over a
+URL's bytes (is there one to percent-encode? a tab or line end?) cost
+more than their work: now read in line, and unchecked in `for i in
+0..len(t)` (653da0d), which makes such a loop vector code. Left: some
+2.5% of user time, which C pays alike.

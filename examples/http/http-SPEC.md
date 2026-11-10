@@ -354,13 +354,21 @@ fails.) `www/` and its `rules.txt` stay for crawlers that want files.
 
 What the link scanner of `extract_links` handles, so that it works on
 real pages and not only on generated ones: `href` and `src` in double
-quotes, single quotes and without quotes; any case of the attribute
-name; `&amp;` and the other entities in URLs; `<base href>`; relative
-URLs, `./`, `../`, `//host/path`, fragments dropped; `javascript:`,
-`mailto:` and `data:` skipped; links in comments ignored. URL
-normalising: lowercase scheme and host, default ports dropped, percent
-encodings of unreserved bytes decoded, an empty path made `/`. Pages
-that are not HTML (by `Content-Type`) are not scanned.
+quotes, single quotes and without quotes, spaces and line ends around
+the `=`; any case of the attribute name; only an attribute of a tag, not
+the same words in text or in another attribute's value (`onchange="var
+href=.."`); `&amp;` and the other entities in URLs (`&lt;`, `&gt;`,
+`&quot;`, `&apos;`, `&nbsp;`, and numbers of printable ASCII);
+spaces at a value's ends dropped and tabs and line ends in it;
+`<base href>`; relative URLs, `./`, `../`, `//host/path`, fragments
+dropped; `javascript:`, `mailto:` and `data:` skipped; links in comments
+and in scripts ignored. URL normalising: lowercase scheme and host,
+default ports dropped, dot segments taken out (of an absolute URL too),
+percent encodings of unreserved bytes decoded, the bytes a URL may not
+hold (controls, space, `"`, `<`, `>`, those past 0x7E) percent-encoded,
+an empty path made `/`. Pages that are not HTML (by `Content-Type`) are
+not scanned. (The cases after `&amp;` were met on crawler-test.com,
+C5; site.py's /cases.html has each.)
 
 ## 8. Checks
 
@@ -579,8 +587,11 @@ around in the example, not in the compiler:
   times: the mending before each (devices/edges.c) looked for room past
   every empty run of the 2M keys, its budget counting edges moved and
   not keys passed. Now 25.5 s for the whole crawl, from 62.
-- **URLs:** percent-decoding of unreserved bytes (§7.3) is not done;
-  site.py makes no links that need it.
+- **URLs:** percent-decoding of unreserved bytes (§7.3) done in C5,
+  with what real pages had (§7.3's last cases). A byte of a text was a
+  call of devices/text.c, so a loop over a URL's bytes cost more than
+  the work: now read in line, and in `for i in 0..len(t)` unchecked, so
+  that such a loop is vector code (653da0d).
 
 ## 11. Milestones
 
@@ -590,8 +601,8 @@ around in the example, not in the compiler:
 | **C1** | `site.py`, `pipeline.ent`, `crawl.ent`, `mock.ent`, `crawl_mock.ent`, `crawl_combined.ent`, `check/`. | K1 to K7, K10 and K12 (generated cases) pass on the mock; mock throughput measured. |
 | **C2** | `devices/http` and the local server with its httpbin endpoints and TLS listener. | D1 to D10 pass (done: test/Integration/http_device.test). |
 | **C3** | `crawl_live.ent`, `robots.txt`, `bench/http/crawl.c`. | K8, K9 and K11 pass (done: check/crawl.py --live); the live benchmark against C is measured and written down (done: bench/http/live.py, RESULTS.md: C 2.3 s at 10⁵ pages, ent 5.5 to 22.7 s, per-frame work over every waiting ask; after the first fixes 4.8 to 10.6 s, then 4.7 to 7.4 s, then 4.2 to 5.0 s, then 3.2 to 4.1 s). |
-| **C4** | The other crawlers' setups, the mirrored real site. | §9.2 measured and written down, every crawler verified first (done on the generated site, bench/http/others.py, RESULTS.md: at 10⁵ C 2.3 s, ent 2.8, spider 4.0, Colly 6.2, wget 85, Scrapy 156; at 10⁶ spider 23, C 28, ent 37, Colly out of 14 GB; the mirror open). |
-| **C5** | `sites.md`, crawls of the public sites. | §9.3 run; what it found is in K12 and D1 to D10. |
+| **C4** | The other crawlers' setups, the mirrored real site. | §9.2 measured and written down, every crawler verified first (done on the generated site, bench/http/others.py, RESULTS.md: at 10⁵ C 2.3 s, ent 2.8, spider 4.0, Colly 6.2, wget 85, Scrapy 156; at 10⁶ spider 23, C 28, ent 37, Colly out of 14 GB; the mirror of books.toscrape.com, bench/http/mirror.py and `others.py --site`, 2026-11-10: ent 0.140 s, C 0.152, the same 3,204 URLs). |
+| **C5** | `sites.md`, crawls of the public sites. | §9.3 run; what it found is in K12 and D1 to D10. (Done 2026-11-10: quotes, books and crawler-test.com against mirror.py, bench/http/public.py; what crawler-test.com found is /cases.html in K12, and a crawl that did not end, fixed. Nothing for D1 to D10: the device answered each odd page as curl does.) |
 | **C6** | A live window (Clay, `layout`, `window`): requests in flight, slow ones, errors, history. | Shows a crawl as it runs. |
 
 ## 12. Open questions
@@ -606,6 +617,8 @@ around in the example, not in the compiler:
    finished ones and keep only `history` rows? (C1 keeps them: some
    2.7 KB an ask, 2.8 GB at 10⁶ pages, C 0.6 GB.)
 4. The user agent string and the project URL in it for §9.3.
+   (Decided in C5: `ent-crawl/0.1 (+https://github.com/mzaks/ent-lang)`;
+   robots.txt groups are matched against `ent-crawl`.)
 5. Which of the other crawlers are worth their setup: all four, or
    start with Scrapy and spider and add the others if the numbers are
    interesting? (Decided: all four, C4; on the generated site first,

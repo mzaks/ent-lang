@@ -126,6 +126,37 @@ static void without_dots(const char *path, size_t n, Text *out) {
   }
 }
 
+static int hex_value(char c) {
+  if (c >= '0' && c <= '9')
+    return c - '0';
+  if (c >= 'a' && c <= 'f')
+    return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F')
+    return c - 'A' + 10;
+  return -1;
+}
+
+// The percent encodings of unreserved bytes (RFC 3986, 2.3) decoded, in
+// place.
+static void unreserved_decoded(char *t) {
+  char *out = t;
+  for (const char *at = t; *at;) {
+    if (at[0] == '%' && at[1] && at[2] && hex_value(at[1]) >= 0 &&
+        hex_value(at[2]) >= 0) {
+      int c = hex_value(at[1]) * 16 + hex_value(at[2]);
+      if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+          (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' ||
+          c == '~') {
+        *out++ = (char)c;
+        at += 3;
+        continue;
+      }
+    }
+    *out++ = *at++;
+  }
+  *out = 0;
+}
+
 static char *normalise(const char *url) {
   long colon = scheme_end(url);
   size_t n = strlen(url);
@@ -152,6 +183,29 @@ static char *normalise(const char *url) {
   put_bytes(&out, named, named_n);
   without_dots(tail, path_n, &out);
   put_bytes(&out, tail + path_n, tail_n - path_n);
+  size_t kept = strlen(scheme) + 3 + named_n;
+  if (memchr(tail, '%', tail_n))
+    unreserved_decoded(out.p + kept);
+  // The bytes a URL may not hold percent-encoded (examples/http/urls.ent).
+  int unfit = 0;
+  for (const unsigned char *c = (unsigned char *)out.p + kept; *c; c++)
+    if (*c <= ' ' || *c >= 127 || *c == '"' || *c == '<' || *c == '>')
+      unfit = 1;
+  if (unfit) {
+    Text encoded = {0};
+    put_bytes(&encoded, out.p, kept);
+    for (const unsigned char *c = (unsigned char *)out.p + kept; *c; c++) {
+      if (*c <= ' ' || *c >= 127 || *c == '"' || *c == '<' || *c == '>') {
+        char e[4];
+        snprintf(e, sizeof e, "%%%02X", *c);
+        put_text(&encoded, e);
+      } else {
+        put_bytes(&encoded, (const char *)c, 1);
+      }
+    }
+    free(out.p);
+    out = encoded;
+  }
   free(scheme);
   free(named);
   return out.p;
@@ -175,19 +229,74 @@ static size_t before(const char *t, size_t n, const char *what) {
 
 // Where a link goes from the page at `base`; NULL where it is not to be
 // followed.
-static char *resolve(const char *base, const char *link, size_t link_n) {
-  Text r = {0};
-  for (size_t at = 0; at < link_n;) {
-    long amp = find(link, link_n, "&amp;", at);
-    size_t end = amp < 0 ? link_n : (size_t)amp;
-    put_bytes(&r, link + at, end - at);
-    if (amp < 0)
-      break;
-    put_text(&r, "&");
-    at = amp + 5;
+// What the character reference `name` (n bytes, between '&' and ';')
+// stands for, written to `out`; 0 where it is not one of those known
+// (examples/http/urls.ent: amp, lt, gt, quot, apos, nbsp, numbers of
+// printable ASCII).
+static int entity(const char *name, size_t n, Text *out) {
+  static const struct { const char *name, *by; } known[] = {
+      {"amp", "&"}, {"lt", "<"}, {"gt", ">"}, {"quot", "\""},
+      {"apos", "'"}, {"nbsp", "\xc2\xa0"}};
+  for (size_t k = 0; k < sizeof known / sizeof known[0]; k++)
+    if (strlen(known[k].name) == n && !memcmp(known[k].name, name, n)) {
+      put_text(out, known[k].by);
+      return 1;
+    }
+  if (n < 2 || name[0] != '#')
+    return 0;
+  int x = name[1] == 'x' || name[1] == 'X';
+  size_t from = x ? 2 : 1;
+  if (n <= from)
+    return 0;
+  int v = 0;
+  for (size_t i = from; i < n; i++) {
+    int d = hex_value(name[i]);
+    if (d < 0 || (!x && d > 9))
+      return 0;
+    v = v * (x ? 16 : 10) + d;
+    if (v > 1000)
+      return 0;
   }
+  if (v < 32 || v >= 127)
+    return 0;
+  char c = (char)v;
+  put_bytes(out, &c, 1);
+  return 1;
+}
+
+static int blank_byte(char c) {
+  return c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == '\f';
+}
+
+static char *resolve(const char *base, const char *link, size_t link_n) {
+  // References decoded; then the spaces at its ends dropped, and the
+  // tabs and line ends in it (as urls.ent's resolve).
+  Text d = {0};
+  for (size_t at = 0; at < link_n;) {
+    char c = link[at];
+    if (c == '&') {
+      long end = find(link, link_n, ";", at);
+      if (end >= 0 && end - (long)at <= 10 &&
+          entity(link + at + 1, end - at - 1, &d)) {
+        at = end + 1;
+        continue;
+      }
+    }
+    put_bytes(&d, &c, 1);
+    at++;
+  }
+  size_t from = 0, to = d.n;
+  while (from < to && blank_byte(d.p[from]))
+    from++;
+  while (to > from && blank_byte(d.p[to - 1]))
+    to--;
+  Text r = {0};
+  for (size_t i = from; i < to; i++)
+    if (d.p[i] != '\n' && d.p[i] != '\t' && d.p[i] != '\r')
+      put_bytes(&r, d.p + i, 1);
+  free(d.p);
   if (!r.p)
-    return NULL;
+    put_text(&r, "");
   char *result = NULL;
   long colon = scheme_end(r.p);
   Text joined = {0};
@@ -243,19 +352,71 @@ static void uncommented(const char *page, size_t n, Text *out) {
   }
 }
 
-static int space(char c) {
-  return c == ' ' || c == '\n' || c == '\t' || c == '\r';
+// What a page's scripts hold dropped, `<script ..>` kept.
+static void unscripted(const char *page, const char *low, size_t n,
+                       Text *out) {
+  size_t from = 0;
+  for (;;) {
+    long open = find(low, n, "<script", from);
+    long start = open < 0 ? -1 : find(low, n, ">", open);
+    if (start < 0) {
+      put_bytes(out, page + from, n - from);
+      return;
+    }
+    put_bytes(out, page + from, start + 1 - from);
+    long close = find(low, n, "</script", start);
+    if (close < 0)
+      return;
+    from = close;
+  }
 }
 
+static int space(char c) {
+  return c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == '\f';
+}
+
+// Whether byte `at` is in a tag and not in a quoted value.
+static int in_tag(const char *low, long at) {
+  long start = at - 1;
+  while (start >= 0 && low[start] != '<' && low[start] != '>')
+    start--;
+  if (start < 0 || low[start] == '>')
+    return 0;
+  char quote = 0;
+  for (long i = start; i < at; i++) {
+    if (!quote) {
+      if (low[i] == '"' || low[i] == '\'')
+        quote = low[i];
+    } else if (low[i] == quote) {
+      quote = 0;
+    }
+  }
+  return !quote;
+}
+
+// The next `href` or `src` attribute's value (examples/http/urls.ent):
+// a name after a space, then '=' with spaces around it allowed, in a tag
+// and not in another value.
 static long next_value(const char *low, size_t n, size_t from) {
   for (;;) {
-    long h = find(low, n, "href=", from), s = find(low, n, "src=", from);
+    long h = find(low, n, "href", from), s = find(low, n, "src", from);
     long at = earliest(h, s);
     if (at < 0)
       return -1;
-    if (at > 0 && space(low[at - 1]))
-      return at == h ? at + 5 : at + 4;
     from = at + 1;
+    if (!(at > 0 && space(low[at - 1])))
+      continue;
+    size_t i = at + (at == h ? 4 : 3);
+    while (i < n && space(low[i]))
+      i++;
+    if (i >= n || low[i] != '=')
+      continue;
+    i++;
+    while (i < n && space(low[i]))
+      i++;
+    if (i >= n || !in_tag(low, at))
+      continue;
+    return i;
   }
 }
 
@@ -652,6 +813,16 @@ static void extract_links(int id) {
   size_t n = page.n;
   const char *text = page.p ? page.p : "";
   char *low = lowered(text, n);
+  if (find(low, n, "<script", 0) >= 0) {
+    Text plain = {0};
+    unscripted(text, low, n, &plain);
+    free(page.p);
+    free(low);
+    page = plain;
+    n = page.n;
+    text = page.p ? page.p : "";
+    low = lowered(text, n);
+  }
   // Its base: `<base href>`, else its own URL.
   char *base = NULL;
   long skip = -1, tag = find(low, n, "<base", 0);

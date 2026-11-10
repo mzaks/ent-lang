@@ -31,12 +31,18 @@ be followed. What a page links to, and how it writes the link, is drawn
 from the seed so that every case of §7.3 appears: absolute, root-relative,
 relative, `./` and `../`, fragments, upper-case schemes and hosts, the
 default port, single quotes, no quotes, `HREF`, `&amp;`, `<base href>`,
-`src`, links in comments, and schemes that are not followed.
+`src`, links in comments, and schemes that are not followed; and on
+/cases.html what real pages had (sites.md): spaces and line ends around
+`=` and in a value, character references, spaces and bytes past ASCII in
+a URL, `href=` in a script, in another attribute's value and in text.
 """
 import argparse
 import heapq
+import html
+import html.parser
 import os
 import random
+import re
 import urllib.parse
 import urllib.robotparser
 
@@ -63,7 +69,9 @@ def robots_text(crawl_delay):
 
 def normalise(url):
     """The crawler's URL rules, by urllib: lower-case scheme and host, the
-    default port dropped, an empty path made `/`, no fragment."""
+    default port dropped, an empty path made `/` and dot segments taken
+    out, the percent encodings of unreserved bytes decoded and the bytes
+    a URL may not hold encoded, no fragment."""
     parts = urllib.parse.urlsplit(url)
     scheme = parts.scheme.lower()
     host = (parts.hostname or "").lower()
@@ -71,14 +79,60 @@ def normalise(url):
     if port and not ((scheme == "http" and port == 80) or
                      (scheme == "https" and port == 443)):
         host += f":{port}"
-    path = parts.path or "/"
-    return urllib.parse.urlunsplit((scheme, host, path, parts.query, ""))
+    path = encoded(unreserved_decoded(without_dots(parts.path or "/")))
+    query = encoded(unreserved_decoded(parts.query))
+    return urllib.parse.urlunsplit((scheme, host, path, query, ""))
 
 
-def resolve(base, ref):
+def without_dots(path):
+    """RFC 3986, 5.2.4 (urljoin does it for relative links alone)."""
+    segments = path.split("/")[1:]
+    out = []
+    for s in segments:
+        if s == "..":
+            if out:
+                out.pop()
+        elif s != ".":
+            out.append(s)
+    if segments and segments[-1] in (".", ".."):
+        out.append("")
+    return "/" + "/".join(out)
+
+
+def encoded(part):
+    """`part` with the bytes a URL may not hold percent-encoded (controls,
+    space, `"`, `<`, `>`, and those past 0x7E), as UTF-8."""
+    out = []
+    for b in part.encode("utf-8", "surrogateescape"):
+        if b <= 0x20 or b >= 0x7F or b in b'"<>':
+            out.append(f"%{b:02X}")
+        else:
+            out.append(chr(b))
+    return "".join(out)
+
+
+UNRESERVED = set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                 "0123456789-._~")
+
+
+def unreserved_decoded(part):
+    """`part` with the percent encodings of unreserved bytes decoded."""
+    def one(m):
+        c = chr(int(m.group(1), 16))
+        return c if c in UNRESERVED else m.group(0)
+    return re.sub(r"%([0-9A-Fa-f]{2})", one, part)
+
+
+def resolve(base, ref, raw=True):
     """Where a link goes from a page at `base`; None where it is not to be
-    followed (another scheme than http and https, or only a fragment)."""
-    ref = ref.replace("&amp;", "&").strip()
+    followed (another scheme than http and https, or only a fragment).
+    `raw`: as the page has it, its character references not decoded yet.
+    Spaces at its ends dropped, tabs and line ends in it too (the URL
+    standard's rules)."""
+    if raw:
+        ref = html.unescape(ref)
+    ref = ref.strip(" \t\n\r\f")
+    ref = ref.replace("\t", "").replace("\n", "").replace("\r", "")
     if not ref or ref.startswith("#"):
         return None
     scheme = urllib.parse.urlsplit(ref).scheme.lower()
@@ -126,6 +180,10 @@ class Site:
             ref = f"HTTP://SITE.TEST{target}"
         elif form == 7:
             ref = f"http://{HOST}:80{target}"
+        elif form == 8 and "." in target:
+            # (An unreserved byte percent-encoded, in either case.)
+            at = target.rindex(".")
+            ref = target[:at] + rng.choice(["%2E", "%2e"]) + target[at + 1:]
         else:
             ref = target
         quote = rng.choice(['"', '"', '"', "'", ""])
@@ -237,34 +295,75 @@ class Site:
             index.append(f'<a href="p/{i}.html">{i}</a>')
         for path in private:
             index.append(f'<a href="{path}">private</a>')
+        index.append('<a href="/cases.html">cases</a>')
         index.append("</body></html>")
         bodies["/"] = "\n".join(index)
+        # What real pages had (sites.md), each a page of its own where it
+        # is a link.
+        bodies["/cases.html"] = (
+            "<html><body>\n"
+            "<a href= '/c/1.html' >spaces around</a><a\nhref =\n"
+            "'/c/2.html'>line ends</a><a href=' /c/3.html\t'>spaces in</a>\n"
+            '<a href="/c/4&#46;html">numeric</a> '
+            '<a href="/c/5.html?a=1&amp;b=2&#x26;c=3">references</a>\n'
+            '<a href="/c/with space.html">space</a> '
+            '<a href="/c/caf\u00e9.html">UTF-8</a> '
+            '<a href="/c/nbsp.html&nbsp;">nbsp</a> '
+            '<a href="/c/%7E6.html">unreserved encoded</a> '
+            '<a href="/c/away">a redirect to another host</a>\n'
+            "<script>var s = ' href=\"/c/script.html\"';</script>\n"
+            '<select onchange="var href=this.value; location.href=href">'
+            "</select>\n"
+            '<img srcset="/c/srcset.png 2x" src="/c/img.png">\n'
+            "<p>text href=/c/text.html</p>\n"
+            "</body></html>")
+        self.page("/c/away", status=301, location="http://other.test/c.html",
+                  body="")
+        for path in ("/c/1.html", "/c/2.html", "/c/3.html", "/c/4.html",
+                     "/c/5.html?a=1&b=2&c=3", "/c/with%20space.html",
+                     "/c/caf%C3%A9.html", "/c/nbsp.html%C2%A0", "/c/~6.html"):
+            bodies[path] = f"<p>case {path}</p>"
         for path, body in bodies.items():
             self.page(path, body=body)
 
     def links_of(self, url, answer):
-        """The links of a page as the crawler is to find them (by regular
-        expressions here, not by its scanner)."""
-        import re
-        body = re.sub(r"<!--.*?-->", "", answer["body"], flags=re.S)
-        base = url
-        found = re.search(r"<base\s[^>]*href\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)",
-                          body, re.I)
-        if found:
-            base = resolve(url, found.group(1).strip("\"'")) or url
-        links = []
-        # (The base's own href is no link.)
-        body = re.sub(r"<base\s[^>]*>", "", body, flags=re.I)
-        for match in re.finditer(
-                r"(?<=[\s])(?:href|src)=(\"[^\"]*\"|'[^']*'|[^\s>]+)", body,
-                re.I):
-            value = match.group(1)
-            if value[:1] in "\"'":
-                value = value[1:-1]
-            target = resolve(base, value)
-            if target is not None:
-                links.append(target)
-        return links
+        """The links of a page as the crawler is to find them (by Python's
+        HTML parser here, not by its scanner)."""
+        return links_of(url, answer["body"])
+
+
+class Links(html.parser.HTMLParser):
+    """The `href` and `src` values of a page, and its first base, by
+    Python's HTML parser (which reads comments, scripts, quoting and
+    character references as a browser does)."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.refs, self.base = [], None
+
+    def handle_starttag(self, tag, attrs):
+        for name, value in attrs:
+            if value is None or name not in ("href", "src"):
+                continue
+            if tag == "base" and name == "href":
+                if self.base is None:
+                    self.base = value
+            else:
+                self.refs.append(value)
+
+    handle_startendtag = handle_starttag
+
+
+def links_of(url, body):
+    """Where the links of the page at `url` go, in order."""
+    parser = Links()
+    parser.feed(body)
+    parser.close()
+    base = url
+    if parser.base is not None:
+        base = resolve(url, parser.base, raw=False) or url
+    return [t for t in (resolve(base, r, raw=False) for r in parser.refs)
+            if t]
 
 
 def crawl(site, conf):
@@ -316,12 +415,13 @@ def crawl(site, conf):
             continue
         if answer["location"] and outcome_of(answer, conf).startswith("3"):
             target = resolve(url, answer["location"])
-            if target is None or host_of(target) not in allowed:
+            if target is None:
                 continue
+            # (Said, and not followed where it goes to another host.)
             redirect_of[url] = target
             if hops[url] >= conf["redirects"]:
                 limited.add(url)
-            else:
+            elif host_of(target) in allowed:
                 reach(target, d, hops[url] + 1)
             continue
         if (outcome_of(answer, conf) != "200" or answer["type"] != "text/html"

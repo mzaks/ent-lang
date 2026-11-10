@@ -36,6 +36,8 @@ component Robots { ask: entity, known: bool, rules: text, delay: f64, next: f64 
 tag RobotsAsk capacity 1024
 // An ask robots.txt does not let the crawler send.
 tag Disallowed
+// An ask past `max_pages`, not sent.
+tag Capped
 // A page links to a page.
 relation (Ask)-[Links]->(Ask) capacity 4194304
 // The page whose link made this ask: the edge is connected once the ask
@@ -47,9 +49,20 @@ component LinkedFrom { page: entity }
 component Ending { word: text }
 
 // What the crawl is to do (crawl.conf): the first URL, how deep, how
-// many asks out to a host at once. (The hosts it may go to, `allow`, are
-// a Host each.)
-unique Rules { seed: text, max_depth: i32, per_host: i32 }
+// many asks out to a host at once; for a crawl of others' sites
+// (http-SPEC.md §9.3), the seconds at least between asks to a host
+// (`min_delay_ms`, more where its robots.txt says so) and how many asks
+// may go out in all (`max_pages`; none where it is 0). (The hosts it may
+// go to, `allow`, are a Host each.)
+unique Rules { seed: text, max_depth: i32, per_host: i32, min_delay: f64,
+               max_pages: i64 }
+// Asks given a turn so far (take_turns), against `max_pages`.
+unique Taken: i64
+// The asks kept and how many of them were settled, and those open at
+// the level or less (advance_level).
+unique Kept_n: i64
+unique Settled_n: i64
+unique AtLevel: i32
 // How deep the links followed are so far.
 unique Level: i32
 // Asks not settled; none at the end.
@@ -76,6 +89,8 @@ system setup() {
   Rules.seed = setting(conf, "seed")
   Rules.max_depth = number(setting(conf, "max_depth")) as i32
   Rules.per_host = number(setting(conf, "per_host")) as i32
+  Rules.min_delay = number(setting(conf, "min_delay_ms")) as f64 / 1000.0
+  Rules.max_pages = number(setting(conf, "max_pages"))
   Net.timeout = number(setting(conf, "timeout_ms")) as f64 / 1000.0
   Net.slow_after = number(setting(conf, "slow_ms")) as f64 / 1000.0
   Net.retries = number(setting(conf, "retries")) as i32
@@ -96,7 +111,8 @@ system setup() {
                            Twin { of: none }, New, Depth { d: 0, open: false }, RobotsAsk }
       hosts += 1
       spawn { Host { name: name, number: hosts, busy: 0, turns: 0, let_go: 0 },
-              Robots { ask: robots, known: false, rules: "", delay: 0.0, next: 0.0 } }
+              Robots { ask: robots, known: false, rules: "", delay: Rules.min_delay,
+                       next: 0.0 } }
     }
     at = end + 1
   }
@@ -132,6 +148,9 @@ system place() {
    if t.of == none {
     let host = HostByName.get(host_of(a.url))
     if host == none {
+      // (A redirect's ask to a host it may not go to: kept, and so
+      // counted in advance_level, the frame before; settled as it goes.)
+      if me.has(Known) { Settled_n += 1 }
       me.destroy()
     } else if me.has(RobotsAsk) {
       me.add(At { host: host })
@@ -164,7 +183,7 @@ system read_robots() {
       if status == 200 {
         let (rules, delay) = robots_rules(body, "ent-crawl")
         r.rules = rules
-        r.delay = delay
+        r.delay max= delay
       }
       r.known = true
     } else {
@@ -190,12 +209,19 @@ system read_robots() {
 // turn (`ByTurn`, of the asks that wait alone): a queue for each host,
 // so no frame looks at the asks that still wait.
 fn turn_key(host: i64, n: i64) -> i64 { host * 4294967296 + n }
+// Past `max_pages` asks given a turn (a robots.txt's not counted), an
+// ask is settled unsent, `Capped`.
 system take_turns() {
   for me, a: Ask, at: At without Sent, Held, Turn in turn by a.serial on added At {
-    if let n = Host(at.host).turns, let number = Host(at.host).number {
+    if Rules.max_pages > 0 && Taken >= Rules.max_pages && !me.has(RobotsAsk) {
+      me.add(Capped)
+      me.add(Handled)
+      me.add(Held)
+    } else if let n = Host(at.host).turns, let number = Host(at.host).number {
       Host(at.host).turns = n + 1
       me.add(Turn { n: n, key: turn_key(number, n) })
       me.add(Held)
+      if !me.has(RobotsAsk) { Taken += 1 }
     }
   }
 }
@@ -280,8 +306,7 @@ system due_pages() {
 // does only them.
 system read_links() {
   for me, a: Ask, g: Got, h: mut Html without Handled on added Html {
-    let page = uncommented(g.body, 0)
-    let low = lower(page)
+    let (page, low) = readable(g.body)
     let (base, skip) = base_of(a.url, page, low)
     var links = ""
     var at = 0
@@ -369,9 +394,6 @@ system merge() {
 // gets a depth or a lower one, or the level comes to it, and none when
 // it is settled; a depth is only ever lowered, the level only raised).
 // The asks without a depth yet (redirects, till take_depth) are few.
-unique Kept_n: i64
-unique Settled_n: i64
-unique AtLevel: i32
 system advance_level() {
   Kept_n += for me with Known on added Known { }
   Settled_n += for me with Known, Handled on added Handled { }
@@ -399,6 +421,8 @@ system conclude() {
   for me, a: Ask, t: Twin, optional g: Got, optional f: Failed where t.of == none {
     if me.has(Disallowed) {
       me.add(Ending { word: "disallowed" })
+    } else if me.has(Capped) {
+      me.add(Ending { word: "capped" })
     } else if let status = g.status {
       me.add(Ending { word: "{status}" })
     } else {
@@ -416,6 +440,7 @@ system conclude() {
 system report() {
   for me, a: Ask, e: Ending, optional g: Got {
     if e.word == "disallowed" { put("disallowed {a.url}") }
+    else if e.word == "capped" { put("capped {a.url}") }
     else { put("fetched {a.url} {e.word} {a.tries + 1}") }
     if let status = g.status, let location = g.location {
       if status >= 300 && status < 400 && len(location) > 0 {
@@ -426,7 +451,8 @@ system report() {
     if me.has(Slow) { put("slow {a.url}") }
     for (me)-[Links]->(to) {
       if let url = Ask(to).url, let word = Ending(to).word {
-        if !starts(word, "2") && !starts(word, "3") && word != "disallowed" {
+        if !starts(word, "2") && !starts(word, "3") && word != "disallowed"
+            && word != "capped" {
           put("broken {url} {word} from {a.url}")
         }
       }

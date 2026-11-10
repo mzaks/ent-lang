@@ -47,11 +47,15 @@ fn failure_of(f: HttpFailure) -> Failure {
   else { Failure.Other }
 }
 
+// Who asks: the crawler and where it is from (http-SPEC.md §9.3), the
+// name robots.txt groups are matched against first.
+fn agent() -> text { "ent-crawl/0.1 (+https://github.com/mzaks/ent-lang)" }
+
 system connect() {
   let conf = read_text("live.conf")
   let connections = number(live_setting(conf, "connections")) as i32
   let most = if connections > 0 { connections } else { 64 }
-  Web.session = http_session("ent-crawl/0.1", false, most, most, false, true, "",
+  Web.session = http_session(agent(), false, most, most, false, true, "",
                              live_setting(conf, "proxy"))
   Web.started = wait_until(0.0)
 }

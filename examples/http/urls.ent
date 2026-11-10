@@ -78,9 +78,86 @@ fn without_dots(path: text) -> text {
   if len(path) == 0 { "/" } else { dots(path, 1, "") }
 }
 
+// The value of a hex digit; -1 where it is none.
+fn hex(c: i8) -> i32 {
+  if c >= '0' && c <= '9' { (c - '0') as i32 }
+  else if c >= 'a' && c <= 'f' { (c - 'a') as i32 + 10 }
+  else if c >= 'A' && c <= 'F' { (c - 'A') as i32 + 10 }
+  else { -1 }
+}
+
+// The bytes a URL need not percent-encode (RFC 3986, 2.3).
+fn unreserved_bytes() -> text {
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+}
+
+// The unreserved byte `value` as a text of its own; none where it is
+// not one.
+fn unreserved(value: i32) -> text {
+  let all = unreserved_bytes()
+  var at = -1
+  for i in 0..len(all) {
+    if all[i] as i32 == value { at = i }
+  }
+  if at < 0 { "" } else { slice(all, at, at + 1) }
+}
+
+// `t` from byte `from` on with the percent encodings of unreserved bytes
+// decoded (`%7E` is `~`); the others as they are.
+fn decoded(t: text, from: i32) -> text {
+  let at = find(t, "%", from)
+  if at < 0 { slice(t, from, len(t)) }
+  else if at + 2 >= len(t) { slice(t, from, len(t)) }
+  else {
+    let high = hex(t[at + 1])
+    let low = hex(t[at + 2])
+    let byte = if high < 0 || low < 0 { "" } else { unreserved(high * 16 + low) }
+    if len(byte) == 0 { slice(t, from, at + 1) + decoded(t, at + 1) }
+    else { slice(t, from, at) + byte + decoded(t, at + 3) }
+  }
+}
+
+// Whether byte `c` may not stand in a URL as it is: a control, a space,
+// `"`, `<`, `>` and every byte above 0x7E (as the URL standard encodes
+// them in a path).
+fn unfit(c: i8) -> bool {
+  c <= ' ' || c == 127 || c == '"' || c == '<' || c == '>'
+}
+
+fn hex_digits() -> text { "0123456789ABCDEF" }
+
+// How many unfit bytes `t` has. (A loop of its own, which the compiler
+// makes vector code: most URLs have none.)
+fn unfit_count(t: text) -> i32 {
+  var n = 0
+  for i in 0..len(t) {
+    let c = t[i]
+    n += if c <= ' ' || c == 127 || c == '"' || c == '<' || c == '>' { 1 } else { 0 }
+  }
+  n
+}
+
+// `t` with every unfit byte percent-encoded (`%20` for a space).
+fn encoded_all(t: text) -> text {
+  var out = ""
+  var from = 0
+  for i in 0..len(t) {
+    let c = t[i]
+    if unfit(c) {
+      let v = (c as i32) & 255
+      out += slice(t, from, i) + "%" + slice(hex_digits(), v / 16, v / 16 + 1)
+             + slice(hex_digits(), v % 16, v % 16 + 1)
+      from = i + 1
+    }
+  }
+  if from == 0 { t } else { out + slice(t, from, len(t)) }
+}
+
 // An absolute URL as the crawler keeps it: scheme and host in lower
 // case, without the scheme's own port, the path without dot segments
-// (`/` where it is empty), no fragment.
+// (`/` where it is empty), the percent encodings of unreserved bytes in
+// path and query decoded and the bytes a URL may not hold encoded, no
+// fragment.
 fn normalise(url: text) -> text {
   let colon = scheme_end(url)
   let scheme = lower(slice(url, 0, colon))
@@ -95,7 +172,12 @@ fn normalise(url: text) -> text {
   let q = find(tail, "?", 0)
   let path = slice(tail, 0, or_end(q, len(tail)))
   let query = if q < 0 { "" } else { slice(tail, q, len(tail)) }
-  scheme + "://" + host + without_dots(path) + query
+  let decode = find(tail, "%", 0) >= 0
+  let p = if decode { decoded(without_dots(path), 0) } else { without_dots(path) }
+  let qs = if decode { decoded(query, 0) } else { query }
+  // (Joined once where nothing needs encoding, as most URLs.)
+  if unfit_count(p) + unfit_count(qs) == 0 { scheme + "://" + host + p + qs }
+  else { scheme + "://" + host + encoded_all(p + qs) }
 }
 
 // Scheme and host of an absolute URL: all before its path.
@@ -110,11 +192,87 @@ fn host_of(url: text) -> text {
   slice(o, scheme_end(url) + 3, len(o))
 }
 
+// The ASCII space bytes, which the start and end of a link drop.
+fn blank_byte(c: i8) -> bool {
+  c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == 12
+}
+
+// How many tabs and line ends `t` has (a loop the compiler makes vector
+// code).
+fn breaks(t: text) -> i32 {
+  var n = 0
+  for i in 0..len(t) {
+    let c = t[i]
+    n += if c == '\n' || c == '\t' || c == '\r' { 1 } else { 0 }
+  }
+  n
+}
+
+// `t` without the spaces at its start and end, and without the tabs and
+// line ends in it (as the URL standard reads a link).
+fn trimmed(t: text) -> text {
+  var from = 0
+  while from < len(t) && blank_byte(t[from]) { from += 1 }
+  var to = len(t)
+  while to > from && blank_byte(t[to - 1]) { to -= 1 }
+  let u = slice(t, from, to)
+  if breaks(u) == 0 { u }
+  else { replace_from(replace_from(replace_from(u, "\n", "", 0), "\t", "", 0), "\r", "", 0) }
+}
+
+// The printable ASCII bytes, from 32 (space) on.
+fn printable() -> text {
+  " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz\{|\}~"
+}
+
+// The number of a reference `#38` or `#x26`; -1 where it is none (or
+// past 1000).
+fn reference_number(name: text) -> i32 {
+  let x = name[1] == 'x' || name[1] == 'X'
+  var v = 0
+  var good = len(name) > (if x { 2 } else { 1 })
+  for i in (if x { 2 } else { 1 })..len(name) {
+    let d = hex(name[i])
+    if d < 0 || (!x && d > 9) { good = false }
+    else { v = v * (if x { 16 } else { 10 }) + d }
+    if v > 1000 { good = false }
+  }
+  if good { v } else { -1 }
+}
+
+// What the character reference `name` (between `&` and `;`) stands for;
+// none (no bytes) where it is not one of those known: amp, lt, gt, quot,
+// apos, nbsp, and numbers of printable ASCII (`&#38;`, `&#x26;`).
+fn entity(name: text) -> text {
+  if name == "amp" { "&" } else if name == "lt" { "<" } else if name == "gt" { ">" }
+  else if name == "quot" { "\"" } else if name == "apos" { "'" }
+  else if name == "nbsp" { " " }
+  else if len(name) > 1 && name[0] == '#' {
+    let v = reference_number(name)
+    if v >= 32 && v < 127 { slice(printable(), v - 32, v - 31) } else { "" }
+  }
+  else { "" }
+}
+
+// `t` from byte `from` on with its character references decoded (those
+// `entity` knows; the others as they are).
+fn entities(t: text, from: i32) -> text {
+  let at = find(t, "&", from)
+  if at < 0 { slice(t, from, len(t)) }
+  else {
+    let end = find(t, ";", at)
+    let by = if end < 0 || end - at > 10 { "" } else { entity(slice(t, at + 1, end)) }
+    if len(by) == 0 { slice(t, from, at + 1) + entities(t, at + 1) }
+    else { slice(t, from, at) + by + entities(t, end + 1) }
+  }
+}
+
 // Where a link `link` on the page at `base` (an absolute URL) goes, or
 // none (no bytes) where it is not to be followed: only a fragment,
 // another scheme than http or https.
 fn resolve(base: text, link: text) -> text {
-  let r = replace_from(link, "&amp;", "&", 0)
+  let e = if find(link, "&", 0) < 0 { link } else { entities(link, 0) }
+  let r = trimmed(e)
   let colon = scheme_end(r)
   let scheme = if colon < 0 { "" } else { lower(slice(r, 0, colon)) }
   if len(r) == 0 || r[0] == '#' { "" }
@@ -139,18 +297,76 @@ fn uncommented(page: text, from: i32) -> text {
   }
 }
 
-fn space(c: i8) -> bool { c == ' ' || c == '\n' || c == '\t' || c == '\r' }
+// `page` (`low` in lower case) from byte `from` on without what its
+// scripts hold, `<script ..>` kept (its `src`).
+fn unscripted(page: text, low: text, from: i32) -> text {
+  let open = find(low, "<script", from)
+  let start = if open < 0 { -1 } else { find(low, ">", open) }
+  if start < 0 { slice(page, from, len(page)) }
+  else {
+    let close = find(low, "</script", start)
+    if close < 0 { slice(page, from, start + 1) }
+    else { slice(page, from, start + 1) + unscripted(page, low, close) }
+  }
+}
 
-// Where the value of the next `href=` or `src=` from byte `from` on
-// starts, in `low` (a page in lower case): an attribute after a space,
-// not part of a longer name (`data-href=`). -1 where there is none.
+// A page as its links are read: without its comments and what its
+// scripts hold; and the same in lower case.
+fn readable(body: text) -> (text, text) {
+  let page = uncommented(body, 0)
+  let low = lower(page)
+  if find(low, "<script", 0) < 0 { (page, low) }
+  else {
+    let p = unscripted(page, low, 0)
+    (p, lower(p))
+  }
+}
+
+fn space(c: i8) -> bool { c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == 12 }
+
+// Whether byte `at` of `low` is in a tag and not in a quoted value: after
+// a '<' with no '>' between, its quotes closed.
+fn in_tag(low: text, at: i32) -> bool {
+  var start = at - 1
+  while start >= 0 && low[start] != '<' && low[start] != '>' { start -= 1 }
+  var quote: i8 = 0
+  if start >= 0 && low[start] == '<' {
+    for i in start..at {
+      let c = low[i]
+      if quote == 0 { if c == '"' || c == '\'' { quote = c } }
+      else if c == quote { quote = 0 }
+    }
+  }
+  start >= 0 && low[start] == '<' && quote == 0
+}
+
+// Where the value after the attribute name ending at `at` starts: after
+// spaces, '=' and spaces; -1 where no '=' follows.
+fn after_equals(low: text, at: i32) -> i32 {
+  var i = at
+  while i < len(low) && space(low[i]) { i += 1 }
+  let equals = i < len(low) && low[i] == '='
+  var j = i + 1
+  while equals && j < len(low) && space(low[j]) { j += 1 }
+  if !equals || j >= len(low) { -1 } else { j }
+}
+
+// Where the value of the next `href` or `src` attribute from byte `from`
+// on starts, in `low` (a page in lower case): a name after a space, not
+// part of a longer one (`data-href`, `srcset`), in a tag and not in
+// another's value, then '=' (spaces around it allowed). -1 where there
+// is none.
 fn next_value(low: text, from: i32) -> i32 {
-  let h = find(low, "href=", from)
-  let s = find(low, "src=", from)
+  let h = find(low, "href", from)
+  let s = find(low, "src", from)
   let at = earliest(h, s)
   if at < 0 { -1 }
-  else if at > 0 && space(low[at - 1]) { if at == h { at + 5 } else { at + 4 } }
-  else { next_value(low, at + 1) }
+  else {
+    let value = if at > 0 && space(low[at - 1]) {
+                  after_equals(low, if at == h { at + 4 } else { at + 3 })
+                } else { -1 }
+    if value >= 0 && in_tag(low, at) { value } else { next_value(low, at + 1) }
+  }
 }
 
 // Where a value that is not quoted, from byte `at` on, ends: at a space

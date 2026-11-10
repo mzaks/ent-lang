@@ -29,6 +29,7 @@ with another schedule.
 | `site.py` | Makes a site (pages, redirects, failures, slow pages, odd links, robots.txt) and the report a crawl of it must give. |
 | `serve.c` | A server on epoll that answers a site as the mock does, for the live crawl. |
 | `check/crawl.py` | Builds the programs, runs them on several sites, compares. |
+| `sites.md` | The public sites the crawler may crawl, the rules, and what crawling them found (§9.3). |
 
 Run (needs the compiler in `build/bin` and `LLVM_PREFIX`):
 
@@ -39,6 +40,8 @@ tools/ent build -I examples/http examples/http/crawl_mock.ent -o /tmp/crawl
 python3 examples/http/check/crawl.py [--parallel] [--live]
 python3 bench/http/mock.py 10000 100000    # pages a second, bench/http/RESULTS.md
 python3 bench/http/live.py                 # over the network, against bench/http/crawl.c
+python3 bench/http/mirror.py --seed URL --allow HOST --out DIR   # a public site, once, politely
+python3 bench/http/public.py DIR --public --local                # the crawler against it
 ```
 
 Over the network (`crawl_live.ent` says it step by step): `serve.c` on
@@ -46,7 +49,11 @@ the site's manifest, a `live.conf` with `proxy http://127.0.0.1:PORT`
 and `connections N` where the site is, then the program;
 `check/crawl.py --live` does that for every site of its checks.
 
-The report: `fetched URL status-or-why tries`, `disallowed URL`,
+For a public site (sites.md) `crawl.conf` also has `min_delay_ms` (the
+least time between asks to a host) and `max_pages` (asks past it are
+reported `capped URL` and not sent).
+
+The report: `fetched URL status-or-why tries`, `disallowed URL`, `capped URL`,
 `redirect URL target`, `redirect-limit URL`, `slow URL`, `broken URL
 why from PAGE`.
 
