@@ -1,0 +1,25 @@
+// A byte of a text and its length are read in line, not by a call of
+// devices/text.c: in `for i in 0..len(t) { t[i] }` with no check (the
+// index cannot leave the text, and the loop can be vector code), anywhere
+// else as 0 past either end and for no text.
+// RUN: %ent run %S/Inputs/text_bytes.ent 2>/dev/null | FileCheck %s
+// RUN: ent-translate --import-ent %S/Inputs/text_bytes.ent -I %S/../../devices -o %t.mlir
+// RUN: ent-opt %t.mlir --ent-lower-to-loops -o %t.lowered.mlir
+// RUN: FileCheck %s --check-prefix=IR --input-file=%t.lowered.mlir
+// RUN: FileCheck %s --check-prefix=CALLS --input-file=%t.lowered.mlir
+
+// CHECK: spaces 4 0 0
+// CHECK: ends 0 0 0 97 100
+// (Bytes 1 on of "a b  c d", then two past the end, 0.)
+// CHECK: sum 425 0
+
+// CALLS-NOT: call @ent_text_at
+// CALLS-NOT: call @ent_text_length
+// IR-LABEL: func.func private @ent_spaces
+// IR: scf.for
+// IR-NOT: scf.if
+// IR: llvm.load %{{.*}} : !llvm.ptr -> i8
+// IR-LABEL: func.func private @ent_sum_from
+// IR: scf.for
+// IR: scf.if
+// IR: llvm.load %{{.*}} : !llvm.ptr -> i8

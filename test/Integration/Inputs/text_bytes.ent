@@ -1,0 +1,35 @@
+// A text's bytes read in line (text_bytes.test): in a loop over its
+// length, where none is checked, and anywhere else, where one past
+// either end is 0.
+import text
+import console
+
+unique Words: text
+
+fn spaces(t: text) -> i32 {
+  var n = 0
+  for i in 0..len(t) {
+    let c = t[i]
+    n += if c == ' ' { 1 } else { 0 }
+  }
+  n
+}
+
+// (From 1: not from nought, so each byte read is checked.)
+fn sum_from(t: text, from: i32) -> i32 {
+  var n = 0
+  for i in from..len(t) + 2 { n += t[i] as i32 }
+  n
+}
+
+system go() {
+  Words = "a b  c d"
+  let none = ""
+  let no = "no"
+  put("spaces {spaces(Words)} {spaces(none)} {spaces(no)}")
+  put("ends {Words[-1]} {Words[len(Words)]} {none[0]} {Words[0]} {Words[7]}")
+  put("sum {sum_from(Words, 1)} {sum_from(none, -3)}")
+}
+
+schedule run() { go() }
+main { run() }

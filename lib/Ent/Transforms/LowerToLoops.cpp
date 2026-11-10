@@ -25563,6 +25563,30 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
     return UnrealizedConversionCastOp::create(rewriter, loc, held, bits)
         .getResult(0);
   };
+  // A text's length in line (devices/text.c's ent_text_length): the
+  // u32 at the start of its block; 0 for no text (address 0).
+  auto inlineLength = [&](Location loc, Value view) -> Value {
+    Type i32 = rewriter.getI32Type();
+    Value none = arith::CmpIOp::create(
+        rewriter, loc, arith::CmpIPredicate::eq, view,
+        arith::ConstantIntOp::create(rewriter, loc, 0, 64));
+    auto read = scf::IfOp::create(rewriter, loc, TypeRange{i32}, none,
+                                  /*withElse=*/true);
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointToStart(read.thenBlock());
+    scf::YieldOp::create(
+        rewriter, loc,
+        ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 32)});
+    rewriter.setInsertionPointToStart(read.elseBlock());
+    Value n = LLVM::LoadOp::create(
+        rewriter, loc, i32,
+        LLVM::IntToPtrOp::create(
+            rewriter, loc, LLVM::LLVMPointerType::get(rewriter.getContext()),
+            view),
+        /*alignment=*/4);
+    scf::YieldOp::create(rewriter, loc, n);
+    return read.getResult(0);
+  };
   auto addressOf = [&](Location loc, Value memory) -> Value {
     Value index =
         memref::ExtractAlignedPointerAsIndexOp::create(rewriter, loc, memory);
@@ -25654,6 +25678,38 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
       paired.insert(op);
       waiting.erase(match);
     }
+  }
+  // A byte read in a loop over the text's bytes, `for i in 0..len(t) {
+  // t[i] }`: the index is never outside it, so it is read with no check
+  // (and the loop can be vector code). Its index the loop's own, from a
+  // constant not below nought, up to the length of the same text.
+  auto throughCasts = [](Value v) {
+    while (Operation *def = v.getDefiningOp()) {
+      if (isa<arith::IndexCastOp, arith::IndexCastUIOp, arith::ExtSIOp,
+              arith::ExtUIOp>(def))
+        v = def->getOperand(0);
+      else
+        break;
+    }
+    return v;
+  };
+  llvm::DenseSet<Operation *> inBounds;
+  for (Operation *op : ops) {
+    auto at = dyn_cast<TextAtOp>(op);
+    if (!at)
+      continue;
+    auto index = dyn_cast<BlockArgument>(throughCasts(at.getIndex()));
+    auto loop = index ? dyn_cast<scf::ForOp>(index.getOwner()->getParentOp())
+                      : scf::ForOp();
+    if (!loop || loop.getInductionVar() != index)
+      continue;
+    APInt from;
+    auto length =
+        throughCasts(loop.getUpperBound()).getDefiningOp<TextLengthOp>();
+    if (length && length.getValue() == at.getValue() &&
+        matchPattern(throughCasts(loop.getLowerBound()), m_ConstantInt(&from)) &&
+        !from.isNegative())
+      inBounds.insert(op);
   }
   // The bytes of each text the program has written, once.
   llvm::StringMap<std::string> constants;
@@ -25757,10 +25813,7 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
                                                  bits)
                   .getResult(0));
     } else if (auto length = dyn_cast<TextLengthOp>(op)) {
-      rewriter.replaceOp(op, call(loc, "ent_text_length",
-                                  {rewriter.getI32Type()},
-                                  {address(loc, length.getValue())})
-                                 .getResults());
+      rewriter.replaceOp(op, inlineLength(loc, address(loc, length.getValue())));
     } else if (auto at = dyn_cast<TextAtOp>(op)) {
       Value index = at.getIndex();
       if (index.getType() != i64)
@@ -25769,9 +25822,44 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
                           .getResult()
                     : arith::ExtSIOp::create(rewriter, loc, i64, index)
                           .getResult();
-      rewriter.replaceOp(op, call(loc, "ent_text_at", {rewriter.getI8Type()},
-                                  {address(loc, at.getValue()), index})
-                                 .getResults());
+      // In line, not a call of ent_text_at: a loop over a text's bytes
+      // is then one the compiler can make vector code of. Byte `index`
+      // of the block {u32 length, bytes}; 0 past either end (and for no
+      // text, whose length is 0).
+      Value view = address(loc, at.getValue());
+      Type i8 = rewriter.getI8Type();
+      auto byteAt = [&](Value index) -> Value {
+        Value where = arith::AddIOp::create(
+            rewriter, loc, view,
+            arith::AddIOp::create(
+                rewriter, loc, index,
+                arith::ConstantIntOp::create(rewriter, loc, 4, 64)));
+        return LLVM::LoadOp::create(
+            rewriter, loc, i8,
+            LLVM::IntToPtrOp::create(
+                rewriter, loc,
+                LLVM::LLVMPointerType::get(rewriter.getContext()), where));
+      };
+      if (inBounds.contains(op)) {
+        rewriter.replaceOp(op, byteAt(index));
+        continue;
+      }
+      Value count = arith::ExtUIOp::create(rewriter, loc, i64,
+                                           inlineLength(loc, view));
+      Value inside = arith::CmpIOp::create(
+          rewriter, loc, arith::CmpIPredicate::ult, index, count);
+      auto read = scf::IfOp::create(rewriter, loc, TypeRange{i8}, inside,
+                                    /*withElse=*/true);
+      {
+        OpBuilder::InsertionGuard guard(rewriter);
+        rewriter.setInsertionPointToStart(read.thenBlock());
+        scf::YieldOp::create(rewriter, loc, byteAt(index));
+        rewriter.setInsertionPointToStart(read.elseBlock());
+        scf::YieldOp::create(
+            rewriter, loc,
+            ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 8)});
+      }
+      rewriter.replaceOp(op, read.getResults());
     } else if (auto hash = dyn_cast<TextHashOp>(op);
                hash && pairedWith.count(op)) {
       TextHashOp other = pairedWith.lookup(op);
