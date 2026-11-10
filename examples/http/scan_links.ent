@@ -7,7 +7,10 @@ import text
 import urls
 import mock
 
-default_capacity 262144
+// As many asks as there may be in a crawl, about: 2^26. What it does not
+// use costs it nothing, in memory or in time; with ENT_WORLD_DIR set it
+// is kept in a file, and so may be larger than memory (docs/ranks.md).
+default_capacity 67108864
 
 system scan() {
   for p: Page where find(p.kind, "html", 0) >= 0 {

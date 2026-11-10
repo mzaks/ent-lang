@@ -8,10 +8,13 @@ import pipeline
 import crawl
 import mock
 
-default_capacity 262144
+// As many asks as there may be in a crawl, about: 2^26. What it does not
+// use costs it nothing, in memory or in time; with ENT_WORLD_DIR set it
+// is kept in a file, and so may be larger than memory (docs/ranks.md).
+default_capacity 67108864
 // (The mock holds no ask back by host: many are going at once, a third
 // of the pages at 10^5.)
-capacity Going 131072
+capacity Going 33554432
 
 schedule start() { load_site() setup() }
 

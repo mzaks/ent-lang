@@ -39,7 +39,7 @@ tag Disallowed
 // An ask past `max_pages`, not sent.
 tag Capped
 // A page links to a page.
-relation (Ask)-[Links]->(Ask) capacity 4194304
+relation (Ask)-[Links]->(Ask) capacity 536870912
 // The page whose link made this ask: the edge is connected once the ask
 // is known to be no duplicate, to the ask it is one of where it is (so
 // nothing reads `Links` before the report, which sorts it, once: a

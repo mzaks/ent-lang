@@ -26,7 +26,7 @@ tag Chart
 // with a status below 400, and the others (none came, or 400 and up).
 buffer Seconds { ok: i32, bad: i32 } capacity 262144
 // The rows of `History` that are errors, in the order they came.
-buffer Troubles { row: i32 } capacity 1048576
+buffer Troubles { row: i32 } capacity 134217728
 // The rows of `History` counted into those so far.
 unique Charted: i32
 

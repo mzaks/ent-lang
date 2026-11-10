@@ -33,20 +33,13 @@ EXAMPLE = os.path.join(ROOT, "examples", "http")
 
 
 def program_for(pages, where):
-    """crawl_mock.ent, holding enough for `pages`: the asks (and pages),
-    the links (several a page), the history (an answer each, and the
-    tries again)."""
+    """crawl_mock.ent as it is (its capacities are for 2^26 asks, which
+    cost what a crawl uses of them), without the history said at the
+    end."""
     with open(os.path.join(EXAMPLE, "crawl_mock.ent")) as f:
         text = f.read()
-    capacity = 1 << max(12, (pages * 11 // 10).bit_length())
     # (Without the history said at the end, which only the checks read.)
     text = text.replace(" say_history()", "")
-    text = text.replace("capacity Going 131072", f"capacity Going {capacity // 2}")
-    text = text.replace("capacity LetGo 131072", f"capacity LetGo {capacity // 2}")
-    text = text.replace("default_capacity 262144",
-                        f"default_capacity {capacity}\n"
-                        f"capacity Links {capacity * 8}\n"
-                        f"capacity History {capacity * 2}")
     path = os.path.join(where, f"crawl_{pages}.ent")
     with open(path, "w") as f:
         f.write(text)

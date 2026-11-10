@@ -76,7 +76,7 @@ unique Counters { serial: i64, answers: i64 }
 
 // What every answer was, in the order they came (the talk's history):
 // when it was sent and answered, its status (0: none came, it failed).
-buffer History { ask: entity, sent: f64, at: f64, status: i32 } capacity 1048576
+buffer History { ask: entity, sent: f64, at: f64, status: i32 } capacity 134217728
 
 // An ask made and not yet known to be no duplicate (drop_duplicates).
 tag New
