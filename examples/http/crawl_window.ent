@@ -1,0 +1,93 @@
+// crawl_live.ent with a window that shows the crawl as it runs
+// (http-SPEC.md, C6; watch.ent): what is out, what is slow, the errors,
+// the answers each second. The crawl is the same, and so is its report,
+// on stdout once it is done; the window stays till it is closed (closing
+// it before stops the crawl, and the report then says which asks were
+// still open). Run as crawl_live.ent is, with `-I examples` too:
+//
+//   ent run -I <repo>/examples -I <repo>/examples/http \
+//       <repo>/examples/http/crawl_window.ent
+//
+// live.conf may say, besides: `close_when_done 1` (the window closes as
+// the crawl ends) and `screenshot FILE` (a picture of the window then,
+// a .png).
+import console
+import text
+import files
+import window
+import layout
+import layout_window
+import pipeline
+import crawl
+import live
+import watch
+
+default_capacity 262144
+
+// What live.conf says of the window.
+unique WindowConf { close: bool, shot: text, taken: bool }
+system read_window_conf() {
+  let conf = read_text("live.conf")
+  WindowConf.close = setting(conf, "close_when_done") == "1"
+  WindowConf.shot = setting(conf, "screenshot")
+}
+system shoot() {
+  if Open == 0 && !WindowConf.taken && len(WindowConf.shot) > 0 {
+    screenshot(WindowConf.shot)
+    WindowConf.taken = true
+  }
+}
+
+schedule start() { connect() setup() read_window_conf() watch_setup() }
+
+schedule frame() {
+  inherit_depth()
+  take_depth()
+  place()
+  take_turns()
+  be_polite()
+  ready()
+  pace()
+  send()
+  receive()
+  fetch()
+  time_out()
+  cancel_late()
+  warn_slow()
+  retry()
+  read_robots()
+  follow_redirect()
+  classify()
+  crawl::settle()
+  read_links()
+  due_pages()
+  extract_links()
+  number_asks()
+  drop_duplicates()
+  merge()
+  forget_duplicates()
+  log()
+  history()
+  clean_up()
+  advance_level()
+  tally()
+}
+
+// The window: no more often than `View.every` while the crawl runs (it
+// does not wait for the screen), at 30 frames a second after.
+schedule show() run_if Now >= View.next || Open == 0 {
+  begin() look() ui_base() draw_chart() ui_top() shoot() present()
+}
+
+schedule finish() { conclude() report() say_history() hang_up() }
+
+system wait_for_screen() { Window.fps = 30 }
+schedule after() { wait_for_screen() }
+
+main {
+  start()
+  loop { frame() show() } until Open == 0 || Window.closed
+  finish()
+  after()
+  loop { show() } until Window.closed || WindowConf.close
+}

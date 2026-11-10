@@ -23,6 +23,7 @@ with another schedule.
 | `mock.ent` | The device, mocked: answers from a site's manifest on a clock of its own. |
 | `live.ent` | The device over the network: `devices/http` (libcurl) and the machine's clock. |
 | `crawl_mock.ent`, `crawl_live.ent` | The programs: the schedules. |
+| `watch.ent`, `crawl_window.ent` | A window that shows a crawl as it runs: what is out, slow ones, errors, answers each second. |
 | `crawl_lean.ent` | The same without the optional systems (check K7). |
 | `crawl_combined.ent` | Four pipeline systems as one (check K10). |
 | `scan_links.ent` | Every link of every page, for check K12. |
@@ -48,6 +49,10 @@ Over the network (`crawl_live.ent` says it step by step): `serve.c` on
 the site's manifest, a `live.conf` with `proxy http://127.0.0.1:PORT`
 and `connections N` where the site is, then the program;
 `check/crawl.py --live` does that for every site of its checks.
+
+With a window (`crawl_window.ent`, the same crawl and report): build it
+with `-I examples -I examples/http`; `close_when_done 1` in live.conf
+closes it as the crawl ends, `screenshot shot.png` takes a picture then.
 
 For a public site (sites.md) `crawl.conf` also has `min_delay_ms` (the
 least time between asks to a host) and `max_pages` (asks past it are

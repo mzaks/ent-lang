@@ -1,0 +1,245 @@
+// A crawl in a window as it runs (http-SPEC.md, C6): what is out now,
+// what is slow, what went wrong, and how many answers came each second.
+// It only reads the pipeline and the crawler (pipeline.ent, crawl.ent);
+// nothing of theirs waits for it, and they run the same without it.
+// Laid out by examples/layout.ent, drawn by examples/layout_window.ent;
+// crawl_window.ent is the program. A program runs `watch_setup` once,
+// `tally` every frame of the crawl (it keeps up with `History`), and,
+// between the window's `begin` and `present`, `look` (the texts, again
+// where `View.every` seconds went by since), `ui_base`, `draw_chart`
+// and `ui_top`.
+import text
+import window
+import layout
+import layout_window
+import pipeline
+import crawl
+
+// The boxes the texts are in, and the one the chart is drawn into.
+tag WatchRoot
+tag Counts
+// 0: in flight, 1: slow, 2: errors.
+component Panel { kind: i32 }
+tag Chart
+
+// The answers of each second of the crawl (by when they came): of those
+// with a status below 400, and the others (none came, or 400 and up).
+buffer Seconds { ok: i32, bad: i32 } capacity 262144
+// The rows of `History` that are errors, in the order they came.
+buffer Troubles { row: i32 } capacity 1048576
+// The rows of `History` counted into those so far.
+unique Charted: i32
+
+// When the texts are made again next, and how often; a text being made,
+// and how many lines it has (or would have).
+unique View { next: f64, every: f64, lines: text, n: i32, skip: i32 }
+// The most lines a panel says.
+fn most_lines() -> i32 { 40 }
+unique Mono: i32
+unique Sans: i32
+
+// Seconds, to the tenth.
+fn tenths(s: f64) -> text {
+  let t = (s * 10.0 + 0.5) as i64
+  "{t / 10}.{t % 10}"
+}
+
+system watch_setup() {
+  Window.width = 1280
+  Window.height = 760
+  Window.title = "ent-crawl: " + Rules.seed
+  Window.background = 0x101418
+  Window.resizable = true
+  Window.min_width = 640
+  Window.min_height = 400
+  View.every = 1.0 / 30.0
+  Mono = font("/usr/share/fonts/noto/NotoSansMono-Regular.ttf", 13)
+  if Mono == 0 { Mono = font("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 13) }
+  if Mono == 0 { Mono = font("/System/Library/Fonts/Menlo.ttc", 13) }
+  Sans = font("/usr/share/fonts/noto/NotoSans-Regular.ttf", 18)
+  if Sans == 0 { Sans = font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18) }
+  if Sans == 0 { Sans = font("/System/Library/Fonts/Supplemental/Arial.ttf", 18) }
+
+  let root = spawn {
+    Box { x: 0.0, y: 0.0, w: 1280.0, h: 760.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: false, pad: 10.0, gap: 10.0 }, Fill { colour: 0x101418 },
+    WatchRoot
+  }
+  let counts = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fit },
+    Stack { row: true, pad: 10.0, gap: 0.0 }, Fill { colour: 0x1c242c },
+    Round { top_left: 8.0, top_right: 8.0, bottom_left: 8.0, bottom_right: 8.0 },
+    Text { text: "", size: 18.0, colour: 0xe0e8f0 },
+    TextStyle { font: Sans, spacing: 0.0, line: 0.0, align: Place.Start,
+                breaks: Breaks.Lines },
+    Counts
+  }
+  connect (counts)-[Inside]->(root)
+  let panels = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    Size { w: Sizing.Grow, h: Sizing.Grow },
+    Stack { row: true, pad: 0.0, gap: 10.0 }
+  }
+  connect (panels)-[Inside]->(root)
+  for kind in 0..3 {
+    let box = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Grow, h: Sizing.Grow },
+      Stack { row: false, pad: 10.0, gap: 6.0 }, Fill { colour: 0x1c242c },
+      Round { top_left: 8.0, top_right: 8.0, bottom_left: 8.0, bottom_right: 8.0 },
+      Clip { x: true, y: true }
+    }
+    connect (box)-[Inside]->(panels)
+    let head = spawn {
+      caption(if kind == 0 { "In flight, the oldest first" }
+              else if kind == 1 { "Slow, the latest" }
+              else { "Errors, the newest first" }, 16.0, 0x70c0ff),
+      TextStyle { font: Sans, spacing: 0.0, line: 0.0, align: Place.Start,
+                  breaks: Breaks.Lines }
+    }
+    connect (head)-[Inside]->(box)
+    let body = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Grow, h: Sizing.Fit },
+      Stack { row: true, pad: 0.0, gap: 0.0 },
+      Text { text: "", size: 13.0, colour: 0xc8d0d8 },
+      TextStyle { font: Mono, spacing: 0.0, line: 17.0, align: Place.Start,
+                  breaks: Breaks.Lines },
+      Panel { kind: kind }
+    }
+    connect (body)-[Inside]->(box)
+  }
+  let chart = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 170.0 },
+    Size { w: Sizing.Grow, h: Sizing.Fixed },
+    Stack { row: true, pad: 10.0, gap: 0.0 }, Fill { colour: 0x1c242c },
+    Round { top_left: 8.0, top_right: 8.0, bottom_left: 8.0, bottom_right: 8.0 },
+    Chart
+  }
+  connect (chart)-[Inside]->(root)
+  let title = spawn {
+    caption("Answers each second: fine, and errors", 16.0, 0x70c0ff),
+    TextStyle { font: Sans, spacing: 0.0, line: 0.0, align: Place.Start,
+                breaks: Breaks.Lines }
+  }
+  connect (title)-[Inside]->(chart)
+}
+
+// The history's new rows into the seconds and the errors.
+system tally() {
+  let end = len(History) as i32
+  for r in Charted..end {
+    let second = History[r].at as i32
+    while len(Seconds) as i32 <= second { Seconds += { ok: 0, bad: 0 } }
+    let status = History[r].status
+    if status == 0 || status >= 400 {
+      Seconds[second].bad = Seconds[second].bad + 1
+      Troubles += { row: r }
+    } else {
+      Seconds[second].ok = Seconds[second].ok + 1
+    }
+  }
+  Charted = end
+}
+
+// The texts, made again where it is time.
+system look() {
+  for b: mut Box with WatchRoot
+      where b.w != Window.width as f32 || b.h != Window.height as f32 {
+    b.w = Window.width as f32
+    b.h = Window.height as f32
+  }
+  if Now >= View.next || Open == 0 {
+    View.next = Now + View.every
+
+    let out = for a: Ask with pipeline::Going, Sent { }
+    let waiting = for a: Ask with pipeline::Going without Sent { }
+    let slow = for a: Ask with Slow { }
+    var state: text = "crawling"
+    if Open == 0 && Window.frame > 2 { state = "done" }
+    for t: mut Text with Counts {
+      t.text = "{state} {tenths(Now)} s    asks {Kept_n}    settled {Settled_n}    open {Open}" +
+               "    out {out}    due {waiting}    answers {len(History)}" +
+               "    errors {len(Troubles)}    slow {slow}    depth {Level}"
+    }
+
+    View.lines = ""
+    View.n = 0
+    for a: Ask, s: Sent with pipeline::Going in turn by s.at {
+      if View.n < most_lines() { View.lines += "{tenths(Now - s.at)} s  {a.url}\n" }
+      View.n += 1
+    }
+    if View.n > most_lines() { View.lines += "and {View.n - most_lines()} more\n" }
+    for t: mut Text, p: Panel where p.kind == 0 { t.text = View.lines }
+
+    View.lines = ""
+    View.n = 0
+    View.skip = slow as i32 - most_lines()
+    for me, a: Ask, s: Sent, optional g: Got, optional f: Failed with Slow in turn by s.at {
+      if View.n >= View.skip {
+        if me.has(pipeline::Going) {
+          View.lines += "{tenths(Now - s.at)} s  waiting  {a.url}\n"
+        } else if let at = g.at, let status = g.status {
+          View.lines += "{tenths(at - s.at)} s  {status}  {a.url}\n"
+        } else {
+          if let at = f.at { View.lines += "{tenths(at - s.at)} s  failed  {a.url}\n" }
+        }
+      }
+      View.n += 1
+    }
+    for t: mut Text, p: Panel where p.kind == 1 { t.text = View.lines }
+
+    View.lines = ""
+    var k = len(Troubles) as i32 - 1
+    let stop = k - most_lines()
+    while k >= 0 && k > stop {
+      let r = Troubles[k].row
+      let status = History[r].status
+      let ask = History[r].ask
+      if let url = Ask(ask).url {
+        var word = "{status}"
+        if status == 0 {
+          word = "no answer"
+          if let kind = Failed(ask).kind {
+            if kind == Failure.Timeout { word = "timeout" }
+            else if kind == Failure.Refused { word = "refused" }
+            else if kind == Failure.Dns { word = "dns" }
+            else if kind == Failure.Tls { word = "tls" }
+            else if kind == Failure.TooBig { word = "too big" }
+            else { word = "failed" }
+          }
+        }
+        View.lines += "{tenths(History[r].at)} s  {word}  {url}\n"
+      }
+      k -= 1
+    }
+    for t: mut Text, p: Panel where p.kind == 2 { t.text = View.lines }
+  }
+}
+
+// The answers of the last seconds, as many as there is room for, a bar
+// each: the fine ones from the bottom, the errors on top of them.
+system draw_chart() {
+  for b: Box with Chart {
+    let left = b.x + 10.0
+    let top = b.y + 36.0
+    let width = b.w - 20.0
+    let height = b.h - 46.0
+    let bar = 6.0
+    let n = len(Seconds) as i32
+    let from = max(0, n - (width / bar) as i32)
+    var most = 1
+    for s in from..n { most = max(most, Seconds[s].ok + Seconds[s].bad) }
+    line(left, top + height, left + width, top + height, 0x3a4650)
+    for s in from..n {
+      let x = left + (s - from) as f32 * bar
+      let ok = Seconds[s].ok as f32 / most as f32 * height
+      let bad = Seconds[s].bad as f32 / most as f32 * height
+      if ok > 0.0 { rect(x, top + height - ok, bar - 1.0, ok, 0x3aa060) }
+      if bad > 0.0 { rect(x, top + height - ok - bad, bar - 1.0, bad, 0xd05040) }
+    }
+    label("{most} a second", left + width - 120.0, b.y + 12.0, 14.0, 0x808890)
+  }
+}

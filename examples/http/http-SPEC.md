@@ -90,6 +90,7 @@ The questions this example is meant to answer:
 | `crawl_combined.ent` | Four of the pipeline's systems as one (§8, K10). |
 | `scan_links.ent` | The link scanner alone, every link of every page (§8, K12). |
 | `robots.ent` | Fns: a robots.txt's rules for the crawler and whether they allow a path (§8.2, K11). |
+| `watch.ent`, `crawl_window.ent` | The live window (C6): a view of the pipeline and the crawler that only reads them, and crawl_live.ent with it. |
 | `serve.c` | The crawl's own server (§7.2, C3): answers a site as its manifest says. |
 | `test/Integration/Inputs/http/serve.py` | The device tests' server (§7.2, C2). |
 | `check/` | The check scripts (§8). |
@@ -603,7 +604,7 @@ around in the example, not in the compiler:
 | **C3** | `crawl_live.ent`, `robots.txt`, `bench/http/crawl.c`. | K8, K9 and K11 pass (done: check/crawl.py --live); the live benchmark against C is measured and written down (done: bench/http/live.py, RESULTS.md: C 2.3 s at 10⁵ pages, ent 5.5 to 22.7 s, per-frame work over every waiting ask; after the first fixes 4.8 to 10.6 s, then 4.7 to 7.4 s, then 4.2 to 5.0 s, then 3.2 to 4.1 s). |
 | **C4** | The other crawlers' setups, the mirrored real site. | §9.2 measured and written down, every crawler verified first (done on the generated site, bench/http/others.py, RESULTS.md: at 10⁵ C 2.3 s, ent 2.8, spider 4.0, Colly 6.2, wget 85, Scrapy 156; at 10⁶ spider 23, C 28, ent 37, Colly out of 14 GB; the mirror of books.toscrape.com, bench/http/mirror.py and `others.py --site`, 2026-11-10: ent 0.140 s, C 0.152, the same 3,204 URLs). |
 | **C5** | `sites.md`, crawls of the public sites. | §9.3 run; what it found is in K12 and D1 to D10. (Done 2026-11-10: quotes, books and crawler-test.com against mirror.py, bench/http/public.py; what crawler-test.com found is /cases.html in K12, and a crawl that did not end, fixed. Nothing for D1 to D10: the device answered each odd page as curl does.) |
-| **C6** | A live window (Clay, `layout`, `window`): requests in flight, slow ones, errors, history. | Shows a crawl as it runs. |
+| **C6** | A live window (Clay, `layout`, `window`): requests in flight, slow ones, errors, history. | Shows a crawl as it runs. (Done 2026-11-10: `watch.ent` and `crawl_window.ent`, laid out by examples/layout.ent and drawn by layout_window.ent rather than Clay: the counts, what is out (oldest first), the slow asks, the errors (newest first), the answers each second as bars; the texts made again at most 30 times a second while the crawl runs, which does not wait for the screen. Its report is crawl_live's, line for line, on a site of 2,000 pages (`close_when_done 1` and `screenshot FILE` in live.conf, by hand: it needs a display, so not in check/crawl.py).) |
 
 ## 12. Open questions
 
