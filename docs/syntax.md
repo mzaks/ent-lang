@@ -132,6 +132,12 @@ capacity Inside 4096                        // another capacity for one declared
   or `<`: two of different sizes are computed with as the bigger). The
   other way round takes `as`. So does going between a number with a sign
   and one without (`u8` .. `u64`): see Whole numbers below.
+- Every arithmetic result is one value, on every processor and the GPU.
+  A fraction `as` a whole number is cut towards nought; one the type
+  cannot hold is the nearest it can (its least or its most), and no
+  number (NaN) is 0. A whole number divided by nought is 0 and leaves 0
+  (`/`, `%`); the least number by -1 is itself and leaves 0. Whole
+  numbers wrap, and a shift is by the amount's low bits.
 - `none`, where an entity is expected, is no entity: the same as itself
   (`target == none`) and as no other; what is sent to it goes nowhere,
   and what is looked up of it is not found.

@@ -1,0 +1,16 @@
+// A fraction cast to a whole number the type cannot hold is the nearest
+// the type can, and no number (NaN) is 0: the same on one core, many and
+// the GPU (and on every processor: the conversion instruction alone gives
+// the least number on x86-64 and the nearest on arm64).
+// RUN: %ent run %S/Inputs/cast_saturates.ent | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/cast_saturates.ent | FileCheck %s
+
+// CHECK: 9223372036854775807 2147483647 4294967295 255 127 18446744073709551615 2147483647
+// CHECK-NEXT: -9223372036854775808 -2147483648 0 0 -128 0 -2147483648
+// CHECK-NEXT: 0 0 0 0 0 0 0
+// CHECK-NEXT: 9223372036854775807 2147483647 4294967295 255 127 18446744073709551615 300
+// CHECK-NEXT: -9223372036854775808 -2147483648 0 0 -128 0 -300
+// CHECK-NEXT: 2147483647 2147483647 2147483647 255 127 2147483647 2147483647
+// CHECK-NEXT: -2147483648 -2147483648 0 0 -128 0 0
+// CHECK-NEXT: 255 255 255 255 127 255 127
+// CHECK-NEXT: -7 -7 0 0 -7 0 7

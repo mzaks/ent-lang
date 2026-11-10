@@ -1,0 +1,43 @@
+// A fraction cast to a whole number that the type cannot hold
+// (cast_saturates.test): the nearest it can, and 0 for no number, on
+// every machine and the GPU alike. The values are in components, so the
+// program converts them as it runs.
+import console
+
+component Value { x: f64, y: f32 } capacity 16
+component Cut { a: i64, b: i32, c: u32, d: u8, e: i8, f: u64, g: i32 } capacity 16
+unique U { frame: i64 }
+
+world {
+  spawn { Value { x: 1e30, y: 1e30 }, Cut { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0, g: 0 } }
+  spawn { Value { x: -1e30, y: -1e30 }, Cut { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0, g: 0 } }
+  spawn { Value { x: float_of(0x7ff8000000000000), y: 0.0 }, Cut { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0, g: 0 } }
+  spawn { Value { x: float_of(0x7ff0000000000000), y: 300.7 }, Cut { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0, g: 0 } }
+  spawn { Value { x: float_of(0xfff0000000000000), y: -300.7 }, Cut { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0, g: 0 } }
+  spawn { Value { x: 2147483647.9, y: 2147483648.0 }, Cut { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0, g: 0 } }
+  spawn { Value { x: -2147483648.9, y: -0.9 }, Cut { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0, g: 0 } }
+  spawn { Value { x: 255.9, y: 127.9 }, Cut { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0, g: 0 } }
+  spawn { Value { x: -7.9, y: 7.9 }, Cut { a: 0, b: 0, c: 0, d: 0, e: 0, f: 0, g: 0 } }
+}
+
+gpu system cut() {
+  for v: Value, c: mut Cut {
+    c.a = v.x as i64
+    c.b = v.x as i32
+    c.c = v.x as u32
+    c.d = v.x as u8
+    c.e = v.x as i8
+    c.f = v.x as u64
+    c.g = v.y as i32
+  }
+}
+
+system show() {
+  for c: Cut {
+    put("{c.a} {c.b} {c.c} {c.d} {c.e} {c.f} {c.g}")
+  }
+  U.frame += 1
+}
+
+schedule frame() { cut() show() }
+main { loop { frame() } until U.frame >= 1 }

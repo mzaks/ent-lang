@@ -52,6 +52,15 @@
 // RUN: diff %t.stored.cpu %t.stored.gpupar
 // RUN: FileCheck %s --check-prefix=STORED --input-file=%t.stored.gpu
 // STORED: frame 1: 9221120237041090560 9221120237041090560 9221120237041090560 9221120237041090560
+// A fraction cast to a whole number out of the type's range, and a whole
+// number divided by nought: on the GPU what they are on the CPU
+// (cast_saturates.test, divide_nought.test).
+// RUN: %ent run %S/Inputs/cast_saturates.ent > %t.cast.cpu
+// RUN: %ent run %S/Inputs/cast_saturates.ent --gpu > %t.cast.gpu
+// RUN: diff %t.cast.cpu %t.cast.gpu
+// RUN: %ent run %S/Inputs/divide_nought.ent > %t.div.cpu
+// RUN: %ent run %S/Inputs/divide_nought.ent --gpu > %t.div.gpu
+// RUN: diff %t.div.cpu %t.div.gpu
 
 // A buffer emptied, kept to its first rows and given rows alike outside
 // the `for`s of a `gpu system`, round by round in a `while`: its count the

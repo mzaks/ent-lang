@@ -15357,17 +15357,68 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
                  ? arith::ExtFOp::create(builder, at, to, *value).getResult()
                  : arith::TruncFOp::create(builder, at, to, *value)
                        .getResult();
+    // A fraction as a whole number: cut towards nought, and one the
+    // type cannot hold is the nearest it can (its least or its most);
+    // no number (NaN) is 0. So on every machine and the GPU alike: the
+    // instruction alone gives what its processor does out of range.
+    auto saturating = [&](Type bitsOf, bool noSign) -> mlir::Value {
+      unsigned width = bitsOf.getIntOrFloatBitWidth();
+      auto real = [&](double number) -> mlir::Value {
+        APFloat as(number);
+        bool lost = false;
+        as.convert(cast<FloatType>(from).getFloatSemantics(),
+                   APFloat::rmNearestTiesToEven, &lost);
+        return arith::ConstantOp::create(builder, at,
+                                         FloatAttr::get(from, as));
+      };
+      auto whole = [&](const APInt &number) -> mlir::Value {
+        return arith::ConstantOp::create(builder, at,
+                                         IntegerAttr::get(bitsOf, number));
+      };
+      // (Both ends are powers of two, which every fraction type has.)
+      double top = std::ldexp(1.0, noSign ? width : width - 1);
+      mlir::Value above = arith::CmpFOp::create(
+          builder, at, arith::CmpFPredicate::OGE, *value, real(top));
+      mlir::Value below =
+          noSign ? arith::CmpFOp::create(builder, at,
+                                         arith::CmpFPredicate::OLE, *value,
+                                         real(-1.0))
+                       .getResult()
+                 : arith::CmpFOp::create(builder, at,
+                                         arith::CmpFPredicate::OLT, *value,
+                                         real(-top))
+                       .getResult();
+      mlir::Value number = arith::CmpFOp::create(
+          builder, at, arith::CmpFPredicate::ORD, *value, *value);
+      mlir::Value outside = arith::OrIOp::create(
+          builder, at, arith::OrIOp::create(builder, at, above, below),
+          arith::XOrIOp::create(
+              builder, at, number,
+              arith::ConstantOp::create(
+                  builder, at, IntegerAttr::get(builder.getI1Type(), 1))));
+      // (What is outside is not given to the instruction at all.)
+      mlir::Value inside =
+          arith::SelectOp::create(builder, at, outside, real(0.0), *value);
+      mlir::Value cut =
+          noSign ? arith::FPToUIOp::create(builder, at, bitsOf, inside)
+                       .getResult()
+                 : arith::FPToSIOp::create(builder, at, bitsOf, inside)
+                       .getResult();
+      mlir::Value most = whole(noSign ? APInt::getMaxValue(width)
+                                      : APInt::getSignedMaxValue(width));
+      mlir::Value least = whole(noSign ? APInt::getZero(width)
+                                       : APInt::getSignedMinValue(width));
+      return arith::SelectOp::create(
+          builder, at, above, most,
+          arith::SelectOp::create(builder, at, below, least, cut));
+    };
     if (fromFloat && isUnsigned(to))
-      return fromBits(
-          at,
-          arith::FPToUIOp::create(builder, at, bitsType(to), *value)
-              .getResult(),
-          to);
+      return fromBits(at, saturating(bitsType(to), true), to);
     if (isUnsigned(from) && toFloat)
       return arith::UIToFPOp::create(builder, at, to, bits(at, *value))
           .getResult();
     if (fromFloat && to.isSignlessInteger())
-      return arith::FPToSIOp::create(builder, at, to, *value).getResult();
+      return saturating(to, false);
     if (from.isSignlessInteger() && toFloat)
       return arith::SIToFPOp::create(builder, at, to, *value).getResult();
     // A bool as a number: 1 for true, 0 for false.
@@ -15520,15 +15571,60 @@ FailureOr<mlir::Value> Parser::arithmetic(Location at, Token::Kind op,
                      : arith::MulIOp::create(builder, at, a, b).getResult();
     break;
   case Token::Slash:
-    result = isFloat   ? arith::DivFOp::create(builder, at, a, b).getResult()
-             : noSign ? arith::DivUIOp::create(builder, at, a, b).getResult()
-                      : arith::DivSIOp::create(builder, at, a, b).getResult();
+  case Token::Percent: {
+    bool rest = op == Token::Percent;
+    if (isFloat) {
+      result = rest ? arith::RemFOp::create(builder, at, a, b).getResult()
+                    : arith::DivFOp::create(builder, at, a, b).getResult();
+      break;
+    }
+    // Whole numbers: by nought the quotient is 0 and so is what is left;
+    // the least number by -1 is itself (as its product wraps), nothing
+    // left. So on every machine and the GPU alike: the instruction alone
+    // stops the program on one processor and gives a number on another.
+    // (By a number written in the program that is neither, as it was.)
+    auto divide = [&](mlir::Value by) -> mlir::Value {
+      if (rest)
+        return noSign ? arith::RemUIOp::create(builder, at, a, by).getResult()
+                      : arith::RemSIOp::create(builder, at, a, by).getResult();
+      return noSign ? arith::DivUIOp::create(builder, at, a, by).getResult()
+                    : arith::DivSIOp::create(builder, at, a, by).getResult();
+    };
+    APInt written;
+    if (matchPattern(b, m_ConstantInt(&written)) && !written.isZero() &&
+        (noSign || !written.isAllOnes())) {
+      result = divide(b);
+      break;
+    }
+    Type numbers = a.getType();
+    unsigned bitsWide = numbers.isIndex() ? 64 : numbers.getIntOrFloatBitWidth();
+    auto constant = [&](const APInt &number) -> mlir::Value {
+      return arith::ConstantOp::create(builder, at,
+                                       IntegerAttr::get(numbers, number));
+    };
+    mlir::Value nought = arith::CmpIOp::create(
+        builder, at, arith::CmpIPredicate::eq, b,
+        constant(APInt::getZero(bitsWide)));
+    mlir::Value neither = nought;
+    if (!noSign)
+      neither = arith::OrIOp::create(
+          builder, at, nought,
+          arith::AndIOp::create(
+              builder, at,
+              arith::CmpIOp::create(
+                  builder, at, arith::CmpIPredicate::eq, a,
+                  constant(APInt::getSignedMinValue(bitsWide))),
+              arith::CmpIOp::create(builder, at, arith::CmpIPredicate::eq, b,
+                                    constant(APInt::getAllOnes(bitsWide)))));
+    // (By 1 where the instruction may not run: the least number by 1 is
+    // itself and leaves nothing, which is what is said of it above.)
+    result = divide(arith::SelectOp::create(
+        builder, at, neither, constant(APInt(bitsWide, 1)), b));
+    if (!rest)
+      result = arith::SelectOp::create(
+          builder, at, nought, constant(APInt::getZero(bitsWide)), result);
     break;
-  case Token::Percent:
-    result = isFloat   ? arith::RemFOp::create(builder, at, a, b).getResult()
-             : noSign ? arith::RemUIOp::create(builder, at, a, b).getResult()
-                      : arith::RemSIOp::create(builder, at, a, b).getResult();
-    break;
+  }
   case Token::Amp:
     if (failed(whole("&")))
       return failure();

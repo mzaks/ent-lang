@@ -1,0 +1,37 @@
+// A whole number divided by nought, and the least by -1
+// (divide_nought.test): 0 and nothing left; itself and nothing left. On
+// every machine and the GPU alike. The numbers are in components, so the
+// program divides them as it runs.
+import console
+
+component Pair { a: i32, b: i32, w: i64, v: i64, u: u32, t: u32 } capacity 16
+component Got { q: i32, r: i32, wq: i64, wr: i64, uq: u32, ur: u32 } capacity 16
+unique U { frame: i64 }
+
+world {
+  spawn { Pair { a: 7, b: 0, w: -9, v: 0, u: 9, t: 0 }, Got { q: 1, r: 1, wq: 1, wr: 1, uq: 1, ur: 1 } }
+  spawn { Pair { a: -2147483648, b: -1, w: -9223372036854775807 - 1, v: -1, u: 4000000000, t: 7 }, Got { q: 1, r: 1, wq: 1, wr: 1, uq: 1, ur: 1 } }
+  spawn { Pair { a: -7, b: 2, w: 7, v: -2, u: 7, t: 2 }, Got { q: 1, r: 1, wq: 1, wr: 1, uq: 1, ur: 1 } }
+  spawn { Pair { a: 0, b: 0, w: 5, v: -1, u: 0, t: 0 }, Got { q: 1, r: 1, wq: 1, wr: 1, uq: 1, ur: 1 } }
+}
+
+gpu system divide() {
+  for p: Pair, g: mut Got {
+    g.q = p.a / p.b
+    g.r = p.a % p.b
+    g.wq = p.w / p.v
+    g.wr = p.w % p.v
+    g.uq = p.u / p.t
+    g.ur = p.u % p.t
+  }
+}
+
+system show() {
+  for g: Got {
+    put("{g.q} {g.r} {g.wq} {g.wr} {g.uq} {g.ur}")
+  }
+  U.frame += 1
+}
+
+schedule frame() { divide() show() }
+main { loop { frame() } until U.frame >= 1 }

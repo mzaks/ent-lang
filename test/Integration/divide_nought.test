@@ -1,0 +1,11 @@
+// A whole number divided by nought is 0 with nothing left, and the least
+// number by -1 is itself with nothing left: the same on one core, many
+// and the GPU (and on every processor: the instruction alone stops the
+// program on x86-64 and gives a number on arm64).
+// RUN: %ent run %S/Inputs/divide_nought.ent | FileCheck %s
+// RUN: %ent run --parallel %S/Inputs/divide_nought.ent | FileCheck %s
+
+// CHECK: 0 0 0 0 0 0
+// CHECK-NEXT: -2147483648 0 -9223372036854775808 0 571428571 3
+// CHECK-NEXT: -3 -1 -3 1 3 1
+// CHECK-NEXT: 0 0 -5 0 0 0
