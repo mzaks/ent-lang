@@ -100,7 +100,15 @@ rank, run on N ranks. No rank ever holds the whole world:
   that: a world larger than the machine's memory runs, slowly. The
   epidemic with tracing at 1e6 people (1.15 GB) ran in 500 MB so, in
   203 s instead of 18 s, to the same bytes. (A directory on a disk: one
-  in memory, as /tmp often is, is no help.)
+  in memory, as /tmp often is, is no help.) The texts that fields hold
+  (`text` without a capacity) go to a file of their own there too
+  (devices/text.c; 1 TB of room, of which only what is written takes
+  disk, `ENT_TEXT_FILE_BYTES` for another). A world made for far more
+  entities than it holds costs what it holds: a relation's offsets are
+  written for the slots handed out, and the first pages of every array
+  and log segment are small ones. The HTTP crawler (examples/http) built
+  for 16M asks crawled 10⁵ pages in 150 MB so, in 24 s instead of 0.7 s;
+  in memory it needs 356 MB.
 
 - A process runs several partitions where it is started on fewer ranks
   than the program is built for: `mpirun -n 2 program` of a build for 8

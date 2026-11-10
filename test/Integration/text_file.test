@@ -1,0 +1,24 @@
+// The texts fields hold in a file, where ENT_WORLD_DIR names a directory
+// (devices/text.c, ent_held_new): blocks given to fields and given back,
+// thirty rounds of it, on one core and on all, say what they say in
+// memory and none is left; texts of up to 4.4 MB the same.
+// RUN: rm -rf %t && mkdir -p %t/world
+// RUN: env ENT_TEXT_REPORT=1 %ent run %S/Inputs/text_churn.ent > %t/ram 2> /dev/null
+// RUN: env ENT_TEXT_REPORT=1 ENT_WORLD_DIR=%t/world %ent run %S/Inputs/text_churn.ent > %t/file 2> %t/err
+// RUN: env ENT_TEXT_REPORT=1 ENT_WORLD_DIR=%t/world %ent run --parallel %S/Inputs/text_churn.ent > %t/pfile 2> %t/perr
+// RUN: cmp %t/ram %t/file
+// RUN: cmp %t/ram %t/pfile
+// RUN: FileCheck %s --check-prefix=HELD --input-file=%t/err
+// RUN: FileCheck %s --check-prefix=HELD --input-file=%t/perr
+// RUN: %ent build %S/Inputs/text_big.ent -o %t/text_big
+// RUN: head -c 300000 /dev/zero | tr '\0' 'a' > %t/big.txt
+// RUN: cd %t && env -u ENT_PROGRAM_DIR %t/text_big > %t/big_ram
+// RUN: cd %t && env -u ENT_PROGRAM_DIR ENT_WORLD_DIR=%t/world %t/text_big > %t/big_file
+// RUN: cmp %t/big_ram %t/big_file
+// (In the file indeed: one of 4 KB is soon full, and says so.)
+// RUN: not env ENT_WORLD_DIR=%t/world ENT_TEXT_FILE_BYTES=4096 %ent run %S/Inputs/text_churn.ent 2>&1 >/dev/null | FileCheck %s --check-prefix=FULL
+// (The files are gone from the directory as soon as they are made.)
+// RUN: ls -A %t/world | count 0
+
+// HELD: texts held: 0
+// FULL: ent: the file for the texts is full (4096 bytes; ENT_TEXT_FILE_BYTES says more)

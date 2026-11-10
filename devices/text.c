@@ -75,13 +75,128 @@ uint64_t ent_text_view(uint64_t view) {
   return (uint64_t)(uintptr_t)ent_text_of(view);
 }
 
+// Where the blocks fields hold live. With ENT_WORLD_DIR set (as for the
+// world, devices/memory.c) they are in a file in that directory, made
+// sparse and gone when the program ends, mapped shared: the system keeps
+// in memory the blocks the program goes to now and writes the others to
+// the file, so that a world larger than the machine's memory has its
+// texts there too. A block is as big as the power of two its text needs
+// (16 bytes at least), kept for the next of that size when it is given
+// back; the file's room is taken from its start, and is 1 TB, of which
+// only what is written takes room on disk (ENT_TEXT_FILE_BYTES says
+// another). Without it, the C library's malloc.
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#define ENT_HELD_CLASSES 40
+static char *ent_held_file;  // 0: not looked at yet, or malloc
+static size_t ent_held_room, ent_held_top;
+static int ent_held_state;   // 0: not looked at, 1: malloc, 2: the file
+static void *ent_held_free[ENT_HELD_CLASSES];
+static char ent_held_locks[ENT_HELD_CLASSES];
+static char ent_held_starting;
+
+static int ent_held_in_file(void) {
+  int state = __atomic_load_n(&ent_held_state, __ATOMIC_ACQUIRE);
+  if (state)
+    return state == 2;
+  while (__atomic_test_and_set(&ent_held_starting, __ATOMIC_ACQUIRE))
+    ;
+  state = ent_held_state;
+  if (!state) {
+    state = 1;
+    const char *directory = getenv("ENT_WORLD_DIR");
+    if (directory && *directory) {
+      const char *bytes = getenv("ENT_TEXT_FILE_BYTES");
+      size_t room = bytes && *bytes ? (size_t)strtoull(bytes, 0, 10)
+                                    : (size_t)1 << 40;
+      char path[4096];
+      snprintf(path, sizeof path, "%s/ent-texts.%ld.XXXXXX", directory,
+               (long)getpid());
+      int file = mkstemp(path);
+      void *base = MAP_FAILED;
+      if (file >= 0) {
+        unlink(path);
+        if (ftruncate(file, (off_t)room) == 0)
+          base = mmap(0, room, PROT_READ | PROT_WRITE,
+                      MAP_SHARED | MAP_NORESERVE, file, 0);
+        close(file);
+      }
+      if (base == MAP_FAILED) {
+        fprintf(stderr, "ent: no file for the texts in %s\n", directory);
+        exit(1);
+      }
+      ent_held_file = base;
+      ent_held_room = room;
+      state = 2;
+    }
+    __atomic_store_n(&ent_held_state, state, __ATOMIC_RELEASE);
+  }
+  __atomic_clear(&ent_held_starting, __ATOMIC_RELEASE);
+  return state == 2;
+}
+
+// The size class of a block of `bytes`: 2^class bytes.
+static int ent_held_class(size_t bytes) {
+  int c = 4;
+  while (((size_t)1 << c) < bytes)
+    ++c;
+  return c;
+}
+
+static void *ent_held_new(size_t bytes) {
+  if (!ent_held_in_file())
+    return malloc(bytes);
+  int c = ent_held_class(bytes);
+  while (__atomic_test_and_set(&ent_held_locks[c], __ATOMIC_ACQUIRE))
+    ;
+  void *block = ent_held_free[c];
+  if (block)
+    memcpy(&ent_held_free[c], block, sizeof block);
+  __atomic_clear(&ent_held_locks[c], __ATOMIC_RELEASE);
+  if (block)
+    return block;
+  size_t at = __atomic_fetch_add(&ent_held_top, (size_t)1 << c,
+                                 __ATOMIC_RELAXED);
+  if (at + ((size_t)1 << c) > ent_held_room) {
+    fprintf(stderr, "ent: the file for the texts is full (%zu bytes; "
+                    "ENT_TEXT_FILE_BYTES says more)\n", ent_held_room);
+    exit(3);
+  }
+  return ent_held_file + at;
+}
+
+// A block given back: `bytes` is what it was made for.
+static void ent_held_give(void *block, size_t bytes) {
+  if (!block)
+    return;
+  if (!ent_held_in_file()) {
+    free(block);
+    return;
+  }
+  int c = ent_held_class(bytes);
+  while (__atomic_test_and_set(&ent_held_locks[c], __ATOMIC_ACQUIRE))
+    ;
+  memcpy(block, &ent_held_free[c], sizeof block);
+  ent_held_free[c] = block;
+  __atomic_clear(&ent_held_locks[c], __ATOMIC_RELEASE);
+}
+#else
+static void *ent_held_new(size_t bytes) { return malloc(bytes); }
+static void ent_held_give(void *block, size_t bytes) {
+  (void)bytes;
+  free(block);
+}
+#endif
+
 // A block of its own with the bytes of `view` (and a 0 after them, which
 // is not counted); none for no bytes.
 uint64_t ent_text_own(uint64_t view) {
   const ent_text *from = ent_text_of(view);
   if (!from->length)
     return 0;
-  ent_text *held = malloc(sizeof(ent_text) + from->length + 1);
+  ent_text *held = ent_held_new(sizeof(ent_text) + from->length + 1);
   if (!held)
     abort();
   held->length = from->length;
@@ -290,7 +405,7 @@ uint64_t ent_text_join_own(uint64_t a, uint64_t b) {
   uint32_t length = left->length + right->length;
   if (!length)
     return 0;
-  ent_text *held = malloc(sizeof(ent_text) + length + 1);
+  ent_text *held = ent_held_new(sizeof(ent_text) + length + 1);
   if (!held)
     abort();
   held->length = length;
@@ -349,9 +464,11 @@ void ent_text_release_all(void) {
 }
 
 void ent_text_drop(uint64_t held) {
-  if (held)
-    ent_text_count(-1);
-  free((void *)(uintptr_t)held);
+  if (!held)
+    return;
+  ent_text_count(-1);
+  ent_text *block = (ent_text *)(uintptr_t)held;
+  ent_held_give(block, sizeof(ent_text) + block->length + 1);
 }
 
 int32_t ent_text_length(uint64_t view) {
