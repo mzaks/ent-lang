@@ -34,7 +34,7 @@ unique Charted: i32
 // and how many lines it has (or would have).
 unique View { next: f64, every: f64, lines: text, n: i32, skip: i32 }
 // The most lines a panel says.
-fn most_lines() -> i32 { 40 }
+fn most_lines() -> i32 { 1000 }
 unique Mono: i32
 unique Sans: i32
 
@@ -88,10 +88,20 @@ system watch_setup() {
       Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
       Size { w: Sizing.Grow, h: Sizing.Grow },
       Stack { row: false, pad: 10.0, gap: 6.0 }, Fill { colour: 0x1c242c },
-      Round { top_left: 8.0, top_right: 8.0, bottom_left: 8.0, bottom_right: 8.0 },
-      Clip { x: true, y: true }
+      Round { top_left: 8.0, top_right: 8.0, bottom_left: 8.0, bottom_right: 8.0 }
     }
     connect (box)-[Inside]->(panels)
+    // Its lines, under the title: the wheel moves them, and so does the
+    // pointer held down on them (both ways: a URL may be longer than the
+    // panel is wide). (The panel does not clip: a box that clips does not
+    // make those in it smaller, and this one would be as high as its
+    // lines, with nothing to scroll.)
+    let list = spawn {
+      Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+      Size { w: Sizing.Grow, h: Sizing.Grow },
+      Stack { row: false, pad: 0.0, gap: 0.0 },
+      Clip { x: true, y: true }, Scroll { x: 0.0, y: 0.0 }, Drag
+    }
     let head = spawn {
       caption(if kind == 0 { "In flight, the oldest first" }
               else if kind == 1 { "Slow, the latest" }
@@ -99,7 +109,6 @@ system watch_setup() {
       TextStyle { font: Sans, spacing: 0.0, line: 0.0, align: Place.Start,
                   breaks: Breaks.Lines }
     }
-    connect (head)-[Inside]->(box)
     let body = spawn {
       Box { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
       Size { w: Sizing.Grow, h: Sizing.Fit },
@@ -109,7 +118,9 @@ system watch_setup() {
                   breaks: Breaks.Lines },
       Panel { kind: kind }
     }
-    connect (body)-[Inside]->(box)
+    connect (head)-[Inside]->(box)
+    connect (list)-[Inside]->(box)
+    connect (body)-[Inside]->(list)
   }
   let chart = spawn {
     Box { x: 0.0, y: 0.0, w: 0.0, h: 170.0 },
