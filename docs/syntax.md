@@ -306,7 +306,8 @@ for with Enemy { Count += 1 }     // nor the entity
   entity's event is asked that way (`changed outer.x`, in a `for` that
   goes along a tree: see Trees below);
   `log N` after a trigger sets its event log's capacity (`log 0`: none;
-  by default an eighth of the rows of the largest archetype it watches).
+  by default an eighth of the rows of the largest archetype it watches,
+  and no more than 2^20).
   Such a `for` goes through the log of what happened, not through every
   entity, so it costs by how much changed. It goes through all of them,
   running its body only where a trigger fired, on its first run and

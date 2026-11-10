@@ -270,8 +270,11 @@ static ent_text_arena *ent_text_arenas;
 static __thread ent_text_arena *ent_text_mine;
 enum { ent_text_first_chunk = 1 << 16, ent_text_most_chunk = 1 << 22 };
 
+// (A chunk is where the blocks fields hold are: in the file, with
+// ENT_WORLD_DIR, so that the texts a frame makes, its pages' bodies
+// say, need not fit in memory either.)
 static ent_text_chunk *ent_text_chunk_new(size_t room, ent_text_chunk *next) {
-  ent_text_chunk *chunk = malloc(sizeof(ent_text_chunk) + room);
+  ent_text_chunk *chunk = ent_held_new(sizeof(ent_text_chunk) + room);
   if (!chunk)
     abort();
   chunk->next = next;
@@ -321,7 +324,7 @@ static ent_text *ent_text_cut_out(uint32_t length) {
 static void ent_text_chunks_free(ent_text_chunk *chunk) {
   while (chunk) {
     ent_text_chunk *next = chunk->next;
-    free(chunk);
+    ent_held_give(chunk, sizeof(ent_text_chunk) + chunk->room);
     chunk = next;
   }
 }

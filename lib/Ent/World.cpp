@@ -588,7 +588,14 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
     // (Connects: of as many entities as the relation has edges.)
     if (stamp.kind == Trigger::Connected)
       entities = layout.getRelation(stamp.component).capacity;
-    int64_t capacity = request ? *request : std::max<int64_t>(64, entities / 8);
+    // (By default an eighth of the entities, and no more than a million
+    // events between two runs of its readers: a log's rings reuse their
+    // pages only when they come round, so one made for many more entities
+    // than a run sees would keep a page for every event since the start.
+    // Where more come, the readers go through all, as where one is lost.)
+    int64_t capacity =
+        request ? *request
+                : std::clamp<int64_t>(entities / 8, 64, int64_t(1) << 20);
     if (capacity > 0) {
       log.capacity = int64_t(llvm::PowerOf2Ceil(uint64_t(capacity)));
       log.segments = std::clamp<int64_t>(
