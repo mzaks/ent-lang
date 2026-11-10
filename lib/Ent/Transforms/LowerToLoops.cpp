@@ -2887,8 +2887,22 @@ layoutArrays(const WorldLayout &layout) {
       add(field.offset, name + "." + field.field.getValue());
     add(buffer.ownerOffset, name + ".owner");
   }
-  for (auto [i, log] : llvm::enumerate(layout.logs))
-    add(log.idsOffset, "log" + Twine(i));
+  // (A log's rings segment by segment: each is written from its start,
+  // so each is an array of its own to ent_world_pages, whose first pages
+  // are small. A log is an eighth of its archetype's capacity, and a
+  // world made for many more entities than it has writes the first few
+  // entries of each segment: a huge page each, else.)
+  for (auto [i, log] : llvm::enumerate(layout.logs)) {
+    if (!log.idsOffset)
+      continue;
+    uint64_t idBytes = layout.entities.idBits / 8;
+    for (int64_t s = 0; s < log.segments; ++s) {
+      add(log.idsOffset + uint64_t(s * log.segmentCapacity) * idBytes,
+          "log" + Twine(i) + (s ? ".segment" + Twine(s) : Twine()));
+      add(log.ticksOffset + uint64_t(s * log.segmentCapacity) * 8,
+          "log" + Twine(i) + ".ticks" + (s ? ".segment" + Twine(s) : Twine()));
+    }
+  }
   add(layout.locationOffset, "entities.location");
   add(layout.generationOffset, "entities.generation");
   llvm::sort(map);
@@ -5945,6 +5959,35 @@ static Value loadSlotsInUse(IRRewriter &rewriter, Location loc,
                                   ValueRange{zero}));
 }
 
+/// Whether a sort of `relation` gives its runs only to the keys of the
+/// slots handed out so far (keysToSort), not to every key the world could
+/// hold: so a world of large capacities costs a sort what its entities
+/// come to, and its offsets are written that far alone. (For a relation
+/// that is no tree, in a program of one world: slots are handed out in
+/// order there, so those in use are the first ones. A key handed out after
+/// a sort reads none of the offsets written: 0, as the arena starts, an
+/// empty run; emitEdgeRange keeps the one at the end empty too.)
+static bool sortsKeysInUse(const WorldLayout &layout,
+                           const WorldRelation &relation) {
+  return layout.entities.hasIds() && !relation.linked && !relation.tree &&
+         !ranksMode && partitionCount == 0;
+}
+
+/// The keys a sort of `relation` gives runs to: those of the slots handed
+/// out so far (at least one), or every key.
+static Value keysToSort(IRRewriter &rewriter, Location loc,
+                        const WorldLayout &layout, WorldAccess &world,
+                        const WorldRelation &relation) {
+  Value all = arith::ConstantIndexOp::create(rewriter, loc, layout.entityKeys);
+  if (!sortsKeysInUse(layout, relation))
+    return all;
+  return arith::MinUIOp::create(
+      rewriter, loc, all,
+      arith::MaxUIOp::create(rewriter, loc,
+                             arith::ConstantIndexOp::create(rewriter, loc, 1),
+                             loadSlotsInUse(rewriter, loc, layout, world)));
+}
+
 /// Emit, at the insertion point, code that finds the entity `id` (in its
 /// stored form) among the `candidate` archetypes, and return the values it
 /// yields. How the entity is found depends on the entity scheme:
@@ -7321,19 +7364,27 @@ static std::pair<Value, Value> emitEdgeRange(IRRewriter &rewriter,
                                              const WorldRelation &relation,
                                              bool in, Value key) {
   Value offsets = world.edgeOffsets(relation, in);
+  // (Where a sort gives runs to the keys in use alone, the key a sort
+  // ended at, handed out since, starts where all end and reads an end of
+  // 0: no edges.)
+  auto keptInOrder = [&](Value begin, Value end) -> std::pair<Value, Value> {
+    if (!sortsKeysInUse(world.getLayout(), relation))
+      return {begin, end};
+    return {begin, arith::MaxSIOp::create(rewriter, loc, begin, end)};
+  };
   // (Kept in order in place, a run ends before the room after it.)
   if (relation.mended()) {
     Value begin =
         memref::LoadOp::create(rewriter, loc, offsets, ValueRange{key});
     Value end = memref::LoadOp::create(
         rewriter, loc, world.edgeEnds(relation, in), ValueRange{key});
-    return {world.toIndex(loc, begin), world.toIndex(loc, end)};
+    return keptInOrder(world.toIndex(loc, begin), world.toIndex(loc, end));
   }
   Value next = arith::AddIOp::create(
       rewriter, loc, key, arith::ConstantIndexOp::create(rewriter, loc, 1));
   Value begin = memref::LoadOp::create(rewriter, loc, offsets, ValueRange{key});
   Value end = memref::LoadOp::create(rewriter, loc, offsets, ValueRange{next});
-  return {world.toIndex(loc, begin), world.toIndex(loc, end)};
+  return keptInOrder(world.toIndex(loc, begin), world.toIndex(loc, end));
 }
 
 /// The parent of the entity `id` (in its stored form) in the tree
@@ -11841,6 +11892,7 @@ static Value edgesSpec(IRRewriter &rewriter, Location loc, ModuleOp module,
       int64_t(relation.hasIndex() ? relation.sourceScratchOffset : 0),
       int64_t(relation.hasIndex() ? relation.targetScratchOffset : 0),
       int64_t(relation.mendsOffset),
+      int64_t(sortsKeysInUse(layout, relation) ? layout.nextSlotOffset : 0),
       int64_t(relation.fields.size())};
   for (auto [k, field] : llvm::enumerate(relation.fields)) {
     spec.push_back(field.offset);
@@ -11918,7 +11970,7 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
   Type offsetType = world.offsetType(relation);
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
   Value one = arith::ConstantIndexOp::create(rewriter, loc, 1);
-  Value keys = arith::ConstantIndexOp::create(rewriter, loc, layout.entityKeys);
+  Value keys = keysToSort(rewriter, loc, layout, world, relation);
   Value clean = memref::LoadOp::create(rewriter, loc, world.edgesClean(relation),
                                        ValueRange{zero});
   auto ifUnclean = scf::IfOp::create(
@@ -11951,8 +12003,12 @@ static void emitSortFunction(IRRewriter &rewriter, ModuleOp module,
   };
   // (In chunks of the keys, each on a thread, with `parallel`.)
   int64_t chunks = 256;
-  Value chunkKeys = arith::ConstantIndexOp::create(
-      rewriter, loc, (int64_t(layout.entityKeys) + chunks - 1) / chunks);
+  Value chunkKeys = arith::DivUIOp::create(
+      rewriter, loc,
+      arith::AddIOp::create(
+          rewriter, loc, keys,
+          arith::ConstantIndexOp::create(rewriter, loc, chunks - 1)),
+      arith::ConstantIndexOp::create(rewriter, loc, chunks));
   auto inChunks = [&](function_ref<void(Value, Value, Value)> body) {
     auto loop = scf::ParallelOp::create(
         rewriter, loc, ValueRange{zero},

@@ -56,8 +56,14 @@ enum {
   SPEC_SOURCE_COPY, // capacity ids
   SPEC_TARGET_COPY, // capacity ids
   SPEC_MENDS,       // i64s: edges changed since the last sort anew, why
-                    // the last mending did not mend (WHY_*), and how much
-                    // mending moved since to make room
+                    // the last mending did not mend (WHY_*), how much
+                    // mending moved since to make room, and the keys the
+                    // runs are given up to (see SPEC_NEXT_SLOT)
+  SPEC_NEXT_SLOT,   // 0, or where the i64 is that says how many slots
+                    // were handed out: the runs are then the keys' of
+                    // those alone (lib/Ent/Transforms/LowerToLoops.cpp,
+                    // sortsKeysInUse), and those of keys handed out since
+                    // the last sort or mending are made here, empty
   SPEC_FIELDS,      // how many; then for each its offset, bytes and copy
   SPEC_FIELD0,
 };
@@ -116,10 +122,60 @@ static int64_t target_key(const Edges *e, int64_t p) {
   return key_of_id(e, id_at(e, SPEC_TARGET, p));
 }
 
+// The keys the runs are for: all, or those of the slots handed out (at
+// least one, as the generated sort counts them).
+static int64_t keys_in_use(char *arena, const int64_t *spec) {
+  if (!spec[SPEC_NEXT_SLOT])
+    return spec[SPEC_KEYS];
+  int64_t used;
+  memcpy(&used, arena + spec[SPEC_NEXT_SLOT], 8);
+  if (used < 1)
+    used = 1;
+  return used < spec[SPEC_KEYS] ? used : spec[SPEC_KEYS];
+}
+
+static Edges edges_of_keys(char *arena, const int64_t *spec, int64_t keys);
+
+// After a sort anew, which gave every key in use its run: those are the
+// keys given (nothing to make).
+static Edges edges_sorted(char *arena, const int64_t *spec) {
+  Edges e = edges_of_keys(arena, spec, keys_in_use(arena, spec));
+  if (spec[SPEC_NEXT_SLOT] && spec[SPEC_MENDS])
+    ((int64_t *)(arena + spec[SPEC_MENDS]))[3] = e.keys;
+  return e;
+}
+
 static Edges edges_of(char *arena, const int64_t *spec) {
+  Edges e = edges_of_keys(arena, spec, keys_in_use(arena, spec));
+  // (The keys handed out since the runs were last given: an empty run
+  // each where all the others end, as a sort would have given them, so
+  // that the offsets go up from key to key.)
+  if (spec[SPEC_NEXT_SLOT] && spec[SPEC_MENDS]) {
+    int64_t *mends = (int64_t *)(arena + spec[SPEC_MENDS]);
+    int64_t filled = mends[3];
+    if (filled < e.keys) {
+      int64_t end = off(&e, SPEC_SORTED, filled);
+      for (int64_t k = filled; k < e.keys; k++) {
+        set_off(&e, SPEC_ENDS, k, end);
+        set_off(&e, SPEC_SORTED, k + 1, end);
+      }
+      if (e.index) {
+        int64_t index_end = off(&e, SPEC_INDEX, filled);
+        for (int64_t k = filled; k < e.keys; k++) {
+          set_off(&e, SPEC_INDEX_ENDS, k, index_end);
+          set_off(&e, SPEC_INDEX, k + 1, index_end);
+        }
+      }
+      mends[3] = e.keys;
+    }
+  }
+  return e;
+}
+
+static Edges edges_of_keys(char *arena, const int64_t *spec, int64_t keys) {
   Edges e = {arena,
              spec,
-             spec[SPEC_KEYS],
+             keys,
              spec[SPEC_CAPACITY],
              spec[SPEC_OFFSET_BYTES],
              spec[SPEC_ID_BYTES],
@@ -201,7 +257,7 @@ static void slots_from(const Edges *e, int64_t from, int64_t to) {
 }
 
 void ent_edges_dense(char *arena, const int64_t *spec) {
-  Edges e = edges_of(arena, spec);
+  Edges e = edges_sorted(arena, spec);
   for (int64_t k = 0; k < e.keys; k++)
     set_off(&e, SPEC_ENDS, k, off(&e, SPEC_SORTED, k + 1));
   if (e.index) {
@@ -267,7 +323,7 @@ static int64_t *spread_starts(const Edges *e, const int64_t *lengths,
 }
 
 void ent_edges_spread(char *arena, const int64_t *spec) {
-  Edges e = edges_of(arena, spec);
+  Edges e = edges_sorted(arena, spec);
   int64_t *count = (int64_t *)(arena + spec[SPEC_COUNT]);
   int64_t total = *count;
   // At most half of what the table has left is room in the runs; the
@@ -731,6 +787,9 @@ void ent_edges_orders(char *arena, const int64_t *spec, int64_t out,
   for (int64_t k = 0; k < e.keys; k++) {
     int64_t first = off(&e, starts, k);
     int64_t last = spec[ends] ? off(&e, ends, k) : off(&e, starts, k + 1);
+    // (The key a sort ended at, handed out since: no edges.)
+    if (last < first)
+      last = first;
     for (int64_t i = first; i < last; i++)
       set_at(arena + out, e.offset_bytes, i, i);
     ent_edges_order_run(arena, arena + out + first * e.offset_bytes,

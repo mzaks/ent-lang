@@ -316,6 +316,7 @@ struct WorldRelation {
   /// where it is mended.
   bool positions = false;
   uint64_t slotOffset = 0;
+  /// Four i64s of devices/edges.c's (SPEC_MENDS).
   uint64_t mendsOffset = 0;
   /// For sorting: a cursor per key and a copy of every column.
   uint64_t cursorOffset = 0;

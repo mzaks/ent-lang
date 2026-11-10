@@ -1,0 +1,110 @@
+// A relation in a world made for far more entities than it has (see
+// test/Integration/relation_keys_in_use.test): its runs are given to the
+// keys of the slots handed out so far alone. Every other step new nodes
+// come, each linked to and from older ones (so many new edges that the
+// relation is sorted anew); in the others a few more edges between old
+// nodes (so few that it is mended in place) while there are nodes newer
+// than its last sort. Nodes with no edges are spawned before and after
+// the edges are sorted, walked (none may be found) and destroyed, so that
+// their slots are handed out again. What the walks find, into each node
+// and out of it, is held against what a list of every edge made says.
+import console
+import wyhash
+
+component Node { id: i32, ins: i32, outs: i32 } capacity 1048576
+tag Fresh
+relation (Node)-[Tie { w: i32 }]->(Node) capacity 4194304
+
+buffer Ids { who: entity } capacity 65536
+buffer Made { from: i32, to: i32 } capacity 65536
+buffer Want { ins: i32, outs: i32 } capacity 65536
+unique S { step: i64, nodes: i32, bad: i32, fresh: i32 }
+
+system grow() {
+  let step = S.step as u64
+  if S.step % 2 == 1 {
+    for k in 0..12 {
+      let from = (wyhash64(step * 7 + 3, k as u64) % S.nodes as u64) as i32
+      let to = (wyhash64(step * 7 + 4, k as u64) % S.nodes as u64) as i32
+      connect (Ids[from].who)-[Tie { w: 9 }]->(Ids[to].who)
+      Made += { from: from, to: to }
+    }
+  } else {
+    for k in 0..40 {
+      let id = S.nodes
+      let e = spawn { Node { id: id, ins: 0, outs: 0 } }
+      Ids += { who: e }
+      S.nodes += 1
+      if id > 0 {
+        for j in 0..3 {
+          let to = (wyhash64(step * 7 + 1, (id * 3 + j) as u64) % id as u64) as i32
+          connect (e)-[Tie { w: j }]->(Ids[to].who)
+          Made += { from: id, to: to }
+          let from = (wyhash64(step * 7 + 2, (id * 3 + j) as u64) % id as u64) as i32
+          connect (Ids[from].who)-[Tie { w: j + 3 }]->(e)
+          Made += { from: from, to: id }
+        }
+      }
+    }
+  }
+}
+
+system count() {
+  for e, n: mut Node where n.id >= 0 {
+    var ins = 0
+    var outs = 0
+    for (u)-[t: Tie]->(e) { ins += 1 }
+    for (e)-[t: Tie]->(v) { outs += 1 }
+    n.ins = ins
+    n.outs = outs
+  }
+}
+
+system expect() {
+  Want = []
+  for i in 0..S.nodes { Want += { ins: 0, outs: 0 } }
+  for i in 0..len(Made) {
+    Want[Made[i].from].outs = Want[Made[i].from].outs + 1
+    Want[Made[i].to].ins = Want[Made[i].to].ins + 1
+  }
+  for n: Node where n.id >= 0 {
+    if n.ins != Want[n.id].ins || n.outs != Want[n.id].outs { S.bad += 1 }
+  }
+}
+
+// Spawned once the edges are sorted, and walked with none.
+system spawn_fresh() {
+  for k in 0..25 { spawn { Node { id: -1, ins: 0, outs: 0 }, Fresh } }
+}
+system walk_fresh() {
+  for e, n: Node with Fresh {
+    var found = 0
+    for (u)-[t: Tie]->(e) { found += 1 }
+    for (e)-[t: Tie]->(v) { found += 1 }
+    if found != 0 { S.bad += 1 }
+    S.fresh += 1
+  }
+}
+system drop_fresh() {
+  for me with Fresh { me.destroy() }
+}
+
+system report() {
+  put("step {S.step}: nodes {S.nodes} edges {len(Made)} fresh {S.fresh} bad {S.bad}")
+  S.step += 1
+}
+
+schedule step() {
+  spawn_fresh()
+  grow()
+  count()
+  expect()
+  spawn_fresh()
+  walk_fresh()
+  drop_fresh()
+  report()
+}
+
+main {
+  loop { step() } until S.step == 30
+}

@@ -1,0 +1,19 @@
+// A relation's runs given only to the keys of the slots handed out so far,
+// in a world made for a million nodes and four million edges, of which
+// the program uses 600 and 3,800 (lib/Ent/Transforms/LowerToLoops.cpp,
+// sortsKeysInUse; devices/edges.c, SPEC_NEXT_SLOT): what the walks find
+// is what the list of edges says, every step, also of the nodes spawned
+// after a sort; mended in place, sorted anew every time, on all cores.
+// (Mended where it can be, a run of the keys handed out since the last
+// sort is made in devices/edges.c, at the end of the others: without it
+// no mending mends, as the offsets end at 0.)
+// RUN: %ent run %S/Inputs/relation_keys_in_use.ent 2>/dev/null > %t.mended
+// RUN: env ENT_EDGES_ANEW=1 %ent run %S/Inputs/relation_keys_in_use.ent 2>/dev/null > %t.anew
+// RUN: %ent run --parallel %S/Inputs/relation_keys_in_use.ent 2>/dev/null > %t.all
+// RUN: cmp %t.mended %t.anew
+// RUN: cmp %t.mended %t.all
+// RUN: FileCheck %s < %t.mended
+
+// CHECK: step 0: nodes 40 edges 234 fresh 50 bad 0
+// CHECK: step 1: nodes 40 edges 246 fresh 100 bad 0
+// CHECK: step 29: nodes 600 edges 3774 fresh 1500 bad 0
