@@ -16,6 +16,14 @@
 // memory runs, slowly where it goes to much of it at once. On many ranks
 // each rank's world is a file of its own.
 //
+// In a web page (Emscripten) the world is memory the WebAssembly memory
+// grows by (sbrk), which comes as noughts and costs the browser the pages
+// the program goes to: Emscripten's own mmap would write noughts over all
+// of it. It is never given back (the page goes, with all its memory), and
+// the whole world counts against the 4 GB WebAssembly's memory may be: a
+// world made for the machine may need smaller capacities (ent build
+// --capacity).
+//
 // On Windows the world is memory the system commits at once (VirtualAlloc):
 // committed pages count against the memory and paging file together, but
 // only those the program goes to take memory. ENT_WORLD_DIR is not read
@@ -53,12 +61,26 @@ static void ent_world_fails(const char *what) {
 
 // The memory of a world of `bytes`, aligned as the world wants it.
 void *ent_world_memory(int64_t bytes) {
+  // (A machine of 32-bit addresses, WebAssembly's, has at most 4 GB.)
+  if ((uint64_t)bytes > (uint64_t)(SIZE_MAX - ENT_WORLD_ALIGNMENT)) {
+    fprintf(stderr, "ent: no memory for the world (%lld bytes): more than "
+            "this machine's addresses reach; smaller capacities would do "
+            "(ent build --capacity)\n", (long long)bytes);
+    exit(1);
+  }
   size_t length = (size_t)bytes + ENT_WORLD_ALIGNMENT;
 #ifdef _WIN32
   void *base = VirtualAlloc(0, length, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
   if (!base) {
     fprintf(stderr, "ent: no memory for the world (%lld bytes): error %lu\n",
             (long long)length, (unsigned long)GetLastError());
+    exit(1);
+  }
+#elif defined(__EMSCRIPTEN__)
+  void *base = sbrk((intptr_t)length);
+  if (base == (void *)-1) {
+    fprintf(stderr, "ent: no memory for the world (%lld bytes; a web page's "
+            "is at most 4 GB)\n", (long long)length);
     exit(1);
   }
 #else
@@ -107,7 +129,7 @@ void *ent_world_memory(int64_t bytes) {
 #define ENT_SMALL_PAGES (4 << 20)
 
 void ent_world_pages(void *world, const int64_t *starts, int64_t count) {
-#if defined(_WIN32) || !defined(MADV_NOHUGEPAGE)
+#if defined(_WIN32) || defined(__EMSCRIPTEN__) || !defined(MADV_NOHUGEPAGE)
   (void)world, (void)starts, (void)count;
 #else
   const char *how = getenv("ENT_HUGE_PAGES");
@@ -189,6 +211,8 @@ void ent_world_free(void *world) {
   if (ent_world_base)
 #ifdef _WIN32
     VirtualFree(ent_world_base, 0, MEM_RELEASE);
+#elif defined(__EMSCRIPTEN__)
+    ;
 #else
     munmap(ent_world_base, ent_world_length);
 #endif

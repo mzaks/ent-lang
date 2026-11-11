@@ -1,0 +1,46 @@
+<!doctype html>
+<!-- The page of a program built with `ent build --web`: its window is the
+     canvas, and what it writes out is shown under it. Emscripten puts the
+     program's script where SCRIPT is. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ent</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #16181d; color: #c9ced6;
+         font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  main { display: flex; flex-direction: column; align-items: center;
+         gap: 8px; padding: 12px 16px; }
+  canvas { display: block; max-width: 100%; outline: none; background: #000; }
+  #status { min-height: 1.4em; }
+  #output { width: min(100%, 1100px); max-height: 30vh; overflow: auto;
+            margin: 0; white-space: pre-wrap; }
+  #output:empty { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <div id="status">Loading…</div>
+  <canvas id="canvas" tabindex="0" oncontextmenu="event.preventDefault()"></canvas>
+  <pre id="output"></pre>
+</main>
+<script>
+  var statusLine = document.getElementById("status");
+  var output = document.getElementById("output");
+  var canvas = document.getElementById("canvas");
+  var Module = {
+    canvas: canvas,
+    print: function (text) { output.textContent += text + "\n"; },
+    printErr: function (text) { output.textContent += text + "\n"; },
+    setStatus: function (text) { statusLine.textContent = text; },
+    onRuntimeInitialized: function () { statusLine.textContent = ""; canvas.focus(); },
+  };
+  // (The keys go to the program wherever on the page one clicks.)
+  document.addEventListener("click", function () { canvas.focus(); });
+  window.onerror = function () { statusLine.textContent = "The program stopped: see below."; };
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

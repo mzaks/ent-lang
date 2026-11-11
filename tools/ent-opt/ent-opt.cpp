@@ -16,6 +16,8 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/InstIterator.h"
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/LLVMContext.h"
@@ -30,6 +32,95 @@ namespace {
 /// the module being written out as text and read again for it, and the
 /// LLVM IR again after that. Leaves the module empty: it has been handed
 /// on, and what is left of it is not worth printing.
+/// Every inttoptr from and ptrtoint to an integer of other than `bits`
+/// bits made through one of `bits`, and every index of a getelementptr
+/// of more bits cut to `bits` (as LLVM takes it: the same address).
+static void narrowAddressCasts(llvm::Module &module, unsigned bits) {
+  llvm::SmallVector<llvm::Instruction *> casts;
+  for (llvm::Function &function : module)
+    for (llvm::Instruction &instruction : llvm::instructions(function))
+      if (llvm::isa<llvm::IntToPtrInst, llvm::PtrToIntInst,
+                    llvm::GetElementPtrInst>(instruction))
+        casts.push_back(&instruction);
+  for (llvm::Instruction *cast : casts) {
+    llvm::IRBuilder<> builder(cast);
+    llvm::Type *word = builder.getIntNTy(bits);
+    if (auto *at = llvm::dyn_cast<llvm::GetElementPtrInst>(cast)) {
+      // (A struct's field is said by a constant i32: left as it is.)
+      for (llvm::Use &index : at->indices()) {
+        llvm::Type *type = index->getType();
+        if (type->isIntegerTy() && type->getIntegerBitWidth() > bits)
+          index.set(builder.CreateTrunc(index, word));
+      }
+      continue;
+    }
+    if (auto *to = llvm::dyn_cast<llvm::IntToPtrInst>(cast)) {
+      llvm::Value *whole = to->getOperand(0);
+      if (whole->getType()->getScalarSizeInBits() == bits)
+        continue;
+      llvm::Value *narrow = builder.CreateZExtOrTrunc(whole, word);
+      to->setOperand(0, narrow);
+    } else {
+      auto *from = llvm::cast<llvm::PtrToIntInst>(cast);
+      llvm::Type *wide = from->getType();
+      if (wide->getScalarSizeInBits() == bits)
+        continue;
+      llvm::Value *narrow = builder.CreatePtrToInt(from->getOperand(0), word);
+      llvm::Value *widened = builder.CreateZExtOrTrunc(narrow, wide);
+      from->replaceAllUsesWith(widened);
+      from->eraseFromParent();
+    }
+  }
+}
+
+/// The C library's functions the lowering declares with the index type
+/// (64 bits) where C has size_t, and puts with no result where C has an
+/// int: on a machine of 32-bit addresses each declared as C has it, its
+/// calls given the sizes cut to 32 bits. (WebAssembly's linker calls one
+/// declared otherwise than defined a stub that stops the program.)
+static void declareAsC(llvm::Module &module, unsigned bits) {
+  // (Which arguments are sizes.)
+  static const std::pair<llvm::StringLiteral, unsigned> sized[] = {
+      {"malloc", 0b1}, {"aligned_alloc", 0b11}, {"calloc", 0b11},
+      {"realloc", 0b10}, {"puts", 0}};
+  for (auto [name, sizes] : sized) {
+    llvm::Function *old = module.getFunction(name);
+    if (!old || !old->isDeclaration())
+      continue;
+    llvm::LLVMContext &context = module.getContext();
+    llvm::Type *word = llvm::Type::getIntNTy(context, bits);
+    llvm::SmallVector<llvm::Type *> parameters;
+    for (auto [index, type] : llvm::enumerate(old->getFunctionType()->params()))
+      parameters.push_back((sizes >> index) & 1 ? word : type);
+    llvm::Type *result = name == "puts" ? llvm::Type::getInt32Ty(context)
+                                        : old->getReturnType();
+    auto *type = llvm::FunctionType::get(result, parameters, false);
+    if (type == old->getFunctionType())
+      continue;
+    old->setName(name + ".as.lowered");
+    llvm::Function *c = llvm::Function::Create(
+        type, llvm::GlobalValue::ExternalLinkage, name, module);
+    for (llvm::User *user : llvm::make_early_inc_range(old->users())) {
+      auto *call = llvm::dyn_cast<llvm::CallInst>(user);
+      if (!call || call->getCalledFunction() != old)
+        continue;
+      llvm::IRBuilder<> builder(call);
+      llvm::SmallVector<llvm::Value *> arguments;
+      for (auto [index, argument] : llvm::enumerate(call->args()))
+        arguments.push_back((sizes >> index) & 1
+                                ? builder.CreateZExtOrTrunc(argument, word)
+                                : argument.get());
+      llvm::CallInst *made = builder.CreateCall(c, arguments);
+      made->setDebugLoc(call->getDebugLoc());
+      if (!call->getType()->isVoidTy())
+        call->replaceAllUsesWith(made);
+      call->eraseFromParent();
+    }
+    if (old->use_empty())
+      old->eraseFromParent();
+  }
+}
+
 struct EmitLLVM : mlir::PassWrapper<EmitLLVM, mlir::OperationPass<mlir::ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(EmitLLVM)
   EmitLLVM() = default;
@@ -51,6 +142,11 @@ struct EmitLLVM : mlir::PassWrapper<EmitLLVM, mlir::OperationPass<mlir::ModuleOp
                      "LLVM's target-features list: with it, the functions "
                      "marked ent.no_gather have them, and prefer no "
                      "gathers (x86 only)")};
+  Option<unsigned> pointerBits{
+      *this, "pointer-bits", llvm::cl::init(64),
+      llvm::cl::desc("How many bits the machine's addresses have: with 32 "
+                     "(WebAssembly's), the casts between addresses and "
+                     "whole numbers of 64 bits are made through 32")};
 
   void runOnOperation() final {
     mlir::ModuleOp module = getOperation();
@@ -94,6 +190,16 @@ struct EmitLLVM : mlir::PassWrapper<EmitLLVM, mlir::OperationPass<mlir::ModuleOp
           object->setComdat(nullptr);
         value.setLinkage(llvm::GlobalValue::InternalLinkage);
       }
+    }
+    // On a machine of 32-bit addresses, the program's casts between an
+    // address and a whole number of 64 bits (as the lowering makes them,
+    // the index type being 64 bits) through one of 32: what LLVM's
+    // optimisation makes of them too, but not in the functions it leaves
+    // as they are (below), whose casts WebAssembly's code generation then
+    // takes as 64-bit addresses, which no WebAssembly of 32 bits loads.
+    if (pointerBits != 64) {
+      narrowAddressCasts(*translated, pointerBits);
+      declareAsC(*translated, pointerBits);
     }
     // What makes the world runs once: it is not worth the time it takes
     // to make it fast, nor is what only it calls.

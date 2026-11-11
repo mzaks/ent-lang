@@ -27,8 +27,21 @@
 #define ENT_SEND_BLOCK 1023
 #define ENT_SEND_LISTS 65536
 
+// (A pointer the compiler reads in place takes 8 bytes, as on a machine of
+// 64-bit addresses: so too in a web page, whose are 32-bit, the rest of
+// the word nought.)
+#if UINTPTR_MAX == 0xffffffffu
+#define ENT_WORD_POINTER(type, name)                                           \
+  union {                                                                      \
+    type name;                                                                 \
+    uint64_t name##_word;                                                      \
+  }
+#else
+#define ENT_WORD_POINTER(type, name) type name
+#endif
+
 typedef struct ent_send_block {
-  struct ent_send_block *next;
+  ENT_WORD_POINTER(struct ent_send_block *, next);
   uint64_t count;
   uint64_t sent[2 * ENT_SEND_BLOCK];
 } ent_send_block;
@@ -40,8 +53,8 @@ _Static_assert(offsetof(ent_send_block, sent) == 16, "a block's values");
 // (A line of the cache each: every thread writes its own. Where a
 // reading of the slice alone is, ent_sends_slice_first.)
 typedef struct {
-  _Alignas(64) ent_send_block *first;
-  ent_send_block *last;
+  _Alignas(64) ENT_WORD_POINTER(ent_send_block *, first);
+  ENT_WORD_POINTER(ent_send_block *, last);
   ent_send_block *block;
   uint64_t at;
   int64_t before;
@@ -115,6 +128,10 @@ static void *ent_sends_take(size_t size) {
     fprintf(stderr, "ent: no memory for what a 'for' sends from a loop\n");
     abort();
   }
+#if UINTPTR_MAX == 0xffffffffu
+  // (Where a pointer has half a word: the other half nought.)
+  memset(memory, 0, size);
+#endif
   return memory;
 }
 

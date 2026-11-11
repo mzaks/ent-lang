@@ -360,7 +360,19 @@ come with the compiler, in `devices/`, and two more that need
   the program for 64-bit Windows on Linux, an `.exe`, with llvm-mingw's
   clang (`x86_64-w64-mingw32-clang` on the PATH) and raylib built for
   Windows; with `--parallel` it needs llvm-mingw's `libomp.dll` next to
-  it. `ent run --windows` starts it with Wine. A font file is checked before it is used (its
+  it. `ent run --windows` starts it with Wine. `ent build --web -o
+  name.html` makes a web page of the program: `name.html`, `.js` and
+  `.wasm`, WebAssembly on one thread, its window the page's canvas and
+  its files in the page, to open through a web server (any that serves
+  files: `python3 -m http.server`). It needs Emscripten (`emcc` on the
+  PATH, or the Emscripten SDK in `build/emsdk`) and raylib built for
+  the web (`make PLATFORM=PLATFORM_WEB` in raylib's `src`, at
+  `build/raylib/src` or `ENT_RAYLIB_WEB`); `-o name.js` gives a program
+  for Node.js. Its frames are the browser's (60 a second, or as
+  `Window.fps` says). A web page has at most 4 GB, the world in it:
+  `--capacity Name=N` gives a component or buffer another capacity
+  without changing the program (as `capacity Name N` after it would),
+  and a world over 3 GB is not built for the web. A font file is checked before it is used (its
   tables are all there and add up to their sums): a damaged one is no
   font, and said so.
 

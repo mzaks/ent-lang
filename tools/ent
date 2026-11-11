@@ -253,6 +253,31 @@ def host_compiler(variable, names, fallback):
 
 # (The machine a --windows build is for, as clang names it.)
 WINDOWS = "x86_64-w64-windows-gnu"
+# (And a --web build's: WebAssembly of 32-bit addresses, with Emscripten's
+# C library.)
+WEB = "wasm32-unknown-emscripten"
+# (The most of a web page's 4 GB its world may take: the rest is for the
+# program's stack, its texts and what its devices take.)
+WEB_WORLD_MOST = 3 << 30
+
+
+def emscripten(tool):
+    """Emscripten's emcc or em++: ENT_CC/ENT_CXX, on the PATH, or in
+    build/emsdk (the Emscripten SDK installed there)."""
+    found = shutil.which(tool) or os.path.join(
+        ROOT, "build", "emsdk", "upstream", "emscripten", tool)
+    if not os.path.isfile(found):
+        sys.exit(f"ent: --web: no {tool} on the PATH or in build/emsdk "
+                 "(the Emscripten SDK) and no ENT_CC")
+    return found
+
+
+def raylib_web():
+    """Where raylib built for the web is (its src: the headers and
+    libraylib.web.a made with PLATFORM=PLATFORM_WEB): ENT_RAYLIB_WEB, else
+    build/raylib/src."""
+    return os.environ.get("ENT_RAYLIB_WEB") or os.path.join(
+        ROOT, "build", "raylib", "src")
 
 
 def c_compilers(arguments):
@@ -260,6 +285,9 @@ def c_compilers(arguments):
     (host_compiler), or with --windows MinGW's clang (llvm-mingw's
     x86_64-w64-mingw32-clang, on the PATH), which knows Windows's headers
     and libraries."""
+    if arguments.web:
+        return (os.environ.get("ENT_CC") or emscripten("emcc"),
+                os.environ.get("ENT_CXX") or emscripten("em++"))
     if arguments.windows:
         return (os.environ.get("ENT_CC") or
                 shutil.which("x86_64-w64-mingw32-clang") or
@@ -299,6 +327,17 @@ def made_of(arguments, known={}):
                 assets[name] = where
         known[key] = (sources, assets)
     return known[key]
+
+
+def capacities(arguments):
+    """What --capacity says, as (name, rows): `Name=N` each."""
+    said = []
+    for item in arguments.capacity:
+        name, _, rows = item.partition("=")
+        if not re.fullmatch(r"[A-Za-z_]\w*", name) or not rows.isdigit():
+            sys.exit(f"ent: --capacity: '{item}' is not Name=N")
+        said.append((name, int(rows)))
+    return said
 
 
 def copy_assets(arguments, output):
@@ -356,7 +395,9 @@ def cache_key(arguments):
         note_tool(shutil.which(compiler) or compiler)
     note_tool(os.path.abspath(__file__))
     note("embed", arguments.embed)
+    note("capacity", capacities(arguments))
     note("windows", arguments.windows)
+    note("web", arguments.web)
     note("check-externs", arguments.check_externs)
     note("infer-indexes", arguments.infer_indexes)
     note("trace", arguments.trace)
@@ -1488,9 +1529,22 @@ def build(arguments, output, directory):
     clang = find_tool("clang", llvm_directories())
 
     include_directories = arguments.I + [os.path.join(ROOT, "devices")]
-    includes = [flag for path in include_directories for flag in ("-I", path)]
     program = arguments.program
     stem = os.path.splitext(os.path.basename(program))[0]
+    # With --capacity, the program as it is with `capacity Name N` after
+    # it, which holds over what it and its modules said; read from here,
+    # its modules found where it is.
+    if arguments.capacity:
+        with open(program) as source:
+            text = source.read()
+        program = os.path.join(directory, stem + ".ent")
+        with open(program, "w") as out:
+            out.write(text + "\n// (ent build --capacity)\n" + "".join(
+                f"capacity {name} {rows}\n"
+                for name, rows in capacities(arguments)))
+        include_directories = ([os.path.dirname(os.path.abspath(
+            arguments.program))] + include_directories)
+    includes = [flag for path in include_directories for flag in ("-I", path)]
 
     module = os.path.join(directory, stem + ".mlir")
     # (With where each op comes from in the .ent, which the lines of the
@@ -1535,6 +1589,16 @@ def build(arguments, output, directory):
          "--mlir-print-op-on-diagnostic=false", "-o", module])
     header = os.path.join(directory, "ent_world.h")
     run([translate, "--ent-to-c-header", module, "-o", header])
+    # (A web page's memory is at most 4 GB, the world and all else: one
+    # made for a machine may be larger, of capacities it never uses.)
+    if arguments.web:
+        with open(header) as source:
+            size = re.search(r"#define ENT_WORLD_BYTES (\d+)ull", source.read())
+        if size and int(size.group(1)) > WEB_WORLD_MOST:
+            sys.exit(f"ent: --web: the world is {int(size.group(1)) / 2**30:.1f}"
+                     f" GB, and a web page's memory at most 4 GB: give its "
+                     "largest components or buffers smaller capacities "
+                     "(--capacity Name=N)")
     # What the C of extern fns and procs gets: their declarations, without
     # the world.
     run([translate, "--ent-to-c-extern-header", module, "-o",
@@ -1643,11 +1707,19 @@ def build(arguments, output, directory):
                      ".c, .cpp, .o or .a)")
     given += arguments.sources
     # The libraries the modules ask for, after everything that uses them.
+    # (For a web page a module's .web.link where it has one; $NAMES in it
+    # are the environment's, and ENT_RAYLIB_WEB is raylib_web().)
     for path in files:
         flags = os.path.splitext(path)[0] + ".link"
+        if arguments.web:
+            flags = os.path.splitext(path)[0] + ".web.link"
         if os.path.isfile(flags):
             with open(flags) as source:
-                link = shlex.split(source.read(), comments=True) + link
+                said = source.read()
+            if arguments.web:
+                said = os.path.expandvars(said.replace(
+                    "$ENT_RAYLIB_WEB", raylib_web()))
+            link = shlex.split(said, comments=True) + link
     # (And what writes the IR of a module in another language, Mojo's.)
     emits = [os.path.splitext(path)[0] + ".emit" for path in given
              if path.endswith(".build") and os.path.isfile(
@@ -1691,8 +1763,9 @@ def build(arguments, output, directory):
             # (Never a multiply and an add made one FMA, as in ent's own
             # code: a device's results are then the same on a processor
             # that has FMA and one that has not.)
+            web = ["-I", raylib_web()] if arguments.web else []
             run([cc, "-O2", "-ffp-contract=off", *cpu_flags(), "-I", directory,
-                 *VENDORED, *cuda,
+                 *VENDORED, *cuda, *web,
                  *mpi, "-c", path, "-o", built], env=host)
         elif extension == ".cpp":
             run([cxx, "-O2", "-ffp-contract=off", *cpu_flags(), "-I", directory,
@@ -1734,7 +1807,7 @@ def build(arguments, output, directory):
                     found.groups()[1:])
             elif not line.startswith("//"):
                 break
-    if not arguments.windows:
+    if not arguments.windows and not arguments.web:
         extra = []
         if gpu:
             extra = ["-DENT_GPU", "-I", os.path.join(
@@ -1769,6 +1842,8 @@ def build(arguments, output, directory):
     cflags = shlex.split(os.environ.get("ENT_CFLAGS", ""))
     if arguments.windows:
         cflags.append("--target=" + WINDOWS)
+    if arguments.web:
+        cflags.append("--target=" + WEB)
     features = machine_features(clang, cflags)
     run([optimise, module] + passes +
         # (What the lowering wrote more than once, once, and the columns
@@ -1783,7 +1858,8 @@ def build(arguments, output, directory):
          # for a profiler or a debugger to say: line tables only.)
          "--ensure-debug-info-scope-on-llvm-func",
          "--ent-emit-llvm=output=" + llvm + " keep=" + keep +
-         (" features=" + features if features else ""),
+         (" features=" + features if features else "") +
+         (" pointer-bits=32" if arguments.web else ""),
          "-o", os.devnull])
 
     flags = ["-O2", "-ffp-contract=off", *cflags, "-Wno-override-module", "-c"]
@@ -1846,7 +1922,7 @@ def build(arguments, output, directory):
     # the files they name are looked for there last (devices/ent_files.h).
     # (Not into one for Windows: they are this machine's.)
     folders = []
-    for path in [] if arguments.windows else files:
+    for path in [] if arguments.windows or arguments.web else files:
         if os.path.dirname(path) not in folders:
             folders.append(os.path.dirname(path))
     written = os.path.join(directory, "ent_folders.c")
@@ -1856,7 +1932,8 @@ def build(arguments, output, directory):
         # With --embed, also the files it declares, by the names it
         # knows them by. Their bytes the assembler takes from the files
         # as they are, however many they are.
-        held = list(assets.items()) if arguments.embed else []
+        held = (list(assets.items()) if arguments.embed and not arguments.web
+                else [])
         if held:
             for index in range(len(held)):
                 source.write("extern const unsigned char "
@@ -2044,6 +2121,26 @@ def build(arguments, output, directory):
     # may be missing.)
     if sys.platform == "darwin" and not arguments.windows:
         maths += ["-Wl,-U,_omp_in_parallel"]
+    if arguments.web:
+        # A page: the program (output.wasm), what starts it (output.js)
+        # and the page (output.html) with a canvas, which the window
+        # draws on. The program's `main` never gives the browser its turn
+        # back (`loop { .. }`): Asyncify lets it wait for the next frame
+        # where the window waits for one (raylib's WindowShouldClose).
+        # Its files are in the page's own (by their names, as --embed),
+        # its world as its capacities say, up to WebAssembly's 4 GB.
+        # (-O2: the WebAssembly made smaller and faster as a whole, by
+        # Binaryen, and the locals of a function the program's code
+        # left unoptimised (what makes the world) shared out: browsers
+        # take no function of more than 50,000.)
+        maths += ["-O2", "-sASYNCIFY", "-sALLOW_MEMORY_GROWTH=1",
+                  "-sMAXIMUM_MEMORY=4GB", "-sSTACK_SIZE=8MB",
+                  "-sEXIT_RUNTIME=1"]
+        for name, where in assets.items():
+            maths += ["--preload-file", f"{os.path.abspath(where)}@/{name}"]
+        shell = os.path.join(ROOT, "devices", "web.html")
+        if output.endswith(".html"):
+            maths += ["--shell-file", shell]
     run([cxx if uses_cxx else cc] + objects + link + maths + ["-o", output],
         env=host)
 
@@ -2116,6 +2213,15 @@ def main():
                         help="build a program for 64-bit Windows (an .exe), "
                         "with llvm-mingw's x86_64-w64-mingw32-clang; `run` "
                         "starts it with Wine")
+    parser.add_argument("--web", action="store_true",
+                        help="build a program for a web page (name.html, "
+                        ".js and .wasm), on one thread, with Emscripten's "
+                        "emcc; open the page through a web server")
+    parser.add_argument("--capacity", action="append", default=[],
+                        metavar="Name=N",
+                        help="give a component, buffer, relation or "
+                        "archetype another capacity, as `capacity Name N` "
+                        "after the program would (again for each)")
     parser.add_argument("--check-externs", action="store_true",
                         help="check as the program runs that each extern fn "
                         "gives the same result for the same arguments, and "
@@ -2134,6 +2240,20 @@ def main():
         parser.error("--instrument and --profile are for two builds")
 
     stem = os.path.splitext(os.path.basename(arguments.program))[0]
+    if arguments.web:
+        if (arguments.gpu or arguments.ranks or arguments.windows
+                or arguments.parallel or arguments.instrument
+                or arguments.check_externs):
+            sys.exit("ent: --web: on one thread, not with --parallel, --gpu, "
+                     "--ranks, --windows, --instrument or --check-externs")
+        if arguments.command == "run":
+            sys.exit("ent run --web: build it (ent build --web) and open "
+                     "the .html through a web server")
+        # (A page is three files: not kept as one in the cache.)
+        arguments.no_cache = True
+        # (A name.js alone, without the page, runs under Node.js too.)
+        if not (arguments.output or "").endswith((".html", ".js")):
+            arguments.output = (arguments.output or stem) + ".html"
     # A program that is run from here is told where its source is, and
     # that of the modules it imports: the files they name are looked for
     # there too (devices/ent_files.h).

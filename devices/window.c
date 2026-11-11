@@ -144,19 +144,54 @@ void ent_window_fill_screen(bool on) {
 // wants that key for itself.
 void ent_window_own_escape(bool own) { SetExitKey(own ? KEY_NULL : KEY_ESCAPE); }
 
+#ifdef __EMSCRIPTEN__
+// In a web page the browser shows the frames: the program waits for the
+// browser's next one (requestAnimationFrame), and for more of them where
+// it asks for fewer frames a second than the screen shows, so that a
+// frame is as long as `Window.fps` says on a screen of 60 Hz or of 144.
+// It gives the browser its turn so (Asyncify), where raylib would wait
+// in EndDrawing without (busy) and then 12 ms more in WindowShouldClose.
+// The page is never closed by the program's window.
+#include <emscripten.h>
+
+EM_ASYNC_JS(void, ent_window_next_frame, (double seconds), {
+  if (!Module.entFrameAt)
+    Module.entFrameAt = performance.now();
+  Module.entFrameAt += seconds * 1000;
+  const now = performance.now();
+  // (Late by more than a frame: from now on.)
+  if (Module.entFrameAt < now - seconds * 1000)
+    Module.entFrameAt = now;
+  do {
+    await new Promise(requestAnimationFrame);
+  } while (performance.now() < Module.entFrameAt - 2);
+});
+
+static int32_t ent_window_fps = 60;
+// (How long the last frame was, waiting for the browser too: raylib's
+// GetFrameTime counts from BeginDrawing to EndDrawing only.)
+static double ent_window_frame_was = 1.0 / 60, ent_window_frame_end = 0;
+bool ent_window_should_close(void) { return false; }
+float ent_window_frame_seconds(void) { return (float)ent_window_frame_was; }
+#else
 bool ent_window_should_close(void) { return WindowShouldClose(); }
 float ent_window_frame_seconds(void) { return GetFrameTime(); }
+#endif
 
 // Everything is drawn so many times as big as it says (`Window.zoom`).
 static float ent_window_zoom = 1;
 static float ent_window_zoom_now(void) { return ent_window_zoom; }
 
 void ent_window_begin_frame(int32_t background, int32_t fps, float zoom) {
+#ifdef __EMSCRIPTEN__
+  ent_window_fps = fps;
+#else
   static int32_t held = -1;
   if (fps != held) {
     SetTargetFPS(fps);
     held = fps;
   }
+#endif
   BeginDrawing();
   ent_window_shading_part = 0;
   ClearBackground(ent_window_color(background));
@@ -171,6 +206,13 @@ void ent_window_end_frame(void) {
   ent_window_unclip();
   rlPopMatrix();
   EndDrawing();
+#ifdef __EMSCRIPTEN__
+  ent_window_next_frame(ent_window_fps > 0 ? 1.0 / ent_window_fps : 0);
+  double now = GetTime();
+  if (ent_window_frame_end > 0)
+    ent_window_frame_was = now - ent_window_frame_end;
+  ent_window_frame_end = now;
+#endif
 }
 
 // For a device that draws in three dimensions within the frame (the

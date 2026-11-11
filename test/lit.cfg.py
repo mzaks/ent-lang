@@ -1,3 +1,4 @@
+import glob
 import os
 
 import lit.formats
@@ -97,6 +98,23 @@ if not os.path.exists(goose):
 if goose:
     config.available_features.add("goose")
     config.substitutions.append(("%goose", goose))
+# Emscripten (emcc on the PATH, or the SDK in build/emsdk) and Node.js:
+# the tests of programs built for a web page (ent build --web) run only
+# then, under %node; with raylib built for the web (build/raylib/src or
+# ENT_RAYLIB_WEB) a window's too ("web-window").
+root = os.path.dirname(config.test_source_root)
+emsdk = os.path.join(root, "build", "emsdk")
+emcc = shutil.which("emcc") or os.path.join(emsdk, "upstream", "emscripten",
+                                            "emcc")
+nodes = sorted(glob.glob(os.path.join(emsdk, "node", "*", "bin", "node")))
+node = nodes[-1] if nodes else shutil.which("node")
+if os.path.exists(emcc) and node:
+    config.available_features.add("web")
+    config.substitutions.append(("%node", node))
+    raylib = os.environ.get("ENT_RAYLIB_WEB") or os.path.join(
+        root, "build", "raylib", "src")
+    if os.path.exists(os.path.join(raylib, "libraylib.web.a")):
+        config.available_features.add("web-window")
 # MPI (mpicc, mpirun): the tests of programs on many ranks (docs/ranks.md)
 # run only then.
 if shutil.which("mpicc") and shutil.which("mpirun"):

@@ -1,0 +1,48 @@
+// Programs built for a web page (ent build --web): WebAssembly of 32-bit
+// addresses, run under Node.js, write what they write natively, byte for
+// byte. What a `for` sends from a loop (devices/sends.c, whose blocks the
+// compiler reads in place), hash indexes, a world made by a large
+// unoptimised setup (prefabs: more locals than a browser takes, but for
+// the optimised link), casts that saturate and division by nought.
+// REQUIRES: web
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: %ent build --web %S/Inputs/for_in_for_sends.ent -o %t/sends.js
+// RUN: %ent run %S/Inputs/for_in_for_sends.ent > %t/sends.native
+// RUN: %node %t/sends.js > %t/sends.web
+// RUN: diff %t/sends.native %t/sends.web
+// RUN: %ent build --web %S/Inputs/hash_index.ent -o %t/hash.js
+// RUN: %ent run %S/Inputs/hash_index.ent > %t/hash.native
+// RUN: %node %t/hash.js > %t/hash.web
+// RUN: diff %t/hash.native %t/hash.web
+// RUN: %ent build --web %S/Inputs/prefabs.ent -o %t/prefabs.js
+// RUN: %ent run %S/Inputs/prefabs.ent > %t/prefabs.native
+// RUN: %node %t/prefabs.js > %t/prefabs.web
+// RUN: diff %t/prefabs.native %t/prefabs.web
+// RUN: %ent build --web %S/Inputs/cast_saturates.ent -o %t/casts.js
+// RUN: %ent run %S/Inputs/cast_saturates.ent > %t/casts.native
+// RUN: %node %t/casts.js > %t/casts.web
+// RUN: diff %t/casts.native %t/casts.web
+// RUN: %ent build --web %S/Inputs/divide_nought.ent -o %t/divide.js
+// RUN: %ent run %S/Inputs/divide_nought.ent > %t/divide.native
+// RUN: %node %t/divide.js > %t/divide.web
+// RUN: diff %t/divide.native %t/divide.web
+//
+// A world larger than a web page may hold is not built for one; another
+// capacity, given at the build, makes it fit, and the program writes
+// what it writes with the capacity it had.
+// RUN: not %ent build --web %S/Inputs/web_large.ent -o %t/large.js 2>&1 | FileCheck %s --check-prefix=LARGE
+// LARGE: ent: --web: the world is 7.5 GB, and a web page's memory at most 4 GB
+// RUN: %ent build --web --capacity Grid=1000 %S/Inputs/web_large.ent -o %t/large.js
+// RUN: %node %t/large.js | FileCheck %s --check-prefix=FITS
+// RUN: %ent run %S/Inputs/web_large.ent | FileCheck %s --check-prefix=FITS
+// FITS: 3 rows, sum 6
+// RUN: not %ent build --capacity Nothing=4 %S/Inputs/web_large.ent -o %t/x 2>&1 | FileCheck %s --check-prefix=NAME
+// NAME: error: 'Nothing' is no component, relation, archetype or buffer declared before this
+// RUN: not %ent build --capacity Grid=many %S/Inputs/web_large.ent -o %t/x 2>&1 | FileCheck %s --check-prefix=FORM
+// FORM: ent: --capacity: 'Grid=many' is not Name=N
+//
+// Not on many threads, nor run here.
+// RUN: not %ent build --web --parallel %S/Inputs/web_large.ent -o %t/x.js 2>&1 | FileCheck %s --check-prefix=ONE
+// ONE: ent: --web: on one thread
+// RUN: not %ent run --web %S/Inputs/web_large.ent 2>&1 | FileCheck %s --check-prefix=HERE
+// HERE: ent run --web: build it (ent build --web)

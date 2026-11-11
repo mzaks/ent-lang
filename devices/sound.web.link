@@ -1,0 +1,3 @@
+# For a web page (ent build --web): raylib built for the web, and GLFW as
+# Emscripten has it.
+$ENT_RAYLIB_WEB/libraylib.web.a -sUSE_GLFW=3

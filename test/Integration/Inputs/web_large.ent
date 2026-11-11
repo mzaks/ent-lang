@@ -1,0 +1,17 @@
+// A world of 7.5 GB, nearly all of it a buffer the program fills three
+// rows of: too large for a web page as it is (web.test).
+import console
+
+buffer Grid { v: i64 } capacity 1000000000
+
+system fill() {
+  Grid = []
+  for i in 1..4 { Grid += { v: i as i64 } }
+  var sum: i64 = 0
+  for i in 0..len(Grid) { sum += Grid[i].v }
+  put("{len(Grid)} rows, sum {sum}")
+}
+
+schedule once() { fill() }
+
+main { once() }
