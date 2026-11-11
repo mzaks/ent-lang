@@ -1,0 +1,35 @@
+import console
+buffer Field { v: f32 } capacity 1000
+component Car { number: i32 } capacity 16
+component Sum { n: f32, m: f32 } capacity 16
+unique Sim { step: i64 }
+fn at(field: Field[], i: i32) -> f32 { field[i].v }
+system make() {
+  for i in 0..4 { spawn { Car { number: i }, Sum { n: 0.0, m: 0.0 } } }
+  Field = [{ v: 1.0 }; 4 * 8]
+}
+system fill() {
+  for c: Car, f: mut Field[c.number * 8, 8] { f[1].v = f[1].v + c.number as f32 }
+}
+// Two systems one after another over the same entities, each of which
+// only hands its window on.
+system first() {
+  for c: Car, s: mut Sum, f: Field[c.number * 8, 8] { s.n += at(f, 1) }
+  Sim.step += 1
+}
+system second() {
+  for c: Car, s: mut Sum, f: Field[c.number * 8, 8] { s.m += at(f, 1) + s.n }
+}
+system say() { for c: Car, s: Sum { put("car {c.number}: {s.n} {s.m}") } }
+schedule a() { make() }
+schedule b() {
+  fill()
+  first()
+  second()
+}
+schedule c() { say() }
+main {
+  a()
+  loop { b() } until Sim.step == 3
+  c()
+}

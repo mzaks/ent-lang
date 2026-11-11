@@ -1,0 +1,32 @@
+import console
+buffer Big { g: f32 } capacity 1000000
+component Car { number: i32, sum: f32 } capacity 128
+const ROWS: i32 = 10000
+unique T { runs: i32, total: f32 }
+proc bump(big: mut Big[], i: i32) { big[i].g = big[i].g + 1.0 }
+system make() {
+  for i in 0..64 { spawn { Car { number: i, sum: 0.0 } } }
+  Big = [{ g: 0.0 }; 64 * ROWS]
+}
+system work() {
+  for c: mut Car, w: mut Big[c.number * ROWS, ROWS] {
+    for i in 0..ROWS { bump(w, i) }
+    c.sum = w[7].g + c.number as f32
+  }
+  T.runs += 1
+}
+system say() {
+  for c: Car { T.total += c.sum }
+}
+system tell() { put("total {T.total}") }
+schedule a() { make() }
+schedule b() { work() }
+schedule c() {
+  say()
+  tell()
+}
+main {
+  a()
+  loop { b() } until T.runs == 20
+  c()
+}

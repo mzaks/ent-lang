@@ -1259,6 +1259,13 @@ static bool changesOnlyRows(Operation *from, FlatSymbolRefAttr callee,
   return only;
 }
 
+/// The fns and procs of which that holds, by their names: asked while
+/// they have their bodies, before the lowering takes those out of them
+/// (see runOnOperation), and read where a query that calls one is
+/// lowered, which is after. (What asks before, a `gpu` system's check,
+/// finds the bodies still.)
+static llvm::StringMap<bool> onlyRowsChanged;
+
 static bool isEntityLocal(QueryOp query) {
   // (A walk of the logs in the order of the rows: one thread.)
   if (query->hasAttr("ent.row_ordered"))
@@ -1333,7 +1340,8 @@ static bool isEntityLocal(QueryOp query) {
     // A proc of the program that changes only rows it is given (the
     // entity's window) and calls only such ones and fns.
     if (auto invoke = dyn_cast<InvokeOp>(op);
-        invoke && changesOnlyRows(invoke, invoke.getCalleeAttr()))
+        invoke && (onlyRowsChanged.lookup(invoke.getCallee()) ||
+                   changesOnlyRows(invoke, invoke.getCalleeAttr())))
       return WalkResult::advance();
     return WalkResult::interrupt();
   });
@@ -23961,12 +23969,15 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
       bool writesResource =
           system
               .walk([](Operation *op) {
-                // (A running sum has passes of its own.)
+                // (A running sum has passes of its own. Rows handed to
+                // a fn or proc are a buffer read or written, as by its
+                // name: a window only read and only handed on is no
+                // other op of these.)
                 return isa<SpawnOp, DespawnOp, EachOp, EdgesOp, ConnectOp,
                            AppendOp, ClearOp, BufferLenOp, BufferAtOp,
                            IndexGetOp, BufferOfOp, BufferSetOp, BufferFillOp,
                            BufferKeepOp, RunningOp, BufferClaimOp, BufferCopyOp,
-                           SetAddOp, SetHasOp, SetCountOp>(op)
+                           BufferRowsOp, SetAddOp, SetHasOp, SetCountOp>(op)
                            ? WalkResult::interrupt()
                            : WalkResult::advance();
               })
@@ -28634,6 +28645,12 @@ struct EntLowerToLoops
     // those of them that are given a buffer, with the world's memory.
     SmallPtrSet<Operation *, 8> defined;
     SmallVector<std::pair<func::FuncOp, Value>> givenBuffers;
+    // (Which of them change only rows they are given, while they have
+    // their bodies: a query that calls such a proc is the entity's own.)
+    onlyRowsChanged.clear();
+    for (FunctionOp function : module.getOps<FunctionOp>())
+      onlyRowsChanged[function.getSymName()] = changesOnlyRows(
+          function, FlatSymbolRefAttr::get(function.getSymNameAttr()));
     for (FunctionOp function : module.getOps<FunctionOp>()) {
       if (function.isDefined())
         defined.insert(function);

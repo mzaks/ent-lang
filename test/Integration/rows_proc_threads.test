@@ -1,0 +1,13 @@
+// A `for` whose entities hand their windows to a proc that changes only
+// the rows it is given runs on many threads, as docs/syntax.md says: the
+// lowering asked whether the proc is such a one after it had taken the
+// procs' bodies out of them, was told no, and ran every such loop on one
+// thread. The trace says "(one thread)" of a loop that ran so.
+// RUN: env ENT_PARALLEL_MIN=1 %ent run %S/Inputs/rows_proc_threads.ent > %t.one
+// RUN: env ENT_TRACE=%t.json ENT_PARALLEL_MIN=1 %ent run %S/Inputs/rows_proc_threads.ent --parallel --trace > %t.all 2> %t.said
+// RUN: diff %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+// RUN: FileCheck %s --check-prefix=SAID --input-file=%t.said
+// CHECK: total 3296.0
+// SAID-NOT: in work (one thread)
+// SAID: in work

@@ -1,0 +1,15 @@
+// Systems that read a window of a buffer only by handing it to a fn, one
+// after another in a schedule over the same entities: the schedule ran
+// them as one loop (they touch no buffer by an op of their own), and the
+// rows handed on were left as they were when the buffers became memory
+// ("'ent.buffer.rows' op refers to unknown buffer"). A system that hands
+// rows on is one that reads a buffer, and is run by itself. For one core
+// and for all of them, the same.
+// RUN: %ent run %S/Inputs/window_handed_on.ent > %t.one
+// RUN: %ent run %S/Inputs/window_handed_on.ent --parallel > %t.all
+// RUN: diff %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+// CHECK: car 0: 3.0 9.0
+// CHECK: car 1: 9.0 25.0
+// CHECK: car 2: 15.0 41.0
+// CHECK: car 3: 21.0 57.0
