@@ -1,0 +1,25 @@
+// REQUIRES: mpi
+// A `for` over a distributed component that two archetypes hold: on many
+// ranks, as partitions and as partitions one at a time in one process, it
+// says what one process says, the lines it writes and the bits of the
+// fractions it adds into a unique (Inputs/ranks_two_archetypes.ent). The
+// ranks wrote each rank's lines of both archetypes before the next rank's,
+// and added each rank's rows of both before the next rank's; one
+// partition at a time stopped where one gave the next a second fraction
+// before it had taken the first.
+// RUN: %ent run %S/Inputs/ranks_two_archetypes.ent > %t.one
+// RUN: %ent run %S/Inputs/ranks_two_archetypes.ent --ranks 2 > %t.two
+// RUN: %ent run %S/Inputs/ranks_two_archetypes.ent --ranks 3 > %t.three
+// RUN: %ent run %S/Inputs/ranks_two_archetypes.ent --ranks 4 > %t.four
+// RUN: diff %t.one %t.two
+// RUN: diff %t.one %t.three
+// RUN: diff %t.one %t.four
+// RUN: %ent build %S/Inputs/ranks_two_archetypes.ent --ranks 4 --partitions -o %t.parts
+// RUN: mpirun -n 1 -x ENT_RUNNING=1 %t.parts > %t.in1
+// RUN: diff %t.one %t.in1
+// RUN: mpirun -n 2 --oversubscribe %t.parts > %t.in2
+// RUN: diff %t.one %t.in2
+// RUN: FileCheck %s --input-file=%t.four
+// CHECK: 0 0.529048
+// CHECK: day 1: all 4796885293629908789 marked 4609149457883412100
+// CHECK: day 3: all 4806778231544703413 marked 4618003855687246251

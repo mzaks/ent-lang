@@ -528,8 +528,19 @@ static void ent_send(const void *data, int64_t bytes, int to) {
   }
   ent_mailbox *box = &ent_mailboxes[to % ent_locals];
   pthread_mutex_lock(&box->lock);
-  while (box->full)
-    pthread_cond_wait(&box->ready, &box->lock);
+  if (box->full) {
+    // (Waiting for the next to take what was given before, it lets
+    // another partition of the process run: with one at a time
+    // (ENT_RUNNING=1), the next could not run to take it.)
+    pthread_mutex_unlock(&box->lock);
+    ent_slot_give();
+    pthread_mutex_lock(&box->lock);
+    while (box->full)
+      pthread_cond_wait(&box->ready, &box->lock);
+    pthread_mutex_unlock(&box->lock);
+    ent_slot_take();
+    pthread_mutex_lock(&box->lock);
+  }
   box->bytes = malloc(bytes ? bytes : 1);
   memcpy(box->bytes, data, bytes);
   box->size = bytes;

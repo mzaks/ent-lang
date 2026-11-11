@@ -3524,7 +3524,8 @@ using SpreadCell = std::tuple<Value, Value, StringRef, Type>;
 /// at the insertion point; each field once.
 static void noteSpreadCells(IRRewriter &rewriter, Location loc,
                             WorldAccess &world, ArrayRef<QueryOp> queries,
-                            SmallVectorImpl<SpreadCell> &cells) {
+                            SmallVectorImpl<SpreadCell> &cells,
+                            bool byArchetype = false) {
   llvm::DenseSet<std::pair<Attribute, Attribute>> seen;
   for (QueryOp query : queries)
     query.getBody().walk([&](AccumulateOp accumulate) {
@@ -3538,12 +3539,15 @@ static void noteSpreadCells(IRRewriter &rewriter, Location loc,
       // (A fraction: what the rank before this one ended with, first: the
       // ranks take turns, see devices/ranks.c.)
       if (isa<FloatType>(type)) {
-        callGpu(rewriter, loc, query->getParentOfType<ModuleOp>(),
-                "ent_ranks_chain_get",
-                ValueRange{worldPointer(rewriter, loc, field),
-                           arith::ConstantIntOp::create(
-                               rewriter, loc, type.getIntOrFloatBitWidth() / 8,
-                               64)});
+        // (byArchetype: around each archetype's rows instead, see
+        // chainOverRanks.)
+        if (!byArchetype)
+          callGpu(rewriter, loc, query->getParentOfType<ModuleOp>(),
+                  "ent_ranks_chain_get",
+                  ValueRange{worldPointer(rewriter, loc, field),
+                             arith::ConstantIntOp::create(
+                                 rewriter, loc,
+                                 type.getIntOrFloatBitWidth() / 8, 64)});
         cells.push_back({field, Value(), accumulate.getRule(), type});
         return;
       }
@@ -3578,17 +3582,42 @@ static void combineSetsOverRanks(IRRewriter &rewriter, Location loc,
   }
 }
 
+/// The fractions of `cells` taken from the rank before (`put` false:
+/// ent_ranks_chain_get) or given on to the next, and then the last rank's
+/// to every rank (`put`), at the insertion point: around what each
+/// archetype of a `for` over distributed entities adds to them, so that
+/// the ranks add one archetype's rows in turn before the next's, as one
+/// process goes through one archetype's rows and then the next's.
+static void chainOverRanks(IRRewriter &rewriter, Location loc, ModuleOp module,
+                           ArrayRef<SpreadCell> cells, bool put) {
+  SmallVector<StringRef, 2> steps;
+  if (put)
+    steps = {"ent_ranks_chain_put", "ent_ranks_chain_last"};
+  else
+    steps = {"ent_ranks_chain_get"};
+  for (StringRef step : steps)
+    for (auto [field, before, rule, type] : cells)
+      if (isa<FloatType>(type))
+        callGpu(rewriter, loc, module, step,
+                ValueRange{worldPointer(rewriter, loc, field),
+                           arith::ConstantIntOp::create(
+                               rewriter, loc, type.getIntOrFloatBitWidth() / 8,
+                               64)});
+}
+
 /// What each rank's rows accumulated into `cells`, combined over the ranks
 /// (devices/ranks.c): added (each rank's part, from where the field was),
 /// or the least or the most.
 static void reduceOverRanks(IRRewriter &rewriter, Location loc,
-                            ModuleOp module, ArrayRef<SpreadCell> cells) {
+                            ModuleOp module, ArrayRef<SpreadCell> cells,
+                            bool byArchetype = false) {
   Type i64 = rewriter.getI64Type();
   Value zero = arith::ConstantIndexOp::create(rewriter, loc, 0);
-  // (Fractions: given on to the next rank, the last one's to every rank.)
+  // (Fractions: given on to the next rank, the last one's to every rank;
+  // byArchetype: so already, see chainOverRanks.)
   for (StringRef step : {"ent_ranks_chain_put", "ent_ranks_chain_last"})
     for (auto [field, before, rule, type] : cells)
-      if (isa<FloatType>(type))
+      if (isa<FloatType>(type) && !byArchetype)
         callGpu(rewriter, loc, module, step,
                 ValueRange{worldPointer(rewriter, loc, field),
                            arith::ConstantIntOp::create(
@@ -22873,6 +22902,10 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   bool asked = false;
   // (Each unique field accumulated into: what it held before.)
   SmallVector<SpreadCell> spreadCells;
+  // (Fractions accumulated in turn over the ranks archetype by archetype,
+  // see chainOverRanks: not in a reactive query, which may go through its
+  // logs on some ranks and scan on others.)
+  bool byArchetype = !query->hasAttr(QueryOp::kTriggersAttr);
   // (And the buffers whose rows it writes.)
   SmallVector<const WorldBuffer *> sharedBuffers;
   if (spread) {
@@ -22886,7 +22919,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     });
     if (captured)
       callGpu(rewriter, loc, module, "ent_ranks_capture", ValueRange{});
-    noteSpreadCells(rewriter, loc, world, {query}, spreadCells);
+    noteSpreadCells(rewriter, loc, world, {query}, spreadCells, byArchetype);
     noteSharedBuffers(rewriter, loc, layout, world, {query}, sharedBuffers);
     // (Built for partitions: what it looks up of other ranks' entities
     // asked for first; else the fields gathered whole.)
@@ -23111,6 +23144,12 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     llvm::SaveAndRestore<const ScanParts *> scanningParts(
         scanParts,
         query.getInSet() && query.getViaPartition() ? &asked : nullptr);
+    // (On many ranks: fractions accumulated in the loop taken from the
+    // rank before first, before anything reads them for these rows.)
+    if (spread && byArchetype && !spreadCells.empty()) {
+      rewriter.setInsertionPoint(anchor);
+      chainOverRanks(rewriter, loc, module, spreadCells, /*put=*/false);
+    }
     Operation *loops = emitEntityLoops(
         rewriter, loc, archetype, world, here, entityLocal,
         [&](Value entity, Value rows, bool parallel) {
@@ -23129,8 +23168,22 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
     loops = keepCells(rewriter, loops, accumulates, archetype, world,
                       sequentialOnly);
     hoistResourceReads(rewriter, loops, world);
+    // (On many ranks: fractions accumulated in the loop given on after
+    // this archetype's rows, see the taking before them.)
+    if (spread && byArchetype && !spreadCells.empty()) {
+      rewriter.setInsertionPoint(anchor);
+      chainOverRanks(rewriter, loc, module, spreadCells, /*put=*/true);
+    }
     if (archetype.hasPending() && isStructuralFor(query, archetype.op))
       changed.push_back(&archetype);
+    // (On many ranks, what this archetype's rows wrote goes out before the
+    // next archetype's, rank after rank: on one process a `for` writes all
+    // of one archetype's rows before the next's.)
+    if (captured && anchor == query.getOperation()) {
+      rewriter.setInsertionPoint(anchor);
+      callGpu(rewriter, loc, module, "ent_ranks_release", ValueRange{});
+      callGpu(rewriter, loc, module, "ent_ranks_capture", ValueRange{});
+    }
   }
 
   if (useLogs) {
@@ -23181,9 +23234,22 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
           accumulate, direct.contains(archetype),
           /*sliced=*/threaded.contains(archetype) &&
               archetype->capacity != 1));
-      if (staged == "list" || staged == "rows")
+      if (staged == "list" || staged == "rows") {
+        // (On many ranks, a fraction's folds in turn too, archetype by
+        // archetype.)
+        SmallVector<SpreadCell, 1> own;
+        if (spread && byArchetype &&
+            isa<FloatType>(accumulate.getValue().getType()))
+          own.push_back({world.resourceField(
+                             accumulate.getResourceAttr().getAttr(),
+                             accumulate.getFieldAttr()),
+                         Value(), accumulate.getRule(),
+                         accumulate.getValue().getType()});
+        chainOverRanks(rewriter, loc, module, own, /*put=*/false);
         foldAccumulated(rewriter, accumulate, staged, layout, *archetype,
                         world, count);
+        chainOverRanks(rewriter, loc, module, own, /*put=*/true);
+      }
     }
   // Connected edges are appended while the buffers' rows still are the
   // rows that filled them, before despawns and moves.
@@ -23208,7 +23274,7 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // ranks, and what they wrote out written in order.)
   if (spread) {
     rewriter.setInsertionPoint(query);
-    reduceOverRanks(rewriter, loc, module, spreadCells);
+    reduceOverRanks(rewriter, loc, module, spreadCells, byArchetype);
     shareOverRanks(rewriter, loc, module, world, sharedBuffers);
     combineSetsOverRanks(rewriter, loc, module, layout, world, {query});
     deliverOverRanks(rewriter, loc, module, layout, world);
@@ -23733,9 +23799,13 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
   rankEdgeChannels.clear();
   SmallVector<SpreadCell> spreadCells;
   SmallVector<const WorldBuffer *> sharedBuffers;
+  // (Fractions accumulated in turn over the ranks archetype by archetype,
+  // see chainOverRanks: one fused loop an archetype, its rows' turn.)
+  bool byArchetype = !options.gpu;
   if (spread) {
     checkPlaced(rewriter, loc, layout, world, module);
-    noteSpreadCells(rewriter, loc, world, spreadQueries, spreadCells);
+    noteSpreadCells(rewriter, loc, world, spreadQueries, spreadCells,
+                    byArchetype);
     noteSharedBuffers(rewriter, loc, layout, world, spreadQueries,
                       sharedBuffers);
 
@@ -23864,6 +23934,10 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
       continue;
 
     rewriter.setInsertionPoint(insertionPoint);
+    // (On many ranks: fractions accumulated in the loop taken from the
+    // rank before first, and given on after it.)
+    if (spread && byArchetype)
+      chainOverRanks(rewriter, loc, module, spreadCells, /*put=*/false);
     Value rows = world.count(loc, archetype);
     // (A distributed archetype's: this rank's stretch of them.)
     Value from = rankFirstRows.lookup(&archetype);
@@ -23904,6 +23978,10 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
     loops = keepCells(rewriter, loops, accumulates, archetype, world,
                       sequentialOnly);
     hoistResourceReads(rewriter, loops, world);
+    if (spread && byArchetype) {
+      rewriter.setInsertionPoint(insertionPoint);
+      chainOverRanks(rewriter, loc, module, spreadCells, /*put=*/true);
+    }
   }
 
   // What was sent to buffers lands now, as when each query ended: by
@@ -23925,13 +24003,25 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
       for (auto [archetype, count] : visited)
         if (StringRef staged =
                 stagedSlots(accumulate, direct.contains(archetype));
-            matches(*archetype, query) && !staged.empty())
+            matches(*archetype, query) && !staged.empty()) {
+          // (On many ranks, a fraction's folds in turn too.)
+          SmallVector<SpreadCell, 1> own;
+          if (spread && byArchetype &&
+              isa<FloatType>(accumulate.getValue().getType()))
+            own.push_back({world.resourceField(
+                               accumulate.getResourceAttr().getAttr(),
+                               accumulate.getFieldAttr()),
+                           Value(), accumulate.getRule(),
+                           accumulate.getValue().getType()});
+          chainOverRanks(rewriter, loc, module, own, /*put=*/false);
           foldAccumulated(rewriter, accumulate, staged, layout, *archetype,
                           world, count);
+          chainOverRanks(rewriter, loc, module, own, /*put=*/true);
+        }
   }
   if (spread) {
     rewriter.setInsertionPoint(insertionPoint);
-    reduceOverRanks(rewriter, loc, module, spreadCells);
+    reduceOverRanks(rewriter, loc, module, spreadCells, byArchetype);
     shareOverRanks(rewriter, loc, module, world, sharedBuffers);
     combineSetsOverRanks(rewriter, loc, module, layout, world, queries);
     deliverOverRanks(rewriter, loc, module, layout, world);

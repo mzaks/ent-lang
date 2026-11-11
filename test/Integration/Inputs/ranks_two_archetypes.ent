@@ -1,0 +1,40 @@
+// On many ranks: a `for` over a distributed component that two archetypes
+// hold (cells alone, and cells with a mark). One process goes through
+// all of one archetype's rows and then the other's; so must the ranks,
+// rank after rank for each archetype in turn: the lines a `for` writes,
+// and the fractions it adds into a unique, whose last digits would show
+// another order (ranks_two_archetypes.test). Three fractions a cell, two
+// from one `for`, so that one partition gives the next two before it has
+// taken the first (one at a time, ENT_RUNNING=1).
+import console
+component Cell { number: i32, weight: f64 } capacity 1200
+component Mark { by: f64 } capacity 1200
+distribute Cell by number
+unique Total { all: f64, marked: f64, days: i32 }
+system weigh() {
+  Total.all = 0.1
+  Total.marked = 0.3
+  for c: Cell { Total.all += c.weight * 1000000000000.0 }
+  for c: Cell, m: Mark { Total.marked += c.weight * m.by }
+}
+system grow() {
+  for c: mut Cell { c.weight = c.weight * 1.37 + 1.0 / (c.number as f64 + 3.0) }
+}
+system list() {
+  for c: Cell { put("{c.number} {c.weight}") }
+}
+system report() {
+  Total.days += 1
+  put("day {Total.days}: all {bits_of(Total.all)} marked {bits_of(Total.marked)}")
+}
+schedule day() { weigh()  grow()  list()  report() }
+world {
+  for i in 0..900 {
+    if i % 3 == 0 {
+      spawn { Cell { number: i, weight: 1.0 / (i as f64 + 7.0) }, Mark { by: 0.5 + (i as f64) * 1e-3 } }
+    } else {
+      spawn { Cell { number: i, weight: 1.0 / (i as f64 + 7.0) } }
+    }
+  }
+}
+main { loop { day() } until Total.days == 3 }

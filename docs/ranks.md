@@ -150,8 +150,9 @@ to the same on any number of ranks:
   added up over the ranks when the `for` ends (MPI's `Allreduce`);
 - fractions added into uniques (or kept the least or the most): the ranks
   take turns in their order, each adding its rows to what the rank before
-  it ended with, so the sum is one process's (such a `for`'s rows run one
-  rank after another);
+  it ended with, archetype by archetype where the `for` goes over more than
+  one, so the sum is one process's (such a `for`'s rows run one rank after
+  another);
 - running sums of whole numbers (`let first = Free += free`), each rank's
   rows from where the ranks before it end (`Exscan`); over several
   archetypes only of one number for every entity (`+= 1`);
@@ -176,8 +177,10 @@ to the same on any number of ranks:
   process combines them in, and the bits are one process's (ranks.test,
   `ranks_sendfloat.ent`, sums of 1e16, -1e16 and tenths);
 - lines it writes out (`put`), each rank's after the ranks' before it, in
-  the order of the rows; a `for` that takes turns (`in turn by c.number`)
-  writes each rank's in its order;
+  the order of the rows, archetype by archetype where the `for` goes over
+  more than one (as one process goes through one archetype's rows and then
+  the next's); a `for` that takes turns (`in turn by c.number`) writes each
+  rank's in its order;
 - edges gone along from its own entities (`for (p)-[w: Tie]->(o)`, and
   `in`), to entities of any rank, and the far end's fields read
   (`(o: Person)`, as lookups). An edge lives with its source's rank and,
