@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ent-lang demos</title>
+<meta name="description" content="Programs written in ent-lang, compiled to WebAssembly and running in the browser.">
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1d2129; --muted: #5d6676;
+    --line: #e1e4ea; --accent: #2f6fd6; --key-bg: #eef1f5;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161b; --card: #1c1f26; --text: #e6e8ec; --muted: #9aa3b2;
+      --line: #2c313b; --accent: #6ea2ff; --key-bg: #262a33;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header, main, footer { max-width: 1180px; margin: 0 auto; padding: 0 16px; }
+  header { padding-top: 48px; padding-bottom: 8px; }
+  h1 { font-size: 2rem; margin: 0 0 8px; letter-spacing: -0.01em; }
+  header p { margin: 0 0 8px; color: var(--muted); max-width: 70ch; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { font: 0.9em ui-monospace, SFMono-Regular, Menlo, monospace; }
+  h2 { font-size: 1.1rem; margin: 40px 0 12px; color: var(--muted);
+       font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+  .grid { display: grid; gap: 20px;
+          grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line);
+          border-radius: 10px; overflow: hidden; display: flex;
+          flex-direction: column; }
+  .card > a.shot { display: block; aspect-ratio: 16 / 10; background: #0e1014;
+                   overflow: hidden; }
+  .card img { width: 100%; height: 100%; object-fit: cover;
+              object-position: top; display: block; transition: transform .2s; }
+  .card > a.shot:hover img { transform: scale(1.02); }
+  .body { padding: 14px 16px 16px; display: flex; flex-direction: column;
+          gap: 8px; flex: 1; }
+  .body h3 { margin: 0; font-size: 1.1rem; }
+  .body h3 a { color: var(--text); }
+  .body p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+  .keys { font-size: 0.85rem; color: var(--muted); }
+  kbd { font: 0.8rem ui-monospace, monospace; background: var(--key-bg);
+        border: 1px solid var(--line); border-bottom-width: 2px;
+        border-radius: 4px; padding: 0 5px; color: var(--text); }
+  .links { margin-top: auto; padding-top: 4px; font-size: 0.9rem;
+           display: flex; gap: 16px; }
+  footer { padding-top: 40px; padding-bottom: 48px; color: var(--muted);
+           font-size: 0.9rem; }
+  footer p { max-width: 80ch; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ent-lang demos</h1>
+  <p>Programs written in <a href="https://github.com/mzaks/ent-lang">ent-lang</a>,
+  a language of entities, components and systems, compiled to WebAssembly with
+  <code>ent build --web</code> and running here in your browser. Click a page,
+  then use the keys it lists.</p>
+  <p>Natively the same programs run on all cores; in the browser each runs on
+  one thread.</p>
+</header>
+<main>
+  <h2>Games</h2>
+  <div class="grid">
+    <article class="card">
+      <a class="shot" href="pacman/"><img src="shots/pacman.webp" alt="A maze with dots, four ghosts and the mouth" loading="lazy"></a>
+      <div class="body">
+        <h3><a href="pacman/">A maze game</a></h3>
+        <p>A maze, a mouth and four ghosts: the pellets and the ghosts are entities, the maze a text that functions read. Sound too.</p>
+        <div class="keys"><kbd>←</kbd><kbd>↑</kbd><kbd>→</kbd><kbd>↓</kbd> steer, <kbd>Enter</kbd> again</div>
+        <div class="links"><a href="pacman/">Play</a><a href="https://github.com/mzaks/ent-lang/blob/main/examples/pacman.ent">Source</a></div>
+      </div>
+    </article>
+    <article class="card">
+      <a class="shot" href="towers/"><img src="shots/towers.webp" alt="A road across a green board, foes walking it" loading="lazy"></a>
+      <div class="body">
+        <h3><a href="towers/">Towers</a></h3>
+        <p>A tower defence game: foes walk a road, towers beside it shoot them. Ten waves, twenty lives, two maps.</p>
+        <div class="keys">click a tower, then a field; <kbd>Space</kbd> next wave</div>
+        <div class="links"><a href="towers/">Play</a><a href="https://github.com/mzaks/ent-lang/blob/main/examples/towers.ent">Source</a></div>
+      </div>
+    </article>
+    <article class="card">
+      <a class="shot" href="swarm/"><img src="shots/swarm.webp" alt="A dark field with foes, shots and gems" loading="lazy"></a>
+      <div class="body">
+        <h3><a href="swarm/">Swarm</a></h3>
+        <p>A shoot-'em-up on a field much bigger than the window, with foes, shots and sparks in their thousands.</p>
+        <div class="keys"><kbd>Enter</kbd> start, <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move, mouse aims, <kbd>B</kbd> stress</div>
+        <div class="links"><a href="swarm/">Play</a><a href="https://github.com/mzaks/ent-lang/blob/main/examples/swarm/swarm.ent">Source</a></div>
+      </div>
+    </article>
+    <article class="card">
+      <a class="shot" href="snake/"><img src="shots/snake.webp" alt="A snake on a checkered board" loading="lazy"></a>
+      <div class="body">
+        <h3><a href="snake/">Snake</a></h3>
+        <p>Every piece of the snake is an entity that knows for how many more steps it stays. The board is as big as fits.</p>
+        <div class="keys"><kbd>Space</kbd> start, arrows or <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> turn</div>
+        <div class="links"><a href="snake/">Play</a><a href="https://github.com/mzaks/ent-lang/blob/main/examples/snake.ent">Source</a></div>
+      </div>
+    </article>
+  </div>
+
+  <h2>Simulations</h2>
+  <div class="grid">
+    <article class="card">
+      <a class="shot" href="parking/"><img src="shots/parking.webp" alt="A car backing into a gap between parked cars" loading="lazy"></a>
+      <div class="body">
+        <h3><a href="parking/">Parking in a tight spot</a></h3>
+        <p>Real vehicles' numbers, ultrasonic sensors and camera vision with its blind zone, what the car believes beside the truth, a car that parks itself, a trailer, and a car park where six park at once.</p>
+        <div class="keys"><kbd>A</kbd> parks itself, arrows drive, <kbd>N</kbd>/<kbd>P</kbd> place, <kbd>1</kbd>–<kbd>5</kbd> vehicle, <kbd>V</kbd> view, <kbd>H</kbd> trailer</div>
+        <div class="links"><a href="parking/">Open</a><a href="https://github.com/mzaks/ent-lang/tree/main/examples/parking">Source</a></div>
+      </div>
+    </article>
+    <article class="card">
+      <a class="shot" href="traffic/"><img src="shots/traffic.webp" alt="Three ring roads of cars and a time-space plot" loading="lazy"></a>
+      <div class="body">
+        <h3><a href="traffic/">Ring roads</a></h3>
+        <p>Sugiyama's 22 cars on a 230 m ring, where a jam forms that nothing caused; lanes with trucks and passing; the road over the last minutes below.</p>
+        <div class="keys"><kbd>Space</kbd> holds, <kbd>↑</kbd>/<kbd>↓</kbd> time faster or slower</div>
+        <div class="links"><a href="traffic/">Open</a><a href="https://github.com/mzaks/ent-lang/blob/main/examples/traffic/show.ent">Source</a></div>
+      </div>
+    </article>
+    <article class="card">
+      <a class="shot" href="junctions/"><img src="shots/junctions.webp" alt="Four streets meeting at a junction" loading="lazy"></a>
+      <div class="body">
+        <h3><a href="junctions/">Junctions</a></h3>
+        <p>Four streets meet and the cars find their way through: lights, a roundabout, a priority road, stops at every street; and a highway with on- and off-ramps.</p>
+        <div class="keys"><kbd>1</kbd>–<kbd>7</kbd> choose the scene</div>
+        <div class="links"><a href="junctions/">Open</a><a href="https://github.com/mzaks/ent-lang/blob/main/examples/traffic/junctions.ent">Source</a></div>
+      </div>
+    </article>
+    <article class="card">
+      <a class="shot" href="orrery/"><img src="shots/orrery.webp" alt="A sun with planets and moons" loading="lazy"></a>
+      <div class="body">
+        <h3><a href="orrery/">Orrery</a></h3>
+        <p>A sun, planets, moons and a station around a moon: every body knows only its orbit around the one it circles.</p>
+        <div class="keys"><kbd>Space</kbd> holds the bodies still</div>
+        <div class="links"><a href="orrery/">Open</a><a href="https://github.com/mzaks/ent-lang/blob/main/examples/orrery.ent">Source</a></div>
+      </div>
+    </article>
+    <article class="card">
+      <a class="shot" href="bounce/"><img src="shots/bounce.webp" alt="Coloured balls in a box" loading="lazy"></a>
+      <div class="body">
+        <h3><a href="bounce/">Bounce</a></h3>
+        <p>Balls in a window: the smallest program with the window device.</p>
+        <div class="keys"><kbd>Space</kbd> holds, left mouse button pulls the balls</div>
+        <div class="links"><a href="bounce/">Open</a><a href="https://github.com/mzaks/ent-lang/blob/main/examples/bounce.ent">Source</a></div>
+      </div>
+    </article>
+  </div>
+
+  <h2>Layout</h2>
+  <div class="grid">
+    <article class="card">
+      <a class="shot" href="layout/"><img src="shots/layout.webp" alt="A side bar, cards and a footer" loading="lazy"></a>
+      <div class="body">
+        <h3><a href="layout/">Layout</a></h3>
+        <p>Boxes that say how big they are to be and which box they are in; where they end up is worked out every frame.</p>
+        <div class="keys">right mouse drags the side bar, <kbd>Space</kbd> stacks the cards, wheel scrolls</div>
+        <div class="links"><a href="layout/">Open</a><a href="https://github.com/mzaks/ent-lang/blob/main/examples/layout_demo.ent">Source</a></div>
+      </div>
+    </article>
+    <article class="card">
+      <a class="shot" href="clay-sidebar/"><img src="shots/clay-sidebar.webp" alt="A profile page with a side bar and floating boxes" loading="lazy"></a>
+      <div class="body">
+        <h3><a href="clay-sidebar/">Clay: scrolling side bar</a></h3>
+        <p><a href="https://github.com/nicbarker/clay">Clay</a>'s example with the same sizes and colours: a box that scrolls with a bar to drag, and boxes that float.</p>
+        <div class="keys">wheel scrolls, drag the bar</div>
+        <div class="links"><a href="clay-sidebar/">Open</a><a href="https://github.com/mzaks/ent-lang/blob/main/examples/clay/sidebar.ent">Source</a></div>
+      </div>
+    </article>
+    <article class="card">
+      <a class="shot" href="clay-transitions/"><img src="shots/clay-transitions.webp" alt="Thirty numbered boxes and four buttons" loading="lazy"></a>
+      <div class="body">
+        <h3><a href="clay-transitions/">Clay: transitions</a></h3>
+        <p>Thirty boxes that move, change colour, come and go in half a second each: every box an entity.</p>
+        <div class="keys">click the buttons, click a box</div>
+        <div class="links"><a href="clay-transitions/">Open</a><a href="https://github.com/mzaks/ent-lang/blob/main/examples/clay/transitions.ent">Source</a></div>
+      </div>
+    </article>
+    <article class="card">
+      <a class="shot" href="clay-video/"><img src="shots/clay-video.webp" alt="A document viewer with a menu bar" loading="lazy"></a>
+      <div class="body">
+        <h3><a href="clay-video/">Clay: video demo</a></h3>
+        <p>A header with a menu that drops down, a side bar of documents, and the chosen one in a box that scrolls.</p>
+        <div class="keys">point at File, click a document, wheel scrolls</div>
+        <div class="links"><a href="clay-video/">Open</a><a href="https://github.com/mzaks/ent-lang/blob/main/examples/clay/video_demo.ent">Source</a></div>
+      </div>
+    </article>
+  </div>
+</main>
+<footer>
+  <p>Built by <code>tools/pages/build.sh</code> in the
+  <a href="https://github.com/mzaks/ent-lang">ent-lang repository</a>.
+  The source of every page is linked under it.</p>
+</footer>
+</body>
+</html>
