@@ -21,6 +21,10 @@ tag Counts
 // 0: in flight, 1: slow, 2: errors.
 component Panel { kind: i32 }
 tag Chart
+// The chart's title, which says how many answers its tallest bar is (in
+// the title, not drawn beside it: a narrow window has no room beside it).
+tag ChartTitle
+unique Tallest: i32
 
 // The answers of each second of the crawl (by when they came): of those
 // with a status below 400, and the others (none came, or 400 and up).
@@ -133,7 +137,8 @@ system watch_setup() {
   let title = spawn {
     caption("Answers each second: fine, and errors", 16.0, 0x70c0ff),
     TextStyle { font: Sans, spacing: 0.0, line: 0.0, align: Place.Start,
-                breaks: Breaks.Lines }
+                breaks: Breaks.Lines },
+    ChartTitle
   }
   connect (title)-[Inside]->(chart)
 }
@@ -174,6 +179,9 @@ system look() {
       t.text = "{state} {tenths(Now)} s    asks {Kept_n}    settled {Settled_n}    open {Open}" +
                "    out {out}    due {waiting}    answers {len(History)}" +
                "    errors {len(Troubles)}    slow {slow}    depth {Level}"
+    }
+    for t: mut Text with ChartTitle {
+      t.text = "Answers each second: fine, and errors (tallest bar: {Tallest})"
     }
 
     View.lines = ""
@@ -251,6 +259,6 @@ system draw_chart() {
       if ok > 0.0 { rect(x, top + height - ok, bar - 1.0, ok, 0x3aa060) }
       if bad > 0.0 { rect(x, top + height - ok - bad, bar - 1.0, bad, 0xd05040) }
     }
-    label("{most} a second", left + width - 120.0, b.y + 12.0, 14.0, 0x808890)
+    Tallest = most
   }
 }
