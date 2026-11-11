@@ -5,11 +5,16 @@
 // and the fractions it adds into a unique, whose last digits would show
 // another order (ranks_two_archetypes.test). Three fractions a cell, two
 // from one `for`, so that one partition gives the next two before it has
-// taken the first (one at a time, ENT_RUNNING=1).
+// taken the first (one at a time, ENT_RUNNING=1). And fractions sent to
+// cells of other ranks from both archetypes' rows, combined as one process
+// combines them, archetype by archetype; and counts sent to cells that
+// other cells look up in the same `for`, which see what was there before
+// it (one partition at a time combined its own before the next looked).
 import console
-component Cell { number: i32, weight: f64 } capacity 1200
+component Cell { number: i32, weight: f64, got: f64, count: i64, seen: i64 } capacity 1200
 component Mark { by: f64 } capacity 1200
 distribute Cell by number
+buffer Ids { who: entity } capacity 1200
 unique Total { all: f64, marked: f64, days: i32 }
 system weigh() {
   Total.all = 0.1
@@ -20,20 +25,28 @@ system weigh() {
 system grow() {
   for c: mut Cell { c.weight = c.weight * 1.37 + 1.0 / (c.number as f64 + 3.0) }
 }
+system pass() {
+  for c: mut Cell {
+    let t = Ids[(c.number % 100) * 9 + 4].who
+    Cell(t).got -= c.weight * 1.1 + 1.0 / (c.number as f64 + 1.0)
+    if let n = Cell(t).count { c.seen = n * 1000 + c.seen % 1000 }
+    Cell(t).count += c.number as i64 + 1
+  }
+}
 system list() {
-  for c: Cell { put("{c.number} {c.weight}") }
+  for c: Cell { put("{c.number} {c.weight} {bits_of(c.got)} {c.count} {c.seen}") }
 }
 system report() {
   Total.days += 1
   put("day {Total.days}: all {bits_of(Total.all)} marked {bits_of(Total.marked)}")
 }
-schedule day() { weigh()  grow()  list()  report() }
+schedule day() { weigh()  grow()  pass()  list()  report() }
 world {
   for i in 0..900 {
     if i % 3 == 0 {
-      spawn { Cell { number: i, weight: 1.0 / (i as f64 + 7.0) }, Mark { by: 0.5 + (i as f64) * 1e-3 } }
+      Ids += { who: spawn { Cell { number: i, weight: 1.0 / (i as f64 + 7.0), got: 0.5, count: 0, seen: 0 }, Mark { by: 0.5 + (i as f64) * 1e-3 } } }
     } else {
-      spawn { Cell { number: i, weight: 1.0 / (i as f64 + 7.0) } }
+      Ids += { who: spawn { Cell { number: i, weight: 1.0 / (i as f64 + 7.0), got: 0.5, count: 0, seen: 0 } } }
     }
   }
 }

@@ -160,7 +160,9 @@ to the same on any number of ranks:
   `for` the fields it looks up are made whole on every rank, each rank's
   stretch given to the others (`Allgatherv`), so a lookup reads another
   rank's entity as it was when the `for` started, as on one process (a
-  `for` does not look up a field it writes);
+  `for` does not look up a field it writes). Partitions of a process that
+  share their rows all finish going through them before any combines what
+  was sent to its own, which the others may look up;
 - sends to entities of any rank: whole numbers added (`+=`, `-=`) or kept
   the least or the most (`min=`, `max=`), which come to the same in any
   order. One to an entity another rank has is posted to that rank, one to
@@ -171,8 +173,9 @@ to the same on any number of ranks:
   kept the least or the most), whose sums depend on their order: every
   one is posted, also one to an entity of the rank's own (to itself), on
   a channel for each place in the `for` that sends, and each rank combines
-  what it was given place by place, each place's in the order of the
-  ranks they came from, each rank's in the order of its rows. The ranks
+  what it was given place by place, archetype by archetype where the
+  `for` goes over more than one, each place's in the order of the ranks
+  they came from, each rank's in the order of its rows. The ranks
   hold stretches of the rows in their order, so that is the order one
   process combines them in, and the bits are one process's (ranks.test,
   `ranks_sendfloat.ent`, sums of 1e16, -1e16 and tenths);

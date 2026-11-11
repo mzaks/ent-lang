@@ -2758,6 +2758,13 @@ struct RankChannel {
 /// The apply and archetype whose merge is being lowered (see
 /// RankChannel), else -1.
 static int64_t rankMergedApply = -1;
+/// The archetype whose rows a `for` over distributed entities is being
+/// lowered for, else -1: an ordered send combined where it is sent takes
+/// a channel of each archetype's (apply -2 - its index), so that each
+/// rank's sends from one archetype's rows are combined before any from
+/// the next's, as one process goes through one archetype and then the
+/// next.
+static int64_t rankLoopArchetype = -1;
 static SmallVector<RankChannel> rankChannels;
 /// What a send being lowered does where the entity is not this rank's
 /// alone (see emitLocate): `post` posts it (to the owner, or to every
@@ -6917,7 +6924,10 @@ static RankPost ranksPosting(IRRewriter &rewriter, Location loc,
   if (posting.postable) {
     // (Ordered: a channel for each apply merged, given in the order they
     // were made, which is the order of the merges.)
-    int64_t apply = posting.ordered ? rankMergedApply : -1;
+    int64_t apply = !posting.ordered       ? -1
+                    : rankMergedApply >= 0 ? rankMergedApply
+                    : rankLoopArchetype >= 0 ? -2 - rankLoopArchetype
+                                             : -1;
     auto known = llvm::find_if(rankChannels, [&](const RankChannel &c) {
       return c.component == component.getAttr() && c.field == fieldName &&
              c.rule == rule && c.stored == value.getType() &&
@@ -23150,6 +23160,8 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
       rewriter.setInsertionPoint(anchor);
       chainOverRanks(rewriter, loc, module, spreadCells, /*put=*/false);
     }
+    llvm::SaveAndRestore loopArchetype(
+        rankLoopArchetype, spread ? int64_t(archetype.index) : int64_t(-1));
     Operation *loops = emitEntityLoops(
         rewriter, loc, archetype, world, here, entityLocal,
         [&](Value entity, Value rows, bool parallel) {
@@ -23213,6 +23225,12 @@ static void lowerQuery(IRRewriter &rewriter, QueryOp query,
   // by apply, then archetype, then row. They land before despawns and
   // moves, while every id still leads to where its entity was.
   rewriter.setInsertionPoint(query);
+  // (Partitions of a process that share memory: all done going through
+  // their rows before any combines into its own, which the others' rows
+  // may look up in this `for`; one partition at a time (ENT_RUNNING=1),
+  // one that ran first combined before the next had looked.)
+  if (spread && partitionCount > 0 && !applies.empty())
+    callGpu(rewriter, loc, module, "ent_ranks_barrier", ValueRange{});
   for (ApplyOp apply : applies)
     for (auto [archetype, count] : visited) {
       // (Its list's where the loop may have run in slices or the query
@@ -23938,6 +23956,8 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
     // rank before first, and given on after it.)
     if (spread && byArchetype)
       chainOverRanks(rewriter, loc, module, spreadCells, /*put=*/false);
+    llvm::SaveAndRestore loopArchetype(
+        rankLoopArchetype, spread ? int64_t(archetype.index) : int64_t(-1));
     Value rows = world.count(loc, archetype);
     // (A distributed archetype's: this rank's stretch of them.)
     Value from = rankFirstRows.lookup(&archetype);
@@ -23985,8 +24005,16 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
   }
 
   // What was sent to buffers lands now, as when each query ended: by
-  // query, then send, then archetype, then row.
+  // query, then send, then archetype, then row. (Partitions that share
+  // memory all done with their rows first, see lowerQuery.)
   rewriter.setInsertionPoint(insertionPoint);
+  if (spread && partitionCount > 0 &&
+      llvm::any_of(queries, [](QueryOp query) {
+        return query.getBody()
+            .walk([](ApplyOp) { return WalkResult::interrupt(); })
+            .wasInterrupted();
+      }))
+    callGpu(rewriter, loc, module, "ent_ranks_barrier", ValueRange{});
   for (QueryOp query : queries) {
     SmallVector<ApplyOp> applies;
     query.getBody().walk([&](ApplyOp apply) { applies.push_back(apply); });
