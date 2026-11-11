@@ -15361,6 +15361,9 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
     // type cannot hold is the nearest it can (its least or its most);
     // no number (NaN) is 0. So on every machine and the GPU alike: the
     // instruction alone gives what its processor does out of range.
+    // One test says whether the type holds it, and then the instruction
+    // alone cuts it; the rest takes a branch of its own (three tests and
+    // selects on every cast cost the epidemic 3% of a day, this 1%).
     auto saturating = [&](Type bitsOf, bool noSign) -> mlir::Value {
       unsigned width = bitsOf.getIntOrFloatBitWidth();
       auto real = [&](double number) -> mlir::Value {
@@ -15377,40 +15380,52 @@ FailureOr<mlir::Value> Parser::emitRaw(const Expr &expr, Type expected) {
       };
       // (Both ends are powers of two, which every fraction type has.)
       double top = std::ldexp(1.0, noSign ? width : width - 1);
+      // What the type holds for certain goes straight to the instruction;
+      // the rest (rare) takes the long way, out of line.
+      mlir::Value holds =
+          noSign ? arith::AndIOp::create(
+                       builder, at,
+                       arith::CmpFOp::create(builder, at,
+                                             arith::CmpFPredicate::OGT,
+                                             *value, real(-1.0)),
+                       arith::CmpFOp::create(builder, at,
+                                             arith::CmpFPredicate::OLT,
+                                             *value, real(top)))
+                       .getResult()
+                 : arith::CmpFOp::create(
+                       builder, at, arith::CmpFPredicate::OLT,
+                       math::AbsFOp::create(builder, at, *value), real(top))
+                       .getResult();
+      auto branch = scf::IfOp::create(builder, at, TypeRange{bitsOf}, holds,
+                                      /*withElseRegion=*/true);
+      OpBuilder::InsertionGuard inner(builder);
+      builder.setInsertionPointToStart(branch.thenBlock());
+      scf::YieldOp::create(
+          builder, at,
+          ValueRange{noSign ? arith::FPToUIOp::create(builder, at, bitsOf,
+                                                      *value)
+                                  .getResult()
+                            : arith::FPToSIOp::create(builder, at, bitsOf,
+                                                      *value)
+                                  .getResult()});
+      builder.setInsertionPointToStart(branch.elseBlock());
       mlir::Value above = arith::CmpFOp::create(
           builder, at, arith::CmpFPredicate::OGE, *value, real(top));
-      mlir::Value below =
-          noSign ? arith::CmpFOp::create(builder, at,
-                                         arith::CmpFPredicate::OLE, *value,
-                                         real(-1.0))
-                       .getResult()
-                 : arith::CmpFOp::create(builder, at,
-                                         arith::CmpFPredicate::OLT, *value,
-                                         real(-top))
-                       .getResult();
-      mlir::Value number = arith::CmpFOp::create(
-          builder, at, arith::CmpFPredicate::ORD, *value, *value);
-      mlir::Value outside = arith::OrIOp::create(
-          builder, at, arith::OrIOp::create(builder, at, above, below),
-          arith::XOrIOp::create(
-              builder, at, number,
-              arith::ConstantOp::create(
-                  builder, at, IntegerAttr::get(builder.getI1Type(), 1))));
-      // (What is outside is not given to the instruction at all.)
-      mlir::Value inside =
-          arith::SelectOp::create(builder, at, outside, real(0.0), *value);
-      mlir::Value cut =
-          noSign ? arith::FPToUIOp::create(builder, at, bitsOf, inside)
-                       .getResult()
-                 : arith::FPToSIOp::create(builder, at, bitsOf, inside)
-                       .getResult();
+      mlir::Value below = arith::CmpFOp::create(
+          builder, at, arith::CmpFPredicate::OLT, *value, real(0.0));
       mlir::Value most = whole(noSign ? APInt::getMaxValue(width)
                                       : APInt::getSignedMaxValue(width));
       mlir::Value least = whole(noSign ? APInt::getZero(width)
                                        : APInt::getSignedMinValue(width));
-      return arith::SelectOp::create(
-          builder, at, above, most,
-          arith::SelectOp::create(builder, at, below, least, cut));
+      // (Outside and not above: below the least, between it and the
+      // bound cut to it, or no number, which is 0.)
+      scf::YieldOp::create(
+          builder, at,
+          ValueRange{arith::SelectOp::create(
+              builder, at, above, most,
+              arith::SelectOp::create(builder, at, below, least,
+                                      whole(APInt::getZero(width))))});
+      return branch.getResult(0);
     };
     if (fromFloat && isUnsigned(to))
       return fromBits(at, saturating(bitsType(to), true), to);
