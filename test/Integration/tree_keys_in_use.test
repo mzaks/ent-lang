@@ -1,0 +1,61 @@
+// A linked tree's sort and its orders go over the keys in use, not over
+// every key the world could hold (lib/Ent/Transforms/LowerToLoops.cpp,
+// treeGoesOverKeysInUse, forTreeKeys): the slots handed out so far, or,
+// where no entity is ever destroyed, each archetype's rows so far. The
+// trees of five other tests, each in a world made for 16 million entities
+// of which it has a dozen or a few hundred: what they print is what they
+// print in a world of their own size, on one core and on all, also where
+// entities are spawned and connected after an order was made (a key
+// handed out since reads no place in it: a place is kept as one more than
+// it is). And each holds little memory: every key gone over, the least of
+// them held 260 MB and the most 650 MB.
+
+// RUN: sed -E 's/^default_capacity [0-9]+/default_capacity 16777216/' \
+// RUN:     %S/Inputs/tree_follow.ent > %t.tree_follow.ent
+// RUN: grep -q "^default_capacity 16777216" %t.tree_follow.ent
+// RUN: %ent run %S/Inputs/tree_follow.ent 2>/dev/null > %t.tree_follow.own
+// RUN: %ent build %t.tree_follow.ent -o %t.tree_follow.bin 2>/dev/null
+// RUN: %t.tree_follow.bin 2>/dev/null | cmp - %t.tree_follow.own
+// RUN: %python %S/Inputs/peak_mb.py 100 %t.tree_follow.bin
+// RUN: %ent run --parallel %S/Inputs/tree_follow.ent 2>/dev/null > %t.tree_follow.all
+// RUN: %ent run --parallel %t.tree_follow.ent 2>/dev/null | cmp - %t.tree_follow.all
+
+// RUN: sed -E 's/^default_capacity [0-9]+/default_capacity 16777216/' \
+// RUN:     %S/Inputs/tree_walk_change.ent > %t.tree_walk_change.ent
+// RUN: grep -q "^default_capacity 16777216" %t.tree_walk_change.ent
+// RUN: %ent run %S/Inputs/tree_walk_change.ent 2>/dev/null > %t.tree_walk_change.own
+// RUN: %ent build %t.tree_walk_change.ent -o %t.tree_walk_change.bin 2>/dev/null
+// RUN: %t.tree_walk_change.bin 2>/dev/null | cmp - %t.tree_walk_change.own
+// RUN: %python %S/Inputs/peak_mb.py 100 %t.tree_walk_change.bin
+// RUN: %ent run --parallel %S/Inputs/tree_walk_change.ent 2>/dev/null > %t.tree_walk_change.all
+// RUN: %ent run --parallel %t.tree_walk_change.ent 2>/dev/null | cmp - %t.tree_walk_change.all
+
+// RUN: sed -E 's/^default_capacity [0-9]+/default_capacity 16777216/' \
+// RUN:     %S/Inputs/tree_reactive.ent > %t.tree_reactive.ent
+// RUN: grep -q "^default_capacity 16777216" %t.tree_reactive.ent
+// RUN: %ent run %S/Inputs/tree_reactive.ent 2>/dev/null > %t.tree_reactive.own
+// RUN: %ent build %t.tree_reactive.ent -o %t.tree_reactive.bin 2>/dev/null
+// RUN: %t.tree_reactive.bin 2>/dev/null | cmp - %t.tree_reactive.own
+// RUN: %python %S/Inputs/peak_mb.py 100 %t.tree_reactive.bin
+// RUN: %ent run --parallel %S/Inputs/tree_reactive.ent 2>/dev/null > %t.tree_reactive.all
+// RUN: %ent run --parallel %t.tree_reactive.ent 2>/dev/null | cmp - %t.tree_reactive.all
+
+// RUN: sed -E 's/^default_capacity [0-9]+/default_capacity 16777216/' \
+// RUN:     %S/Inputs/tree_churn.ent > %t.tree_churn.ent
+// RUN: grep -q "^default_capacity 16777216" %t.tree_churn.ent
+// RUN: %ent run %S/Inputs/tree_churn.ent 2>/dev/null > %t.tree_churn.own
+// RUN: %ent build %t.tree_churn.ent -o %t.tree_churn.bin 2>/dev/null
+// RUN: %t.tree_churn.bin 2>/dev/null | cmp - %t.tree_churn.own
+// RUN: %python %S/Inputs/peak_mb.py 100 %t.tree_churn.bin
+// RUN: %ent run --parallel %S/Inputs/tree_churn.ent 2>/dev/null > %t.tree_churn.all
+// RUN: %ent run --parallel %t.tree_churn.ent 2>/dev/null | cmp - %t.tree_churn.all
+
+// RUN: sed -E 's/^default_capacity [0-9]+/default_capacity 16777216/' \
+// RUN:     %S/Inputs/tree_order.ent > %t.tree_order.ent
+// RUN: grep -q "^default_capacity 16777216" %t.tree_order.ent
+// RUN: %ent run %S/Inputs/tree_order.ent 2>/dev/null > %t.tree_order.own
+// RUN: %ent build %t.tree_order.ent -o %t.tree_order.bin 2>/dev/null
+// RUN: %t.tree_order.bin 2>/dev/null | cmp - %t.tree_order.own
+// RUN: %python %S/Inputs/peak_mb.py 100 %t.tree_order.bin
+// RUN: %ent run --parallel %S/Inputs/tree_order.ent 2>/dev/null > %t.tree_order.all
+// RUN: %ent run --parallel %t.tree_order.ent 2>/dev/null | cmp - %t.tree_order.all

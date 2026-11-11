@@ -11354,8 +11354,23 @@ static void emitDropFunction(IRRewriter &rewriter, ModuleOp module,
     tree.store(tree.noLink(), column, slot);
 }
 
+/// Whether what a linked tree keeps for each key is gone over for the
+/// keys in use alone (forTreeKeys), not for every key the world could
+/// hold: so a world of large capacities costs a tree's sort and its
+/// orders what its entities come to. (In a program of one world: with
+/// slot ids, slots are handed out in order there, so those in use are the
+/// first ones; with row ids, an archetype's rows are its first ones, and
+/// none is ever given up. A key never in use has nothing written for it:
+/// all 0, as the arena starts, which is no edge, no link and no place in
+/// any order.)
+static bool treeGoesOverKeysInUse() {
+  return !ranksMode && partitionCount == 0;
+}
+
 /// For each key of an entity of the tree `relation` (a child or a parent)
-/// that this rank has, in the order of the keys: all of them, or, built
+/// that this rank has, in the order of the keys: all of them (those in
+/// use, see treeGoesOverKeysInUse: the slots handed out so far, or each
+/// archetype's rows so far), or, built
 /// for partitions with row ids, its partition's rows of each archetype
 /// that can be in the tree (a tree's children live with their parents, so
 /// a rank's edges of it are of its own entities). `body` at each, inside.
@@ -11377,7 +11392,17 @@ static void forTreeKeys(IRRewriter &rewriter, Location loc,
     rewriter.setInsertionPoint(loop.getBody()->getTerminator());
     body(loop.getInductionVar());
   };
-  if (partitionCount == 0 || layout.entities.kind != EntityScheme::Rows) {
+  if (layout.entities.kind != EntityScheme::Rows) {
+    Value keys =
+        arith::ConstantIndexOp::create(rewriter, loc, layout.entityKeys);
+    if (treeGoesOverKeysInUse())
+      keys = arith::MinUIOp::create(
+          rewriter, loc, keys, loadSlotsInUse(rewriter, loc, layout, world));
+    loopOver(arith::ConstantIndexOp::create(rewriter, loc, 0), keys);
+    atBeyond();
+    return;
+  }
+  if (partitionCount == 0 && !treeGoesOverKeysInUse()) {
     loopOver(arith::ConstantIndexOp::create(rewriter, loc, 0),
              arith::ConstantIndexOp::create(rewriter, loc, layout.entityKeys));
     atBeyond();
@@ -11396,6 +11421,16 @@ static void forTreeKeys(IRRewriter &rewriter, Location loc,
     Value from = arith::ConstantIndexOp::create(rewriter, loc, base);
     Value to = arith::ConstantIndexOp::create(rewriter, loc,
                                               base + archetype.capacity);
+    // (One world: the archetype's rows so far.)
+    if (partitionCount == 0) {
+      loopOver(from, arith::AddIOp::create(
+                         rewriter, loc, from,
+                         arith::MinUIOp::create(
+                             rewriter, loc, world.count(loc, archetype),
+                             arith::ConstantIndexOp::create(
+                                 rewriter, loc, archetype.capacity))));
+      continue;
+    }
     if (archetype.isDistributed()) {
       Value first = arith::MinUIOp::create(
           rewriter, loc,
@@ -17337,8 +17372,6 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
   auto buildWalk = [&](LinkedTree &tree) -> Walk {
     Value zero = tree.zero, one = tree.one;
     Type index = rewriter.getIndexType();
-    Value keys =
-        arith::ConstantIndexOp::create(rewriter, loc, layout.entityKeys + 1);
     Value list = world.treeOrder(relation);
     Value listParents = world.treeOrderParents(relation);
     Value listed = world.toIndex(loc, tree.listed());
@@ -17394,13 +17427,12 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
         tree.store(tree.i64(-1), cursors, key);
       }, /*beyond=*/true);
       // (Where each is in the order, for the queries that follow events
-      // in it: nowhere, until it is given its place.)
-      tree.forEach(zero,
-                   arith::ConstantIndexOp::create(rewriter, loc,
-                                                  layout.entityKeys),
-                   [&](Value key) {
-                     tree.store(tree.i64(-1), world.walkPlaces(relation), key);
-                   });
+      // in it: nowhere, until it is given its place. A place is kept as
+      // one more than it is and nowhere as 0, which is what a key handed
+      // out after this reads.)
+      forTreeKeys(rewriter, loc, layout, world, relation, [&](Value key) {
+        tree.store(tree.i64(0), world.walkPlaces(relation), key);
+      });
       forListed(/*backwards=*/true, [&](Value id, Value parent) {
         Value key = world.entityKey(loc, id);
         Value size = add(tree.load(sizes, key), tree.i64(1));
@@ -17419,7 +17451,8 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
       auto place = [&](Value id, Value parent, Value at) {
         tree.store(id, out, asIndex(at));
         tree.store(parent, outParents, asIndex(at));
-        tree.store(at, world.walkPlaces(relation), world.entityKey(loc, id));
+        tree.store(add(at, tree.i64(1)), world.walkPlaces(relation),
+                   world.entityKey(loc, id));
       };
       forListed(/*backwards=*/false, [&](Value id, Value parent) {
         Value key = world.entityKey(loc, id);
@@ -17462,6 +17495,13 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
         tree.store(tree.i64(0), sizes, key);
         tree.store(tree.i64(0), cursors, key);
       }, /*beyond=*/true);
+      // (How many are at each depth is counted in the cursors, by depth,
+      // not by key: an entity's depth is at most the entities in the
+      // order, so that many depths and one are gone over.)
+      Value depths = arith::AddIOp::create(rewriter, loc, all, one);
+      tree.forEach(zero, depths, [&](Value depth) {
+        tree.store(tree.i64(0), cursors, depth);
+      });
       forListed(/*backwards=*/false, [&](Value id, Value parent) {
         Value depth = add(tree.load(sizes, world.entityKey(loc, parent)),
                           tree.i64(1));
@@ -17469,7 +17509,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
         Value at = asIndex(depth);
         tree.store(add(tree.load(cursors, at), tree.i64(1)), cursors, at);
       });
-      auto starts = scf::ForOp::create(rewriter, loc, zero, keys, one,
+      auto starts = scf::ForOp::create(rewriter, loc, zero, depths, one,
                                        ValueRange{tree.i64(0)});
       {
         OpBuilder::InsertionGuard guard(rewriter);
@@ -17484,7 +17524,7 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
         Value id = tree.load(out, k);
         Value parent = tree.load(outParents, k);
         tree.branch(tree.same(parent, none), [&] {
-          tree.store(tree.i64(-1), world.walkPlaces(relation),
+          tree.store(tree.i64(0), world.walkPlaces(relation),
                      world.entityKey(loc, id));
         });
         tree.branch(tree.negate(tree.same(parent, none)), [&] {
@@ -17494,8 +17534,9 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
           Value to = arith::AddIOp::create(rewriter, loc, from, asIndex(at));
           tree.store(id, out, to);
           tree.store(parent, outParents, to);
-          tree.store(arith::IndexCastOp::create(rewriter, loc,
-                                                rewriter.getI64Type(), to),
+          tree.store(add(arith::IndexCastOp::create(
+                             rewriter, loc, rewriter.getI64Type(), to),
+                         tree.i64(1)),
                      world.walkPlaces(relation), world.entityKey(loc, id));
         });
       });
@@ -17633,11 +17674,13 @@ static void lowerCascade(IRRewriter &rewriter, QueryOp query,
     // Whether the entity with the key `key` is in the order, and where.
     auto placeOf = [&](Value key) -> std::pair<Value, Value> {
       if (followsOrder) {
+        // (Kept as one more than the place: 0 is nowhere.)
         Value place = tree.load(world.walkPlaces(relation), key);
-        return {arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sge,
+        return {arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sgt,
                                       place, tree.i64(0)),
-                arith::IndexCastOp::create(rewriter, loc,
-                                           rewriter.getIndexType(), place)};
+                arith::IndexCastOp::create(
+                    rewriter, loc, rewriter.getIndexType(),
+                    arith::SubIOp::create(rewriter, loc, place, tree.i64(1)))};
       }
       Value link = tree.load(tree.position(), key);
       return {tree.negate(tree.isNone(link)),
