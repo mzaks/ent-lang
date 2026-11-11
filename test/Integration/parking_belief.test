@@ -1,0 +1,17 @@
+// What a vehicle of examples/parking believes (check/belief.ent;
+// parking-SPEC.md, check 4): it drives up to 30 cm from a low wall,
+// where none of its cameras sees the wall any more, and the grid still
+// holds it. Without errors the believed pose is the true one to the bit
+// and the distance read off the grid within a centimetre of the true
+// one; with errors the pose is off by centimetres after 2.7 m and the
+// reading by some more. On one core and on all.
+// RUN: %ent run -I %S/../../examples/parking %S/../../examples/parking/check/belief.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel -I %S/../../examples/parking %S/../../examples/parking/check/belief.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+
+// CHECK: errors false: pose off 0 um 0 urad exact true, true 3000 reads 1000000 {{.*}} seen low 11, cells 0
+// CHECK: errors false: pose off 0 um 0 urad exact true, true 285 reads 294 (off by 9), seen low 0, cells 152
+// CHECK: errors true: pose off 0 um 0 urad exact true, true 3000
+// Less than 1.5 percent of 2.7 m (40 mm), and the reading within 15 cm.
+// CHECK: errors true: pose off {{[1-3][0-9][0-9][0-9][0-9]}} um {{[0-9]+}} urad exact false, true 285 reads {{[1-4][0-9][0-9]}} (off by {{[0-9][0-9]?}}), seen low 0

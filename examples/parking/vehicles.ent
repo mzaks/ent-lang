@@ -1,0 +1,55 @@
+// The vehicles that can be parked (parking-SPEC.md, 4): what the model
+// needs of each, in metres. Seen from above a vehicle is its body, a
+// rectangle with rounded corners from `rear` behind the rear axle to
+// `front` ahead of the front one, two mirrors that stand out to
+// `mirrors` across, and four tyres at the ends of axles `track` wide.
+//
+// `circle` is the turning circle kerb to kerb: the diameter of the path
+// of the outer front wheel at full lock, from which the model works out
+// how far the front wheels steer. `rear_steer` is the most the rear axle
+// steers against the front at parking speed, in degrees (0: it does not).
+// `turns` are the steering wheel's from lock to lock.
+//
+// The Model 3 rows are the "Dimensions and Weights" tables of Tesla's
+// owner's manuals (that of the cars of 2017 to 2023, and the present
+// one); the others from specification sites that agree with each other.
+// Estimates, where nothing gave the number: `corner` (the radius of the
+// body's corners), `tyre` and `tyre_width`, `clearance`, `ticks` (the
+// wheel encoder's edges a wheel turn) of all; the track and turns of the
+// smart, the EQS and the Sprinter; how the EQS's overhangs are split;
+// the Sprinter's width with mirrors.
+table vehicles { name: text[30], length: f32, width: f32, mirrors: f32, wheelbase: f32,
+                 front: f32, rear: f32, track: f32, circle: f32, rear_steer: f32,
+                 turns: f32, corner: f32, tyre: f32, tyre_width: f32, clearance: f32,
+                 ticks: i32 } = [
+  { name: "Tesla Model 3 (2017-2023)", length: 4.694, width: 1.849, mirrors: 2.088,
+    wheelbase: 2.875, front: 0.841, rear: 0.978, track: 1.580, circle: 11.6,
+    rear_steer: 0.0, turns: 2.0, corner: 0.35, tyre: 0.668, tyre_width: 0.235,
+    clearance: 0.14, ticks: 96 },
+  { name: "Tesla Model 3 (2024)", length: 4.720, width: 1.850, mirrors: 2.089,
+    wheelbase: 2.875, front: 0.868, rear: 0.977, track: 1.584, circle: 11.7,
+    rear_steer: 0.0, turns: 2.14, corner: 0.35, tyre: 0.668, tyre_width: 0.235,
+    clearance: 0.138, ticks: 96 },
+  { name: "smart fortwo", length: 2.695, width: 1.663, mirrors: 1.893,
+    wheelbase: 1.873, front: 0.424, rear: 0.398, track: 1.45, circle: 6.95,
+    rear_steer: 0.0, turns: 3.4, corner: 0.25, tyre: 0.57, tyre_width: 0.175,
+    clearance: 0.13, ticks: 96 },
+  { name: "Mercedes EQS (rear steering)", length: 5.223, width: 1.926, mirrors: 2.125,
+    wheelbase: 3.210, front: 0.890, rear: 1.123, track: 1.67, circle: 10.9,
+    rear_steer: 10.0, turns: 2.1, corner: 0.35, tyre: 0.73, tyre_width: 0.255,
+    clearance: 0.13, ticks: 96 },
+  { name: "Mercedes Sprinter L3", length: 6.967, width: 2.020, mirrors: 2.345,
+    wheelbase: 4.325, front: 1.021, rear: 1.621, track: 1.72, circle: 14.4,
+    rear_steer: 0.0, turns: 3.9, corner: 0.15, tyre: 0.70, tyre_width: 0.235,
+    clearance: 0.17, ticks: 96 }
+]
+
+// The trailers that can be hitched (parking-SPEC.md, 5.5), one axle
+// each: `drawbar` from the hitch ball to the axle, the body a rectangle
+// `length` by `width` that ends `behind` the axle, the tyres `track`
+// apart. Estimates, of the sizes such trailers have: an unbraked box
+// trailer of 750 kg and a caravan for four.
+table trailers { name: text[30], drawbar: f32, length: f32, width: f32, behind: f32, track: f32 } = [
+  { name: "box trailer (750 kg)", drawbar: 2.45, length: 2.6, width: 1.5, behind: 1.3, track: 1.3 },
+  { name: "caravan", drawbar: 3.9, length: 5.2, width: 2.3, behind: 2.6, track: 2.0 }
+]

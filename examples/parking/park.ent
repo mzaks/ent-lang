@@ -1,0 +1,483 @@
+// A vehicle driven slowly among things it must not touch
+// (parking-SPEC.md, 5): where it is, how it moves when its wheels are
+// steered, and how near it is to the nearest thing. No window here:
+// show.ent draws it.
+//
+// A vehicle's pose is where the middle of its rear axle is, in metres,
+// and its heading in radians (0 along x, growing anticlockwise). At
+// parking speeds the tyres do not slip, so it goes where its wheels
+// point: with the front wheels at the angle `steer` and the rear ones,
+// where they steer, at `rho` against it, a step of `ds` is an arc
+//
+//   turn = ds cos(rho) (tan(steer) - tan(rho)) / wheelbase
+//   x += ds cos(heading + rho + turn/2) (1 - turn^2/24)
+//   y += ds sin(heading + rho + turn/2) (1 - turn^2/24)
+//   heading += turn
+//
+// (the arc's chord), which keeps a vehicle held at one angle on its
+// circle. What is asked of it is a speed and how far the wheel is
+// turned; it comes to them as fast as a car can.
+//
+// What it must not touch is `Edges`: segments, each of a height that
+// says which of its parts can touch it (`Height`). Every step the
+// vehicle finds how near its body and mirrors are to the nearest edge
+// and its tyres to the nearest kerb; a step that would touch is not
+// taken, and the vehicle stands.
+import math
+import vehicles
+
+// The step in seconds, and how many were taken.
+unique Sim { dt: f32, step: i64 }
+
+// How fast a vehicle may go while parking (10 km/h), how hard it speeds
+// up and brakes (m/s^2), and how long its wheels take from lock to lock.
+const CREEP: f32 = 2.8
+const SPEED_UP: f32 = 1.5
+const BRAKE: f32 = 4.0
+const LOCK_TO_LOCK: f32 = 1.6
+
+// How high a thing is, which says what of a vehicle can touch it: a
+// kerb only the tyres (the body goes over it), a low thing (a bollard, a
+// low wall) the body but not the mirrors, a tall one (a wall, a pillar,
+// another vehicle) both, and so one that hangs over the ground (a
+// lorry's tail lift, a barrier's arm).
+enum Height { Kerb, Low, Tall, Over }
+
+// What must not be touched: segments from (x0, y0) to (x1, y1). `plain`
+// is a face without anything to see on it (a white wall, glass), which
+// the sensors care about. `owner`: the number of the vehicle whose body
+// the edge is a side of, for the other vehicles of its place (-1: of
+// none); a vehicle does not touch or sense its own.
+buffer Edges { x0: f32, y0: f32, x1: f32, y1: f32, height: Height, plain: bool, owner: i32 } capacity 16384
+
+// The vehicles to place, a row each, which the program gives before
+// `lay()`: which row of `vehicles`, and the pose.
+buffer Fleet { kind: i32, x: f32, y: f32, heading: f32 } capacity 1024
+
+component Car { kind: row of vehicles, number: i32 } capacity 1024
+// The vehicles `lay()` placed, in the order of `Fleet`'s rows: for what
+// is to be made for each of them after (its sensors).
+buffer Cars { who: entity } capacity 1024
+// What is worked out of the vehicle's row once: the most its front
+// wheels steer (of the single-track model, radians), how far the rear
+// ones steer against them for each radian of that, and how fast the
+// wheels are turned (radians a second).
+component Chassis { lock: f32, back: f32, rate: f32 } capacity 1024
+// (In f64: ten thousand steps of a few millimetres and of a thousandth
+// of a radian are added to it, and in an f32 their rounding shows: a
+// vehicle is millimetres off its circle after 80 m.)
+component Pose { x: f64, y: f64, heading: f64 } capacity 1024
+// How fast it goes (m/s, below nought backwards) and where its front
+// wheels are (radians, above nought to the left); and what the last
+// step was: how far it went (`ds`, metres) and how far it turned
+// (`bend`, radians), both 0 where the step was not taken. Its wheels
+// and its gyroscope measure those.
+component Motion { v: f32, steer: f32, ds: f32, bend: f32 } capacity 1024
+// What is asked of it: a speed, and the wheel as a part of its lock
+// (-1 all to the right, 1 all to the left).
+component Ask { v: f32, steer: f32 } capacity 1024
+// How near it is, where it stands: the body and the mirrors to the
+// nearest edge they can touch (`gap`, and which edge), the tyres to the
+// nearest kerb (`kerb`). At or below nought it touches. `hits`: how
+// often it was stopped because the step would have touched; `stopped`,
+// that the last step was not taken.
+component Near { gap: f32, edge: i32, kerb: f32, hits: i32, stopped: bool } capacity 1024
+// The edges of the place a vehicle is in: `count` rows of `Edges` from
+// `first` (`whole()`: all there are). Where many vehicles are in one
+// place, each is four edges to the others, at `body` (`rows`: 4, or 0
+// where it is alone), which `bodies()` keeps where the vehicle is.
+component Place { first: i32, count: i32, body: i32, rows: i32 } capacity 1024
+// The trailer it pulls: which row of `trailers` (-1: none), its heading
+// (the way its drawbar points; its axle is `drawbar` behind the hitch
+// ball, which is `hitch_of` behind the vehicle's rear axle), and how
+// near its body and its tyres are to the nearest edge and kerb.
+// `jack`: the last step was not taken because the trailer would have
+// stood more than `JACK` across the vehicle (jackknifed).
+component Trailer { kind: i32, heading: f64, gap: f32, kerb: f32, jack: bool } capacity 1024
+// Where it is to stand: the slot, a box by its middle, its heading
+// (radians) and its size, headed along it either way, or only as the
+// slot is where `turned` says so; and whether it is parked there
+// (scenes.ent's `judge()`).
+component Goal { x: f32, y: f32, heading: f32, length: f32, width: f32, turned: bool,
+                 parked: bool } capacity 1024
+
+// The most the front wheels steer. At full lock the outer front wheel
+// goes round a circle of the diameter `circle`. The turning centre is
+// `r` beside the vehicle's axis and, where the rear wheels steer by
+// their most, r tan(rear_steer) ahead of the rear axle (else beside it):
+//   (r + track/2)^2 + (wheelbase - r k)^2 = (circle/2)^2
+fn lock_of(car: row of vehicles) -> f32 {
+  let half = car.circle * 0.5
+  let side = car.track * 0.5
+  let k = tan(radians(car.rear_steer))
+  let qa = 1.0 + k * k
+  let qb = 2.0 * (side - car.wheelbase * k)
+  let qc = side * side + car.wheelbase * car.wheelbase - half * half
+  let r = (sqrt(qb * qb - 4.0 * qa * qc) - qb) / (2.0 * qa)
+  atan((car.wheelbase - k * r) / r)
+}
+
+// How far a point is from the box from (x0, y0) to (x1, y1), which lies
+// along the axes; 0 in it.
+fn point_box(px: f32, py: f32, x0: f32, y0: f32, x1: f32, y1: f32) -> f32 {
+  let dx = max(max(x0 - px, 0.0), px - x1)
+  let dy = max(max(y0 - py, 0.0), py - y1)
+  sqrt(dx * dx + dy * dy)
+}
+
+// How far a point is from the segment from a to b.
+fn point_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+  let ux = bx - ax
+  let uy = by - ay
+  let uu = ux * ux + uy * uy
+  var t = 0.0
+  if uu > 0.0 { t = clamp(((px - ax) * ux + (py - ay) * uy) / uu, 0.0, 1.0) }
+  let dx = px - (ax + t * ux)
+  let dy = py - (ay + t * uy)
+  sqrt(dx * dx + dy * dy)
+}
+
+// Whether the segment from a to b has a point in the box: what is left
+// of it between the box's sides across, and then between those along.
+fn crosses(ax: f32, ay: f32, bx: f32, by: f32, x0: f32, y0: f32, x1: f32, y1: f32) -> bool {
+  var from = 0.0
+  var to = 1.0
+  var out = false
+  let dx = bx - ax
+  let dy = by - ay
+  if dx == 0.0 {
+    if ax < x0 || ax > x1 { out = true }
+  } else {
+    let p = (x0 - ax) / dx
+    let q = (x1 - ax) / dx
+    from = max(from, min(p, q))
+    to = min(to, max(p, q))
+  }
+  if dy == 0.0 {
+    if ay < y0 || ay > y1 { out = true }
+  } else {
+    let p = (y0 - ay) / dy
+    let q = (y1 - ay) / dy
+    from = max(from, min(p, q))
+    to = min(to, max(p, q))
+  }
+  !out && from <= to
+}
+
+// How far the segment from a to b is from that box: 0 where it has a
+// point in it, else the least of its ends' distances to the box and the
+// box's corners' to it (two things with straight sides that do not meet
+// are nearest at a corner of one).
+fn segment_box(ax: f32, ay: f32, bx: f32, by: f32, x0: f32, y0: f32, x1: f32, y1: f32) -> f32 {
+  if crosses(ax, ay, bx, by, x0, y0, x1, y1) { 0.0 } else {
+    let ends = min(point_box(ax, ay, x0, y0, x1, y1), point_box(bx, by, x0, y0, x1, y1))
+    let low = min(point_segment(x0, y0, ax, ay, bx, by), point_segment(x1, y0, ax, ay, bx, by))
+    let high = min(point_segment(x0, y1, ax, ay, bx, by), point_segment(x1, y1, ax, ay, bx, by))
+    min(ends, min(low, high))
+  }
+}
+
+// How far that segment, in the vehicle's frame, is from a tyre: a box
+// `long` by `wide` with its middle at (cx, cy), turned by `angle`.
+fn segment_tyre(ax: f32, ay: f32, bx: f32, by: f32, cx: f32, cy: f32, angle: f32,
+                long: f32, wide: f32) -> f32 {
+  let c = cos(angle)
+  let s = sin(angle)
+  let px = (ax - cx) * c + (ay - cy) * s
+  let py = (ay - cy) * c - (ax - cx) * s
+  let qx = (bx - cx) * c + (by - cy) * s
+  let qy = (by - cy) * c - (bx - cx) * s
+  segment_box(px, py, qx, qy, -0.5 * long, -0.5 * wide, 0.5 * long, 0.5 * wide)
+}
+
+// Where along the vehicle its mirrors are, from the rear axle, and how
+// long they are.
+fn mirror_from(car: row of vehicles) -> f32 { car.wheelbase * 0.75 - 0.1 }
+const MIRROR_LONG: f32 = 0.2
+
+// How near a vehicle of that pose, with its front wheels at `steer` and
+// its rear ones at `rho`, is to the edges: its body and mirrors to the
+// nearest they can touch, which edge that is (-1: none), and its tyres
+// to the nearest kerb. Where there is nothing, 1000.
+// `edges`: those of its place, and the edge's number is among them;
+// `me`: the vehicle's number, whose own edges are left out.
+fn clearance(edges: Edges[], me: i32, car: row of vehicles, x: f32, y: f32, heading: f32,
+             steer: f32, rho: f32) -> (f32, i32, f32) {
+  var gap = 1000.0
+  var edge = -1
+  var kerb = 1000.0
+  let c = cos(heading)
+  let s = sin(heading)
+  let round = car.corner
+  let half = car.width * 0.5
+  let back = 0.0 - car.rear
+  let nose = car.wheelbase + car.front
+  let m0 = mirror_from(car)
+  let m1 = m0 + MIRROR_LONG
+  let out = car.mirrors * 0.5
+  let side = car.track * 0.5
+  for i in 0..len(edges) {
+    // The edge in the vehicle's frame: x ahead, y to the left.
+    let ax = (edges[i].x0 - x) * c + (edges[i].y0 - y) * s
+    let ay = (edges[i].y0 - y) * c - (edges[i].x0 - x) * s
+    let bx = (edges[i].x1 - x) * c + (edges[i].y1 - y) * s
+    let by = (edges[i].y1 - y) * c - (edges[i].x1 - x) * s
+    let height = edges[i].height
+    if edges[i].owner == me {
+    } else if height == Height.Kerb {
+      let rear = min(segment_tyre(ax, ay, bx, by, 0.0, side, rho, car.tyre, car.tyre_width),
+                     segment_tyre(ax, ay, bx, by, 0.0, 0.0 - side, rho, car.tyre, car.tyre_width))
+      let fore = min(segment_tyre(ax, ay, bx, by, car.wheelbase, side, steer, car.tyre,
+                                  car.tyre_width),
+                     segment_tyre(ax, ay, bx, by, car.wheelbase, 0.0 - side, steer, car.tyre,
+                                  car.tyre_width))
+      kerb = min(kerb, min(rear, fore))
+    } else {
+      // The body: the box smaller by its corners' radius, and the
+      // radius off the distance to that.
+      var d = segment_box(ax, ay, bx, by, back + round, round - half, nose - round,
+                          half - round) - round
+      if height != Height.Low {
+        d = min(d, segment_box(ax, ay, bx, by, m0, half, m1, out))
+        d = min(d, segment_box(ax, ay, bx, by, m0, 0.0 - out, m1, 0.0 - half))
+      }
+      if d < gap {
+        gap = d
+        edge = i
+      }
+    }
+  }
+  (gap, edge, kerb)
+}
+
+// The four edges of a box by its middle, its heading and its size.
+proc box(edges: mut Edges, x: f32, y: f32, heading: f32, length: f32, width: f32,
+         height: Height, plain: bool) {
+  let c = cos(heading) * length * 0.5
+  let s = sin(heading) * length * 0.5
+  let u = 0.0 - sin(heading) * width * 0.5
+  let v = cos(heading) * width * 0.5
+  edges += { x0: x - c - u, y0: y - s - v, x1: x + c - u, y1: y + s - v, height: height,
+             plain: plain, owner: -1 }
+  edges += { x0: x + c - u, y0: y + s - v, x1: x + c + u, y1: y + s + v, height: height,
+             plain: plain, owner: -1 }
+  edges += { x0: x + c + u, y0: y + s + v, x1: x - c + u, y1: y - s + v, height: height,
+             plain: plain, owner: -1 }
+  edges += { x0: x - c + u, y0: y - s + v, x1: x - c - u, y1: y - s - v, height: height,
+             plain: plain, owner: -1 }
+}
+
+// A box's four edges anew, where they are among `edges`.
+proc box_at(edges: mut Edges[], first: i32, x: f32, y: f32, heading: f32, length: f32, width: f32) {
+  let c = cos(heading) * length * 0.5
+  let s = sin(heading) * length * 0.5
+  let u = 0.0 - sin(heading) * width * 0.5
+  let v = cos(heading) * width * 0.5
+  for k in 0..4 {
+    let a = if k == 0 || k == 3 { -1.0 } else { 1.0 }
+    let b = if k < 2 { -1.0 } else { 1.0 }
+    let a1 = if k < 2 { 1.0 } else { -1.0 }
+    let b1 = if k == 0 || k == 3 { -1.0 } else { 1.0 }
+    edges[first + k].x0 = x + a * c + b * u
+    edges[first + k].y0 = y + a * s + b * v
+    edges[first + k].x1 = x + a1 * c + b1 * u
+    edges[first + k].y1 = y + a1 * s + b1 * v
+  }
+}
+
+// How far behind a vehicle's rear axle its hitch ball is, and the most
+// a trailer can stand across it (60 degrees: then its corner is at the
+// vehicle's).
+fn hitch_of(car: row of vehicles) -> f32 { car.rear + 0.08 }
+const JACK: f32 = 1.0472
+
+// How near a trailer with its axle's middle at (x, y), headed
+// `heading`, is to the edges: its body to the nearest it can touch
+// (all but kerbs), its tyres to the nearest kerb. As `clearance`.
+fn trailer_clearance(edges: Edges[], me: i32, tr: row of trailers, x: f32, y: f32,
+                     heading: f32) -> (f32, f32) {
+  var gap = 1000.0
+  var kerb = 1000.0
+  let c = cos(heading)
+  let s = sin(heading)
+  let half = tr.width * 0.5
+  let back = 0.0 - tr.behind
+  let side = tr.track * 0.5
+  for i in 0..len(edges) {
+    let ax = (edges[i].x0 - x) * c + (edges[i].y0 - y) * s
+    let ay = (edges[i].y0 - y) * c - (edges[i].x0 - x) * s
+    let bx = (edges[i].x1 - x) * c + (edges[i].y1 - y) * s
+    let by = (edges[i].y1 - y) * c - (edges[i].x1 - x) * s
+    if edges[i].owner == me {
+    } else if edges[i].height == Height.Kerb {
+      kerb = min(kerb, min(segment_tyre(ax, ay, bx, by, 0.0, side, 0.0, 0.6, 0.2),
+                           segment_tyre(ax, ay, bx, by, 0.0, 0.0 - side, 0.0, 0.6, 0.2)))
+    } else {
+      gap = min(gap, segment_box(ax, ay, bx, by, back, 0.0 - half, back + tr.length, half))
+    }
+  }
+  (gap, kerb)
+}
+
+// A trailer's heading after its hitch ball went by (dx, dy): its axle
+// does not slip sideways, so it turns by what of that is across it,
+// over its drawbar (at the heading it has halfway).
+fn trailed(heading: f64, dx: f64, dy: f64, drawbar: f64) -> f64 {
+  let first = (dy * cos64(heading) - dx * sin64(heading)) / drawbar
+  let mid = heading + first * 0.5
+  var next = heading + (dy * cos64(mid) - dx * sin64(mid)) / drawbar
+  if next > pi64() { next -= tau64() } else if next <= 0.0 - pi64() { next += tau64() }
+  next
+}
+
+// For every row of `Fleet` a vehicle, standing, its wheels straight.
+system lay() {
+  for i in 0..len(Fleet) {
+    let kind = vehicles[Fleet[i].kind]
+    let lock = lock_of(kind)
+    let car = spawn { Car { kind: kind, number: i },
+            Chassis { lock: lock, back: radians(kind.rear_steer) / lock,
+                      rate: 2.0 * lock / LOCK_TO_LOCK },
+            Pose { x: Fleet[i].x as f64, y: Fleet[i].y as f64, heading: Fleet[i].heading as f64 },
+            Motion { v: 0.0, steer: 0.0, ds: 0.0, bend: 0.0 }, Ask { v: 0.0, steer: 0.0 },
+            Near { gap: 1000.0, edge: -1, kerb: 1000.0, hits: 0, stopped: false },
+            Place { first: 0, count: 0, body: 0, rows: 0 },
+            Trailer { kind: -1, heading: Fleet[i].heading as f64, gap: 1000.0, kerb: 1000.0, jack: false },
+            Goal { x: 0.0, y: 0.0, heading: 0.0, length: 0.0, width: 0.0, turned: false,
+                   parked: false } }
+    Cars += { who: car }
+  }
+}
+
+// Every vehicle's place is all the edges there are.
+system whole() {
+  let count = len(Edges)
+  for pl: mut Place {
+    pl.first = 0
+    pl.count = count
+  }
+}
+
+// The vehicles that are edges to others, where they are now: the body's
+// box (before every step of theirs).
+system bodies() {
+  for c: Car, p: Pose, pl: Place, w: mut Edges[pl.body, pl.rows] {
+    if len(w) == 4 {
+      let middle = (c.kind.wheelbase + c.kind.front - c.kind.rear) * 0.5
+      let heading = p.heading as f32
+      box_at(w, 0, p.x as f32 + middle * cos(heading), p.y as f32 + middle * sin(heading), heading,
+             c.kind.length, c.kind.width)
+    }
+  }
+}
+
+// How near every vehicle is where it stands: after the vehicles or the
+// edges were placed anew.
+system measure() {
+  for c: Car, ch: Chassis, p: Pose, m: Motion, n: mut Near, tr: mut Trailer, pl: Place,
+      e: Edges[pl.first, pl.count] {
+    tr.gap = 1000.0
+    tr.kerb = 1000.0
+    tr.jack = false
+    if tr.kind >= 0 {
+      let t = trailers[tr.kind]
+      let reach = (hitch_of(c.kind)) as f64
+      let ax = p.x - reach * cos64(p.heading) - t.drawbar as f64 * cos64(tr.heading)
+      let ay = p.y - reach * sin64(p.heading) - t.drawbar as f64 * sin64(tr.heading)
+      let (tgap, tkerb) = trailer_clearance(e, c.number, t, ax as f32, ay as f32, tr.heading as f32)
+      tr.gap = tgap
+      tr.kerb = tkerb
+    }
+    let (gap, edge, kerb) = clearance(e, c.number, c.kind, p.x as f32, p.y as f32, p.heading as f32,
+                                      m.steer, 0.0 - ch.back * m.steer)
+    n.gap = gap
+    n.edge = if edge < 0 { -1 } else { pl.first + edge }
+    n.kerb = kerb
+    n.stopped = false
+  }
+}
+
+// A step: the wheels turn towards what is asked, the vehicle comes
+// nearer the speed asked, and goes on along its arc, unless it would
+// touch something there (and be no further from it than it is): then it
+// stands where it is.
+system drive() {
+  let dt = Sim.dt
+  for c: Car, ch: Chassis, p: mut Pose, m: mut Motion, a: Ask, n: mut Near, tr: mut Trailer, pl: Place,
+      e: Edges[pl.first, pl.count] {
+    let turn = ch.rate * dt
+    let steer = m.steer + clamp(clamp(a.steer, -1.0, 1.0) * ch.lock - m.steer, 0.0 - turn, turn)
+    let more = clamp(a.v, 0.0 - CREEP, CREEP) - m.v
+    let most = (if m.v * more >= 0.0 { SPEED_UP } else { BRAKE }) * dt
+    let v = m.v + clamp(more, 0.0 - most, most)
+    let rho = 0.0 - ch.back * steer
+    let ds = v * dt
+    let bend = ds * cos(rho) * (tan(steer) - tan(rho)) / c.kind.wheelbase
+    let chord = (ds * (1.0 - bend * bend / 24.0)) as f64
+    let way = p.heading + (rho + bend * 0.5) as f64
+    let x = p.x + chord * cos64(way)
+    let y = p.y + chord * sin64(way)
+    var heading = p.heading + bend as f64
+    if heading > pi64() { heading -= tau64() } else if heading <= 0.0 - pi64() { heading += tau64() }
+    let (gap, edge, kerb) = clearance(e, c.number, c.kind, x as f32, y as f32, heading as f32, steer, rho)
+    let near = min(gap, kerb)
+    m.steer = steer
+    // The trailer a step on: where its hitch ball goes, it follows. The
+    // step is not taken either where the trailer would touch (and be
+    // no further from that than it is), or would stand further across
+    // the vehicle than it can and than it does.
+    var towed = tr.heading
+    var tgap = 1000.0
+    var tkerb = 1000.0
+    var held = false
+    var jack = false
+    if tr.kind >= 0 {
+      let t = trailers[tr.kind]
+      let reach = (hitch_of(c.kind)) as f64
+      let hx = x - reach * cos64(heading)
+      let hy = y - reach * sin64(heading)
+      towed = trailed(tr.heading, hx - (p.x - reach * cos64(p.heading)), hy - (p.y - reach * sin64(p.heading)),
+                      t.drawbar as f64)
+      let (g, k) = trailer_clearance(e, c.number, t, (hx - t.drawbar as f64 * cos64(towed)) as f32,
+                                     (hy - t.drawbar as f64 * sin64(towed)) as f32, towed as f32)
+      tgap = g
+      tkerb = k
+      let across = abs(sin64(heading - towed) as f32)
+      let ahead = cos64(heading - towed) as f32
+      let was = abs(sin64(p.heading - tr.heading) as f32)
+      jack = (across > sin(JACK) || ahead < 0.0) && across >= was && ds != 0.0
+      held = jack || (min(g, k) <= 0.0 && min(g, k) <= min(tr.gap, tr.kerb) && ds != 0.0)
+    }
+    tr.jack = jack
+    if held || (near <= 0.0 && near <= min(n.gap, n.kerb) && ds != 0.0) {
+      m.v = 0.0
+      m.ds = 0.0
+      m.bend = 0.0
+      if !n.stopped { n.hits += 1 }
+      n.stopped = true
+    } else {
+      m.v = v
+      m.ds = ds
+      m.bend = bend
+      p.x = x
+      p.y = y
+      p.heading = heading
+      n.gap = gap
+      n.edge = if edge < 0 { -1 } else { pl.first + edge }
+      n.kerb = kerb
+      n.stopped = false
+      tr.heading = towed
+      tr.gap = tgap
+      tr.kerb = tkerb
+    }
+  }
+  Sim.step += 1
+}
+
+schedule setup() {
+  lay()
+  whole()
+  measure()
+}
+
+schedule step() { drive() }

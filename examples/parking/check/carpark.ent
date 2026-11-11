@@ -1,0 +1,102 @@
+// Many vehicles parking at once (parking-SPEC.md, 9: scene 13): a car
+// park of `Lot.aisles` aisles with `Lot.per` vehicles driving in each,
+// every one with Tesla's cameras, their errors on, and a parker of its
+// own. For each vehicle a line: what its parker came to, whether it is
+// parked by the truth, how often it touched something, after how many
+// seconds it was done and how often it searched. The same on one core
+// and on all.
+import console
+import math
+import vehicles
+import park
+import scenes
+import sense
+import believe
+import parker
+import lot
+
+unique Run { from: i64, busy: i32, show: i32, cars: i32 }
+// When a vehicle's parker was done (the step; 0: not yet).
+component Clock { done: i64 } capacity 1024
+
+world {
+  Sim.dt = 1.0 / 120.0
+  Sensing.seed = 2026
+  Sensing.errors = true
+  Lot.aisles = 2
+  Lot.per = 3
+  Lot.apart = 12.0
+  for i in 0..6 { Fleet += { kind: 1, x: 0.0, y: 0.0, heading: 0.0 } }
+}
+
+system begin() {
+  for e, c: Car { e.add(Clock { done: 0 }) }
+  Run.from = Sim.step
+  Run.cars = len(Cars)
+}
+
+// A second of looking round before they start, all at once.
+system look_first() {
+  let now = Sim.step - Run.from == 120
+  for p: mut Parker where now { p.phase = Phase.Plan }
+}
+
+// Who is done sleeps: it senses no more, and stands where it is, a
+// thing to the others.
+system tally() {
+  let step = Sim.step
+  Run.busy = 0
+  for p: Parker, k: mut Clock, ey: mut Eyes {
+    if p.phase == Phase.Done || p.phase == Phase.GaveUp {
+      if k.done == 0 { k.done = step }
+      ey.asleep = true
+    } else {
+      Run.busy += 1
+    }
+  }
+}
+
+system report() {
+  let which = Run.show
+  for c: Car, n: Near, p: Parker, g: Goal, k: Clock where c.number == which {
+    let seconds = (k.done - Run.from) / 120
+    put("vehicle {c.number + 1} ({c.kind.name}): {p.phase}, parked {g.parked}, touched {n.hits}, {seconds} s, {p.searches} searches")
+  }
+  Run.show += 1
+}
+
+schedule start() {
+  lot()
+  bodies()
+  measure()
+  recall()
+  begin()
+}
+
+schedule go() {
+  look_first()
+  bodies()
+  park_step()
+  step()
+  reckon()
+  sense() run_if Sim.step % 4 == 0
+  chart() run_if Sim.step % 4 == 0
+  read() run_if Sim.step % 4 == 0
+  judge()
+  tally()
+}
+
+schedule finish() { report() }
+schedule sensors() {
+  fit()
+  minds()
+  minds_park()
+}
+
+main {
+  setup()
+  sensors()
+  start()
+  loop { go() } until Sim.step >= 120 * 240 || (Run.busy == 0 && Sim.step > 240)
+  loop { finish() } until Run.show == Run.cars
+}

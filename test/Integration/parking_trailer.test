@@ -1,0 +1,37 @@
+// A trailer behind a vehicle (examples/parking/check/trailer.ent,
+// parking-SPEC.md check 6). Forwards round a circle it comes to stand
+// across the vehicle by what the formula gives (within 10 millionths of
+// a radian) and its axle goes round the circle it gives (within a tenth
+// of a millimetre). Backwards with the wheels straight it does not
+// stay behind: from one degree across it is jackknifed at 60 degrees
+// after 10 m (the box trailer) or 16 m (the caravan), the vehicle is
+// stopped, and forwards again the trailer comes straight. With the
+// backing assist's knob (tow.ent) the car steers so that the trailer
+// comes to the angle asked for and stays there for 90 m, also where
+// the rear wheels steer; and a trailer backed at a wall stops short of
+// it. The same lines on one core and on many threads.
+// RUN: %ent run -I %S/../../examples/parking %S/../../examples/parking/check/trailer.ent 2>/dev/null > %t.one
+// RUN: env ENT_PARALLEL_MIN=1 OMP_NUM_THREADS=6 %ent run --parallel -I %S/../../examples/parking %S/../../examples/parking/check/trailer.ent 2>/dev/null > %t.all
+// RUN: diff %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+
+// CHECK: Tesla Model 3 (2024), box trailer (750 kg), wheels straight: jackknifed true at 60 deg after 102 dm, stopped true
+// CHECK: Tesla Model 3 (2024), caravan, wheels straight: jackknifed true at 60 deg after 163 dm, stopped true
+// CHECK: Tesla Model 3 (2024), box trailer (750 kg), knob at its middle: 0 hundredths of a degree across after 90 m, jackknifed false
+// CHECK: Tesla Model 3 (2024), caravan, knob at its middle: 0 hundredths of a degree across after 90 m, jackknifed false
+// CHECK: Mercedes EQS (rear steering), box trailer (750 kg), knob at its middle: 0 hundredths of a degree across after 90 m, jackknifed false
+// CHECK: Mercedes Sprinter L3, caravan, knob at its middle: 0 hundredths of a degree across after 90 m, jackknifed false
+// CHECK: Tesla Model 3 (2024), box trailer (750 kg), knob halfway: wanted 189 tenths of a degree, 0 hundredths off after 90 m, jackknifed false
+// CHECK: Tesla Model 3 (2024), caravan, knob halfway: wanted 240 tenths of a degree, 0 hundredths off after 90 m, jackknifed false
+// CHECK: Mercedes EQS (rear steering), box trailer (750 kg), knob halfway: wanted 163 tenths of a degree, 0 hundredths off after 90 m, jackknifed false
+// CHECK: Mercedes Sprinter L3, caravan, knob halfway: wanted 240 tenths of a degree, 0 hundredths off after 90 m, jackknifed false
+// CHECK: Tesla Model 3 (2024), box trailer (750 kg), at a wall: the trailer 0 mm from it, the vehicle 383 cm, stopped true, jackknifed false
+// CHECK: Tesla Model 3 (2024), caravan, at a wall: the trailer 0 mm from it, the vehicle 657 cm, stopped true, jackknifed false
+// CHECK: Tesla Model 3 (2017-2023), box trailer (750 kg), round: across off by {{[0-9]}} millionths of a radian, its circle by 0 tenths of a millimetre
+// CHECK: Tesla Model 3 (2017-2023), caravan, round: across off by {{[0-9]}} millionths of a radian, its circle by 0 tenths of a millimetre
+// CHECK: smart fortwo, box trailer (750 kg), round: across off by {{[0-9]}} millionths of a radian, its circle by 0 tenths of a millimetre
+// CHECK: smart fortwo, caravan, round: across off by {{[0-9]}} millionths of a radian, its circle by 0 tenths of a millimetre
+// CHECK: Mercedes Sprinter L3, box trailer (750 kg), round: across off by {{[0-9]}} millionths of a radian, its circle by 0 tenths of a millimetre
+// CHECK: Mercedes Sprinter L3, caravan, round: across off by {{[0-9]}} millionths of a radian, its circle by 0 tenths of a millimetre
+// CHECK: Tesla Model 3 (2024), box trailer (750 kg), forwards again: 0 hundredths of a degree across, jackknifed false
+// CHECK: Tesla Model 3 (2024), caravan, forwards again: 0 hundredths of a degree across, jackknifed false

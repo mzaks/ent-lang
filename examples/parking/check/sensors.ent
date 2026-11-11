@@ -1,0 +1,118 @@
+// What the sensors of a Model 3 (of 2017 to 2023) report of things at
+// distances known by hand (parking-SPEC.md, check 3), without errors,
+// each vehicle 100 m from the next and with the suite it says. Its front
+// end is 3.716 m ahead of the rear axle, the windscreen camera 1.878 m
+// behind that. For each a line: the least range an ultrasonic sensor
+// heard and how many said "stop", then the least range a camera saw a
+// tall thing at, a low one, a kerb and one that hangs over, in
+// millimetres (-1: none).
+//
+//  Ultrasonic:
+//   0  a wall 1 m ahead: 1000
+//   1  a wall 0.2 m ahead: nearer than they range, the two that face it
+//      say stop (the outer two, further back and aslant, hear 25 cm)
+//   2  a post 5 cm thick 1.5 m ahead: not heard
+//   3  the same 0.8 m ahead: heard
+//   4  a kerb 1 m ahead: below the cone
+//   5  a thing that hangs over, 1 m ahead: above it
+//  Cameras:
+//   6  a wall 5 m ahead: 6878 from the windscreen
+//   7  a low wall 0.3 m ahead: hidden by the bonnet (it would have to be
+//      2443 from the camera, and is 2178)
+//   8  the same, with the bumper camera: 300
+//   9  a kerb 3 m ahead: 4878
+//  10  a kerb 1 m ahead: hidden (a kerb must be 3474 away)
+//  11  a low wall 3 m ahead behind a tall one 2 m ahead: only the tall
+//  12  a plain wall 5 m ahead, 6 m wide: seen at its ends alone, 7.4 m off
+import console
+import math
+import vehicles
+import park
+import sense
+
+component Read { heard: f32, stops: i32, tall: f32, low: f32, kerb: f32, over: f32 } capacity 64
+
+table cases { suite: i32, ahead: f32, half: f32, height: Height, plain: bool, thick: f32 } = [
+  { suite: 0, ahead: 1.0, half: 3.0, height: Height.Tall, plain: false, thick: 0.0 },
+  { suite: 0, ahead: 0.2, half: 3.0, height: Height.Tall, plain: false, thick: 0.0 },
+  { suite: 0, ahead: 1.5, half: 0.025, height: Height.Tall, plain: false, thick: 0.05 },
+  { suite: 0, ahead: 0.8, half: 0.025, height: Height.Tall, plain: false, thick: 0.05 },
+  { suite: 0, ahead: 1.0, half: 3.0, height: Height.Kerb, plain: false, thick: 0.0 },
+  { suite: 0, ahead: 1.0, half: 3.0, height: Height.Over, plain: false, thick: 0.0 },
+  { suite: 1, ahead: 5.0, half: 3.0, height: Height.Tall, plain: false, thick: 0.0 },
+  { suite: 1, ahead: 0.3, half: 1.0, height: Height.Low, plain: false, thick: 0.0 },
+  { suite: 2, ahead: 0.3, half: 1.0, height: Height.Low, plain: false, thick: 0.0 },
+  { suite: 1, ahead: 3.0, half: 3.0, height: Height.Kerb, plain: false, thick: 0.0 },
+  { suite: 1, ahead: 1.0, half: 1.5, height: Height.Kerb, plain: false, thick: 0.0 },
+  { suite: 1, ahead: 3.0, half: 3.0, height: Height.Low, plain: false, thick: 0.0 },
+  { suite: 1, ahead: 5.0, half: 3.0, height: Height.Tall, plain: true, thick: 0.0 }
+]
+
+world {
+  Sim.dt = 1.0 / 120.0
+  for i, case in cases {
+    let x = 100.0 * i as f32
+    Fleet += { kind: 0, x: x, y: 0.0, heading: 0.0 }
+    let at = x + 3.716 + case.ahead
+    if case.thick > 0.0 {
+      box(Edges, at + case.thick * 0.5, 0.2, 0.0, case.thick, case.thick, case.height, case.plain)
+    } else {
+      Edges += { x0: at, y0: 0.0 - case.half, x1: at, y1: case.half, height: case.height, plain: case.plain, owner: -1 }
+    }
+  }
+  // 11: the tall wall before the low one.
+  Edges += { x0: 1105.716, y0: -3.0, x1: 1105.716, y1: 3.0, height: Height.Tall, plain: false, owner: -1 }
+}
+
+system suit() {
+  for c: Car, s: mut Suite { s.which = cases[c.number].suite }
+  for e, c: Car { e.add(Read { heard: 1000.0, stops: 0, tall: 1000.0, low: 1000.0, kerb: 1000.0, over: 1000.0 }) }
+}
+
+system gather() {
+  for s: Sensor, w: Rays[s.first, s.rows] {
+    var heard = 1000.0
+    var stops = 0
+    var tall = 1000.0
+    var low = 1000.0
+    var kerb = 1000.0
+    var over = 1000.0
+    for k in 0..len(w) {
+      // (Not what is a neighbour's, 100 m on.)
+      let sight = if w[k].range < 50.0 { w[k].sight } else { Sight.Nothing }
+      if sight == Sight.Heard { heard = min(heard, w[k].range) }
+      if sight == Sight.Stop { stops += 1 }
+      if sight == Sight.Tall { tall = min(tall, w[k].range) }
+      if sight == Sight.Low { low = min(low, w[k].range) }
+      if sight == Sight.Kerb { kerb = min(kerb, w[k].range) }
+      if sight == Sight.Over { over = min(over, w[k].range) }
+    }
+    Read(s.car).heard min= heard
+    Read(s.car).stops += stops
+    Read(s.car).tall min= tall
+    Read(s.car).low min= low
+    Read(s.car).kerb min= kerb
+    Read(s.car).over min= over
+  }
+}
+
+fn mm(range: f32) -> i32 { if range >= 1000.0 { -1 } else { (range * 1000.0 + 0.5) as i32 } }
+
+system report() {
+  for c: Car, r: Read {
+    put("car {c.number} heard {mm(r.heard)} stops {r.stops} tall {mm(r.tall)} low {mm(r.low)} kerb {mm(r.kerb)} over {mm(r.over)}")
+  }
+}
+
+schedule check() {
+  fit()
+  suit()
+  sense()
+  gather()
+  report()
+}
+
+main {
+  setup()
+  check()
+}

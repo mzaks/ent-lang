@@ -1,0 +1,33 @@
+// Every place of scenes.ent with a Model 3 (2024) at its start: how
+// near it is there, in centimetres. No place starts with the vehicle
+// touching something.
+import console
+import math
+import vehicles
+import park
+import scenes
+
+world {
+  Sim.dt = 1.0 / 120.0
+  Fleet += { kind: 1, x: 0.0, y: 0.0, heading: 0.0 }
+  Stage.kind = 1
+}
+
+system report() {
+  for n: Near {
+    let free = n.gap > 0.2 && n.kerb > 0.2
+    put("place {Stage.scene + 1} of {SINGLE}: gap {(n.gap * 100.0) as i32} cm, {len(Edges)} edges, free {free}")
+  }
+  Stage.scene += 1
+}
+
+schedule one() {
+  stage()
+  measure()
+  report()
+}
+
+main {
+  setup()
+  loop { one() } until Stage.scene == SINGLE
+}

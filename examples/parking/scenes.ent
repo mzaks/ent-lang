@@ -1,0 +1,441 @@
+// The places to park in (parking-SPEC.md, 9): each a row of `scenes`
+// and the rows of `things` that have its number. A thing is a box by
+// its middle, its heading (degrees) and its size, of a height
+// (park.ent's `Height`); `stage()` makes the scene chosen of them and
+// stands the vehicle chosen at its start, and `judge()` says whether it
+// is parked: standing, all of its body in the slot, and headed along it.
+//
+// What moves in a scene is in `movers`: `watch_car()` and `move()` go
+// before every step of the vehicle.
+//
+// These are places for one vehicle (the first); the slot is its `Goal`
+// and all the edges are its `Place` (park.ent). The last row of
+// `scenes` is the car park of many, which lot.ent makes.
+//
+// Metres; x to the right and y up, as park.ent has them.
+import math
+import vehicles
+import park
+
+// A scene: where the vehicle starts (its rear axle's middle and its
+// heading, degrees), the slot (a box by its middle, heading and size)
+// that it is to stand in, headed along it either way, or only as the
+// slot is where `turned` says so, and what of the place is shown: so
+// many metres across, round (cx, cy). `dark`: a place without light,
+// where cameras see worse. `hitch`: the trailer it comes with (a row of
+// `trailers` and one; 0: none), which is then what is to stand in the
+// slot.
+table scenes { name: text[40], x: f32, y: f32, heading: f32,
+               slot_x: f32, slot_y: f32, slot_heading: f32, slot_length: f32,
+               slot_width: f32, turned: bool, cx: f32, cy: f32, across: f32, dark: bool,
+               hitch: i32 } = [
+  { name: "Parallel, a gap of 6.2 m at the kerb", x: 4.2, y: 3.35, heading: 0.0,
+    slot_x: 0.0, slot_y: 1.1, slot_heading: 0.0, slot_length: 6.2, slot_width: 2.2,
+    turned: false, cx: 0.0, cy: 3.2, across: 24.0, dark: false, hitch: 0 },
+  { name: "A bay between two cars, 2.5 m wide", x: -7.0, y: 7.2, heading: 0.0,
+    slot_x: 0.0, slot_y: 2.5, slot_heading: 90.0, slot_length: 5.0, slot_width: 2.5,
+    turned: false, cx: 0.0, cy: 5.0, across: 24.0, dark: false, hitch: 0 },
+  { name: "A garage, its door 2.4 m wide", x: -7.5, y: 2.2, heading: 0.0,
+    slot_x: 0.0, slot_y: 8.2, slot_heading: 90.0, slot_length: 6.0, slot_width: 2.8,
+    turned: false, cx: 0.0, cy: 5.4, across: 26.0, dark: false, hitch: 0 },
+  { name: "A dead end 7 m wide: turn round", x: 0.8, y: 2.0, heading: 0.0,
+    slot_x: 4.0, slot_y: 5.0, slot_heading: 180.0, slot_length: 9.0, slot_width: 3.6,
+    turned: true, cx: 6.0, cy: 3.5, across: 22.0, dark: false, hitch: 0 },
+  // The places made to fool the sensors (parking-SPEC.md, 9: 6 to 10).
+  { name: "A bollard in the corner of a bay", x: -7.0, y: 7.2, heading: 0.0,
+    slot_x: 0.0, slot_y: 2.5, slot_heading: 90.0, slot_length: 5.0, slot_width: 2.5,
+    turned: false, cx: 0.0, cy: 5.0, across: 24.0, dark: false, hitch: 0 },
+  { name: "A wheel stop before the wall", x: -7.0, y: 7.2, heading: 0.0,
+    slot_x: 0.0, slot_y: 2.5, slot_heading: 90.0, slot_length: 5.0, slot_width: 2.5,
+    turned: false, cx: 0.0, cy: 5.0, across: 24.0, dark: false, hitch: 0 },
+  { name: "A lorry's tail lift over the gap", x: 5.2, y: 4.0, heading: 0.0,
+    slot_x: 0.0, slot_y: 1.1, slot_heading: 0.0, slot_length: 6.2, slot_width: 2.2,
+    turned: false, cx: 0.0, cy: 3.2, across: 26.0, dark: false, hitch: 0 },
+  { name: "White walls in a dark garage", x: -7.0, y: 8.0, heading: 0.0,
+    slot_x: 0.0, slot_y: 2.75, slot_heading: 90.0, slot_length: 5.5, slot_width: 2.7,
+    turned: false, cx: 0.0, cy: 5.0, across: 24.0, dark: true, hitch: 0 },
+  { name: "A charger: back up to the post", x: -7.0, y: 7.8, heading: 0.0,
+    slot_x: 0.0, slot_y: 3.2, slot_heading: 90.0, slot_length: 5.2, slot_width: 2.7,
+    turned: true, cx: 0.0, cy: 5.0, across: 24.0, dark: false, hitch: 0 },
+  // The places where things move (parking-SPEC.md, 9: 11 and 12).
+  { name: "A bay: a walker, a trolley, a door", x: -7.0, y: 7.2, heading: 0.0,
+    slot_x: 0.0, slot_y: 2.5, slot_heading: 90.0, slot_length: 5.0, slot_width: 2.5,
+    turned: false, cx: 0.0, cy: 5.0, across: 24.0, dark: false, hitch: 0 },
+  { name: "Backing out between two vans", x: 0.0, y: 4.1, heading: -90.0,
+    slot_x: 6.0, slot_y: 6.6, slot_heading: 0.0, slot_length: 9.0, slot_width: 3.0,
+    turned: true, cx: 0.0, cy: 5.0, across: 28.0, dark: false, hitch: 0 },
+  // A place to back a trailer into (parking-SPEC.md, 9: 14).
+  { name: "A yard: back the trailer into the bay", x: 11.0, y: 13.0, heading: 0.0,
+    slot_x: 0.0, slot_y: 3.1, slot_heading: 90.0, slot_length: 6.0, slot_width: 3.4,
+    turned: false, cx: 3.0, cy: 11.0, across: 46.0, dark: false, hitch: 1 },
+  // The car park of many vehicles (parking-SPEC.md, 9: 13), which
+  // lot.ent makes: of this row only what is shown of it, and its name.
+  { name: "A car park: six park at once", x: 0.0, y: 0.0, heading: 0.0,
+    slot_x: 0.0, slot_y: 0.0, slot_heading: 0.0, slot_length: 0.0, slot_width: 0.0,
+    turned: false, cx: 23.75, cy: 18.0, across: 76.0, dark: false, hitch: 0 }
+]
+// So many of the places are for one vehicle: all but the last.
+const SINGLE: i32 = 12
+
+table things { scene: i32, x: f32, y: f32, heading: f32, length: f32, width: f32,
+               height: Height, plain: bool } = [
+  // 0: a street along x. The kerb at y 0, two cars parked at it with
+  // 6.2 m between them, a van further back, and a wall across the street.
+  { scene: 0, x: 0.0, y: -0.075, heading: 0.0, length: 30.0, width: 0.15, height: Height.Kerb, plain: false },
+  { scene: 0, x: -5.45, y: 1.1, heading: 0.0, length: 4.7, width: 1.85, height: Height.Tall, plain: false },
+  { scene: 0, x: 5.45, y: 1.1, heading: 0.0, length: 4.7, width: 1.85, height: Height.Tall, plain: false },
+  { scene: 0, x: -11.6, y: 1.2, heading: 0.0, length: 5.9, width: 2.0, height: Height.Tall, plain: false },
+  { scene: 0, x: 0.0, y: 7.6, heading: 0.0, length: 30.0, width: 0.2, height: Height.Tall, plain: false },
+  // 1: bays 2.5 m wide and 5 m deep below an aisle of 6 m, a wall
+  // behind them and one across the aisle; the bays beside the free one
+  // are taken, and one further on.
+  { scene: 1, x: 0.0, y: -0.1, heading: 0.0, length: 30.0, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 1, x: 0.0, y: 11.1, heading: 0.0, length: 30.0, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 1, x: -2.5, y: 2.55, heading: 90.0, length: 4.7, width: 1.85, height: Height.Tall, plain: false },
+  { scene: 1, x: 2.5, y: 2.5, heading: 90.0, length: 4.6, width: 1.9, height: Height.Tall, plain: false },
+  { scene: 1, x: 5.0, y: 2.6, heading: 90.0, length: 4.4, width: 1.8, height: Height.Tall, plain: false },
+  { scene: 1, x: -7.5, y: 2.45, heading: 90.0, length: 4.3, width: 1.8, height: Height.Tall, plain: false },
+  // 2: a lane 5.5 m wide below a garage 3 m wide and 6.5 m deep, its
+  // door 2.4 m, with a pillar inside on the right.
+  { scene: 2, x: 0.0, y: -0.6, heading: 0.0, length: 30.0, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 2, x: -8.35, y: 5.0, heading: 0.0, length: 13.3, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 2, x: 8.35, y: 5.0, heading: 0.0, length: 13.3, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 2, x: -1.35, y: 5.0, heading: 0.0, length: 0.3, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 2, x: 1.35, y: 5.0, heading: 0.0, length: 0.3, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 2, x: -1.6, y: 8.35, heading: 90.0, length: 6.9, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 2, x: 1.6, y: 8.35, heading: 90.0, length: 6.9, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 2, x: 0.0, y: 11.7, heading: 0.0, length: 3.4, width: 0.2, height: Height.Tall, plain: true },
+  { scene: 2, x: 1.3, y: 9.6, heading: 0.0, length: 0.4, width: 0.4, height: Height.Tall, plain: false },
+  // 3: a dead end: walls 7 m apart and one across at x 12, a bollard
+  // and a car left standing in it.
+  { scene: 3, x: 5.0, y: -0.1, heading: 0.0, length: 14.4, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 3, x: 5.0, y: 7.1, heading: 0.0, length: 14.4, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 3, x: 12.1, y: 3.5, heading: 90.0, length: 7.0, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 3, x: 10.6, y: 5.9, heading: 0.0, length: 0.2, width: 0.2, height: Height.Low, plain: false },
+  { scene: 3, x: 9.6, y: 1.1, heading: 0.0, length: 4.5, width: 1.8, height: Height.Tall, plain: false },
+  // 4: the bays of 1, and in the right corner at the head of the free
+  // one a bollard 15 cm thick (it keeps cars off a pipe on the wall):
+  // seen from the aisle, and gone under the bonnet half a metre before
+  // the bumper is at it. A vehicle in the middle of the bay passes it
+  // by 10 cm.
+  { scene: 4, x: 0.0, y: -0.1, heading: 0.0, length: 30.0, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 4, x: 0.0, y: 11.1, heading: 0.0, length: 30.0, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 4, x: -2.5, y: 2.55, heading: 90.0, length: 4.7, width: 1.85, height: Height.Tall, plain: false },
+  { scene: 4, x: 2.5, y: 2.5, heading: 90.0, length: 4.6, width: 1.9, height: Height.Tall, plain: false },
+  { scene: 4, x: 1.1, y: 0.75, heading: 0.0, length: 0.15, width: 0.15, height: Height.Low, plain: false },
+  // 5: the same bays, with a wheel stop 70 cm before the wall: the
+  // tyres are to stop at it, and then the end over it is a quarter of
+  // a metre from the wall at most. Too low for ultrasonic sensors, and out of the
+  // cameras' sight 1.6 m before the bumper is over it.
+  { scene: 5, x: 0.0, y: -0.1, heading: 0.0, length: 30.0, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 5, x: 0.0, y: 11.1, heading: 0.0, length: 30.0, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 5, x: -2.5, y: 2.55, heading: 90.0, length: 4.7, width: 1.85, height: Height.Tall, plain: false },
+  { scene: 5, x: 2.5, y: 2.5, heading: 90.0, length: 4.6, width: 1.9, height: Height.Tall, plain: false },
+  { scene: 5, x: 0.0, y: 0.7, heading: 0.0, length: 1.8, width: 0.15, height: Height.Kerb, plain: false },
+  // 6: the street of 0, but ahead of the gap stands a lorry with its
+  // tail lift down: 1.2 m of platform at the height of a bonnet, over
+  // the gap's end. Above what ultrasonic sensors hear.
+  { scene: 6, x: 0.0, y: -0.075, heading: 0.0, length: 30.0, width: 0.15, height: Height.Kerb, plain: false },
+  { scene: 6, x: -5.45, y: 1.1, heading: 0.0, length: 4.7, width: 1.85, height: Height.Tall, plain: false },
+  { scene: 6, x: 7.8, y: 1.3, heading: 0.0, length: 7.0, width: 2.4, height: Height.Tall, plain: false },
+  { scene: 6, x: 3.7, y: 1.3, heading: 0.0, length: 1.2, width: 2.2, height: Height.Over, plain: false },
+  { scene: 6, x: 0.0, y: 7.6, heading: 0.0, length: 30.0, width: 0.2, height: Height.Tall, plain: false },
+  // 7: a bay 2.7 m wide between white walls, a white wall at its head,
+  // without light: nothing on the walls for a camera to hold on to but
+  // their ends.
+  { scene: 7, x: 0.0, y: -0.1, heading: 0.0, length: 3.1, width: 0.2, height: Height.Tall, plain: true },
+  { scene: 7, x: -1.45, y: 2.75, heading: 90.0, length: 5.5, width: 0.2, height: Height.Tall, plain: true },
+  { scene: 7, x: 1.45, y: 2.75, heading: 90.0, length: 5.5, width: 0.2, height: Height.Tall, plain: true },
+  { scene: 7, x: 0.0, y: 11.6, heading: 0.0, length: 30.0, width: 0.2, height: Height.Tall, plain: true },
+  // 8: a charging bay to back into: a kerb across its end, behind it
+  // the charger's post at the left rear corner (where the car's port
+  // is) and a bollard before the post. Cars in the bays beside it.
+  { scene: 8, x: 0.0, y: 11.1, heading: 0.0, length: 30.0, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 8, x: 0.0, y: 0.525, heading: 0.0, length: 12.0, width: 0.15, height: Height.Kerb, plain: false },
+  { scene: 8, x: -1.2, y: 0.2, heading: 0.0, length: 0.3, width: 0.25, height: Height.Tall, plain: false },
+  { scene: 8, x: -1.2, y: 0.85, heading: 0.0, length: 0.12, width: 0.12, height: Height.Low, plain: false },
+  { scene: 8, x: -2.7, y: 3.1, heading: 90.0, length: 4.7, width: 1.85, height: Height.Tall, plain: false },
+  { scene: 8, x: 2.7, y: 3.15, heading: 90.0, length: 4.75, width: 1.9, height: Height.Tall, plain: false },
+  // 9: the bays of 1; what moves there is in `movers`.
+  { scene: 9, x: 0.0, y: -0.1, heading: 0.0, length: 30.0, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 9, x: 0.0, y: 11.1, heading: 0.0, length: 30.0, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 9, x: -2.5, y: 2.55, heading: 90.0, length: 4.7, width: 1.85, height: Height.Tall, plain: false },
+  { scene: 9, x: 2.5, y: 2.5, heading: 90.0, length: 4.6, width: 1.9, height: Height.Tall, plain: false },
+  { scene: 9, x: 5.0, y: 2.6, heading: 90.0, length: 4.4, width: 1.8, height: Height.Tall, plain: false },
+  { scene: 9, x: -7.5, y: 2.45, heading: 90.0, length: 4.3, width: 1.8, height: Height.Tall, plain: false },
+  // 10: the same bays; the vehicle stands in one, its front to the
+  // wall, between two vans that reach 80 cm further into the aisle
+  // than it does. The aisle is two lanes: the slot is the near one,
+  // headed to the right.
+  { scene: 10, x: 0.0, y: -0.1, heading: 0.0, length: 30.0, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 10, x: 0.0, y: 11.1, heading: 0.0, length: 30.0, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 10, x: -2.55, y: 3.0, heading: 90.0, length: 5.6, width: 2.0, height: Height.Tall, plain: false },
+  { scene: 10, x: 2.55, y: 3.0, heading: 90.0, length: 5.6, width: 2.0, height: Height.Tall, plain: false },
+  // 11: a yard 22 m deep above bays 3.4 m wide and 6 m deep at a wall:
+  // a horse box and a van in the bays beside the free one, a boat on
+  // its trailer further on, walls round the yard.
+  { scene: 11, x: 3.0, y: -0.1, heading: 0.0, length: 36.0, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 11, x: 3.0, y: 22.1, heading: 0.0, length: 36.0, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 11, x: -15.1, y: 11.0, heading: 90.0, length: 22.4, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 11, x: 21.1, y: 11.0, heading: 90.0, length: 22.4, width: 0.2, height: Height.Tall, plain: false },
+  { scene: 11, x: -3.4, y: 2.6, heading: 90.0, length: 4.4, width: 2.2, height: Height.Tall, plain: false },
+  { scene: 11, x: 3.4, y: 3.1, heading: 90.0, length: 5.4, width: 2.0, height: Height.Tall, plain: false },
+  { scene: 11, x: -6.8, y: 3.4, heading: 90.0, length: 6.2, width: 2.3, height: Height.Tall, plain: false }
+]
+
+// What moves in a scene. A walker, a trolley and a car go straight from
+// (x, y) to (to_x, to_y) at `speed` (m/s), a box headed as it goes; a
+// door is a box that turns about its end at (x, y) from `heading` to
+// the heading `to_x` (degrees), at `speed` degrees a second. Each sets
+// out `after` so many seconds from when the vehicle first moves; with
+// `again`, it is back at its start so many seconds after it arrived,
+// and sets out anew. None of them goes on while the vehicle is close
+// before it: what touches is the vehicle that drives into them.
+enum Mover { Walk, Roll, Swing, Drive }
+
+table movers { scene: i32, kind: Mover, x: f32, y: f32, heading: f32, length: f32, width: f32,
+               height: Height, to_x: f32, to_y: f32, speed: f32, after: f32, again: f32 } = [
+  // 9: someone walks along the bays' ends (30 cm from the cars' fronts:
+  // nearer, and what the grid keeps of them is one with the cars), to
+  // the left, 20 s after the vehicle set out (when it backs into the
+  // bay), and again 30 s after he is through; a trolley rolls across
+  // the aisle and is left before the bays to the right; the door of
+  // the car to the right opens 30 degrees into the free bay.
+  { scene: 9, kind: Mover.Walk, x: 11.0, y: 5.45, heading: 180.0, length: 0.45, width: 0.45,
+    height: Height.Tall, to_x: -11.0, to_y: 5.45, speed: 1.2, after: 20.0, again: 30.0 },
+  { scene: 9, kind: Mover.Roll, x: 10.0, y: 9.6, heading: 221.6, length: 0.9, width: 0.55,
+    height: Height.Low, to_x: 5.5, to_y: 5.6, speed: 0.9, after: 9.0, again: 0.0 },
+  { scene: 9, kind: Mover.Swing, x: 1.55, y: 3.4, heading: -90.0, length: 1.0, width: 0.08,
+    height: Height.Tall, to_x: -120.0, to_y: 0.0, speed: 30.0, after: 16.0, again: 0.0 },
+  // 10: cars in both lanes, 3 m/s, hidden by the vans until the
+  // vehicle's end is out between them.
+  { scene: 10, kind: Mover.Drive, x: -24.0, y: 6.6, heading: 0.0, length: 4.5, width: 1.8,
+    height: Height.Tall, to_x: 24.0, to_y: 6.6, speed: 3.0, after: 0.5, again: 9.0 },
+  { scene: 10, kind: Mover.Drive, x: 24.0, y: 9.6, heading: 180.0, length: 4.3, width: 1.8,
+    height: Height.Tall, to_x: -24.0, to_y: 9.6, speed: 3.0, after: 6.0, again: 11.0 }
+]
+
+// The movers of the scene as they are now: the row of `movers`, where
+// its four edges begin in `Edges`, its box's middle and heading, how
+// far it has gone (metres, a door degrees) and how long it has rested
+// at its end.
+buffer Moving { row: i32, first: i32, x: f32, y: f32, heading: f32, gone: f32, rest: f32 } capacity 64
+
+
+// The scene and the vehicle chosen (rows of `scenes` and `vehicles`),
+// the trailer hitched to it (`hitch`: a row of `trailers` and one; 0:
+// none),
+// and whether the vehicle is parked.
+// `going`: the vehicle has moved since the scene was staged, and for
+// how long (`clock`, seconds); where it is (for what moves to stop
+// before it).
+unique Stage { scene: i32, kind: i32, hitch: i32, parked: bool, going: bool, clock: f32,
+               car_x: f32, car_y: f32, car_heading: f32 }
+
+// A mover's box at its start, and where on its way: `part` of it.
+fn mover_at(m: row of movers, part: f32) -> (f32, f32, f32) {
+  if m.kind == Mover.Swing {
+    let heading = radians(m.heading + (m.to_x - m.heading) * part)
+    (m.x + cos(heading) * m.length * 0.5, m.y + sin(heading) * m.length * 0.5, heading)
+  } else {
+    (m.x + (m.to_x - m.x) * part, m.y + (m.to_y - m.y) * part, radians(m.heading))
+  }
+}
+
+fn mover_way(m: row of movers) -> f32 {
+  if m.kind == Mover.Swing { abs(m.to_x - m.heading) }
+  else { sqrt((m.to_x - m.x) * (m.to_x - m.x) + (m.to_y - m.y) * (m.to_y - m.y)) }
+}
+
+// The scene's things as edges, and the vehicle at its start, standing,
+// its wheels straight. (The vehicle is there: `Fleet` had a row.)
+system stage() {
+  Edges = []
+  for thing in things {
+    if thing.scene == Stage.scene {
+      box(Edges, thing.x, thing.y, radians(thing.heading), thing.length, thing.width,
+          thing.height, thing.plain)
+    }
+  }
+  Moving = []
+  for row in 0..len(movers) {
+    let m = movers[row]
+    if m.scene == Stage.scene {
+      let (x, y, heading) = mover_at(m, 0.0)
+      Moving += { row: row, first: len(Edges), x: x, y: y, heading: heading, gone: 0.0, rest: 0.0 }
+      box(Edges, x, y, heading, m.length, m.width, m.height, false)
+    }
+  }
+  Stage.going = false
+  Stage.clock = 0.0
+  let scene = scenes[Stage.scene]
+  let kind = vehicles[Stage.kind]
+  let lock = lock_of(kind)
+  let count = len(Edges)
+  let hitched = if Stage.scene >= SINGLE { -1 } else { Stage.hitch - 1 }
+  for c: mut Car, ch: mut Chassis, p: mut Pose, m: mut Motion, a: mut Ask, n: mut Near, pl: mut Place,
+      g: mut Goal, tr: mut Trailer {
+    tr.kind = hitched
+    tr.heading = radians(scene.heading) as f64
+    tr.jack = false
+    pl.first = 0
+    pl.count = count
+    pl.body = 0
+    pl.rows = 0
+    g.x = scene.slot_x
+    g.y = scene.slot_y
+    g.heading = radians(scene.slot_heading)
+    g.length = scene.slot_length
+    g.width = scene.slot_width
+    g.turned = scene.turned
+    g.parked = false
+    c.kind = kind
+    ch.lock = lock
+    ch.back = radians(kind.rear_steer) / lock
+    ch.rate = 2.0 * lock / LOCK_TO_LOCK
+    p.x = scene.x as f64
+    p.y = scene.y as f64
+    p.heading = radians(scene.heading) as f64
+    m.v = 0.0
+    m.steer = 0.0
+    a.v = 0.0
+    a.steer = 0.0
+    n.hits = 0
+  }
+  Stage.parked = false
+}
+
+// Where the vehicle is, and whether it has moved, for `move()`.
+system watch_car() {
+  for c: Car, p: Pose, m: Motion where c.number == 0 {
+    Stage.car_x = p.x as f32
+    Stage.car_y = p.y as f32
+    Stage.car_heading = p.heading as f32
+    if m.v != 0.0 { Stage.going = true }
+  }
+}
+
+// A step of all that moves (after `watch_car()`, before the vehicle's
+// step). A mover does not go on where the vehicle's body or mirrors
+// would be within 30 cm of a point before it: three points across it,
+// at three distances up to where it could stop from its speed (a car
+// leaves 5 m, as a driver does who sees another back out; a door: its
+// free end).
+system move() {
+  let dt = Sim.dt
+  if Stage.going { Stage.clock += dt }
+  let car = vehicles[Stage.kind]
+  let c = cos(Stage.car_heading)
+  let s = sin(Stage.car_heading)
+  for i in 0..len(Moving) {
+    let m = movers[Moving[i].row]
+    // (Someone on foot squeezes past: 12 cm from the body, the mirrors
+    // over the arm.)
+    let half = if m.kind == Mover.Walk { car.width * 0.5 } else { car.mirrors * 0.5 }
+    let least = if m.kind == Mover.Walk { 0.12 } else { 0.3 }
+    let whole = mover_way(m)
+    if Stage.clock >= m.after && Moving[i].gone < whole {
+      let more = min(Moving[i].gone + m.speed * dt, whole)
+      let (x, y, heading) = mover_at(m, more / max(whole, 0.001))
+      let ux = if m.kind == Mover.Swing { cos(heading) } else { (m.to_x - m.x) / max(whole, 0.001) }
+      let uy = if m.kind == Mover.Swing { sin(heading) } else { (m.to_y - m.y) / max(whole, 0.001) }
+      var free = true
+      let ahead = if m.kind == Mover.Swing { 0.1 } else if m.kind == Mover.Drive { 5.0 }
+                  else { 0.4 + m.speed * m.speed / 6.0 }
+      for k in 0..9 {
+        let far = m.length * 0.5 + ahead * (k / 3 + 1) as f32 / 3.0
+        let side = m.width * 0.5 * (k % 3 - 1) as f32
+        let qx = x + ux * far - uy * side - Stage.car_x
+        let qy = y + uy * far + ux * side - Stage.car_y
+        if point_box(qx * c + qy * s, qy * c - qx * s, 0.0 - car.rear, 0.0 - half, car.wheelbase + car.front,
+                     half) < least { free = false }
+      }
+      if free {
+        Moving[i].x = x
+        Moving[i].y = y
+        Moving[i].heading = heading
+        Moving[i].gone = more
+        box_at(Edges, Moving[i].first, x, y, heading, m.length, m.width)
+      }
+    } else if Moving[i].gone >= whole && m.again > 0.0 {
+      Moving[i].rest += dt
+      if Moving[i].rest >= m.again {
+        let (x, y, heading) = mover_at(m, 0.0)
+        Moving[i].x = x
+        Moving[i].y = y
+        Moving[i].heading = heading
+        Moving[i].gone = 0.0
+        Moving[i].rest = 0.0
+        box_at(Edges, Moving[i].first, x, y, heading, m.length, m.width)
+      }
+    }
+  }
+}
+
+// Whether a point of the vehicle's frame is in the slot, for a vehicle
+// at (x, y) with the heading's cosine and sine `c` and `s`.
+// (Up to 30 cm past the slot's ends: a bay is hardly longer than a car,
+// and nobody parks with the bumper at the wall. And up to 5 cm over
+// its sides: a corner over the painted line.)
+fn in_slot(gx: f32, gy: f32, gh: f32, length: f32, width: f32, x: f32, y: f32, c: f32, s: f32,
+           px: f32, py: f32) -> bool {
+  let wx = x + px * c - py * s - gx
+  let wy = y + px * s + py * c - gy
+  let sc = cos(gh)
+  let ss = sin(gh)
+  abs(wx * sc + wy * ss) <= length * 0.5 + 0.3 && abs(wy * sc - wx * ss) <= width * 0.5 + 0.05
+}
+
+// Whether the body of a vehicle at that pose is in the slot and headed
+// along it: the four corners of its rectangle, and within 6 degrees.
+fn stands_in(car: row of vehicles, gx: f32, gy: f32, gh: f32, length: f32, width: f32, turned: bool,
+             x: f32, y: f32, heading: f32) -> bool {
+  let cs = cos(heading)
+  let sn = sin(heading)
+  let back = 0.0 - car.rear
+  let nose = car.wheelbase + car.front
+  let half = car.width * 0.5
+  let off = heading - gh
+  in_slot(gx, gy, gh, length, width, x, y, cs, sn, back, half) &&
+    in_slot(gx, gy, gh, length, width, x, y, cs, sn, back, 0.0 - half) &&
+    in_slot(gx, gy, gh, length, width, x, y, cs, sn, nose, half) &&
+    in_slot(gx, gy, gh, length, width, x, y, cs, sn, nose, 0.0 - half) &&
+    abs(sin(off)) < 0.1045 && (!turned || cos(off) > 0.0)
+}
+
+// Parked: standing, the four corners of the body's rectangle between
+// the slot's sides (5 cm over them at most) and no more than 30 cm
+// past its ends, and headed
+// along it within 6 degrees.
+// Whether a trailer with its axle's middle at (x, y) stands in the
+// slot: all of its body, headed along it either way.
+fn trailer_in(t: row of trailers, gx: f32, gy: f32, gh: f32, length: f32, width: f32,
+              x: f32, y: f32, heading: f32) -> bool {
+  let cs = cos(heading)
+  let sn = sin(heading)
+  let back = 0.0 - t.behind
+  let half = t.width * 0.5
+  in_slot(gx, gy, gh, length, width, x, y, cs, sn, back, half) &&
+    in_slot(gx, gy, gh, length, width, x, y, cs, sn, back, 0.0 - half) &&
+    in_slot(gx, gy, gh, length, width, x, y, cs, sn, back + t.length, half) &&
+    in_slot(gx, gy, gh, length, width, x, y, cs, sn, back + t.length, 0.0 - half) &&
+    abs(sin(heading - gh)) < 0.1045
+}
+// (With a trailer hitched, it is the trailer that is to stand in the
+// slot.)
+system judge() {
+  for c: Car, p: Pose, m: Motion, tr: Trailer, g: mut Goal {
+    if tr.kind >= 0 {
+      let t = trailers[tr.kind]
+      let reach = (hitch_of(c.kind)) as f64
+      let ax = p.x - reach * cos64(p.heading) - t.drawbar as f64 * cos64(tr.heading)
+      let ay = p.y - reach * sin64(p.heading) - t.drawbar as f64 * sin64(tr.heading)
+      g.parked = m.v == 0.0 && trailer_in(t, g.x, g.y, g.heading, g.length, g.width, ax as f32, ay as f32,
+                                          tr.heading as f32)
+    } else {
+      g.parked = m.v == 0.0 && stands_in(c.kind, g.x, g.y, g.heading, g.length, g.width, g.turned, p.x as f32,
+                                         p.y as f32, p.heading as f32)
+    }
+  }
+  for c: Car, g: Goal where c.number == 0 { Stage.parked = g.parked }
+}

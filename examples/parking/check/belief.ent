@@ -1,0 +1,112 @@
+// What a Model 3 with Tesla's cameras believes (parking-SPEC.md, check
+// 4). It stands 3 m before a low wall 2 m wide, with a tall wall 3 m
+// behind that, and drives up to 30 cm from the low one, where no camera
+// sees it any more (check/sensors.ent, 7): the grid still holds it.
+// Lines, before the drive and after it:
+//
+//   pose off   how far the believed pose is from the true one, in
+//              micrometres and microradians
+//   true       the true distance of the body to the nearest edge, mm
+//   reads      what the grid gives for it, mm
+//   seen low   how many of the cameras' rays report something low now
+//
+// Without errors the believed pose is the true one, and the grid gives
+// the distance within a cell (5 cm) and the 10 cm that a ray leaves
+// before its point. Then the same drive with errors: the pose is off by
+// less than 1.5 percent of the 2.7 m driven, the reading within 15 cm.
+import console
+import math
+import vehicles
+import park
+import sense
+import believe
+
+unique Run { errors: bool, low: i32, until: i64 }
+
+world {
+  Sim.dt = 1.0 / 120.0
+  Sensing.seed = 7
+  Fleet += { kind: 0, x: 0.0, y: 0.0, heading: 0.0 }
+  Edges += { x0: 6.716, y0: -1.0, x1: 6.716, y1: 1.0, height: Height.Low, plain: false, owner: -1 }
+  Edges += { x0: 9.716, y0: -3.0, x1: 9.716, y1: 3.0, height: Height.Tall, plain: false, owner: -1 }
+}
+
+system home() {
+  Sensing.errors = Run.errors
+  for c: Car, p: mut Pose, m: mut Motion, a: mut Ask, s: mut Suite {
+    p.x = 0.0
+    p.y = 0.0
+    p.heading = 0.0
+    m.v = 0.0
+    a.v = 0.0
+    s.which = 1
+  }
+  Run.until = Sim.step + 1200
+}
+
+// Forwards until the body is 30 cm from the wall, then standing.
+system pedal() {
+  for a: mut Ask, n: Near { a.v = if n.gap > 0.33 { 0.6 } else { 0.0 } }
+}
+
+system count() {
+  Run.low = 0
+  for i in 0..len(Rays) {
+    if Rays[i].sight == Sight.Low { Run.low += 1 }
+  }
+}
+
+system report() {
+  for c: Car, p: Pose, n: Near, b: Belief {
+    let off = sqrt64((p.x - b.x) * (p.x - b.x) + (p.y - b.y) * (p.y - b.y))
+    let turned = abs64(p.heading - b.heading)
+    let exact = off == 0.0 && turned == 0.0
+    let near = abs((b.reads - n.gap) * 1000.0) as i32
+    put("errors {Run.errors}: pose off {(off * 1000000.0) as i64} um {(turned * 1000000.0) as i64} urad exact {exact}, true {(n.gap * 1000.0 + 0.5) as i32} reads {(b.reads * 1000.0 + 0.5) as i32} (off by {near}), seen low {Run.low}, cells {b.cells}")
+  }
+}
+
+system again() { Run.errors = true }
+
+schedule start() {
+  home()
+  measure()
+  recall()
+  sense()
+  chart()
+  read()
+  count()
+  report()
+}
+
+schedule go() {
+  pedal()
+  step()
+  reckon()
+  sense() run_if Sim.step % 4 == 0
+  chart() run_if Sim.step % 4 == 0
+}
+
+schedule finish() {
+  read()
+  count()
+  report()
+}
+
+schedule other() { again() }
+schedule sensors() {
+  fit()
+  minds()
+}
+
+main {
+  setup()
+  sensors()
+  start()
+  loop { go() } until Sim.step >= Run.until
+  finish()
+  other()
+  start()
+  loop { go() } until Sim.step >= Run.until
+  finish()
+}

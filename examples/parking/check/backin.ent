@@ -1,0 +1,110 @@
+// A trailer backed into the bay of the yard (place 12) by the car
+// (tow.ent's `Backing.Line`; parking-SPEC.md, check 7): every vehicle
+// with each trailer, by where it believes it is, with the errors of its
+// wheel encoders and gyroscope. For each a line: what the backing came
+// to, whether the trailer stands in the slot by the truth, how often
+// the vehicle or the trailer touched something, the seconds it took,
+// how often it pulled forwards to straighten the trailer, and the most the trailer stood across the vehicle (degrees). And the
+// parker (parker.ent) asked to park with a trailer hitched: it does not.
+import console
+import math
+import vehicles
+import park
+import scenes
+import sense
+import believe
+import parker
+import tow
+
+unique Run { until: i64, from: i64, over: bool, most: f32, trial: i32 }
+
+world {
+  Sim.dt = 1.0 / 120.0
+  Sensing.seed = 2026
+  Sensing.errors = true
+  Fleet += { kind: 1, x: 0.0, y: 0.0, heading: 0.0 }
+  Stage.scene = 11
+}
+
+system choose() {
+  Stage.kind = Run.trial / len(trailers)
+  Stage.hitch = Run.trial % len(trailers) + 1
+}
+
+system begin_place() {
+  for s: mut Suite { s.which = 1 }
+  for tw: mut Tow {
+    tw.mode = Backing.Line
+    tw.round = 0.0
+    tw.pulls = 0
+  }
+  Run.over = false
+  Run.most = 0.0
+  Run.from = Sim.step
+  Run.until = Sim.step + 120 * 240
+}
+
+system tally() {
+  for p: Pose, tr: Trailer, tw: Tow {
+    Run.most = max(Run.most, abs(degrees(across_of(p.heading, tr.heading))))
+    Run.over = tw.mode == Backing.Done || tw.mode == Backing.GaveUp
+  }
+}
+
+system report() {
+  for c: Car, n: Near, tr: Trailer, tw: Tow {
+    let seconds = (Sim.step - Run.from) / 120
+    put("{c.kind.name} with {trailers[tr.kind].name}: {tw.mode}, parked {Stage.parked}, touched {n.hits}, {seconds} s, pulled out {tw.pulls} times, at most {(Run.most + 0.5) as i32} deg across")
+  }
+  Run.trial += 1
+}
+
+// The parker, with the trailer still hitched.
+system ask_parker() {
+  for p: mut Parker { p.phase = Phase.Plan }
+}
+system parker_says() {
+  for p: Parker { put("the parker with a trailer: {p.phase}, {p.why}") }
+}
+
+schedule start() {
+  choose()
+  stage()
+  measure()
+  recall()
+  begin_place()
+}
+
+schedule go() {
+  tow_step()
+  tally()
+  step()
+  reckon()
+  judge()
+}
+
+schedule finish() { report() }
+
+schedule decline() {
+  ask_parker()
+  park_step()
+  parker_says()
+}
+
+schedule sensors() {
+  fit()
+  minds()
+  minds_park()
+  hitches()
+}
+
+main {
+  setup()
+  sensors()
+  loop {
+    start()
+    loop { go() } until Sim.step >= Run.until || Run.over
+    finish()
+  } until Run.trial == len(vehicles) * len(trailers)
+  decline()
+}

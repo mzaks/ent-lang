@@ -1,0 +1,366 @@
+// What a vehicle's sensors report of the place (parking-SPEC.md, 6):
+// twelve ultrasonic sensors, as the Tesla Model 3 had until October
+// 2022, or the cameras it has had since ("Tesla Vision"), with or
+// without the one in the front bumper that came late in 2025.
+//
+// A sensor is a row of `sensors`: where on the body it sits, which way
+// it looks, how wide, from how near to how far. Every vehicle has an
+// entity for each row, with rows of `Rays` of its own for what it
+// reports; those of the suite the vehicle carries (`Suite`) report, the
+// others nothing. All that is reported is in the vehicle's own frame (x
+// ahead from the rear axle, y to the left): the vehicle does not know
+// where it is.
+//
+// An ultrasonic sensor reports one range: of the nearest thing in its
+// cone that sends its echo back. A flat face does where the sensor
+// stands straight before it (the foot of the perpendicular is on the
+// face and in the cone), a face seen aslant sends it elsewhere and only
+// its ends are heard. Not what is below the cone (a kerb) or above it
+// (what hangs over); a thing narrower than 7.5 cm only below 1 m.
+// Nearer than its least range it says "stop" and no range.
+//
+// A camera is rays, one every two degrees. Each reports the nearest
+// thing it meets, and the nearest tall one if that is another (what is
+// behind a tall thing is hidden), unless the vehicle's own body hides
+// it: a camera at the height `up` looks over an edge of the body `hide`
+// away and `lip` high, and a thing of the height t is hidden where it is
+// nearer than hide (up - t) / (up - lip). So the ground just ahead of
+// the bumper is not seen from the windscreen, a kerb vanishes 1.6 m
+// ahead of it and a bollard half a metre.
+//
+// The errors (with `Sensing.errors`): an ultrasonic range is within a
+// centimetre; a camera's is off by up to 3 percent of it, at least 3
+// cm, three times that on a plain face (which is seen only near its
+// ends) and twice in the dark, part of it the same for a second or two
+// (it does not average out). Each is worked out from the seed, the
+// sensor, the ray and the step, so a run is the same on one core and on
+// all.
+import math
+import wyhash
+import vehicles
+import park
+
+enum Kind { Sonic, Camera }
+
+// The suites: a sensor is of those whose bit its `suites` has.
+table suites { name: text[40] } = [
+  { name: "12 ultrasonic sensors" },
+  { name: "Tesla Vision (cameras)" },
+  { name: "Tesla Vision with a bumper camera" }
+]
+
+// `along`: where on the body, from 0 at its rear end to 1 at its front;
+// `side`: from -1 at its right side to 1 at its left. `facing`: degrees,
+// 0 ahead and 90 to the left; `across`: how wide it looks, in all.
+// `near`, `far`: metres. `up`, `hide`, `lip`: a camera's height, and how
+// far away and how high the edge of the body is that it looks over
+// (estimates, from pictures of the car).
+table sensors { name: text[24], suites: i32, kind: Kind, along: f32, side: f32, facing: f32,
+                across: f32, near: f32, far: f32, up: f32, hide: f32, lip: f32 } = [
+  // Front bumper: four ahead, and one at each corner that looks to the
+  // side and further (it measures a gap as the car goes past).
+  { name: "front inner right", suites: 1, kind: Kind.Sonic, along: 1.0, side: -0.25, facing: 0.0, across: 70.0, near: 0.25, far: 2.5, up: 0.5, hide: 0.0, lip: 0.0 },
+  { name: "front inner left", suites: 1, kind: Kind.Sonic, along: 1.0, side: 0.25, facing: 0.0, across: 70.0, near: 0.25, far: 2.5, up: 0.5, hide: 0.0, lip: 0.0 },
+  { name: "front outer right", suites: 1, kind: Kind.Sonic, along: 0.99, side: -0.7, facing: -20.0, across: 70.0, near: 0.25, far: 2.5, up: 0.5, hide: 0.0, lip: 0.0 },
+  { name: "front outer left", suites: 1, kind: Kind.Sonic, along: 0.99, side: 0.7, facing: 20.0, across: 70.0, near: 0.25, far: 2.5, up: 0.5, hide: 0.0, lip: 0.0 },
+  { name: "front corner right", suites: 1, kind: Kind.Sonic, along: 0.94, side: -1.0, facing: -75.0, across: 70.0, near: 0.25, far: 4.5, up: 0.5, hide: 0.0, lip: 0.0 },
+  { name: "front corner left", suites: 1, kind: Kind.Sonic, along: 0.94, side: 1.0, facing: 75.0, across: 70.0, near: 0.25, far: 4.5, up: 0.5, hide: 0.0, lip: 0.0 },
+  { name: "rear inner right", suites: 1, kind: Kind.Sonic, along: 0.0, side: -0.25, facing: 180.0, across: 70.0, near: 0.25, far: 2.5, up: 0.5, hide: 0.0, lip: 0.0 },
+  { name: "rear inner left", suites: 1, kind: Kind.Sonic, along: 0.0, side: 0.25, facing: 180.0, across: 70.0, near: 0.25, far: 2.5, up: 0.5, hide: 0.0, lip: 0.0 },
+  { name: "rear outer right", suites: 1, kind: Kind.Sonic, along: 0.01, side: -0.7, facing: -160.0, across: 70.0, near: 0.25, far: 2.5, up: 0.5, hide: 0.0, lip: 0.0 },
+  { name: "rear outer left", suites: 1, kind: Kind.Sonic, along: 0.01, side: 0.7, facing: 160.0, across: 70.0, near: 0.25, far: 2.5, up: 0.5, hide: 0.0, lip: 0.0 },
+  { name: "rear corner right", suites: 1, kind: Kind.Sonic, along: 0.06, side: -1.0, facing: -105.0, across: 70.0, near: 0.25, far: 4.5, up: 0.5, hide: 0.0, lip: 0.0 },
+  { name: "rear corner left", suites: 1, kind: Kind.Sonic, along: 0.06, side: 1.0, facing: 105.0, across: 70.0, near: 0.25, far: 4.5, up: 0.5, hide: 0.0, lip: 0.0 },
+  // The cameras. The windscreen's wide one (the main and the narrow one
+  // beside it see nothing near that it does not): 1.9 m behind the
+  // front bumper of a Model 3, looking over the bonnet's front edge.
+  { name: "windscreen", suites: 6, kind: Kind.Camera, along: 0.6, side: 0.0, facing: 0.0, across: 120.0, near: 0.0, far: 60.0, up: 1.4, hide: 1.9, lip: 0.7 },
+  // In the pillars between the doors, looking sideways and ahead over
+  // the widest of the doors below.
+  { name: "pillar right", suites: 6, kind: Kind.Camera, along: 0.47, side: -0.92, facing: -70.0, across: 90.0, near: 0.0, far: 80.0, up: 1.15, hide: 0.1, lip: 0.9 },
+  { name: "pillar left", suites: 6, kind: Kind.Camera, along: 0.47, side: 0.92, facing: 70.0, across: 90.0, near: 0.0, far: 80.0, up: 1.15, hide: 0.1, lip: 0.9 },
+  // In the front wings, looking back along the sides.
+  { name: "repeater right", suites: 6, kind: Kind.Camera, along: 0.72, side: -1.0, facing: -150.0, across: 75.0, near: 0.0, far: 100.0, up: 0.9, hide: 0.05, lip: 0.8 },
+  { name: "repeater left", suites: 6, kind: Kind.Camera, along: 0.72, side: 1.0, facing: 150.0, across: 75.0, near: 0.0, far: 100.0, up: 0.9, hide: 0.05, lip: 0.8 },
+  // Above the number plate, looking back over the bumper.
+  { name: "rear", suites: 6, kind: Kind.Camera, along: 0.0, side: 0.0, facing: 180.0, across: 140.0, near: 0.0, far: 50.0, up: 0.9, hide: 0.25, lip: 0.6 },
+  // In the front bumper: nothing of the car is in its way.
+  { name: "bumper", suites: 4, kind: Kind.Camera, along: 1.0, side: 0.0, facing: 0.0, across: 120.0, near: 0.0, far: 10.0, up: 0.5, hide: 0.0, lip: 0.0 }
+]
+
+// How high the things of each height are taken to be, for what a camera
+// sees over the body (metres; what hangs over is always seen).
+table heights[Height]: f32 = [ Kerb: 0.12, Low: 0.5, Tall: 1.5, Over: 1.5 ]
+
+// What a row of `Rays` says: its sensor is not of the suite carried
+// (`Off`); a camera's ray met nothing; an ultrasonic sensor heard
+// nothing (`Silent`), says "stop" or has a range; a camera's sight of a
+// thing of that height.
+enum Sight { Off, Nothing, Silent, Stop, Heard, Kerb, Low, Tall, Over }
+
+// Whether a row says that something is there.
+fn something(sight: Sight) -> bool {
+  sight != Sight.Off && sight != Sight.Nothing && sight != Sight.Silent
+}
+
+// What is reported: a point in the vehicle's frame and how far it is
+// from the sensor, which is at (ox, oy) there. An ultrasonic sensor has
+// one row (its point is where it would be straight ahead of the sensor:
+// it knows the range alone), a camera two for each ray: the nearest
+// thing and the nearest tall one. A row that reports nothing still says
+// how far it looked and found nothing: its point is that far along the
+// ray (a camera's first row: to the tall thing of its second, or as far
+// as `REACH`; an ultrasonic sensor's: its range's end). `low_from` and
+// `kerb_from`: how near a camera's ray can see a low thing and a kerb
+// over the body (nearer, nothing it reports says they are not there).
+buffer Rays { ox: f32, oy: f32, x: f32, y: f32, range: f32, sight: Sight, low_from: f32,
+              kerb_from: f32 } capacity 131072
+
+// How far a camera's ray that met nothing is taken to have looked.
+const REACH: f32 = 15.0
+
+// A sensor of a vehicle: its row, and its rows of `Rays`.
+component Sensor { car: entity, spec: row of sensors, number: i32, first: i32, rows: i32 } capacity 16384
+// Which suite a vehicle carries (a row of `suites`).
+component Suite { which: i32 } capacity 1024
+// A vehicle's rows of `Rays`, those of all its sensors in the order of
+// `sensors`, and the number of its first sensor. `asleep`: it senses
+// nothing now, and its belief stays as it is (a vehicle that is parked
+// and switched off, or not in the place).
+component Eyes { first: i32, rows: i32, number: i32, asleep: bool } capacity 1024
+
+// The seed of the errors, whether there are any, and whether it is dark.
+unique Sensing { seed: u64, errors: bool, dark: bool }
+
+// A camera's rays are so many degrees apart.
+const RAY_STEP: f32 = 2.0
+
+fn rays_of(spec: row of sensors) -> i32 {
+  if spec.kind == Kind.Sonic { 1 } else { (spec.across / RAY_STEP) as i32 + 1 }
+}
+// A sensor's rows of `Rays`.
+fn rows_of(spec: row of sensors) -> i32 {
+  if spec.kind == Kind.Sonic { 1 } else { 2 * rays_of(spec) }
+}
+
+// Where a sensor is in the frame of a vehicle.
+fn mount(car: row of vehicles, spec: row of sensors) -> (f32, f32) {
+  (spec.along * car.length - car.rear, spec.side * car.width * 0.5)
+}
+
+// A number from -1 to 1 that is the same for the same key and n.
+fn unit(key: u64, n: i64) -> f32 { (wyrand_unit(key, n) * 2.0 - 1.0) as f32 }
+
+// What an ultrasonic sensor at (sx, sy) of a vehicle at that pose hears:
+// the range of the nearest echo, or 1000.
+fn hear(edges: Edges[], me: i32, spec: row of sensors, x: f32, y: f32, heading: f32, sx: f32,
+        sy: f32) -> f32 {
+  // The sensor's own frame: x the way it faces.
+  let facing = heading + radians(spec.facing)
+  let c = cos(facing)
+  let s = sin(facing)
+  let ox = x + sx * cos(heading) - sy * sin(heading)
+  let oy = y + sx * sin(heading) + sy * cos(heading)
+  let slope = tan(radians(spec.across * 0.5))
+  var range = 1000.0
+  for i in 0..len(edges) {
+    let height = edges[i].height
+    if (height == Height.Low || height == Height.Tall) && edges[i].owner != me {
+      let ax = (edges[i].x0 - ox) * c + (edges[i].y0 - oy) * s
+      let ay = (edges[i].y0 - oy) * c - (edges[i].x0 - ox) * s
+      let bx = (edges[i].x1 - ox) * c + (edges[i].y1 - oy) * s
+      let by = (edges[i].y1 - oy) * c - (edges[i].x1 - ox) * s
+      let ux = bx - ax
+      let uy = by - ay
+      let uu = ux * ux + uy * uy
+      var d = 1000.0
+      // Straight before the face: the foot of the perpendicular.
+      if uu > 0.0 {
+        let t = 0.0 - (ax * ux + ay * uy) / uu
+        if t >= 0.0 && t <= 1.0 {
+          let fx = ax + t * ux
+          let fy = ay + t * uy
+          if fx > 0.0 && abs(fy) <= fx * slope { d = sqrt(fx * fx + fy * fy) }
+        }
+      }
+      // Its ends.
+      if ax > 0.0 && abs(ay) <= ax * slope { d = min(d, sqrt(ax * ax + ay * ay)) }
+      if bx > 0.0 && abs(by) <= bx * slope { d = min(d, sqrt(bx * bx + by * by)) }
+      // A thin thing is heard only from near.
+      if uu < 0.075 * 0.075 && d > 1.0 { d = 1000.0 }
+      range = min(range, d)
+    }
+  }
+  range
+}
+
+// What a ray of a camera sees, from (ox, oy) of the place along (dx,
+// dy): how far the nearest thing is and how high, and how far the
+// nearest tall one, and of each whether its face is plain; 1000 where
+// there is none. `least` is how near a
+// thing of each height can be and still be seen over the body.
+fn see(edges: Edges[], me: i32, ox: f32, oy: f32, dx: f32, dy: f32, far: f32, kerb_least: f32,
+       low_least: f32) -> (f32, Height, bool, f32, bool) {
+  var near = 1000.0
+  var what = Height.Tall
+  var near_plain = false
+  var tall = 1000.0
+  var tall_plain = false
+  for i in 0..len(edges) {
+    let ex = edges[i].x1 - edges[i].x0
+    let ey = edges[i].y1 - edges[i].y0
+    let cross = dx * ey - dy * ex
+    if cross != 0.0 && edges[i].owner != me {
+      let px = edges[i].x0 - ox
+      let py = edges[i].y0 - oy
+      let t = (px * ey - py * ex) / cross
+      let u = (px * dy - py * dx) / cross
+      if t > 0.0 && t <= far && u >= 0.0 && u <= 1.0 {
+        let height = edges[i].height
+        // A plain face shows only within 30 cm of its ends.
+        let length = sqrt(ex * ex + ey * ey)
+        let shown = !edges[i].plain || u * length < 0.3 || (1.0 - u) * length < 0.3
+        // A kerb is made out only up to 8 m.
+        let over = if height == Height.Kerb { t >= kerb_least && t < 8.0 }
+                   else if height == Height.Low { t >= low_least } else { true }
+        if shown && over {
+          if height == Height.Tall {
+            if t < tall {
+              tall = t
+              tall_plain = edges[i].plain
+            }
+          } else if t < near {
+            near = t
+            what = height
+            near_plain = edges[i].plain
+          }
+        }
+      }
+    }
+  }
+  (near, what, near_plain, tall, tall_plain)
+}
+
+// How far off a camera reports a range: up to 3 percent of it and at
+// least 3 cm, of which six tenths stay for two seconds and go over
+// evenly into the next, and the rest is the ray's own each time.
+fn seen_range(range: f32, seed: u64, sensor: i32, ray: i32, step: i64, plain: bool, dark: bool) -> f32 {
+  let most = max(0.03 * range, 0.03) * (if plain { 3.0 } else { 1.0 }) * (if dark { 2.0 } else { 1.0 })
+  let key = wyhash64(seed, sensor as u64)
+  let age = step / 240
+  let part = (step % 240) as f32 / 240.0
+  let slow = lerp(unit(key, age), unit(key, age + 1), part)
+  let quick = unit(wyhash64(key, ray as u64 + 1), step)
+  range + most * (0.6 * slow + 0.4 * quick)
+}
+
+// A sensor entity for every row of `sensors`, for every vehicle of
+// `Cars`, with its rows of `Rays`; and each vehicle its `Suite`.
+system fit() {
+  var first = 0
+  var number = 0
+  var each = 0
+  for i in 0..len(Cars) {
+    for spec in sensors {
+      let rows = rows_of(spec)
+      spawn { Sensor { car: Cars[i].who, spec: spec, number: number, first: first, rows: rows } }
+      first += rows
+      number += 1
+    }
+    if i == 0 { each = first }
+  }
+  Rays = [{ ox: 0.0, oy: 0.0, x: 0.0, y: 0.0, range: 0.0, sight: Sight.Off, low_from: 0.0,
+            kerb_from: 0.0 }; first]
+  let count = len(sensors)
+  for e, c: Car {
+    e.add(Suite { which: 0 })
+    e.add(Eyes { first: c.number * each, rows: each, number: c.number * count, asleep: false })
+  }
+}
+
+// What every vehicle's sensors report now: the cameras every fourth
+// step (30 times a second), the ultrasonic ones every eighth. Of the
+// edges of its place, but for its own.
+system sense() {
+  let step = Sim.step
+  let seed = Sensing.seed
+  let errors = Sensing.errors
+  let dark = Sensing.dark
+  for c: Car, p: Pose, su: Suite, tr: Trailer, pl: Place, ey: Eyes, w: mut Rays[ey.first, ey.rows],
+      e: Edges[pl.first, pl.count] where !ey.asleep {
+    let car = c.kind
+    let me = c.number
+    let x = p.x as f32
+    let y = p.y as f32
+    let heading = p.heading as f32
+    var at = 0
+    var number = ey.number
+    for spec in sensors {
+      let (sx, sy) = mount(car, spec)
+      // (With a trailer hitched, what looks back reports nothing: the
+      // trailer is all it would see, and the car switches it off.)
+      if (spec.suites >> su.which) & 1 == 0 || (tr.kind >= 0 && abs(spec.facing) > 155.0) {
+        for k in 0..rows_of(spec) { w[at + k].sight = Sight.Off }
+      } else if spec.kind == Kind.Sonic {
+        if step % 8 == 0 {
+          var range = hear(e, me, spec, x, y, heading, sx, sy)
+          if errors && range < 1000.0 { range += 0.01 * unit(wyhash64(seed, number as u64), step) }
+          // In whole centimetres.
+          range = floor(range * 100.0 + 0.5) * 0.01
+          w[at].sight = if range > spec.far { Sight.Silent } else if range < spec.near { Sight.Stop }
+                        else { Sight.Heard }
+          range = clamp(range, spec.near, spec.far)
+          w[at].range = range
+          w[at].ox = sx
+          w[at].oy = sy
+          w[at].x = sx + range * cos(radians(spec.facing))
+          w[at].y = sy + range * sin(radians(spec.facing))
+        }
+      } else {
+        let ox = x + sx * cos(heading) - sy * sin(heading)
+        let oy = y + sx * sin(heading) + sy * cos(heading)
+        // How near a kerb and a low thing can be and be seen.
+        let room = spec.up - spec.lip
+        let kerb_least = if room > 0.0 { spec.hide * (spec.up - heights[Height.Kerb]) / room } else { 0.0 }
+        let low_least = if room > 0.0 && heights[Height.Low] < spec.lip {
+          spec.hide * (spec.up - heights[Height.Low]) / room } else { 0.0 }
+        for k in 0..rays_of(spec) {
+          let angle = radians(spec.facing - spec.across * 0.5 + RAY_STEP * k as f32)
+          let (near, what, near_plain, tall, tall_plain) = see(e, me, ox, oy, cos(heading + angle),
+                                       sin(heading + angle), spec.far, kerb_least, low_least)
+          // The nearest thing, where it is before the nearest tall one.
+          var first = Sight.Nothing
+          var range = min(tall, min(spec.far, REACH))
+          if near < tall {
+            range = if errors { seen_range(near, seed, number, 2 * k, step, near_plain, dark) } else { near }
+            first = if what == Height.Kerb { Sight.Kerb } else if what == Height.Low { Sight.Low }
+                    else { Sight.Over }
+          }
+          let r = at + 2 * k
+          w[r].sight = first
+          w[r].range = range
+          w[r].ox = sx
+          w[r].oy = sy
+          w[r].x = sx + range * cos(angle)
+          w[r].y = sy + range * sin(angle)
+          w[r].low_from = low_least
+          w[r].kerb_from = kerb_least
+          var far = min(spec.far, REACH)
+          if tall < 1000.0 {
+            far = if errors { seen_range(tall, seed, number, 2 * k + 1, step, tall_plain, dark) } else { tall }
+          }
+          w[r + 1].sight = if tall < 1000.0 { Sight.Tall } else { Sight.Nothing }
+          w[r + 1].range = far
+          w[r + 1].ox = sx
+          w[r + 1].oy = sy
+          w[r + 1].x = sx + far * cos(angle)
+          w[r + 1].y = sy + far * sin(angle)
+          w[r + 1].low_from = low_least
+          w[r + 1].kerb_from = kerb_least
+        }
+      }
+      at += rows_of(spec)
+      number += 1
+    }
+  }
+}

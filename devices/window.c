@@ -386,6 +386,18 @@ void ent_window_line(float x0, float y0, float x1, float y1, int32_t color) {
   DrawLineV((Vector2){x0, y0}, (Vector2){x1, y1}, ent_window_color(color));
 }
 
+// A filled shape of four corners, as two triangles, each drawn both ways
+// round: the corners may be given clockwise or not.
+void ent_window_quad(float x0, float y0, float x1, float y1, float x2,
+                     float y2, float x3, float y3, int32_t rgb) {
+  Color color = ent_window_color(rgb);
+  Vector2 a = {x0, y0}, b = {x1, y1}, c = {x2, y2}, d = {x3, y3};
+  DrawTriangle(a, b, c, color);
+  DrawTriangle(a, c, b, color);
+  DrawTriangle(a, c, d, color);
+  DrawTriangle(a, d, c, color);
+}
+
 // The font of `label` and `paragraph`: one of the machine's own, the
 // first there is of those most machines have (ENT_WINDOW_FONT names
 // another file, or "none" for the window library's own letters of a few

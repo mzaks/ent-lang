@@ -1,0 +1,9 @@
+// Every place of examples/parking/scenes.ent is made of its things, and
+// a Model 3 at its start touches nothing there (check/places.ent).
+// RUN: %ent run -I %S/../../examples/parking %S/../../examples/parking/check/places.ent 2>/dev/null | FileCheck %s
+
+// CHECK: place 1 of 12: gap 28 cm, 20 edges, free true
+// CHECK-NOT: free false
+// CHECK: place 9 of 12: gap {{[0-9]+}} cm, 24 edges, free true
+// CHECK: place 11 of 12: gap {{[0-9]+}} cm, 24 edges, free true
+// CHECK: place 12 of 12: gap {{[0-9]+}} cm, 28 edges, free true

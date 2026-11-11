@@ -1,0 +1,25 @@
+// The automatic parker of examples/parking (parker.ent) drives a Model 3
+// with Tesla's cameras, their errors on, into the slot of every place by
+// what the car believes alone, and touches nothing (check/autopark.ent,
+// parking-SPEC.md check 5). In place 8, a dark garage with plain white
+// walls, the cameras see no wall: it finds no way it believes in, or is
+// stopped by a wall, and gives up.
+// In places 10 and 11 things move (someone walks behind it, a trolley,
+// a door that opens; cars that pass as it backs out between two vans):
+// it waits for them and touches none.
+// Place 12 is the yard a trailer is backed into (parking_backin.test):
+// without one, the vehicle parks in its bay.
+// RUN: %ent run -I %S/../../examples/parking %S/../../examples/parking/check/autopark.ent 2>/dev/null | FileCheck %s
+
+// CHECK: place 1: Done, parked true, touched 0,
+// CHECK: place 2: Done, parked true, touched 0,
+// CHECK: place 3: Done, parked true, touched 0,
+// CHECK: place 4: Done, parked true, touched 0,
+// CHECK: place 5: Done, parked true, touched 0,
+// CHECK: place 6: Done, parked true, touched 0,
+// CHECK: place 7: Done, parked true, touched 0,
+// CHECK: place 8: GaveUp, parked false,
+// CHECK: place 9: Done, parked true, touched 0,
+// CHECK: place 10: Done, parked true, touched 0,
+// CHECK: place 11: Done, parked true, touched 0,
+// CHECK: place 12: Done, parked true, touched 0,

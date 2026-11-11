@@ -1,0 +1,18 @@
+// Six vehicles park at once in a car park of two aisles
+// (examples/parking/check/carpark.ent, parking-SPEC.md scene 13): each
+// with Tesla's cameras, their errors on, a belief grid, a search and a
+// parker of its own (rows of its own of the buffers, by windows), and
+// the vehicles of an aisle are things to each other. All park and none
+// touches anything; on one core and with every loop over the vehicles
+// on six threads, the same lines.
+// RUN: %ent run -I %S/../../examples/parking %S/../../examples/parking/check/carpark.ent 2>/dev/null > %t.one
+// RUN: env ENT_PARALLEL_MIN=1 OMP_NUM_THREADS=6 %ent run --parallel -I %S/../../examples/parking %S/../../examples/parking/check/carpark.ent 2>/dev/null > %t.all
+// RUN: diff %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+
+// CHECK: vehicle 1 (Tesla Model 3 (2024)): Done, parked true, touched 0,
+// CHECK: vehicle 2 (Tesla Model 3 (2017-2023)): Done, parked true, touched 0,
+// CHECK: vehicle 3 (smart fortwo): Done, parked true, touched 0,
+// CHECK: vehicle 4 (Tesla Model 3 (2024)): Done, parked true, touched 0,
+// CHECK: vehicle 5 (Tesla Model 3 (2017-2023)): Done, parked true, touched 0,
+// CHECK: vehicle 6 (smart fortwo): Done, parked true, touched 0,

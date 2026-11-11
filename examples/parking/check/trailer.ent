@@ -1,0 +1,168 @@
+// A trailer behind a vehicle (parking-SPEC.md, check 6): what park.ent
+// makes of it and what tow.ent's knob does, against what is known by
+// hand. A vehicle for each row of `tests`, 300 m from the next:
+//
+// Round: forwards at half lock, for three minutes. The trailer comes to
+// stand across the vehicle by atan(h / R) + asin(d / sqrt(R R + h h)),
+// and its axle goes round a circle of radius sqrt(R R + h h - d d) (R:
+// the radius the vehicle's rear axle goes round, h: from that axle to
+// the hitch ball, d: the drawbar).
+// Jack: backwards with the wheels straight, the trailer one degree
+// across at the start. It does not stay: the trailer swings out until
+// it is jackknifed (60 degrees), and the vehicle is stopped; forwards
+// again, it comes straight behind.
+// Straight: backwards with the knob (tow.ent) at its middle, the
+// trailer 20 degrees across at the start: it comes straight and stays.
+// Held: backwards with the knob halfway to the left: the trailer comes
+// to stand half of the most the vehicle holds across it, and stays.
+// Wall: backwards with the knob at its middle at a wall 14 m behind:
+// the trailer's tail stops short of it, the vehicle far from it.
+import console
+import math
+import vehicles
+import park
+import believe
+import tow
+
+enum What { Round, Jack, Straight, Held, Wall }
+
+table tests { what: What, kind: i32, trailer: i32 } = [
+  { what: What.Round, kind: 0, trailer: 0 }, { what: What.Round, kind: 0, trailer: 1 },
+  { what: What.Round, kind: 2, trailer: 0 }, { what: What.Round, kind: 2, trailer: 1 },
+  { what: What.Round, kind: 4, trailer: 0 }, { what: What.Round, kind: 4, trailer: 1 },
+  { what: What.Jack, kind: 1, trailer: 0 }, { what: What.Jack, kind: 1, trailer: 1 },
+  { what: What.Straight, kind: 1, trailer: 0 }, { what: What.Straight, kind: 1, trailer: 1 },
+  { what: What.Straight, kind: 3, trailer: 0 }, { what: What.Straight, kind: 4, trailer: 1 },
+  { what: What.Held, kind: 1, trailer: 0 }, { what: What.Held, kind: 1, trailer: 1 },
+  { what: What.Held, kind: 3, trailer: 0 }, { what: What.Held, kind: 4, trailer: 1 },
+  { what: What.Wall, kind: 1, trailer: 0 }, { what: What.Wall, kind: 1, trailer: 1 }
+]
+
+// What it is to do, the least and the most x its trailer's axle had
+// (from the second minute on), and how far it went backwards.
+component Role { what: What, low: f64, high: f64, backed: f32 } capacity 1024
+
+world {
+  Sim.dt = 1.0 / 120.0
+  for i in 0..len(tests) {
+    Fleet += { kind: tests[i].kind, x: 300.0 * i as f32, y: 0.0, heading: 0.0 }
+  }
+}
+
+system roles() {
+  for e, c: Car {
+    e.add(Role { what: tests[c.number].what, low: 1.0e9, high: -1.0e9, backed: 0.0 })
+  }
+}
+
+system walls() {
+  for i in 0..len(tests) {
+    if tests[i].what == What.Wall {
+      box(Edges, 300.0 * i as f32 - 14.1, 0.0, radians(90.0), 12.0, 0.2, Height.Tall, false)
+    }
+  }
+}
+
+system begin() {
+  for c: Car, ch: Chassis, p: Pose, m: mut Motion, a: mut Ask, tr: mut Trailer, tw: mut Tow, r: Role {
+    tr.kind = tests[c.number].trailer
+    tr.heading = p.heading
+    a.v = -1.0
+    a.steer = 0.0
+    if r.what == What.Round {
+      a.v = 2.0
+      a.steer = 0.5
+      m.v = 2.0
+      m.steer = 0.5 * ch.lock
+    } else if r.what == What.Jack {
+      tr.heading = p.heading - radians(1.0) as f64
+    } else if r.what == What.Straight {
+      tr.heading = p.heading - radians(20.0) as f64
+      tw.mode = Backing.Knob
+    } else if r.what == What.Held {
+      tw.mode = Backing.Knob
+      tw.knob = 0.5
+    } else {
+      tw.mode = Backing.Knob
+    }
+  }
+}
+
+fn axle_x(car: row of vehicles, t: row of trailers, x: f64, heading: f64, towed: f64) -> f64 {
+  x - (hitch_of(car)) as f64 * cos64(heading) - t.drawbar as f64 * cos64(towed)
+}
+
+system track() {
+  let late = Sim.step >= 120 * 60
+  for c: Car, p: Pose, m: Motion, tr: Trailer, r: mut Role {
+    if m.ds < 0.0 { r.backed -= m.ds }
+    if late {
+      let x = axle_x(c.kind, trailers[tr.kind], p.x, p.heading, tr.heading)
+      r.low = min(r.low, x)
+      r.high = max(r.high, x)
+    }
+  }
+}
+
+// After 90 s: what backing came to. Then those jackknifed go forwards.
+system backed() {
+  for c: Car, p: Pose, n: Near, tr: Trailer, tw: Tow, a: mut Ask, r: Role {
+    let name = trailers[tr.kind].name
+    let across = degrees(across_of(p.heading, tr.heading))
+    if r.what == What.Jack {
+      put("{c.kind.name}, {name}, wheels straight: jackknifed {tr.jack} at {(abs(across) + 0.5) as i32} deg after {(r.backed * 10.0) as i32} dm, stopped {n.hits > 0}")
+      a.v = 1.0
+    } else if r.what == What.Straight {
+      put("{c.kind.name}, {name}, knob at its middle: {(abs(across) * 100.0 + 0.5) as i32} hundredths of a degree across after {(r.backed + 0.5) as i32} m, jackknifed {tr.jack}")
+    } else if r.what == What.Held {
+      let off = abs(across - degrees(tw.want))
+      put("{c.kind.name}, {name}, knob halfway: wanted {(degrees(tw.want) * 10.0 + 0.5) as i32} tenths of a degree, {(off * 100.0 + 0.5) as i32} hundredths off after {(r.backed + 0.5) as i32} m, jackknifed {tr.jack}")
+    } else if r.what == What.Wall {
+      put("{c.kind.name}, {name}, at a wall: the trailer {(tr.gap * 1000.0 + 0.5) as i32} mm from it, the vehicle {(n.gap * 100.0) as i32} cm, stopped {n.hits > 0}, jackknifed {tr.jack}")
+    }
+  }
+}
+
+system ended() {
+  for c: Car, ch: Chassis, p: Pose, m: Motion, tr: Trailer, r: Role {
+    let t = trailers[tr.kind]
+    let across = across_of(p.heading, tr.heading)
+    if r.what == What.Jack {
+      put("{c.kind.name}, {t.name}, forwards again: {(abs(degrees(across)) * 100.0 + 0.5) as i32} hundredths of a degree across, jackknifed {tr.jack}")
+    } else if r.what == What.Round {
+      let h = hitch_of(c.kind)
+      let round = c.kind.wheelbase / tan(m.steer)
+      let reach = sqrt(round * round + h * h)
+      let stands = atan(h / round) + asin(t.drawbar / reach)
+      let wide = 2.0 * sqrt(round * round + h * h - t.drawbar * t.drawbar)
+      put("{c.kind.name}, {t.name}, round: across off by {(abs(across - stands) * 1.0e6 + 0.5) as i32} millionths of a radian, its circle by {(abs((r.high - r.low) as f32 - wide) * 1.0e4 + 0.5) as i32} tenths of a millimetre")
+    }
+  }
+}
+
+schedule start() {
+  hitches()
+  roles()
+  walls()
+  whole()
+  begin()
+  measure()
+}
+
+schedule go() {
+  by_knob()
+  step()
+  track()
+}
+
+schedule middle() { backed() }
+schedule finish() { ended() }
+
+main {
+  setup()
+  start()
+  loop { go() } until Sim.step == 120 * 90
+  middle()
+  loop { go() } until Sim.step == 120 * 180
+  finish()
+}

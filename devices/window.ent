@@ -2,7 +2,7 @@
 // it (the first time), takes in what happened since the last frame and
 // clears the picture; `present` shows what was drawn since. Systems run
 // between the two draw by calling `rect`, `circle`, `sector`, `line`,
-// `label` and `paragraph`:
+// `quad`, `label` and `paragraph`:
 //
 //   import window
 //   world { Window.width = 800  Window.height = 450  Window.fps = 60 }
@@ -116,6 +116,11 @@ extern proc draw_pixels(them: Pixels, width: i32, height: i32, x: f32,
 // the right and growing clockwise (90 is down).
 extern proc sector(x: f32, y: f32, radius: f32, from: f32, to: f32, color: i32)
 extern proc line(x0: f32, y0: f32, x1: f32, y1: f32, color: i32)
+// A filled shape of four corners, given one after another round it,
+// either way: a rectangle that is turned, say. (One that folds back
+// into itself is not filled as it looks.)
+extern proc quad(x0: f32, y0: f32, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32,
+                 y3: f32, color: i32)
 // A line of text `size` pixels high, by its top left corner.
 // (In a font of the machine's own, the first there is of a few that most
 // machines have, so the letters differ from machine to machine and

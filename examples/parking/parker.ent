@@ -1,0 +1,988 @@
+// The automatic parker (parking-SPEC.md, 8): it drives the vehicle into
+// the slot by what the vehicle believes alone: the believed pose and
+// the grid (believe.ent). It never reads the true pose or the edges.
+// Every vehicle has a parker of its own (`Parker`), and rows of its own
+// of the buffers here; one that is `Off` does nothing.
+//
+// The slot is given (the scene's: in the car the driver taps it on the
+// display). The parker
+//
+// - makes of the grid how far every cell is from the nearest cell that
+//   holds something (`Field`), so that a pose is held against it with a
+//   few lookups: the body as a row of discs, the mirrors as one, the
+//   tyres as small ones against the kerbs;
+// - finds the corridor: the poses along the slot's axis, headed along
+//   it, that touch nothing, from the pose in the slot's middle outwards
+//   (a vehicle may stand in the slot either way round, unless the scene
+//   says which: then there are two corridors);
+// - searches for a way into a corridor (`search`): from the believed
+//   pose, short arcs forwards and backwards with the wheel left, right
+//   or straight, the cheapest first (hybrid A*: the poses are kept apart
+//   by cells of 15 cm and 5 degrees), until one lies in a corridor,
+//   nearly on the axis and nearly along it;
+// - follows that way: for each stretch of one arc it turns the wheels
+//   while standing, then drives its length by the odometer; where it
+//   changes direction it searches again from where it believes it is
+//   now, with what it has seen since;
+// - settles: in the corridor it steers towards the axis as it drives to
+//   the middle, and where it is not well on it there, it drives out
+//   along the corridor the way it came and comes in again, in a short
+//   gap to and fro between its ends.
+//
+// In the corridor it looks at the grid again twice a second: the slot's
+// end is seen better from near. It stops when the grid says something
+// is nearer than the margin and a centimetre, and searches again. It
+// gives up, and says so, when it finds no way or has searched too
+// often, when it is stopped by what it did not believe was there (it
+// touched it), and at once where the vehicle has no cameras.
+//
+// Things move (scenes.ent's movers). Ten times a second it looks at the
+// next 3 m of its way (`watch`): it stands while the cameras see
+// something near it that the grid has not held for 2 s (it moves, or
+// has just come into view), for 4 s at most; where the grid has had
+// something in its way for 2 s it searches again. Where a search
+// finds no way it waits 2 s and searches again, six times, before it
+// gives up.
+import math
+import vehicles
+import park
+import sense
+import believe
+import scenes
+
+enum Phase { Off, Plan, Follow, Settle, Done, GaveUp, Wait }
+// Why a parker gave up: the vehicle has no cameras; the grid leaves no
+// room for it in the slot; no search found a way, six times; it
+// searched more than 60 times; it was stopped by something it did not
+// believe to be there; it settled as well as it could, and is not in
+// the slot.
+enum Why { Not, Blind, NoRoom, NoWay, Searches, Stopped, Askew, Hitched }
+
+// How far each cell of the grid is from the nearest that holds
+// something the body can touch, and from the nearest kerb (metres);
+// `old`: from the nearest that has held something for 2 s or longer
+// (what was there before, not what has just come). A vehicle's rows
+// are those of its grid (believe.ent).
+buffer Field { body: f32, kerb: f32, old: f32 } capacity 61440000
+
+// The search: poses reached (`from`: the one before, `move`: the arc
+// that led here), the heap of those still to go on from by what they
+// cost and have left, the cheapest way found to each cell of poses, and
+// the way found: stretches of one arc each. Of each so many rows a
+// vehicle (room for 96 vehicles).
+buffer Nodes { x: f32, y: f32, heading: f32, g: f32, from: i32, move: i32 } capacity 57600000
+buffer Heap { f: f32, node: i32 } capacity 57600000
+buffer Best { g: f32 } capacity 276480000
+buffer Way { dir: f32, steer: f32, length: f32 } capacity 49152
+const NODES: i32 = 600000
+const BEST: i32 = 2880000
+const WAYS: i32 = 512
+
+const RES: f32 = 0.15
+const ACROSS: i32 = 200
+const TURNS: i32 = 72
+const ARC: f32 = 0.3
+// The room it keeps to what it believes is there.
+const MARGIN: f32 = 0.06
+const MOST_POSES: i32 = 90000
+
+// A vehicle's parker: what it is doing, the corridors (the pose in the
+// slot's middle, and from how far behind it to how far ahead a vehicle
+// headed so touches nothing; `ok`: there is such a corridor), which of
+// them the way found leads into, how many stretches the way has
+// (`ways`), the stretch it is on and how much of it is left, counts,
+// and `bump`: it gave up because it was stopped by something it did
+// not believe to be there, driving forwards (1) or backwards (-1);
+// `side`: the end of the corridor it came in by (1: the one ahead of
+// the slot's pose); `margin`: the room it keeps; `heads`: forwards or
+// backwards now; `alert`: the cameras see something near its way where
+// the grid has nothing (it moves, or is new), and `calm` looks since
+// they last did; `barred`: the grid has something in its way; `held`:
+// the steps it has stood for either, or waited after a search that
+// found no way, of which `tries` were made; `out_from`: where along the
+// corridor it set out on leg 1; `quiet`: the steps for which it does
+// not stand for `alert` (what was there for 4 s is not passing by);
+// `blind`: it gave up because the vehicle has no cameras; `leg`: where
+// it settles to (0: the middle, 1: out towards that end, 2: towards
+// the other).
+component Parker { phase: Phase,
+                   x0: f32, y0: f32, h0: f32, lo0: f32, hi0: f32, ok0: bool,
+                   x1: f32, y1: f32, h1: f32, lo1: f32, hi1: f32, ok1: bool,
+                   into: i32, ways: i32, stretch: i32, left: f32, leg: i32, turns: i32, read: f32,
+                   searches: i32, poses: i32, wx: f32, wy: f32, stood: i32, bump: f32, side: f32,
+                   margin: f32, blind: bool, heads: f32, alert: bool, barred: bool, calm: i32,
+                   held: i32, tries: i32, quiet: i32, out_from: f32, why: Why } capacity 1024
+
+// The poses it comes to next (`watch`), so many rows a vehicle.
+buffer Ahead { x: f32, y: f32, heading: f32 } capacity 6144
+const AHEAD: i32 = 64
+
+fn wrap(a: f32) -> f32 {
+  var b = a
+  if b > pi() { b -= tau() } else if b <= 0.0 - pi() { b += tau() }
+  b
+}
+
+// The field at a point of the place: 10 where the grid has no cell.
+fn body_at(field: Field[], x: f32, y: f32, gx: f32, gy: f32) -> f32 {
+  let at = cell_of(x, y, gx, gy)
+  if at < 0 { 10.0 } else { field[at].body }
+}
+fn old_at(field: Field[], x: f32, y: f32, gx: f32, gy: f32) -> f32 {
+  let at = cell_of(x, y, gx, gy)
+  if at < 0 { 10.0 } else { field[at].old }
+}
+fn kerb_at(field: Field[], x: f32, y: f32, gx: f32, gy: f32) -> f32 {
+  let at = cell_of(x, y, gx, gy)
+  if at < 0 { 10.0 } else { field[at].kerb }
+}
+
+// How much room a vehicle at that pose has, by the field: the least of
+// what its discs have left (below nought: it would touch). The body is
+// six big discs along its middle part, and at each end, where big ones
+// would reach far past the bumper, eight small ones: six across the
+// bumper and one at each side behind it. The mirrors are one disc
+// across, each tyre two small ones against the kerbs.
+fn room(field: Field[], car: row of vehicles, x: f32, y: f32, heading: f32, gx: f32, gy: f32) -> f32 {
+  let c = cos(heading)
+  let s = sin(heading)
+  let half = car.width * 0.5
+  let back = 0.0 - car.rear
+  let nose = car.wheelbase + car.front
+  let part = (car.length - 1.8) / 5.0
+  let r = sqrt(half * half + part * part * 0.25) - 0.03
+  var least = 10.0
+  for k in 0..6 {
+    let along = back + 0.9 + part * k as f32
+    least = min(least, body_at(field, x + along * c, y + along * s, gx, gy) - r)
+  }
+  for end in 0..2 {
+    let along = if end == 0 { back + 0.27 } else { nose - 0.27 }
+    for k in 0..6 {
+      let to = (half - 0.27) * (k as f32 * 0.4 - 1.0)
+      least = min(least, body_at(field, x + along * c - to * s, y + along * s + to * c, gx, gy) - 0.3)
+    }
+    let behind = if end == 0 { back + 0.65 } else { nose - 0.65 }
+    for k in 0..2 {
+      let to = if k == 0 { half - 0.27 } else { 0.27 - half }
+      least = min(least, body_at(field, x + behind * c - to * s, y + behind * s + to * c, gx, gy) - 0.3)
+    }
+  }
+  let mirror = mirror_from(car) + MIRROR_LONG * 0.5
+  least = min(least, body_at(field, x + mirror * c, y + mirror * s, gx, gy) - car.mirrors * 0.5)
+  let side = car.track * 0.5
+  for k in 0..8 {
+    let along = (if k < 4 { 0.0 } else { car.wheelbase }) + (if k % 2 == 0 { -0.18 } else { 0.18 })
+    let to = if (k / 2) % 2 == 0 { side } else { 0.0 - side }
+    least = min(least, kerb_at(field, x + along * c - to * s, y + along * s + to * c, gx, gy) - 0.16)
+  }
+  least
+}
+
+// A node onto the heap of `size` rows; how many it has then.
+proc heap_push(heap: mut Heap[], size: i32, f: f32, node: i32) -> i32 {
+  var at = size
+  var going = true
+  while at > 0 && going {
+    let up = (at - 1) / 2
+    if heap[up].f > f {
+      heap[at].f = heap[up].f
+      heap[at].node = heap[up].node
+      at = up
+    } else { going = false }
+  }
+  // (In a block: a row's field set as the last statement before the
+  // value a proc gives is not read as a statement yet.)
+  if true {
+    heap[at].f = f
+    heap[at].node = node
+  }
+  size + 1
+}
+
+// The node that has least `f`, taken off the heap of `had` rows (which
+// has one fewer then).
+proc heap_pop(heap: mut Heap[], had: i32) -> i32 {
+  let top = heap[0].node
+  let size = had - 1
+  let f = heap[size].f
+  let node = heap[size].node
+  var at = 0
+  var going = size > 0
+  while going {
+    var child = 2 * at + 1
+    if child >= size { going = false } else {
+      if child + 1 < size && heap[child + 1].f < heap[child].f { child += 1 }
+      if heap[child].f < f {
+        heap[at].f = heap[child].f
+        heap[at].node = heap[child].node
+        at = child
+      } else { going = false }
+    }
+  }
+  if size > 0 {
+    heap[at].f = f
+    heap[at].node = node
+  }
+  top
+}
+
+// The field of the grid as it is now: two sweeps over it, each cell the
+// least of its neighbours' plus the way to them.
+proc chamfer(field: mut Field[], cells: Cells[], step: i64, r0: i32, r1: i32, c0: i32, c1: i32) {
+  let far = 10.0 / CELL
+  for row in r0..r1 {
+    for col in c0..c1 {
+      let at = row * SIDE + col
+      field[at].body = far
+      field[at].kerb = far
+      field[at].old = far
+      if cells[at].sure >= SURE {
+        if cells[at].sight == Sight.Kerb { field[at].kerb = 0.0 } else {
+          field[at].body = 0.0
+          if step - cells[at].first >= 240 { field[at].old = 0.0 }
+        }
+      }
+    }
+  }
+  for row in r0 + 1..r1 {
+    for col in c0 + 1..c1 - 1 {
+      let at = row * SIDE + col
+      field[at].body = min(min(field[at].body, field[at - 1].body + 1.0),
+                           min(field[at - SIDE].body + 1.0,
+                               min(field[at - SIDE - 1].body, field[at - SIDE + 1].body) + 1.4142))
+      field[at].kerb = min(min(field[at].kerb, field[at - 1].kerb + 1.0),
+                           min(field[at - SIDE].kerb + 1.0,
+                               min(field[at - SIDE - 1].kerb, field[at - SIDE + 1].kerb) + 1.4142))
+      field[at].old = min(min(field[at].old, field[at - 1].old + 1.0),
+                          min(field[at - SIDE].old + 1.0,
+                              min(field[at - SIDE - 1].old, field[at - SIDE + 1].old) + 1.4142))
+    }
+  }
+  for back in 1..r1 - r0 {
+    let row = r1 - 1 - back
+    for behind in 1..c1 - c0 - 1 {
+      let col = c1 - 1 - behind
+      let at = row * SIDE + col
+      field[at].body = min(min(field[at].body, field[at + 1].body + 1.0),
+                           min(field[at + SIDE].body + 1.0,
+                               min(field[at + SIDE - 1].body, field[at + SIDE + 1].body) + 1.4142))
+      field[at].kerb = min(min(field[at].kerb, field[at + 1].kerb + 1.0),
+                           min(field[at + SIDE].kerb + 1.0,
+                               min(field[at + SIDE - 1].kerb, field[at + SIDE + 1].kerb) + 1.4142))
+      field[at].old = min(min(field[at].old, field[at + 1].old + 1.0),
+                          min(field[at + SIDE].old + 1.0,
+                              min(field[at + SIDE - 1].old, field[at + SIDE + 1].old) + 1.4142))
+    }
+  }
+  for row in r0..r1 {
+    for col in c0..c1 {
+      let at = row * SIDE + col
+      field[at].body = field[at].body * CELL
+      field[at].kerb = field[at].kerb * CELL
+      field[at].old = field[at].old * CELL
+    }
+  }
+}
+
+// Every vehicle its parker, off, and its rows of the buffers (once,
+// after `setup()`).
+system minds_park() {
+  let n = len(Cars)
+  for e, c: Car {
+    e.add(Parker { phase: Phase.Off, x0: 0.0, y0: 0.0, h0: 0.0, lo0: 0.0, hi0: 0.0, ok0: false,
+                   x1: 0.0, y1: 0.0, h1: 0.0, lo1: 0.0, hi1: 0.0, ok1: false,
+                   into: 0, ways: 0, stretch: 0, left: 0.0, leg: 0, turns: 0, read: 0.0,
+                   searches: 0, poses: 0, wx: 0.0, wy: 0.0, stood: 0, bump: 0.0, side: 0.0,
+                   margin: MARGIN, blind: false, heads: 1.0, alert: false, barred: false, calm: 0,
+                   held: 0, tries: 0, quiet: 0, out_from: 0.0, why: Why.Not })
+  }
+  Field = [{ body: 0.0, kerb: 0.0, old: 0.0 }; GRID * n]
+  Nodes = [{ x: 0.0, y: 0.0, heading: 0.0, g: 0.0, from: -1, move: -1 }; NODES * n]
+  Heap = [{ f: 0.0, node: 0 }; NODES * n]
+  Best = [{ g: 0.0 }; BEST * n]
+  Way = [{ dir: 0.0, steer: 0.0, length: 0.0 }; WAYS * n]
+  Ahead = [{ x: 0.0, y: 0.0, heading: 0.0 }; AHEAD * n]
+}
+
+// Before a search. Without cameras it does not start: ultrasonic
+// sensors hear nothing further than 2.5 m (the slot is not known before
+// the vehicle is at it) and nothing nearer than 25 cm.
+system aim() {
+  for su: Suite, tr: Trailer, p: mut Parker where p.phase == Phase.Plan {
+    p.margin = MARGIN
+    p.bump = 0.0
+    p.why = Why.Not
+    let blind = su.which != 1 && su.which != 2
+    p.blind = blind
+    if blind {
+      p.phase = Phase.GaveUp
+      p.why = Why.Blind
+    }
+    // (Nor with a trailer: it parks a vehicle, not two.)
+    if tr.kind >= 0 {
+      p.phase = Phase.GaveUp
+      p.why = Why.Hitched
+    }
+  }
+}
+
+// The field of all the grid, before a search (and twice a second while
+// it settles).
+system survey() {
+  let step = Sim.step
+  let tick = step % 60 == 0
+  for c: Car, p: Parker, cells: Cells[c.number * GRID, GRID], field: mut Field[c.number * GRID, GRID]
+      where p.phase == Phase.Plan || (p.phase == Phase.Settle && tick) {
+    chamfer(field, cells, step, 0, SIDE, 0, SIDE)
+  }
+}
+
+// The field anew 8 m round the vehicle, where `watch` and `settle` read
+// it (further off it stays as the last search had it).
+system glance() {
+  let step = Sim.step
+  let tick = step % 12 == 0 && step % 60 != 0
+  for c: Car, b: Belief, p: Parker, cells: Cells[c.number * GRID, GRID],
+      field: mut Field[c.number * GRID, GRID]
+      where (p.phase == Phase.Settle || p.phase == Phase.Follow) && tick {
+    let col = ((b.x as f32 - b.gx) / CELL) as i32
+    let row = ((b.y as f32 - b.gy) / CELL) as i32
+    chamfer(field, cells, step, min(max(row - 160, 0), SIDE), min(max(row + 160, 0), SIDE),
+            min(max(col - 160, 0), SIDE), min(max(col + 160, 0), SIDE))
+  }
+}
+
+// The corridor of the slot for a vehicle headed `heading`: a pose with
+// the body in the slot, and how far behind and ahead of it the poses
+// along the slot's axis are free. The pose is the one with the body in
+// the slot's middle where that is free; else the nearest free one to
+// it (along the axis and to a side, added): up to 60 cm along the axis,
+// and to a side as far as the body stays in the slot, by 5 cm.
+fn corridor(field: Field[], car: row of vehicles, slot_x: f32, slot_y: f32, slot_width: f32, heading: f32,
+            gx: f32, gy: f32, margin: f32) -> (f32, f32, f32, f32, bool) {
+  let c = cos(heading)
+  let s = sin(heading)
+  // The rear axle, with the body's middle in the slot's.
+  let middle = (car.wheelbase + car.front - car.rear) * 0.5
+  let mx = slot_x - middle * c
+  let my = slot_y - middle * s
+  let sides = max(0, ((slot_width - car.width) * 0.5 / 0.05) as i32)
+  var x = mx
+  var y = my
+  var ok = false
+  var least = 100.0
+  for n in 0..2 * sides + 1 {
+    // 0, 5 cm left, 5 cm right, 10 cm left, ...
+    let aside = 0.05 * ((n + 1) / 2) as f32 * (if n % 2 == 1 { 1.0 } else { -1.0 })
+    let ax = mx - aside * s
+    let ay = my + aside * c
+    for k in 0..25 {
+      // 0, 5 cm ahead, 5 cm behind, ...
+      let t = 0.05 * ((k + 1) / 2) as f32 * (if k % 2 == 1 { 1.0 } else { -1.0 })
+      if abs(t) + abs(aside) < least - 0.001 {
+        // (One with hardly the margin counts as 30 cm further.)
+        let has = room(field, car, ax + t * c, ay + t * s, heading, gx, gy)
+        let far = abs(t) + abs(aside) + (if has < margin + 0.03 { 0.3 } else { 0.0 })
+        // (It must be come to: 40 cm of the axis before it or behind
+        // it free too.)
+        let px = ax + t * c
+        let py = ay + t * s
+        let open = (room(field, car, px + 0.2 * c, py + 0.2 * s, heading, gx, gy) >= margin &&
+                    room(field, car, px + 0.4 * c, py + 0.4 * s, heading, gx, gy) >= margin) ||
+                   (room(field, car, px - 0.2 * c, py - 0.2 * s, heading, gx, gy) >= margin &&
+                    room(field, car, px - 0.4 * c, py - 0.4 * s, heading, gx, gy) >= margin)
+        if has >= margin && open && far < least - 0.001 {
+          ok = true
+          least = far
+          x = ax + t * c
+          y = ay + t * s
+        }
+      }
+    }
+  }
+  var lo = 0.0
+  var hi = 0.0
+  if ok {
+    var going = true
+    while going && hi < 7.0 {
+      if room(field, car, x + (hi + 0.1) * c, y + (hi + 0.1) * s, heading, gx, gy) >= margin { hi += 0.1 }
+      else { going = false }
+    }
+    going = true
+    while going && lo > -7.0 {
+      if room(field, car, x + (lo - 0.1) * c, y + (lo - 0.1) * s, heading, gx, gy) >= margin { lo -= 0.1 }
+      else { going = false }
+    }
+  }
+  (x, y, lo, hi, ok)
+}
+
+system corridors() {
+  let tick = Sim.step % 60 == 0
+  for c: Car, b: Belief, g: Goal, p: mut Parker, field: Field[c.number * GRID, GRID] {
+    if p.phase == Phase.Plan || (p.phase == Phase.Settle && tick) {
+      let car = c.kind
+      let heading = g.heading
+      let (x0, y0, lo0, hi0, ok0) = corridor(field, car, g.x, g.y, g.width, heading, b.gx, b.gy, p.margin)
+      p.x0 = x0
+      p.y0 = y0
+      p.h0 = heading
+      p.lo0 = lo0
+      p.hi0 = hi0
+      p.ok0 = ok0
+      let other = wrap(heading + pi())
+      let (x1, y1, lo1, hi1, ok1) = corridor(field, car, g.x, g.y, g.width, other, b.gx, b.gy, p.margin)
+      p.x1 = x1
+      p.y1 = y1
+      p.h1 = other
+      p.lo1 = lo1
+      p.hi1 = hi1
+      p.ok1 = ok1 && !g.turned
+    }
+  }
+}
+
+// How far a pose is from a corridor: from its axis between its ends,
+// and by how it is turned off it (a metre for a radian).
+fn to_corridor(x: f32, y: f32, heading: f32, cx: f32, cy: f32, ch: f32, lo: f32, hi: f32) -> f32 {
+  let c = cos(ch)
+  let s = sin(ch)
+  let along = (x - cx) * c + (y - cy) * s
+  let across = (y - cy) * c - (x - cx) * s
+  let past = max(max(lo - 0.25 - along, along - hi - 0.25), 0.0)
+  sqrt(across * across + past * past) + abs(wrap(heading - ch))
+}
+
+// Whether a pose is in a corridor well enough to settle from: within
+// 25 cm of its ends, 20 cm off the axis at most and 8 degrees (the
+// search holds every pose it goes through against the field itself).
+// Less in a corridor shorter than 1.5 m, by as much as it is shorter,
+// down to 7 cm and 3 degrees: a vehicle that has no room to go to and
+// fro in cannot straighten itself there, and must come in straight.
+fn in_corridor(x: f32, y: f32, heading: f32, cx: f32, cy: f32, ch: f32, lo: f32, hi: f32) -> bool {
+  let c = cos(ch)
+  let s = sin(ch)
+  let along = (x - cx) * c + (y - cy) * s
+  let across = (y - cy) * c - (x - cx) * s
+  let part = clamp((hi - lo) / 1.5, 0.35, 1.0)
+  along >= lo - 0.25 && along <= hi + 0.25 && abs(across) <= 0.2 * part &&
+    abs(wrap(heading - ch)) <= 0.14 * part
+}
+
+// Whether settling can start at a pose: it is in the corridor, and
+// headed as it is it can go 30 cm and 60 cm towards the corridor's
+// middle (in a narrow door a few degrees off are too many).
+fn settles(field: Field[], car: row of vehicles, x: f32, y: f32, heading: f32, cx: f32, cy: f32, ch: f32,
+           lo: f32, hi: f32, gx: f32, gy: f32, margin: f32) -> bool {
+  var can = in_corridor(x, y, heading, cx, cy, ch, lo, hi)
+  if can {
+    let along = (x - cx) * cos(ch) + (y - cy) * sin(ch)
+    let dir = if along > 0.0 { -1.0 } else { 1.0 }
+    for k in 1..3 {
+      let d = dir * min(0.3 * k as f32, abs(along))
+      if room(field, car, x + d * cos(heading), y + d * sin(heading), heading, gx, gy) < margin { can = false }
+    }
+  }
+  can
+}
+
+proc node(nodes: mut Nodes[], at: i32, x: f32, y: f32, heading: f32, g: f32, from: i32, move: i32) {
+  nodes[at].x = x
+  nodes[at].y = y
+  nodes[at].heading = heading
+  nodes[at].g = g
+  nodes[at].from = from
+  nodes[at].move = move
+}
+
+// A way from the believed pose into a corridor, into the vehicle's rows
+// of `Way` (`Parker.ways` of them); none where there is no way.
+system search() {
+  for c: Car, ch: Chassis, b: Belief, p: mut Parker, field: Field[c.number * GRID, GRID],
+      best: mut Best[c.number * BEST, BEST], nodes: mut Nodes[c.number * NODES, NODES],
+      heap: mut Heap[c.number * NODES, NODES], way: mut Way[c.number * WAYS, WAYS]
+      where p.phase == Phase.Plan {
+    let car = c.kind
+    let gx = b.gx
+    let gy = b.gy
+    let sx = b.x as f32
+    let sy = b.y as f32
+    let sh = b.heading as f32
+    let margin = p.margin
+    let ok0 = p.ok0
+    let ok1 = p.ok1
+    // The cells of poses: a square of 30 m round the middle between the
+    // start and the slot.
+    let wx = (sx + p.x0) * 0.5 - RES * (ACROSS / 2) as f32
+    let wy = (sy + p.y0) * 0.5 - RES * (ACROSS / 2) as f32
+    p.wx = wx
+    p.wy = wy
+    for i in 0..BEST { best[i].g = 1000000.0 }
+    p.searches += 1
+    var count = 0
+    var size = 0
+    var ways = 0
+    var found = -1
+    var into = 0
+    var poses = 0
+    if ok0 || ok1 {
+      node(nodes, 0, sx, sy, sh, 0.0, -1, -1)
+      count = 1
+      size = heap_push(heap, size, 0.0, 0)
+      while size > 0 && found < 0 && poses < MOST_POSES && count < NODES - 10000 {
+        let n = heap_pop(heap, size)
+        size -= 1
+        let x = nodes[n].x
+        let y = nodes[n].y
+        let heading = nodes[n].heading
+        let g = nodes[n].g
+        let col = floor((x - wx) / RES) as i32
+        let row = floor((y - wy) / RES) as i32
+        let turn = (floor((heading + pi()) / tau() * TURNS as f32) as i32 + TURNS) % TURNS
+        let cell = (turn * ACROSS + row) * ACROSS + col
+        // (One that a cheaper way to its cell was found after is left.)
+        if g <= best[cell].g + 0.0001 {
+          poses += 1
+          if ok0 && settles(field, car, x, y, heading, p.x0, p.y0, p.h0, p.lo0, p.hi0, gx, gy, margin) {
+            found = n
+            into = 0
+          } else if ok1 && settles(field, car, x, y, heading, p.x1, p.y1, p.h1, p.lo1, p.hi1, gx, gy,
+                                   margin) {
+            found = n
+            into = 1
+          } else {
+            let was = nodes[n].move
+            for move in 0..6 {
+              let dir = if move < 3 { 1.0 } else { -1.0 }
+              let steer = (move % 3 - 1) as f32 * ch.lock * 0.95
+              let rho = 0.0 - ch.back * steer
+              let ds = dir * ARC
+              let bend = ds * cos(rho) * (tan(steer) - tan(rho)) / car.wheelbase
+              // Half the arc, and all of it.
+              let mx = x + 0.5 * ds * cos(heading + rho + bend * 0.25)
+              let my = y + 0.5 * ds * sin(heading + rho + bend * 0.25)
+              let nx = x + ds * cos(heading + rho + bend * 0.5)
+              let ny = y + ds * sin(heading + rho + bend * 0.5)
+              let nh = wrap(heading + bend)
+              let ncol = floor((nx - wx) / RES) as i32
+              let nrow = floor((ny - wy) / RES) as i32
+              if ncol >= 0 && ncol < ACROSS && nrow >= 0 && nrow < ACROSS {
+                let free = min(room(field, car, mx, my, wrap(heading + bend * 0.5), gx, gy),
+                               room(field, car, nx, ny, nh, gx, gy))
+                if free >= margin {
+                  // What the arc costs: its length, more backwards; a
+                  // change of direction; another place of the wheel
+                  // (the vehicle stands for it); being near things.
+                  var cost = ARC * (if dir < 0.0 { 1.3 } else { 1.0 })
+                  if was >= 0 && (was < 3) != (move < 3) { cost += 2.0 }
+                  if was >= 0 && was % 3 != move % 3 { cost += 0.5 }
+                  if free < 0.3 { cost += (0.3 - free) * 1.5 }
+                  let ng = g + cost
+                  let nturn = (floor((nh + pi()) / tau() * TURNS as f32) as i32 + TURNS) % TURNS
+                  let ncell = (nturn * ACROSS + nrow) * ACROSS + ncol
+                  if ng < best[ncell].g - 0.0001 {
+                    best[ncell].g = ng
+                    var left = 1000.0
+                    if ok0 { left = to_corridor(nx, ny, nh, p.x0, p.y0, p.h0, p.lo0, p.hi0) }
+                    if ok1 { left = min(left, to_corridor(nx, ny, nh, p.x1, p.y1, p.h1, p.lo1, p.hi1)) }
+                    node(nodes, count, nx, ny, nh, ng, n, move)
+                    size = heap_push(heap, size, ng + 1.5 * left, count)
+                    count += 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    p.poses = poses
+    p.into = into
+    if found >= 0 {
+      // The arcs from the end back to the start (in the heap's rows),
+      // then turned round, those alike one after another as one stretch.
+      size = 0
+      var at = found
+      while nodes[at].from >= 0 {
+        heap[size].node = nodes[at].move
+        size += 1
+        at = nodes[at].from
+      }
+      var last = -1
+      for k in 0..size {
+        let move = heap[size - 1 - k].node
+        if move == last {
+          way[ways - 1].length += ARC
+        } else if ways < WAYS {
+          way[ways].dir = if move < 3 { 1.0 } else { -1.0 }
+          way[ways].steer = (move % 3 - 1) as f32 * ch.lock * 0.95
+          way[ways].length = ARC
+          ways += 1
+          last = move
+        }
+      }
+    }
+    p.ways = ways
+  }
+}
+
+// After a search: follow the way, settle where the vehicle is in a
+// corridor already, or give up.
+system decide() {
+  for c: Car, b: Belief, p: mut Parker, field: Field[c.number * GRID, GRID],
+      way: Way[c.number * WAYS, WAYS] {
+    if p.phase == Phase.Plan {
+      let x = b.x as f32
+      let y = b.y as f32
+      let heading = b.heading as f32
+      let car = c.kind
+      let gx = b.gx
+      let gy = b.gy
+      let there = (p.ok0 && settles(field, car, x, y, heading, p.x0, p.y0, p.h0, p.lo0, p.hi0, gx, gy, p.margin)) ||
+                  (p.ok1 && settles(field, car, x, y, heading, p.x1, p.y1, p.h1, p.lo1, p.hi1, gx, gy, p.margin))
+      let tries = if p.searches <= 1 { 0 } else { p.tries }
+      if p.ways > 0 {
+        p.phase = Phase.Follow
+        p.stretch = 0
+        p.left = way[0].length
+      } else if there {
+        p.phase = Phase.Settle
+        p.leg = 0
+        p.turns = 0
+        let cx = if p.into == 0 { p.x0 } else { p.x1 }
+        let cy = if p.into == 0 { p.y0 } else { p.y1 }
+        let ch = if p.into == 0 { p.h0 } else { p.h1 }
+        p.side = if (x - cx) * cos(ch) + (y - cy) * sin(ch) >= 0.0 { 1.0 } else { -1.0 }
+      } else if tries < 6 {
+        // No way now: what is in it may go. Up to six times.
+        p.phase = Phase.Wait
+        p.tries = tries + 1
+      } else {
+        p.phase = Phase.GaveUp
+        p.why = if p.ok0 || p.ok1 { Why.NoWay } else { Why.NoRoom }
+      }
+      if p.ways > 0 || there { p.tries = 0 }
+      if p.searches > 60 {
+        p.phase = Phase.GaveUp
+        p.why = Why.Searches
+      }
+      p.stood = 0
+      p.held = 0
+      p.alert = false
+      p.barred = false
+      p.calm = 0
+      p.quiet = 0
+      p.read = b.reads
+    }
+  }
+}
+
+// A step of following the way: the wheels to the stretch's place while
+// standing, then its length by the odometer, braking so as to stand at
+// its end. At a change of direction, and at the end, it searches again.
+system follow() {
+  for c: Car, ch: Chassis, m: Motion, a: mut Ask, b: Belief, p: mut Parker,
+      way: Way[c.number * WAYS, WAYS] {
+    if p.phase == Phase.Follow {
+      let reads = b.reads
+      let went = abs(b.went)
+      let stretch = p.stretch
+      let steer = way[stretch].steer
+      let dir = way[stretch].dir
+      var left = p.left - went
+      a.steer = steer / ch.lock
+      var v = 0.0
+      if abs(m.steer - steer) < 0.01 {
+        // As fast as it can still stop in what is left.
+        v = min(0.8, sqrt(max(0.0, 2.0 * 2.0 * (left - 0.02))))
+        if reads < 0.4 { v = min(v, 0.3) }
+      }
+      if left <= 0.02 { v = 0.0 }
+      // It stands while something moves near its way or is in it; where
+      // that stays for 2 s, it searches for a way round.
+      let quiet = max(0, p.quiet - 1)
+      let alert = p.alert && quiet == 0
+      let barred = p.barred
+      let hold = alert || barred
+      let held = if hold { p.held + 1 } else { 0 }
+      p.held = held
+      // What it has stood for 4 s for is not passing by: on, for 6 s.
+      p.quiet = if alert && !barred && held > 480 { 720 } else { quiet }
+      if hold { v = 0.0 }
+      a.v = dir * v
+      p.heads = dir
+      p.left = left
+      var phase = Phase.Follow
+      if left <= 0.02 && m.v == 0.0 {
+        // The next stretch, or, where that goes the other way, a search.
+        if stretch + 1 < p.ways && way[stretch + 1].dir == dir {
+          p.stretch = stretch + 1
+          p.left = left + way[stretch + 1].length
+        } else {
+          phase = Phase.Plan
+        }
+      }
+      // Something too near, and a centimetre nearer than when it set
+      // out on this way: stand, and search again.
+      if reads < p.margin + 0.01 && reads < p.read - 0.01 && m.v != 0.0 {
+        a.v = 0.0
+        phase = Phase.Plan
+      }
+      if barred && !alert && held > 240 && m.v == 0.0 { phase = Phase.Plan }
+      // Standing though it should drive (it was stopped): give up.
+      let stood = p.stood
+      p.stood = if m.v == 0.0 && v > 0.0 { stood + 1 } else { 0 }
+      if stood > 120 {
+        phase = Phase.GaveUp
+        p.why = Why.Stopped
+        p.bump = dir
+      }
+      p.phase = phase
+    }
+  }
+}
+
+// A look at the way ahead, ten times a second: the poses of the next
+// 3 m of the way, as far as it goes the same way (settling: of 2 m
+// straight on), every 30 cm. `barred`: the grid leaves one of them no
+// room (the margin it may have lost by how it followed the way).
+// `alert`: two or more of the points the cameras see now, within 6 m,
+// are within 2.5 m of one of those poses' body (a car at 3 m/s is there
+// in a second) and where the grid has held nothing near for 2 s or
+// longer (so they have just come, or move: someone walking, a car); it
+// stays for 0.6 s after the last such look.
+system watch() {
+  let tick = Sim.step % 12 == 0
+  for c: Car, ch: Chassis, b: Belief, ey: Eyes, p: mut Parker, rays: Rays[ey.first, ey.rows],
+      field: Field[c.number * GRID, GRID], way: Way[c.number * WAYS, WAYS],
+      ahead: mut Ahead[c.number * AHEAD, AHEAD]
+      where (p.phase == Phase.Settle || p.phase == Phase.Follow) && tick {
+    let car = c.kind
+    let gx = b.gx
+    let gy = b.gy
+    var x = b.x as f32
+    var y = b.y as f32
+    var heading = b.heading as f32
+    let cs = cos(heading)
+    let sn = sin(heading)
+    let bx = x
+    let by = y
+    let following = p.phase == Phase.Follow
+    var count = 1
+    ahead[0].x = x
+    ahead[0].y = y
+    ahead[0].heading = heading
+    if following {
+      var gone = 0.0
+      let dir = way[p.stretch].dir
+      var same = true
+      for k in p.stretch..p.ways {
+        if way[k].dir != dir { same = false }
+        let length = if k == p.stretch { p.left } else { way[k].length }
+        let steer = way[k].steer
+        let rho = 0.0 - ch.back * steer
+        // Every 30 cm of the stretch, and what is left of it at its end.
+        for n in 0..(length / 0.3) as i32 + 1 {
+          let ds = way[k].dir * min(0.3, length - 0.3 * n as f32)
+          let bend = ds * cos(rho) * (tan(steer) - tan(rho)) / car.wheelbase
+          if gone < 3.0 && same && abs(ds) > 0.001 && count < AHEAD {
+            x += ds * cos(heading + rho + bend * 0.5)
+            y += ds * sin(heading + rho + bend * 0.5)
+            heading += bend
+            gone += abs(ds)
+            ahead[count].x = x
+            ahead[count].y = y
+            ahead[count].heading = heading
+            count += 1
+          }
+        }
+      }
+    } else {
+      for n in 1..7 {
+        ahead[count].x = x + p.heads * 0.3 * n as f32 * cs
+        ahead[count].y = y + p.heads * 0.3 * n as f32 * sn
+        ahead[count].heading = heading
+        count += 1
+      }
+    }
+    var barred = false
+    for k in 1..count {
+      if following && room(field, car, ahead[k].x, ahead[k].y, ahead[k].heading, gx, gy) < 0.01 {
+        barred = true
+      }
+    }
+    var fresh = 0
+    let half = car.mirrors * 0.5
+    for i in 0..len(rays) {
+      let sight = rays[i].sight
+      if (sight == Sight.Low || sight == Sight.Tall || sight == Sight.Over) && rays[i].range <= 6.0 {
+        let px = bx + rays[i].x * cs - rays[i].y * sn
+        let py = by + rays[i].x * sn + rays[i].y * cs
+        if old_at(field, px, py, gx, gy) > 0.25 + 0.05 * rays[i].range {
+          var near = false
+          for k in 0..count {
+            let qx = px - ahead[k].x
+            let qy = py - ahead[k].y
+            let ac = cos(ahead[k].heading)
+            let as = sin(ahead[k].heading)
+            if point_box(qx * ac + qy * as, qy * ac - qx * as, 0.0 - car.rear, 0.0 - half,
+                         car.wheelbase + car.front, half) < 2.5 { near = true }
+          }
+          if near { fresh += 1 }
+        }
+      }
+    }
+    if fresh >= 2 {
+      p.alert = true
+      p.calm = 0
+    } else {
+      let calm = p.calm + 1
+      p.calm = calm
+      if calm >= 6 { p.alert = false }
+    }
+    p.barred = barred
+  }
+}
+
+// After a search that found no way: 2 s standing, then another.
+system pause() {
+  for a: mut Ask, p: mut Parker where p.phase == Phase.Wait {
+    a.v = 0.0
+    let held = p.held + 1
+    p.held = held
+    if held > 240 { p.phase = Phase.Plan }
+  }
+}
+
+// The room a vehicle has `step` on as it is headed, where it is, and
+// `step` back.
+fn rooms(field: Field[], car: row of vehicles, x: f32, y: f32, heading: f32, step: f32, gx: f32,
+         gy: f32) -> (f32, f32, f32) {
+  (room(field, car, x + step * cos(heading), y + step * sin(heading), heading, gx, gy),
+   room(field, car, x, y, heading, gx, gy),
+   room(field, car, x - step * cos(heading), y - step * sin(heading), heading, gx, gy))
+}
+
+// A step of settling in the corridor: along it to the middle, steering
+// towards the axis, with no more of a heading across it than the wheel
+// takes out again in what is left of the leg (so every leg ends headed
+// along the corridor, and brings the vehicle nearer the axis: in a gap
+// a metre longer than the vehicle, a few centimetres). Where it is not
+// well on the axis at the middle, out along the corridor the way it
+// came, then, as far as the slot goes, to the other end, and so on,
+// ten times at most; then to the middle. Done where the body is in the
+// slot by what it believes (as `judge()` asks of the truth).
+system settle() {
+  for c: Car, ch: Chassis, m: Motion, a: mut Ask, b: Belief, g: Goal, p: mut Parker,
+      field: Field[c.number * GRID, GRID] {
+    if p.phase == Phase.Settle {
+      let car = c.kind
+      let cx = if p.into == 0 { p.x0 } else { p.x1 }
+      let cy = if p.into == 0 { p.y0 } else { p.y1 }
+      let ch0 = if p.into == 0 { p.h0 } else { p.h1 }
+      let lo = if p.into == 0 { p.lo0 } else { p.lo1 }
+      let hi = if p.into == 0 { p.hi0 } else { p.hi1 }
+      let x = b.x as f32
+      let y = b.y as f32
+      let heading = b.heading as f32
+      let cc = cos(ch0)
+      let ss = sin(ch0)
+      let along = (x - cx) * cc + (y - cy) * ss
+      let across = (y - cy) * cc - (x - cx) * ss
+      let off = wrap(heading - ch0)
+      let leg = p.leg
+      let turns = p.turns
+      let margin = p.margin
+      // The ends of the legs: out no further than 6 m (and no further than
+      // to where it is on the axis within 3 cm and 0.7 degrees, a door 30 cm
+      // wider than the mirrors asks for that; but a metre at least, from
+      // where it sees again what was under its ends), the other way no
+      // further than the slot goes (what is behind it may not have been
+      // seen), 15 cm short of the corridor's ends.
+      let slack = max(0.0, (g.length - car.length) * 0.5 + 0.2)
+      let outer = if p.side > 0.0 { max(0.0, min(hi - 0.15, 6.0)) } else { min(0.0, max(lo + 0.15, -6.0)) }
+      let inner = if p.side > 0.0 { min(0.0, max(lo + 0.15, 0.0 - slack)) } else { max(0.0, min(hi - 0.15, slack)) }
+      let to = if leg == 1 { outer } else if leg == 2 { inner } else { 0.0 }
+      let left = to - along
+      let well = abs(across) < 0.05 && abs(off) < 0.03
+      let dir = if left >= 0.0 { 1.0 } else { -1.0 }
+      // What the grid leaves it 15 cm on, as it is headed: where that is
+      // nothing, and less than where it is, it stands, and that is the
+      // leg's end (on the way to the middle only near it: else it goes
+      // out, to come in better; and where out is no better, it searches).
+      let (on, here, other) = rooms(field, car, x, y, heading, dir * 0.15, b.gx, b.gy)
+      let blocked = abs(left) > 0.03 && on < margin && on < here
+      let stuck = blocked && other < margin && other < here
+      let arrived = abs(left) <= 0.03 || (blocked && (leg != 0 || abs(left) < 0.4)) ||
+                    (leg == 1 && abs(across) < 0.03 && abs(off) < 0.012 && abs(along - p.out_from) >= 1.0)
+      let inside = stands_in(car, g.x, g.y, g.heading, g.length, g.width, false, x, y, heading)
+      let most = min(0.4, abs(left) * tan(ch.lock) / car.wheelbase)
+      // The heading to hold so as to come to the axis, and the wheel for it.
+      let want = clamp(0.0 - dir * 2.0 * across, 0.0 - most, most)
+      var wheel = clamp(dir * 2.5 * (want - off) / ch.lock, -1.0, 1.0)
+      var v = min(0.5, sqrt(max(0.0, 2.0 * 2.0 * (abs(left) - 0.02))))
+      // Slowly while the wheel is far from where it is asked to be.
+      if abs(m.steer - wheel * ch.lock) > 0.15 { v = min(v, 0.12) }
+      let quiet = max(0, p.quiet - 1)
+      let alert = p.alert && quiet == 0
+      let held = if alert { p.held + 1 } else { 0 }
+      p.held = held
+      p.quiet = if held > 480 { 720 } else { quiet }
+      if arrived || blocked || alert { v = 0.0 }
+      a.v = dir * v
+      p.heads = dir
+      var phase = Phase.Settle
+      if (arrived || blocked) && m.v == 0.0 {
+        if turns > 12 || (leg == 0 && arrived && (well || turns >= 10 || (abs(outer) < 0.3 && abs(inner) < 0.3))) {
+          wheel = 0.0
+          phase = if inside { Phase.Done } else { Phase.GaveUp }
+          if !inside { p.why = Why.Askew }
+        } else if stuck && !arrived {
+          phase = Phase.Plan
+        } else if !arrived || leg == 0 {
+          p.leg = 1
+          p.out_from = along
+          p.turns = turns + 1
+        } else if well || turns >= 10 {
+          p.leg = 0
+        } else {
+          p.leg = if leg == 1 && abs(inner) > 0.2 { 2 } else if leg == 1 { 0 } else { 1 }
+          p.out_from = along
+          p.turns = turns + 1
+        }
+      }
+      a.steer = wheel
+      let stood = p.stood
+      p.stood = if m.v == 0.0 && v > 0.0 { stood + 1 } else { 0 }
+      if stood > 120 {
+        phase = Phase.GaveUp
+        p.why = Why.Stopped
+        p.bump = dir
+      }
+      p.phase = phase
+    }
+  }
+}
+
+// Standing, whatever was asked.
+system halt() {
+  for a: mut Ask, p: Parker where p.phase == Phase.Done || p.phase == Phase.GaveUp { a.v = 0.0 }
+}
+
+// The parkers' part of a step, before the vehicles' (`step()`): one
+// search at most each, then what each asks of its vehicle. Nothing for
+// one whose phase is `Off`; `Plan` starts it.
+schedule park_step() {
+  aim()
+  survey()
+  glance()
+  corridors()
+  search()
+  decide()
+  watch()
+  pause()
+  follow()
+  settle()
+  halt()
+}

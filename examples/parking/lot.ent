@@ -1,0 +1,149 @@
+// A car park of many vehicles parking at once (parking-SPEC.md, 9:
+// scene 13). Aisles of 6 m, each with bays 2.5 m wide and 5 m deep on
+// both sides and a wall behind them; `Lot.per` vehicles drive along
+// each aisle, `Lot.apart` metres one behind another, and each is to
+// park in a free bay some 7 m ahead of where it starts, on one side and
+// the other in turn. Every other bay is taken.
+//
+// An aisle is a place of its own (park.ent's `Place`): its things and
+// the bodies of its vehicles, which are edges to each other. So a
+// vehicle sees, and must not touch, those of its aisle, and the aisles
+// are apart: on many cores each vehicle is a thread's work.
+//
+// The program gives `Lot` and a row of `Fleet` for every vehicle before
+// `setup()`; `lot()` makes the place and stands the vehicles in it.
+import math
+import wyhash
+import vehicles
+import park
+import sense
+import scenes
+
+unique Lot { aisles: i32, per: i32, apart: f32, x: f32, y: f32 }
+
+// How far apart the aisles are, how wide a bay is, where a vehicle of
+// an aisle starts along it and across it, and where the bays' middles
+// are across it.
+const AISLE: f32 = 20.0
+const BAY: f32 = 2.5
+const LOT_START: f32 = 3.0
+const LOT_LANE: f32 = 8.0
+const BAY_LOW: f32 = 2.5
+const BAY_HIGH: f32 = 13.5
+
+// The bays on each side of an aisle.
+fn lot_bays(per: i32, apart: f32) -> i32 { ((LOT_START + apart * per as f32 + 8.0) / BAY) as i32 + 1 }
+// The bay the k-th vehicle of an aisle is to park in, and whether on
+// the upper side.
+fn lot_bay(k: i32, apart: f32) -> i32 { ((LOT_START + apart * k as f32 + 7.0) / BAY) as i32 }
+fn lot_high(k: i32) -> bool { k % 2 == 1 }
+// The edges of an aisle: two walls, a vehicle in every bay but the
+// `per` that are free, and the `per` vehicles that drive.
+fn lot_edges(per: i32, apart: f32) -> i32 { 4 * (2 + 2 * lot_bays(per, apart)) }
+// Which vehicle (a row of `vehicles`) the n-th is, and which suite it
+// carries: Model 3s of both kinds and a smart; every other Model 3 of
+// 2024 has the bumper camera.
+fn lot_kind(n: i32) -> i32 { if n % 3 == 0 { 1 } else if n % 3 == 1 { 0 } else { 2 } }
+fn lot_suite(n: i32) -> i32 { if n % 6 == 3 { 2 } else { 1 } }
+
+// The car park's edges, and every vehicle at its start: standing, its
+// wheels straight, its place the aisle, its goal the bay.
+system lot() {
+  let per = Lot.per
+  let apart = Lot.apart
+  let bays = lot_bays(per, apart)
+  let each = lot_edges(per, apart)
+  let ox = Lot.x
+  let oy = Lot.y
+  Edges = []
+  for a in 0..Lot.aisles {
+    let y = oy + AISLE * a as f32
+    let long = BAY * bays as f32
+    box(Edges, ox + long * 0.5, y - 0.1, 0.0, long, 0.2, Height.Tall, false)
+    box(Edges, ox + long * 0.5, y + 16.1, 0.0, long, 0.2, Height.Tall, false)
+    // The vehicles that drive: their four edges each, set by `bodies()`.
+    for k in 0..per {
+      box(Edges, 0.0, 0.0, 0.0, 1.0, 1.0, Height.Tall, false)
+      for e in 0..4 { Edges[len(Edges) - 4 + e].owner = a * per + k }
+    }
+    // The vehicles that stand: none in the free bays.
+    for side in 0..2 {
+      for bay in 0..bays {
+        var free = false
+        for k in 0..per {
+          if lot_bay(k, apart) == bay && lot_high(k) == (side == 1) { free = true }
+        }
+        if !free {
+          // (Each a little other than the next: as people park.)
+          let key = wyhash64(77, (a * 1000 + side * 500 + bay) as u64)
+          let length = 4.5 + 0.2 * unit(key, 0)
+          let width = 1.85 + 0.05 * unit(key, 1)
+          box(Edges, ox + BAY * (bay as f32 + 0.5) + 0.1 * unit(key, 2),
+              y + (if side == 0 { BAY_LOW } else { BAY_HIGH }) + 0.15 * unit(key, 3),
+              radians(90.0 + 2.0 * unit(key, 4)), length, width, Height.Tall, false)
+        }
+      }
+    }
+  }
+  for c: mut Car, ch: mut Chassis, p: mut Pose, m: mut Motion, ask: mut Ask, n: mut Near, pl: mut Place,
+      g: mut Goal, su: mut Suite, ey: mut Eyes {
+    let a = c.number / per
+    let k = c.number % per
+    let there = a < Lot.aisles
+    let kind = vehicles[lot_kind(c.number)]
+    let lock = lock_of(kind)
+    let y = oy + AISLE * a as f32
+    c.kind = kind
+    ch.lock = lock
+    ch.back = radians(kind.rear_steer) / lock
+    ch.rate = 2.0 * lock / LOCK_TO_LOCK
+    p.x = (ox + LOT_START + apart * k as f32) as f64
+    p.y = (y + LOT_LANE) as f64
+    p.heading = 0.0
+    m.v = 0.0
+    m.steer = 0.0
+    ask.v = 0.0
+    ask.steer = 0.0
+    n.hits = 0
+    pl.first = each * a
+    pl.count = each
+    pl.body = each * a + 8 + 4 * k
+    pl.rows = 4
+    g.x = ox + BAY * (lot_bay(k, apart) as f32 + 0.5)
+    g.y = y + (if lot_high(k) { BAY_HIGH } else { BAY_LOW })
+    g.heading = radians(90.0)
+    g.length = 5.0
+    g.width = BAY
+    g.turned = false
+    g.parked = false
+    su.which = lot_suite(c.number)
+    ey.asleep = !there
+    if !there {
+      // (More vehicles than the car park has room for: away.)
+      p.x = 2000.0 + 20.0 * c.number as f64
+      p.y = 2000.0
+      pl.first = 0
+      pl.count = 0
+      pl.body = 0
+      pl.rows = 0
+      g.length = 0.0
+    }
+  }
+}
+
+// In a place for one vehicle (after scenes.ent's `stage()`): the first
+// is there, the others are away, asleep, and nothing to anyone.
+system lot_away() {
+  for c: Car, p: mut Pose, pl: mut Place, g: mut Goal, ey: mut Eyes {
+    ey.asleep = c.number > 0
+    if c.number > 0 {
+      p.x = 2000.0 + 20.0 * c.number as f64
+      p.y = 2000.0
+      pl.first = 0
+      pl.count = 0
+      pl.body = 0
+      pl.rows = 0
+      g.length = 0.0
+    }
+  }
+}

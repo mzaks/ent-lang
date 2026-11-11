@@ -1,0 +1,27 @@
+// What the sensors of examples/parking report of walls, a thin post, a
+// kerb and things that hang over at distances known by hand
+// (check/sensors.ent; parking-SPEC.md, check 3), without errors, in
+// millimetres: ultrasonic sensors that hear a face straight ahead and
+// not what is too thin, too low or too high, and cameras that do not see
+// over the bonnet what is low and near. On one core and on all.
+// RUN: %ent run -I %S/../../examples/parking %S/../../examples/parking/check/sensors.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel -I %S/../../examples/parking %S/../../examples/parking/check/sensors.ent 2>/dev/null > %t.all
+// RUN: cmp %t.one %t.all
+// RUN: FileCheck %s --input-file=%t.one
+
+// CHECK: car 0 heard 1000 stops 0 tall -1 low -1 kerb -1 over -1
+// CHECK: car 1 heard 250 stops 2
+// A thin post from 1.5 m and from 0.8 m; a kerb; what hangs over.
+// CHECK: car 2 heard -1 stops 0
+// CHECK: car 3 heard 800 stops 0
+// CHECK: car 4 heard -1 stops 0
+// CHECK: car 5 heard -1 stops 0
+// The cameras: a wall; a low wall just ahead, without and with the
+// bumper camera; a kerb far and near; what a wall hides; a plain wall.
+// CHECK: car 6 heard -1 stops 0 tall 6878 low -1 kerb -1 over -1
+// CHECK: car 7 heard -1 stops 0 tall -1 low -1 kerb -1 over -1
+// CHECK: car 8 heard -1 stops 0 tall -1 low 300 kerb -1 over -1
+// CHECK: car 9 heard -1 stops 0 tall -1 low -1 kerb 4878 over -1
+// CHECK: car 10 heard -1 stops 0 tall -1 low -1 kerb -1 over -1
+// CHECK: car 11 heard -1 stops 0 tall 3878 low -1 kerb -1 over -1
+// CHECK: car 12 heard -1 stops 0 tall 7418 low -1 kerb -1 over -1

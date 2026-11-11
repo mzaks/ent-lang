@@ -291,7 +291,7 @@ come with the compiler, in `devices/`, and two more that need
 
 - `window`: a window to draw in, with the keys and the mouse.
   `begin()` opens it, fills `Window`, `Mouse` and `Keys` and clears the
-  picture; systems then draw with `rect`, `circle`, `sector`, `line`,
+  picture; systems then draw with `rect`, `circle`, `sector`, `line`, `quad`,
   `label` and `paragraph` (colours are `0xRRGGBB`); `present()` shows the frame and holds
   `Window.fps`. The window can be given another size by the user
   (`Window.resizable`) and fills the screen while `Window.fullscreen`

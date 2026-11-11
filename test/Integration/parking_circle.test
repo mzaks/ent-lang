@@ -1,0 +1,11 @@
+// The vehicles of examples/parking held at a steering angle and a speed
+// (check/circle.ent) stay on the circle the formula gives, within 0.01
+// mm after 80 m, turn at full lock in their turning circle kerb to kerb,
+// within 1 mm, and are where they are to the bit on one core and on all
+// (parking-SPEC.md, check 1).
+// RUN: %ent run -I %S/../../examples/parking %S/../../examples/parking/check/circle.ent 2>/dev/null > %t.one
+// RUN: %ent run --parallel -I %S/../../examples/parking %S/../../examples/parking/check/circle.ent 2>/dev/null > %t.all
+// RUN: %python %S/../../examples/parking/check/circle.py %t.one %t.all | FileCheck %s
+
+// CHECK: 20 vehicles: at most 0.00{{[0-9]+}} mm off their circles
+// CHECK: ok

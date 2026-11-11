@@ -1,0 +1,91 @@
+// Every vehicle of `vehicles` held at a steering angle and a speed, for
+// examples/parking/check/circle.py (parking-SPEC.md, checks 1.1 and
+// 1.2): four of each, at full lock to the left forwards and backwards,
+// and at a third of it to the right forwards and backwards, for two
+// rounds of the first. A line for each of what it is given, then every
+// 240 steps a line for each of where it is (the bits of the doubles),
+// and at the end how wide the path of its outer front wheel was.
+import console
+import math
+import vehicles
+import park
+
+// Where the wheel went that is the outer front one in a turn to the
+// left: the least and the most of its x.
+component Round { low: f32, high: f32 } capacity 1024
+
+world {
+  Sim.dt = 1.0 / 120.0
+  for k in 0..len(vehicles) {
+    for i in 0..4 {
+      Fleet += { kind: k, x: 3.0 * k as f32, y: 0.0 - 2.0 * i as f32, heading: 0.5 * i as f32 }
+    }
+  }
+}
+
+// Each is at once as fast as it is to go, its wheels where they are to be.
+system hold() {
+  for c: Car, ch: Chassis, m: mut Motion, a: mut Ask {
+    let way = c.number % 4
+    a.steer = if way < 2 { 1.0 } else { -1.0 / 3.0 }
+    a.v = if way % 2 == 0 { 1.0 } else { -1.0 }
+    m.steer = a.steer * ch.lock
+    m.v = a.v
+  }
+}
+
+system rounds() {
+  for e, c: Car { e.add(Round { low: 1000.0, high: -1000.0 }) }
+}
+
+system given() {
+  for c: Car, ch: Chassis, p: Pose, m: Motion {
+    put("car {c.number} {c.kind.wheelbase} {c.kind.track} {c.kind.circle} {c.kind.rear_steer} {bits_of(ch.lock)} {bits_of(m.steer)} {bits_of(m.v)} {bits_of(p.x)} {bits_of(p.y)} {bits_of(p.heading)}")
+  }
+}
+
+system trace() {
+  let step = Sim.step
+  for c: Car, p: Pose {
+    put("at {step} {c.number} {bits_of(p.x)} {bits_of(p.y)} {bits_of(p.heading)}")
+  }
+}
+
+// The right front wheel's place.
+system wheel() {
+  for c: Car, p: Pose, r: mut Round {
+    let x = p.x as f32 + c.kind.wheelbase * cos(p.heading as f32) + c.kind.track * 0.5 * sin(p.heading as f32)
+    r.low = min(r.low, x)
+    r.high = max(r.high, x)
+  }
+}
+
+system widths() {
+  for c: Car, r: Round {
+    put("wide {c.number} {bits_of(r.high - r.low)}")
+  }
+}
+
+schedule start() {
+  hold()
+  rounds()
+  given()
+}
+
+schedule traced() {
+  trace() run_if Sim.step % 240 == 0
+  step()
+  wheel()
+}
+
+schedule finish() {
+  trace()
+  widths()
+}
+
+main {
+  setup()
+  start()
+  loop { traced() } until Sim.step == 9600
+  finish()
+}

@@ -1,0 +1,310 @@
+// What a vehicle believes (parking-SPEC.md, 7): where it is, by its
+// wheels and its gyroscope, and what is around it, by all that its
+// sensors have reported so far. Every vehicle has its own: a `Belief`,
+// and the rows of `Cells` that are its grid (those of vehicle n start at
+// n times a grid's cells).
+//
+// Where it is. It does not know its pose; it starts from the true one
+// (`recall()`), and from then on adds up what it measures: how far the
+// rear wheels rolled, in edges of their encoders (`ticks` a turn: 2 cm
+// each), each wheel's tyre a little bigger or smaller than it is taken
+// to be, and how far it turned, by a gyroscope that reads a little too
+// much or too little and drifts a little while it drives. So the
+// believed pose goes off the true one, by a part of how far it drove
+// and turned. Without errors it is the true one.
+//
+// What is around it. `Cells` is a grid of squares of 5 cm, 40 m across,
+// fixed where the vehicle believed itself to be at the start. A cell
+// holds how sure the vehicle is that something is there, how high it
+// took it to be, and when it last saw it. What a sensor reports is put
+// in by the pose believed then: the cell of a camera's point gets
+// surer, the cells its ray went through before get less sure, but not
+// where the ray could not have seen what the cell holds: a low thing
+// nearer than the body lets it see is kept as it is. That is the
+// memory: what has gone into the blind zone is still in the grid, where
+// it was put when it was last seen, and is off by all the pose has
+// drifted since, and by the error of that sighting. A cell also holds
+// from how far it was seen at the nearest (`from`): a sighting from far
+// is off by more, counts for less, and gives way to one from much
+// nearer that puts the thing elsewhere on the same ray, so what the
+// vehicle believes gets sharper as it comes near. An ultrasonic range
+// is an arc across the sensor's cone; the cone before it is cleared.
+//
+// `Belief.reads` is how near the body is to the nearest cell it is
+// sure of, by the believed pose: what the car shows its driver.
+import math
+import wyhash
+import vehicles
+import park
+import sense
+
+const CELL: f32 = 0.05
+const SIDE: i32 = 800
+const GRID: i32 = 640000
+// How much surer a sighting makes a cell and how much less sure a ray
+// that goes through it; from `SURE` on it counts as something there.
+const MORE: f32 = 0.34
+const LESS: f32 = 0.2
+const SURE: f32 = 0.5
+
+// (Room for the grids of 96 vehicles; what is not used costs nothing.)
+buffer Cells { sure: f32, sight: Sight, seen: i64, from: f32, first: i64 } capacity 61440000
+
+// The believed pose; what the wheels rolled that is not yet a whole
+// edge of their encoders (`left`, `right`, metres); this run's errors:
+// each rear tyre's size (a ratio off 1), the gyroscope's scale (the
+// same) and its drift (radians a second); where the grid's corner is;
+// how near the body is to what the grid holds, which run this is, and
+// how far it believes it went in the last step (`went`).
+component Belief { x: f64, y: f64, heading: f64, left: f32, right: f32,
+                   tyre_left: f32, tyre_right: f32, gyro: f32, drift: f32,
+                   gx: f32, gy: f32, reads: f32, run: i64, cells: i32, went: f32 } capacity 1024
+
+// From the start: the true pose, an empty grid round it, and other
+// errors than the run before had (up to half a percent of a tyre, one
+// percent of a turn, 0.05 degrees a second).
+system recall() {
+  let key = wyhash64(Sensing.seed, 0x6f646f)
+  for c: Car, p: Pose, b: mut Belief {
+    let run = b.run + 1
+    // (Each vehicle its own errors.)
+    let n = run * 4 + c.number as i64 * 4000000
+    b.run = run
+    b.tyre_left = 0.005 * unit(key, n)
+    b.tyre_right = 0.005 * unit(key, n + 1)
+    b.gyro = 0.01 * unit(key, n + 2)
+    b.drift = radians(0.05) * unit(key, n + 3)
+    b.left = 0.0
+    b.right = 0.0
+    b.reads = 1000.0
+    b.x = p.x
+    b.y = p.y
+    b.heading = p.heading
+    b.gx = p.x as f32 - CELL * (SIDE / 2) as f32
+    b.gy = p.y as f32 - CELL * (SIDE / 2) as f32
+  }
+  Cells = [{ sure: 0.0, sight: Sight.Off, seen: 0, from: 1000.0, first: 0 }; GRID * len(Cars)]
+}
+
+// Every vehicle its belief (once, after `setup()`).
+system minds() {
+  for e, c: Car {
+    e.add(Belief { x: 0.0, y: 0.0, heading: 0.0, left: 0.0, right: 0.0, tyre_left: 0.0, tyre_right: 0.0,
+                   gyro: 0.0, drift: 0.0, gx: 0.0, gy: 0.0, reads: 1000.0, run: 0, cells: 0, went: 0.0 })
+  }
+}
+
+// The believed pose a step on, by what the wheels and the gyroscope
+// measured of the step the vehicle took.
+system reckon() {
+  let dt = Sim.dt
+  let errors = Sensing.errors
+  for c: Car, ch: Chassis, m: Motion, b: mut Belief {
+    var ds = m.ds
+    var bend = m.bend
+    if errors {
+      // What each rear wheel rolled, as its encoder counts it.
+      let edge = pi() * c.kind.tyre / c.kind.ticks as f32
+      let side = c.kind.track * 0.5
+      let left = b.left + (m.ds - m.bend * side) * (1.0 + b.tyre_left)
+      let right = b.right + (m.ds + m.bend * side) * (1.0 + b.tyre_right)
+      let edges_left = trunc(left / edge)
+      let edges_right = trunc(right / edge)
+      b.left = left - edges_left * edge
+      b.right = right - edges_right * edge
+      ds = (edges_left + edges_right) * edge * 0.5
+      bend = m.bend * (1.0 + b.gyro) + (if m.ds != 0.0 { b.drift * dt } else { 0.0 })
+    }
+    b.went = ds
+    let rho = 0.0 - ch.back * m.steer
+    let way = b.heading + (rho + bend * 0.5) as f64
+    b.x = b.x + ds as f64 * cos64(way)
+    b.y = b.y + ds as f64 * sin64(way)
+    var heading = b.heading + bend as f64
+    if heading > pi64() { heading -= tau64() } else if heading <= 0.0 - pi64() { heading += tau64() }
+    b.heading = heading
+  }
+}
+
+// The cell of a point of the place, or -1 where the grid has none.
+fn cell_of(x: f32, y: f32, gx: f32, gy: f32) -> i32 {
+  let col = floor((x - gx) / CELL) as i32
+  let row = floor((y - gy) / CELL) as i32
+  if col < 0 || col >= SIDE || row < 0 || row >= SIDE { -1 } else { row * SIDE + col }
+}
+
+// A cell a ray went through: less sure, where the ray could have seen
+// what it holds.
+proc pass(cells: mut Cells[], at: i32, t: f32, low_from: f32, kerb_from: f32, tall_only: bool) {
+  if at >= 0 && cells[at].sure > 0.0 {
+    let sight = cells[at].sight
+    let seen = if tall_only { sight == Sight.Tall }
+               else if sight == Sight.Kerb { t >= kerb_from }
+               else if sight == Sight.Low { t >= low_from } else { true }
+    if seen { cells[at].sure = max(0.0, cells[at].sure - LESS) }
+  }
+}
+
+// A cell something was reported in.
+proc mark(cells: mut Cells[], at: i32, sight: Sight, step: i64, range: f32) {
+  if at >= 0 {
+    if cells[at].sure <= 0.0 {
+      cells[at].from = range
+      cells[at].first = step
+    }
+    cells[at].sure = min(1.0, cells[at].sure + MORE * clamp(4.0 / range, 0.25, 1.0))
+    cells[at].sight = sight
+    cells[at].seen = step
+    cells[at].from = min(cells[at].from, range)
+  }
+}
+
+// All that a vehicle's sensors report now, put into its grid by the
+// believed pose. (Run after `sense()`, as often as the cameras report.)
+system chart() {
+  let step = Sim.step
+  let dark = Sensing.dark
+  for car: Car, b: Belief, ey: Eyes, Rays: Rays[ey.first, ey.rows], Cells: mut Cells[car.number * GRID, GRID]
+      where !ey.asleep {
+  let gx = b.gx
+  let gy = b.gy
+  let bx = b.x as f32
+  let by = b.y as f32
+  let c = cos(b.heading as f32)
+  let s = sin(b.heading as f32)
+  let cone = radians(sensors[0].across * 0.5)
+  // Half of what is between two rays of a camera, for a metre of range
+  // (looked at four times a second: 0 else).
+  let gap = if step % 32 == 0 { tan(radians(RAY_STEP as f32 * 0.5)) } else { 0.0 }
+  for i in 0..len(Rays) {
+    let sight = Rays[i].sight
+    if sight != Sight.Off {
+      let range = Rays[i].range
+      // The sensor and the ray's way, in the place as it is believed.
+      let ox = bx + Rays[i].ox * c - Rays[i].oy * s
+      let oy = by + Rays[i].ox * s + Rays[i].oy * c
+      let lx = (Rays[i].x - Rays[i].ox) / max(range, 0.001)
+      let ly = (Rays[i].y - Rays[i].oy) / max(range, 0.001)
+      let dx = lx * c - ly * s
+      let dy = lx * s + ly * c
+      if sight == Sight.Silent || sight == Sight.Stop || sight == Sight.Heard {
+        // Ultrasonic: every 15th step of the eight is not this one.
+        if step % 8 == 0 {
+          let spokes = (range * 2.0 * cone / CELL) as i32 + 2
+          let clear = if sight == Sight.Silent { range } else { range - 0.15 }
+          for k in 0..spokes {
+            let a = cone * (2.0 * k as f32 / (spokes - 1) as f32 - 1.0)
+            let ax = dx * cos(a) - dy * sin(a)
+            let ay = dx * sin(a) + dy * cos(a)
+            for n in 0..(clear / CELL) as i32 {
+              let t = CELL * (n as f32 + 0.5)
+              pass(Cells, cell_of(ox + ax * t, oy + ay * t, gx, gy), t, 0.0, 0.0, false)
+            }
+            if sight != Sight.Silent {
+              // Each cell of the arc once, however many spokes end in it.
+              let at = cell_of(ox + ax * range, oy + ay * range, gx, gy)
+              // (Sure at once: the arc is elsewhere at the next echo of a
+              // sensor that moves, and something is at this range.)
+              if at >= 0 && Cells[at].seen != step {
+                mark(Cells, at, Sight.Heard, step, 1.0)
+                mark(Cells, at, Sight.Heard, step, 1.0)
+              }
+            }
+          }
+        }
+      } else {
+        // A camera's ray. It is off by its error at its end: so much is
+        // left as it is before the point.
+        let tall_only = sight == Sight.Tall || (sight == Sight.Nothing && i % 2 == 1)
+        let slack = (0.05 + 0.03 * range) * (if dark { 2.0 } else { 1.0 })
+        let clear = if something(sight) { range - slack } else { range }
+        for n in 0..(clear / CELL) as i32 {
+          let t = CELL * (n as f32 + 0.5)
+          pass(Cells, cell_of(ox + dx * t, oy + dy * t, gx, gy), t, Rays[i].low_from, Rays[i].kerb_from,
+               tall_only)
+          // Further out the rays are more than a cell apart. The cells
+          // between them that held something for less than 2 s in all
+          // and were last seen to 2 s ago or longer (what moved on: who
+          // walked there, a car that passed) go as the ray's own do.
+          // What was seen for longer stays until a ray goes through it.
+          for j in 1..(if gap > 0.0 { (t * gap / CELL) as i32 + 2 } else { 1 }) {
+            for side in 0..2 {
+              let off = CELL * j as f32 * (if side == 0 { 1.0 } else { -1.0 })
+              let at = cell_of(ox + dx * t - dy * off, oy + dy * t + dx * off, gx, gy)
+              if at >= 0 && Cells[at].sure > 0.0 && Cells[at].seen - Cells[at].first < 240 &&
+                 step - Cells[at].seen > 240 {
+                pass(Cells, at, t, Rays[i].low_from, Rays[i].kerb_from, tall_only)
+                pass(Cells, at, t, Rays[i].low_from, Rays[i].kerb_from, tall_only)
+              }
+            }
+          }
+        }
+        if something(sight) {
+          // (Between the rays so too, up to the point.)
+          for n in (clear / CELL) as i32..(range / CELL) as i32 {
+            let t = CELL * (n as f32 + 0.5)
+            for j in 1..(if gap > 0.0 { (t * gap / CELL) as i32 + 2 } else { 1 }) {
+              for side in 0..2 {
+                let off = CELL * j as f32 * (if side == 0 { 1.0 } else { -1.0 })
+                let at = cell_of(ox + dx * t - dy * off, oy + dy * t + dx * off, gx, gy)
+                if at >= 0 && Cells[at].sure > 0.0 && Cells[at].seen - Cells[at].first < 240 &&
+                   step - Cells[at].seen > 240 {
+                  pass(Cells, at, t, Rays[i].low_from, Rays[i].kerb_from, tall_only)
+                }
+              }
+            }
+          }
+          // What the grid holds as far before the point as the ray may
+          // be off: seen now, where it was seen from about as near
+          // before; where only from much further, it was put there by
+          // a worse sighting than this one, and goes.
+          for n in 0..(slack / CELL) as i32 + 1 {
+            let at = cell_of(ox + dx * (range - slack + CELL * n as f32), oy + dy * (range - slack + CELL * n as f32),
+                             gx, gy)
+            if at >= 0 && Cells[at].sure > 0.0 {
+              if Cells[at].from > 1.6 * range && CELL * (n as f32 + 1.5) < slack { Cells[at].sure = 0.0 }
+              else { Cells[at].seen = step }
+            }
+          }
+          mark(Cells, cell_of(ox + dx * range, oy + dy * range, gx, gy), sight, step, range)
+        }
+      }
+    }
+  }
+  }
+}
+
+// How near the body is to the nearest cell it is sure of (kerbs are
+// the tyres' business), by the believed pose; and how many cells it is
+// sure of in all.
+system read() {
+  for car: Car, b: mut Belief, Cells: Cells[car.number * GRID, GRID] {
+    let gx = b.gx
+    let gy = b.gy
+    let bx = b.x as f32
+    let by = b.y as f32
+    let c = cos(b.heading as f32)
+    let s = sin(b.heading as f32)
+    let kind = car.kind
+    let round = kind.corner
+    let half = kind.width * 0.5
+    var reads = 1000.0
+    var cells = 0
+    for row in 0..SIDE {
+      for col in 0..SIDE {
+        let at = row * SIDE + col
+        if Cells[at].sure >= SURE {
+          cells += 1
+          if Cells[at].sight != Sight.Kerb {
+            let px = gx + CELL * (col as f32 + 0.5) - bx
+            let py = gy + CELL * (row as f32 + 0.5) - by
+            reads = min(reads, point_box(px * c + py * s, py * c - px * s, round - kind.rear, round - half,
+                                         kind.wheelbase + kind.front - round, half - round) - round)
+          }
+        }
+      }
+    }
+    b.reads = reads
+    b.cells = cells
+  }
+}

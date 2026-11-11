@@ -1,0 +1,180 @@
+// How tight is too tight (parking-SPEC.md, 9: scene 5): the gap at the
+// kerb of place 1, between two parked cars, 1.6 m and 1.4 m longer than
+// the vehicle and from 1.2 m down to 0.5 m longer, for every vehicle
+// with Tesla's cameras (the Model 3 of 2024 also with the bumper
+// camera), their errors on. Every vehicle and gap is a street of its
+// own with a vehicle and a parker of its own, all at once: 60 of them
+// (3.5 GB). For each a line: what the parker came to (and why it gave
+// up), whether the vehicle is parked by the truth, how often it touched
+// something, the seconds, the searches and the turns to and fro in the
+// gap; then for each vehicle the tightest gap it parked in without a
+// touch.
+//
+// On all cores (the loops over the vehicles on a thread each, though
+// they are few):
+//
+//   ENT_PARALLEL_MIN=1 tools/ent run --parallel -I examples/parking \
+//     examples/parking/check/sweep.ent
+import console
+import math
+import vehicles
+import park
+import scenes
+import sense
+import believe
+import parker
+
+// What is swept: a vehicle (a row of `vehicles`) and the suite it has.
+table sweeps { kind: i32, suite: i32 } = [
+  { kind: 0, suite: 1 },
+  { kind: 1, suite: 1 },
+  { kind: 1, suite: 2 },
+  { kind: 2, suite: 1 },
+  { kind: 3, suite: 1 },
+  { kind: 4, suite: 1 }
+]
+const GAPS: i32 = 10
+// How much longer than the vehicle the n-th gap is (metres).
+fn extra(n: i32) -> f32 { if n < 2 { 1.6 - 0.2 * n as f32 } else { 1.4 - 0.1 * n as f32 } }
+
+unique Run { from: i64, busy: i32, show: i32, cars: i32, row: i32, least: f32 }
+// When a vehicle's parker was done (the step; 0: not yet).
+component Clock { done: i64 } capacity 1024
+
+world {
+  Sim.dt = 1.0 / 120.0
+  Sensing.seed = 2026
+  Sensing.errors = true
+  for r, row in sweeps {
+    for g in 0..GAPS { Fleet += { kind: row.kind, x: 0.0, y: 0.0, heading: 0.0 } }
+  }
+}
+
+// The streets, 60 m apart: the kerb, a car behind the gap and one ahead
+// of it, a wall across the street (16 edges each); and each vehicle
+// beside the car ahead, as in place 1.
+system streets() {
+  Edges = []
+  for n in 0..len(Cars) {
+    let car = vehicles[sweeps[n / GAPS].kind]
+    let gap = car.length + extra(n % GAPS)
+    let x = 60.0 * (n % GAPS) as f32
+    let y = 30.0 * (n / GAPS) as f32
+    box(Edges, x, y - 0.075, 0.0, 30.0, 0.15, Height.Kerb, false)
+    box(Edges, x - gap * 0.5 - 2.35, y + 1.1, 0.0, 4.7, 1.85, Height.Tall, false)
+    box(Edges, x + gap * 0.5 + 2.35, y + 1.1, 0.0, 4.7, 1.85, Height.Tall, false)
+    box(Edges, x, y + 7.6, 0.0, 30.0, 0.2, Height.Tall, false)
+  }
+  for c: Car, p: mut Pose, pl: mut Place, g: mut Goal, su: mut Suite {
+    let n = c.number
+    let gap = c.kind.length + extra(n % GAPS)
+    let x = 60.0 * (n % GAPS) as f32
+    let y = 30.0 * (n / GAPS) as f32
+    p.x = (x + gap * 0.5 + 1.1) as f64
+    p.y = (y + 3.35) as f64
+    p.heading = 0.0
+    pl.first = 16 * n
+    pl.count = 16
+    g.x = x
+    g.y = y + 1.1
+    g.heading = 0.0
+    g.length = gap
+    g.width = 2.2
+    g.turned = false
+    su.which = sweeps[n / GAPS].suite
+  }
+}
+
+system begin() {
+  for e, c: Car { e.add(Clock { done: 0 }) }
+  Run.from = Sim.step
+  Run.cars = len(Cars)
+}
+
+// A second of looking round before they start.
+system look_first() {
+  let now = Sim.step - Run.from == 120
+  for p: mut Parker where now { p.phase = Phase.Plan }
+}
+
+// Who is done sleeps.
+system tally() {
+  let step = Sim.step
+  Run.busy = 0
+  for p: Parker, k: mut Clock, ey: mut Eyes {
+    if p.phase == Phase.Done || p.phase == Phase.GaveUp {
+      if k.done == 0 { k.done = step }
+      ey.asleep = true
+    } else {
+      Run.busy += 1
+    }
+  }
+}
+
+system report() {
+  let which = Run.show
+  for c: Car, n: Near, p: Parker, g: Goal, k: Clock, su: Suite where c.number == which {
+    let seconds = (k.done - Run.from) / 120
+    let cm = (extra(which % GAPS) * 100.0 + 0.5) as i32
+    put("{c.kind.name}, suite {su.which}, gap +{cm} cm: {p.phase} {p.why}, parked {g.parked}, touched {n.hits}, {seconds} s, {p.searches} searches, {p.turns} turns")
+  }
+  Run.show += 1
+}
+
+// The tightest gap a row's vehicle parked in without a touch.
+system tightest() {
+  let row = Run.row
+  Run.least = 1000.0
+  for c: Car, n: Near, g: Goal where c.number / GAPS == row && g.parked && n.hits == 0 {
+    Run.least = min(Run.least, extra(c.number % GAPS))
+  }
+}
+system say() {
+  let row = sweeps[Run.row]
+  let cm = (Run.least * 100.0 + 0.5) as i32
+  if Run.least < 1000.0 {
+    put("{vehicles[row.kind].name}, {suites[row.suite].name}: parks in its length +{cm} cm")
+  } else {
+    put("{vehicles[row.kind].name}, {suites[row.suite].name}: parks in none of the gaps")
+  }
+  Run.row += 1
+}
+
+schedule start() {
+  streets()
+  measure()
+  recall()
+  begin()
+}
+
+schedule go() {
+  look_first()
+  park_step()
+  step()
+  reckon()
+  sense() run_if Sim.step % 4 == 0
+  chart() run_if Sim.step % 4 == 0
+  read() run_if Sim.step % 4 == 0
+  judge()
+  tally()
+}
+
+schedule finish() { report() }
+schedule sum() {
+  tightest()
+  say()
+}
+schedule sensors() {
+  fit()
+  minds()
+  minds_park()
+}
+
+main {
+  setup()
+  sensors()
+  start()
+  loop { go() } until Sim.step >= 120 * 300 || (Run.busy == 0 && Sim.step > 240)
+  loop { finish() } until Run.show == Run.cars
+  loop { sum() } until Run.row == len(sweeps)
+}

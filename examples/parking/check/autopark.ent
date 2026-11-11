@@ -1,0 +1,95 @@
+// The automatic parker in every place (parking-SPEC.md, check 5): a
+// Model 3 (2024) with Tesla's cameras, with errors. For each place a
+// line: what the parker came to, whether the vehicle is parked by the
+// truth, how often it touched something, the seconds it took, how often
+// it searched and the most poses a search went through.
+import console
+import math
+import vehicles
+import park
+import scenes
+import sense
+import believe
+import parker
+
+unique Run { until: i64, from: i64, most: i32, only: i32, over: bool }
+
+world {
+  Sim.dt = 1.0 / 120.0
+  Sensing.seed = 2026
+  Sensing.errors = true
+  Fleet += { kind: 1, x: 0.0, y: 0.0, heading: 0.0 }
+  Stage.kind = 1
+}
+
+system begin_place() {
+  for s: mut Suite { s.which = 1 }
+  Sensing.dark = scenes[Stage.scene].dark
+  for p: mut Parker {
+    p.phase = Phase.Off
+    p.searches = 0
+  }
+  Run.over = false
+  Run.most = 0
+  Run.from = Sim.step
+  Run.until = Sim.step + 120 * 240
+}
+
+// A second of looking round before it starts.
+system look_first() {
+  let now = Sim.step - Run.from == 120
+  for p: mut Parker where now { p.phase = Phase.Plan }
+}
+
+system tally() {
+  for p: Parker {
+    Run.most = max(Run.most, p.poses)
+    Run.over = p.phase == Phase.Done || p.phase == Phase.GaveUp
+  }
+}
+
+system report() {
+  for n: Near, p: Parker {
+    let seconds = (Sim.step - Run.from) / 120
+    put("place {Stage.scene + 1}: {p.phase}, parked {Stage.parked}, touched {n.hits}, {seconds} s, {p.searches} searches, {Run.most} poses at most")
+  }
+  Stage.scene += 1
+}
+
+schedule start() {
+  stage()
+  measure()
+  recall()
+  begin_place()
+}
+
+schedule go() {
+  look_first()
+  watch_car()
+  move()
+  park_step()
+  tally()
+  step()
+  reckon()
+  sense() run_if Sim.step % 4 == 0
+  chart() run_if Sim.step % 4 == 0
+  read() run_if Sim.step % 4 == 0
+  judge()
+}
+
+schedule finish() { report() }
+schedule sensors() {
+  fit()
+  minds()
+  minds_park()
+}
+
+main {
+  setup()
+  sensors()
+  loop {
+    start()
+    loop { go() } until Sim.step >= Run.until || Run.over
+    finish()
+  } until Stage.scene == SINGLE
+}

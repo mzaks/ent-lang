@@ -1,0 +1,291 @@
+// Backing with a trailer (parking-SPEC.md, 5.5 and milestone P8).
+//
+// A trailer pushed backwards does not stay behind the vehicle: what it
+// stands across it (the hitch angle) grows by itself, until it is
+// jackknifed. Two helps, as cars that tow have them:
+//
+// `Backing.Knob`: the driver says how far across the trailer is to
+// stand (`knob`, from -1 to 1 of the most the vehicle can hold: left is
+// the trailer's tail to the vehicle's left), and keeps the speed; the
+// car turns its own steering wheel so that the trailer comes to that
+// and stays there. Forwards the knob is the steering wheel.
+//
+// `Backing.Line`: the car backs the trailer into the slot (the
+// vehicle's `Goal`). The way in is the line the trailer's axle is on
+// across the slot's line, a quarter of a circle, and the slot's middle
+// line from a metre before its mouth; the car steers the trailer's
+// axle at the point of that way REACH on from where it is, and stops
+// when the trailer's tail is at the slot's end. Where the trailer then
+// stands askew or off the middle, the car does as a driver does: it
+// pulls forwards along the slot's line until the trailer is straight
+// behind it (`Backing.Pull`), and backs in again along the line alone;
+// twice at most. By where the car believes it is
+// (believe.ent) and the hitch angle, which a sensor at the ball is
+// taken to give as it is. It does not look where it goes: with a
+// trailer hitched what looks back is switched off (sense.ent), and the
+// driver looks out, as with the cars that have this.
+//
+// The law: with the vehicle's rear axle going v (below 0 backwards) and
+// turning at v tan(steer) / wheelbase, a trailer on a ball `hitch`
+// behind that axle, its own axle `drawbar` behind the ball, standing
+// `across` the vehicle, turns against it at
+//
+//   v (tan(steer) (1 + hitch cos(across) / drawbar) / wheelbase
+//      - sin(across) / drawbar)
+//
+// (where the rear wheels steer too, by `slip`, with
+// cos(slip) (tan(steer) - tan(slip)) for tan(steer) and across + slip
+// in the sine), so the steer at which `across` comes to what is wanted
+// at GAIN of what is missing a metre is asked for outright: found by
+// halving, since the rear wheels' angle goes with the front ones'.
+import math
+import vehicles
+import park
+import believe
+
+enum Backing { Off, Knob, Line, Pull, Done, GaveUp }
+
+// `want`: how far across the trailer is to stand now (radians), `most`:
+// the most the knob asks for.
+// For `Line`: the way's circle is `round` across (0: the way is not
+// made yet: whoever sets `Line` sets it 0, and `pulls` 0; below 0: the
+// way is the slot's line alone) and to the slot line's `side` (1: its
+// left, looking out of the slot). `pulls`: how often it pulled forwards.
+component Tow { mode: Backing, knob: f32, want: f32, most: f32, round: f32, side: f32,
+                pulls: i32 } capacity 1024
+
+const GAIN: f32 = 2.0
+// How far on along the slot's line the trailer's axle is steered at,
+// how fast the car backs, and how far from the slot's end the trailer's
+// tail stops.
+const REACH: f32 = 2.0
+const BACK: f32 = 0.6
+const SHORT: f32 = 0.4
+// Pulling forwards: how far on along the line the vehicle steers at,
+// and how far out of the slot's mouth its rear axle goes at most.
+const FORE: f32 = 3.0
+const PULL_OUT: f32 = 8.0
+
+// How far across a trailer stands: the vehicle's heading less its own,
+// from -pi to pi.
+fn half_turn() -> f32 { 1.5707963267948966 }
+
+fn across_of(heading: f64, towed: f64) -> f32 {
+  atan2(sin64(heading - towed) as f32, cos64(heading - towed) as f32)
+}
+
+// The most a trailer can stand across a vehicle that still gets it
+// straight again backing at full lock, and four fifths of that (or of
+// where it is jackknifed): what the knob asks for at most.
+fn holds(car: row of vehicles, lock: f32, t: row of trailers) -> f32 {
+  let turn = tan(lock)
+  let hitch = hitch_of(car)
+  let part = turn * t.drawbar / sqrt(car.wheelbase * car.wheelbase + turn * turn * hitch * hitch)
+  let most = if part >= 1.0 { JACK } else { asin(part) + atan(turn * hitch / car.wheelbase) }
+  0.8 * min(most, JACK)
+}
+
+// How fast a trailer turns against the vehicle, for a metre the
+// vehicle goes, its front wheels at `steer` (its rear ones at -`back`
+// of that).
+fn swing(car: row of vehicles, back: f32, t: row of trailers, across: f32, steer: f32) -> f32 {
+  let slip = 0.0 - back * steer
+  let turn = cos(slip) * (tan(steer) - tan(slip)) / car.wheelbase
+  turn * (1.0 + hitch_of(car) * cos(across) / t.drawbar) - sin(across + slip) / t.drawbar
+}
+
+// Where the front wheels are to point, backing, for the trailer to
+// come to stand `want` across.
+fn back_steer(car: row of vehicles, lock: f32, back: f32, t: row of trailers, across: f32,
+              want: f32) -> f32 {
+  let asked = GAIN * (across - want)
+  var low = 0.0 - lock
+  var high = lock
+  for i in 0..16 {
+    let mid = (low + high) * 0.5
+    if swing(car, back, t, across, mid) < asked { low = mid } else { high = mid }
+  }
+  (low + high) * 0.5
+}
+
+system hitches() {
+  for e, c: Car { e.add(Tow { mode: Backing.Off, knob: 0.0, want: 0.0, most: 0.0, round: 0.0, side: 1.0, pulls: 0 }) }
+}
+
+system by_knob() {
+  for c: Car, ch: Chassis, p: Pose, m: Motion, a: mut Ask, tr: Trailer, tw: mut Tow
+      where tw.mode == Backing.Knob {
+    if tr.kind < 0 {
+      tw.mode = Backing.Off
+    } else {
+      let t = trailers[tr.kind]
+      let most = holds(c.kind, ch.lock, t)
+      tw.most = most
+      tw.want = clamp(tw.knob, -1.0, 1.0) * most
+      if a.v < 0.0 || m.v < 0.0 {
+        a.steer = back_steer(c.kind, ch.lock, ch.back, t, across_of(p.heading, tr.heading), tw.want) / ch.lock
+      } else {
+        a.steer = clamp(tw.knob, -1.0, 1.0)
+      }
+    }
+  }
+}
+
+system back_in() {
+  for c: Car, ch: Chassis, p: Pose, m: Motion, a: mut Ask, n: Near, tr: Trailer, g: Goal, b: Belief,
+      tw: mut Tow where tw.mode == Backing.Line {
+    if tr.kind < 0 || g.length == 0.0 {
+      tw.mode = Backing.Off
+      tw.round = 0.0
+    } else if n.stopped {
+      tw.mode = Backing.GaveUp
+      tw.round = 0.0
+      a.v = 0.0
+    } else {
+      let t = trailers[tr.kind]
+      let most = holds(c.kind, ch.lock, t)
+      let across = across_of(p.heading, tr.heading)
+      // Where the car believes the trailer's axle is, and how it heads.
+      let heading = b.heading as f32
+      let towed = heading - across
+      let hitch = hitch_of(c.kind)
+      let ax = b.x as f32 - hitch * cos(heading) - t.drawbar * cos(towed)
+      let ay = b.y as f32 - hitch * sin(heading) - t.drawbar * sin(towed)
+      // Along the slot's line, out of it: towards the side the car is on.
+      var dx = cos(g.heading)
+      var dy = sin(g.heading)
+      if (b.x as f32 - g.x) * dx + (b.y as f32 - g.y) * dy < 0.0 {
+        dx = 0.0 - dx
+        dy = 0.0 - dy
+      }
+      let out = (ax - g.x) * dx + (ay - g.y) * dy
+      let off = (ay - g.y) * dx - (ax - g.x) * dy
+      // The way: the circle ends on the slot's line `from` out, a
+      // metre before the slot's mouth, and is as large as brings the
+      // trailer round from where it is now, and no smaller than it
+      // turns at seven tenths of what the car can hold.
+      let from = g.length * 0.5 + 1.0
+      var round = tw.round
+      var side = tw.side
+      if round == 0.0 {
+        side = if off >= 0.0 { 1.0 } else { -1.0 }
+        round = max(out - from, t.drawbar / tan(0.7 * most))
+        tw.round = round
+        tw.side = side
+      }
+      // (nx, ny): across the slot's line, to the side the circle is on.
+      let nx = 0.0 - dy * side
+      let ny = dx * side
+      let cx = g.x + dx * from + nx * round
+      let cy = g.y + dy * from + ny * round
+      // How far along the way the axle is (0 where the circle ends,
+      // less in the slot), and the point REACH on.
+      let along = out - from
+      let past = off * side - round
+      var where = along
+      if round < 0.0 {
+      } else if along > 0.0 && past > 0.0 {
+        where = round * half_turn() + past
+      } else if along > 0.0 {
+        where = round * atan2(along, 0.0 - past)
+      }
+      let to = where - REACH
+      var px = g.x + dx * (from + to)
+      var py = g.y + dy * (from + to)
+      if round < 0.0 {
+      } else if to > round * half_turn() {
+        px = cx + dx * round + nx * (to - round * half_turn())
+        py = cy + dy * round + ny * (to - round * half_turn())
+      } else if to > 0.0 {
+        px = cx + round * (dx * sin(to / round) - nx * cos(to / round))
+        py = cy + round * (dy * sin(to / round) - ny * cos(to / round))
+      }
+      // The point steered at, as the trailer going backwards has it:
+      // `fore` ahead of its axle and `left` to its left.
+      let tx = px - ax
+      let ty = py - ay
+      let fore = 0.0 - tx * cos(towed) - ty * sin(towed)
+      let left = tx * sin(towed) - ty * cos(towed)
+      let bend = 2.0 * left / (fore * fore + left * left)
+      let want = clamp(0.0 - atan(bend * t.drawbar), 0.0 - most, most)
+      tw.most = most
+      tw.want = want
+      let tail = out - t.behind * (cos(towed) * dx + sin(towed) * dy)
+      let more = tail - (SHORT - g.length * 0.5)
+      if more <= 0.0 {
+        a.v = 0.0
+        if m.v == 0.0 {
+          // Askew (4 degrees), or nearer to a side of the slot than
+          // 15 cm: out again, if it has not been twice.
+          let askew = abs(sin(towed - g.heading)) > 0.07 ||
+                      abs(off) + t.width * 0.5 > g.width * 0.5 - 0.15
+          if askew && tw.pulls < 2 {
+            tw.mode = Backing.Pull
+            tw.pulls += 1
+            tw.round = -1.0
+          } else {
+            tw.mode = Backing.Done
+            tw.round = 0.0
+          }
+        }
+      } else {
+        a.v = 0.0 - clamp(more * 1.5, 0.15, BACK)
+        a.steer = back_steer(c.kind, ch.lock, ch.back, t, across, want) / ch.lock
+      }
+    }
+  }
+}
+
+// Forwards along the slot's line, the vehicle's rear axle steered at
+// the point of the line FORE on, until the trailer is on the line and
+// straight behind, or the vehicle is PULL_OUT from the slot's mouth;
+// then backwards again.
+system pull_out() {
+  for c: Car, ch: Chassis, p: Pose, m: Motion, a: mut Ask, n: Near, tr: Trailer, g: Goal, b: Belief,
+      tw: mut Tow where tw.mode == Backing.Pull {
+    if tr.kind < 0 {
+      tw.mode = Backing.Off
+      tw.round = 0.0
+    } else if n.stopped {
+      tw.mode = Backing.GaveUp
+      tw.round = 0.0
+      a.v = 0.0
+    } else {
+      let t = trailers[tr.kind]
+      let across = across_of(p.heading, tr.heading)
+      let heading = b.heading as f32
+      let towed = heading - across
+      let hitch = hitch_of(c.kind)
+      let ax = b.x as f32 - hitch * cos(heading) - t.drawbar * cos(towed)
+      let ay = b.y as f32 - hitch * sin(heading) - t.drawbar * sin(towed)
+      var dx = cos(g.heading)
+      var dy = sin(g.heading)
+      if (b.x as f32 - g.x) * dx + (b.y as f32 - g.y) * dy < 0.0 {
+        dx = 0.0 - dx
+        dy = 0.0 - dy
+      }
+      let out = (b.x as f32 - g.x) * dx + (b.y as f32 - g.y) * dy
+      let off = (ay - g.y) * dx - (ax - g.x) * dy
+      let straight = abs(off) < 0.05 && abs(across) < 0.035 &&
+                     abs(sin(towed) * dx - cos(towed) * dy) < 0.02
+      if straight || out > g.length * 0.5 + PULL_OUT {
+        a.v = 0.0
+        if m.v == 0.0 { tw.mode = Backing.Line }
+      } else {
+        let tx = g.x + dx * (out + FORE) - b.x as f32
+        let ty = g.y + dy * (out + FORE) - b.y as f32
+        let fore = tx * cos(heading) + ty * sin(heading)
+        let left = ty * cos(heading) - tx * sin(heading)
+        let bend = 2.0 * left / (fore * fore + left * left)
+        a.v = BACK
+        a.steer = clamp(atan(bend * c.kind.wheelbase), 0.0 - ch.lock, ch.lock) / ch.lock
+      }
+    }
+  }
+}
+
+schedule tow_step() {
+  by_knob()
+  back_in()
+  pull_out()
+}

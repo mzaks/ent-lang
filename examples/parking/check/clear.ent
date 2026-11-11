@@ -1,0 +1,62 @@
+// A Model 3 (of 2017 to 2023) beside, before and under things at
+// distances known by hand (parking-SPEC.md, check 2), each vehicle 100 m
+// from the next so that it is nearest its own. Its body is 0.9245 m to
+// each side, 1.044 with a mirror, 3.716 ahead of the rear axle and its
+// corners are rounded by 0.35; a tyre's outer face is 0.9075 to the
+// side. For each a line of how near it is, in tenths of a millimetre.
+//
+//   0  a tall wall 1.5 m to the left: the mirror, 0.456
+//   1  a low wall there: under the mirror, the body, 0.5755
+//   2  a wall 0.3 m ahead
+//   3  a point 0.2 m ahead of and 0.2 m beside the front left corner of
+//      the body's rectangle: sqrt(2) 0.55 - 0.35 = 0.4278 from its
+//      rounded corner (a square one would be 0.2828 from it)
+//   4  a kerb 5 cm beside the left tyres, which the body does not care for
+//   5  heading up, a wall 0.25 m ahead
+//   6  a wall 1 m ahead that it drives at, at 1 m/s for 5 s: it is
+//      stopped nearer than a step goes (8.4 mm) and not in it, creeps on
+//      and is stopped again, nearer each time
+import console
+import math
+import vehicles
+import park
+
+world {
+  Sim.dt = 1.0 / 120.0
+  for i in 0..7 {
+    Fleet += { kind: 0, x: 100.0 * i as f32, y: 0.0, heading: if i == 5 { pi() * 0.5 } else { 0.0 } }
+  }
+  Edges += { x0: -5.0, y0: 1.5, x1: 10.0, y1: 1.5, height: Height.Tall, plain: false, owner: -1 }
+  Edges += { x0: 95.0, y0: 1.5, x1: 110.0, y1: 1.5, height: Height.Low, plain: false, owner: -1 }
+  Edges += { x0: 204.016, y0: -3.0, x1: 204.016, y1: 3.0, height: Height.Tall, plain: false, owner: -1 }
+  Edges += { x0: 303.916, y0: 1.1245, x1: 303.916, y1: 1.1245, height: Height.Tall, plain: false, owner: -1 }
+  Edges += { x0: 395.0, y0: 0.9575, x1: 410.0, y1: 0.9575, height: Height.Kerb, plain: false, owner: -1 }
+  Edges += { x0: 497.0, y0: 3.966, x1: 503.0, y1: 3.966, height: Height.Tall, plain: false, owner: -1 }
+  Edges += { x0: 604.716, y0: -3.0, x1: 604.716, y1: 3.0, height: Height.Tall, plain: false, owner: -1 }
+}
+
+system go() {
+  for c: Car, a: mut Ask where c.number == 6 { a.v = 1.0 }
+}
+
+system report() {
+  for c: Car, n: Near, m: Motion {
+    let gap = (n.gap * 10000.0 + 0.5) as i32
+    let kerb = (n.kerb * 10000.0 + 0.5) as i32
+    let within = n.gap > 0.0 && n.gap < 0.0084
+    put("car {c.number} gap {gap} edge {n.edge} kerb {kerb} hits {n.hits} stopped {n.stopped} within {within} v {m.v}")
+  }
+}
+
+schedule start() {
+  report()
+  go()
+}
+schedule finish() { report() }
+
+main {
+  setup()
+  start()
+  loop { step() } until Sim.step == 600
+  finish()
+}

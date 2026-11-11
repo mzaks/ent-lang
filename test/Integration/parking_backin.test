@@ -1,0 +1,20 @@
+// The car backs a trailer into the bay of a yard (tow.ent's
+// `Backing.Line`; examples/parking/check/backin.ent, parking-SPEC.md
+// check 7): every vehicle with each trailer, by where it believes it is
+// (the errors of its wheel encoders and gyroscope on). All ten stand
+// in the slot and touch nothing; the long EQS with the short box
+// trailer ends askew at first, pulls forwards to straighten it and
+// backs in again. The parker (parker.ent) does not park with a trailer.
+// RUN: %ent run -I %S/../../examples/parking %S/../../examples/parking/check/backin.ent 2>/dev/null | FileCheck %s
+
+// CHECK: Tesla Model 3 (2017-2023) with box trailer (750 kg): Done, parked true, touched 0, {{[0-9]+}} s, pulled out 0 times,
+// CHECK: Tesla Model 3 (2017-2023) with caravan: Done, parked true, touched 0, {{[0-9]+}} s, pulled out 0 times,
+// CHECK: Tesla Model 3 (2024) with box trailer (750 kg): Done, parked true, touched 0, {{[0-9]+}} s, pulled out 0 times,
+// CHECK: Tesla Model 3 (2024) with caravan: Done, parked true, touched 0, {{[0-9]+}} s, pulled out 0 times,
+// CHECK: smart fortwo with box trailer (750 kg): Done, parked true, touched 0, {{[0-9]+}} s, pulled out 0 times,
+// CHECK: smart fortwo with caravan: Done, parked true, touched 0, {{[0-9]+}} s, pulled out 0 times,
+// CHECK: Mercedes EQS (rear steering) with box trailer (750 kg): Done, parked true, touched 0, {{[0-9]+}} s, pulled out 1 times,
+// CHECK: Mercedes EQS (rear steering) with caravan: Done, parked true, touched 0, {{[0-9]+}} s, pulled out 0 times,
+// CHECK: Mercedes Sprinter L3 with box trailer (750 kg): Done, parked true, touched 0, {{[0-9]+}} s, pulled out 0 times,
+// CHECK: Mercedes Sprinter L3 with caravan: Done, parked true, touched 0, {{[0-9]+}} s, pulled out 0 times,
+// CHECK: the parker with a trailer: GaveUp, Hitched

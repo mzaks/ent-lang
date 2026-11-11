@@ -1,0 +1,998 @@
+// Parking a vehicle in a tight spot, in a window, by the keys
+// (parking-SPEC.md, milestone P1): the place from above, the vehicle
+// with its mirrors and its steered wheels, and how near it is to what it
+// must not touch. This is the truth; what the vehicle's own sensors make
+// of it comes next.
+//
+//   tools/ent run examples/parking/show.ent
+//
+// Up and down: forwards and backwards (with shift, slowly). Left and
+// right turn the steering wheel, which stays where it is left; C sets it
+// straight; the steering wheel and the wheels from above are drawn at
+// the bottom right as they are. Space brakes. 1 to 5: another vehicle. N and P: the next
+// place and the one before. R: from the start again. T: the path its
+// corners swept, on and off. S: the sensors it carries (ultrasonic,
+// Tesla's cameras, those with a bumper camera, none shown); E: their
+// errors on and off. What they report is drawn over the place: arcs
+// for ultrasonic ranges, points for what the cameras see, and the
+// least distance they make of it beside the true one. V: what is
+// shown: the truth with what the sensors report now; the truth with
+// what the vehicle believes (its grid's cells, pink where it has not
+// seen them for two seconds and remembers, and where it believes it is
+// as a yellow outline); or the belief alone, to park by as in the car.
+// A: the car parks itself (parker.ent), by what it believes alone; its
+// way is drawn as dots, green forwards and orange backwards. A again,
+// or a key that drives, and it is the driver's again. In places 10 and
+// 11 things move, from when the vehicle first does: someone walking
+// (yellow), a trolley, a door, cars (green). Place 13 is a car park
+// (lot.ent) in which six vehicles park at once, each with a parker, a
+// belief and sensors of its own: A starts them all, Tab chooses whose
+// belief, sensors, way and wheel are shown, and the arrows drive that
+// one.
+//
+// H: a trailer is hitched (a box trailer, a caravan, none): it follows
+// the hitch ball, a step that would touch something with it or
+// jackknife it is not taken, and what looks back from the vehicle is
+// switched off. B: the backing assist (tow.ent): left and right then
+// say how far across the trailer is to stand (the blue line), and the
+// car turns its own steering wheel, backing, so that it does. With a
+// trailer A backs it into the slot (place 12, a yard, is made for
+// that), pulling forwards to straighten it where it must; the car does
+// not park itself with one.
+//
+// The edge nearest to the body or a mirror is drawn in the colour of
+// how near it is, as the number is: red below 30 cm, yellow below 60. A
+// step that would touch is not taken, and counted. The slot turns green
+// when the vehicle stands in it.
+import window
+import math
+import vehicles
+import park
+import scenes
+import sense
+import believe
+import parker
+import lot
+import tow
+
+// (A grid's cells are drawn as rows of `Shapes`.)
+capacity Shapes 65536
+
+// How the place is drawn: points a metre, and where its (0, 0) is in
+// the window, and how big what is written and the steering wheel are
+// (`ui`: 1 in a wide window, less in a narrow one). What the keys were the frame before (a key counts when it
+// goes down), which suite of sensors the vehicle carries (a row of
+// `suites`, or one more: none) and the least distance they report,
+// what is shown (`mode`: 0 the truth and what the sensors report now,
+// 1 the truth and what the vehicle believes, 2 the belief alone),
+// whether the swept path is drawn and has room for more,
+// and how many steps are still to run in this frame.
+unique View { scale: f32, ox: f32, oy: f32, ui: f32, suite: i32, reads: f32, was_s: bool, was_e: bool,
+              mode: i32, was_v: bool, was_a: bool,
+              trail: bool, room: bool, left: i32, restage: bool,
+              was_n: bool, was_p: bool, was_r: bool, was_t: bool, was_digit: bool,
+              car: i32, was_tab: bool, park: i32, busy: bool, cars: i32, parked: i32,
+              was_h: bool, was_b: bool }
+
+// The parker and the belief of the vehicle shown (`View.car`), as they
+// were when the frame began: what is drawn of them.
+unique Pk { phase: Phase, searches: i32, tries: i32, barred: bool, alert: bool, quiet: i32, bump: f32,
+            blind: bool, into: i32, x0: f32, y0: f32, x1: f32, y1: f32, stretch: i32, left: f32, ways: i32,
+            car: row of vehicles, back: f32, parked: bool, tow: Backing }
+unique Bel { x: f64, y: f64, heading: f64, gx: f32, gy: f32, reads: f32 }
+
+// Where the body's corners were, every few steps.
+buffer Trail { x: f32, y: f32 } capacity 16384
+
+const STEPS: i32 = 2
+const GROUND: i32 = 0x23272e
+const WALL: i32 = 0x8b93a1
+const PLAIN: i32 = 0xe3e6ea
+const PARKED: i32 = 0x3d6ea8
+const MOVING: i32 = 0x2f9c8f
+const WALKER: i32 = 0xe8b04a
+const KERB: i32 = 0x5b626e
+const LOW: i32 = 0xd98a2b
+const OVER: i32 = 0x9a6bd1
+const TYRE: i32 = 0x0c0d0f
+const SEEN_TYRE: i32 = 0xb0101216
+const PAINT: i32 = 0xe9ecf1
+const GLASS: i32 = 0x20262e
+
+world {
+  Window.width = 1280
+  Window.height = 800
+  Window.title = "ent-lang: parking"
+  Window.background = 0x15171b
+  Window.fps = 60
+  Window.resizable = true
+  Sim.dt = 1.0 / 120.0
+  // (Six vehicles: in the places for one, five of them are away.)
+  for i in 0..6 { Fleet += { kind: 0, x: 0.0, y: 0.0, heading: 0.0 } }
+  Lot.aisles = 2
+  Lot.per = 3
+  Lot.apart = 12.0
+  View.restage = true
+  View.trail = true
+  View.suite = 1
+  View.mode = 1
+  Stage.kind = 1
+  Sensing.seed = 2026
+  Sensing.errors = true
+}
+
+// The colour of a distance: red below 30 cm, yellow below 60.
+fn half_pi() -> f32 { 1.5707963267948966 }
+
+fn gap_color(gap: f32) -> i32 {
+  if gap < 0.3 { 0xe0383c } else if gap < 0.6 { 0xf2c94c } else { 0x4cc76a }
+}
+
+// A box of a frame that stands at (x, y) of the place, turned so that
+// its cosine and sine are `c` and `s`: from (x0, y0) to (x1, y1) there.
+proc turned_box(x: f32, y: f32, c: f32, s: f32, x0: f32, y0: f32, x1: f32, y1: f32,
+                scale: f32, ox: f32, oy: f32, color: i32) {
+  quad(ox + (x + x0 * c - y0 * s) * scale, oy - (y + x0 * s + y0 * c) * scale,
+       ox + (x + x1 * c - y0 * s) * scale, oy - (y + x1 * s + y0 * c) * scale,
+       ox + (x + x1 * c - y1 * s) * scale, oy - (y + x1 * s + y1 * c) * scale,
+       ox + (x + x0 * c - y1 * s) * scale, oy - (y + x0 * s + y1 * c) * scale, color)
+}
+
+// A disc at a point of such a frame.
+proc turned_disc(x: f32, y: f32, c: f32, s: f32, px: f32, py: f32, radius: f32,
+                 scale: f32, ox: f32, oy: f32, color: i32) {
+  circle(ox + (x + px * c - py * s) * scale, oy - (y + px * s + py * c) * scale,
+         radius * scale, color)
+}
+
+// A box with rounded corners in such a frame: two boxes that cross and
+// a disc in each corner.
+proc turned_round(x: f32, y: f32, c: f32, s: f32, x0: f32, y0: f32, x1: f32, y1: f32,
+                  r: f32, scale: f32, ox: f32, oy: f32, color: i32) {
+  turned_box(x, y, c, s, x0 + r, y0, x1 - r, y1, scale, ox, oy, color)
+  turned_box(x, y, c, s, x0, y0 + r, x1, y1 - r, scale, ox, oy, color)
+  turned_disc(x, y, c, s, x0 + r, y0 + r, r, scale, ox, oy, color)
+  turned_disc(x, y, c, s, x1 - r, y0 + r, r, scale, ox, oy, color)
+  turned_disc(x, y, c, s, x1 - r, y1 - r, r, scale, ox, oy, color)
+  turned_disc(x, y, c, s, x0 + r, y1 - r, r, scale, ox, oy, color)
+}
+
+// The keys: what is asked of the vehicle, and what the viewer chose.
+system look() {
+  let n = key_down('N' as i32)
+  let p = key_down('P' as i32)
+  let r = key_down('R' as i32)
+  let t = key_down('T' as i32)
+  let slow = key_down(340) || key_down(344)
+  if n && !View.was_n {
+    Stage.scene = (Stage.scene + 1) % len(scenes)
+    Stage.hitch = scenes[Stage.scene].hitch
+    View.restage = true
+  }
+  if p && !View.was_p {
+    Stage.scene = (Stage.scene + len(scenes) - 1) % len(scenes)
+    Stage.hitch = scenes[Stage.scene].hitch
+    View.restage = true
+  }
+  // H: the next trailer, or none (not in the car park).
+  let h = key_down('H' as i32)
+  if h && !View.was_h && Stage.scene < SINGLE {
+    Stage.hitch = (Stage.hitch + 1) % (len(trailers) + 1)
+    View.restage = true
+  }
+  View.was_h = h
+  if r && !View.was_r { View.restage = true }
+  if t && !View.was_t { View.trail = !View.trail }
+  let s = key_down('S' as i32)
+  let e = key_down('E' as i32)
+  if s && !View.was_s { View.suite = (View.suite + 1) % (len(suites) + 1) }
+  if e && !View.was_e { Sensing.errors = !Sensing.errors }
+  let v = key_down('V' as i32)
+  if v && !View.was_v { View.mode = (View.mode + 1) % 3 }
+  // A: the car parks itself, or stops doing so; so does it when the
+  // driver drives.
+  // Tab: the next vehicle's belief, sensors and wheel (where there are
+  // more than one).
+  let tab = key_down(258)
+  if tab && !View.was_tab && Stage.scene >= SINGLE { View.car = (View.car + 1) % (Lot.aisles * Lot.per) }
+  View.was_tab = tab
+  let auto = key_down('A' as i32)
+  let busy = View.busy
+  View.park = 0
+  if auto && !View.was_a { View.park = if busy { 2 } else { 1 } }
+  let backs = Pk.tow == Backing.Line || Pk.tow == Backing.Pull || Pk.tow == Backing.Done ||
+              Pk.tow == Backing.GaveUp
+  if (Pk.phase != Phase.Off || backs) && (Keys.up || Keys.down || Keys.left || Keys.right || Keys.space) {
+    View.park = 2
+  }
+  View.was_a = auto
+  View.was_v = v
+  View.was_s = s
+  View.was_e = e
+  for suite: mut Suite { suite.which = View.suite }
+  var digit = false
+  for i in 0..len(vehicles) {
+    if key_down('1' as i32 + i) {
+      digit = true
+      if !View.was_digit && Stage.kind != i {
+        Stage.kind = i
+        View.restage = true
+      }
+    }
+  }
+  View.was_n = n
+  View.was_p = p
+  View.was_r = r
+  View.was_t = t
+  View.was_digit = digit
+  View.left = STEPS
+  let go = if slow { 0.5 } else { 1.5 }
+  let straight = key_down('C' as i32)
+  let parks = busy && View.park != 2
+  let which = View.car
+  // B: the backing assist's knob, on and off (with a trailer).
+  let b = key_down('B' as i32)
+  let knobs = b && !View.was_b
+  View.was_b = b
+  for c: Car, a: mut Ask, tr: Trailer, tw: mut Tow where !parks && c.number == which {
+    a.v = if Keys.space { 0.0 } else if Keys.up { go } else if Keys.down { 0.0 - go } else { 0.0 }
+    var knob = tw.mode == Backing.Knob
+    if knobs && tr.kind >= 0 {
+      knob = !knob
+      tw.mode = if knob { Backing.Knob } else { Backing.Off }
+      tw.knob = 0.0
+    }
+    // The wheel from lock to lock in as long as the wheels take; with
+    // the assist, the knob.
+    let turn = 2.0 / LOCK_TO_LOCK / 60.0
+    if knob {
+      if Keys.left { tw.knob = min(1.0, tw.knob + turn * 0.5) }
+      if Keys.right { tw.knob = max(-1.0, tw.knob - turn * 0.5) }
+      if straight { tw.knob = 0.0 }
+    } else {
+      if Keys.left { a.steer = min(1.0, a.steer + turn) }
+      if Keys.right { a.steer = max(-1.0, a.steer - turn) }
+      if straight { a.steer = 0.0 }
+    }
+  }
+}
+
+// Another place or vehicle, or the same from the start.
+system fresh() {
+  Sensing.dark = scenes[Stage.scene].dark
+  Trail = []
+  View.room = true
+  View.restage = false
+  View.park = 2
+  View.car = 0
+  for tw: mut Tow {
+    tw.mode = Backing.Off
+    tw.knob = 0.0
+    tw.round = 0.0
+  }
+}
+
+// What the keys asked of the parkers: all that are in the place start
+// (1), or all stop (2). With a trailer it is the backing (tow.ent)
+// that starts, and stops (its knob stays as it is).
+system command() {
+  let park = View.park
+  for p: mut Parker, tr: Trailer, ey: Eyes
+      where park != 0 && !(ey.asleep && park == 1) && !(tr.kind >= 0 && park == 1) {
+    p.phase = if park == 1 { Phase.Plan } else { Phase.Off }
+    p.searches = 0
+  }
+  for tr: Trailer, tw: mut Tow, ey: Eyes where park != 0 && !ey.asleep {
+    if park == 1 && tr.kind >= 0 {
+      tw.mode = Backing.Line
+      tw.round = 0.0
+      tw.pulls = 0
+    } else if park == 2 && tw.mode != Backing.Knob {
+      tw.mode = Backing.Off
+      tw.round = 0.0
+    }
+  }
+  View.park = 0
+}
+
+// The shown vehicle's parker and belief, for the keys and the drawing;
+// and whether any vehicle is parking itself.
+system mirror() {
+  let which = View.car
+  View.busy = false
+  View.cars = 0
+  View.parked = 0
+  for p: Parker, g: Goal, ey: Eyes {
+    if p.phase == Phase.Plan || p.phase == Phase.Follow || p.phase == Phase.Settle || p.phase == Phase.Wait {
+      View.busy = true
+    }
+    if !ey.asleep { View.cars += 1 }
+    if g.parked && !ey.asleep { View.parked += 1 }
+  }
+  for tw: Tow, ey: Eyes where !ey.asleep {
+    if tw.mode == Backing.Line || tw.mode == Backing.Pull { View.busy = true }
+  }
+  for c: Car, tw: Tow where c.number == which { Pk.tow = tw.mode }
+  for c: Car, ch: Chassis, b: Belief, p: Parker, g: Goal where c.number == which {
+    Pk.parked = g.parked
+    Pk.phase = p.phase
+    Pk.searches = p.searches
+    Pk.tries = p.tries
+    Pk.barred = p.barred
+    Pk.alert = p.alert
+    Pk.quiet = p.quiet
+    Pk.bump = p.bump
+    Pk.blind = p.blind
+    Pk.into = p.into
+    Pk.x0 = p.x0
+    Pk.y0 = p.y0
+    Pk.x1 = p.x1
+    Pk.y1 = p.y1
+    Pk.stretch = p.stretch
+    Pk.left = p.left
+    Pk.ways = p.ways
+    Pk.car = c.kind
+    Pk.back = ch.back
+    Bel.x = b.x
+    Bel.y = b.y
+    Bel.heading = b.heading
+    Bel.gx = b.gx
+    Bel.gy = b.gy
+    Bel.reads = b.reads
+  }
+}
+
+// The way the parker follows, from where the car believes it is: a dot
+// every 15 cm (forwards green, backwards orange), and the pose in the
+// slot it is to come to.
+system way() {
+  let scale = View.scale
+  let car = Pk.car
+  var x = Bel.x as f32
+  var y = Bel.y as f32
+  var heading = Bel.heading as f32
+  let first = View.car * WAYS
+  if Pk.phase == Phase.Follow {
+    for k in Pk.stretch..Pk.ways {
+      let length = if k == Pk.stretch { Pk.left } else { Way[first + k].length }
+      let steer = Way[first + k].steer
+      let rho = 0.0 - Pk.back * steer
+      for n in 0..(length / 0.15) as i32 + 1 {
+        let ds = Way[first + k].dir * min(0.15, max(0.0, length - 0.15 * n as f32))
+        let bend = ds * cos(rho) * (tan(steer) - tan(rho)) / car.wheelbase
+        x += ds * cos(heading + rho + bend * 0.5)
+        y += ds * sin(heading + rho + bend * 0.5)
+        heading += bend
+        Shapes += { x: View.ox + x * scale - 2.0, y: View.oy - y * scale - 2.0, w: 4.0, h: 4.0,
+                    color: if Way[first + k].dir > 0.0 { 0x4cc76a } else { 0xf2994a }, round: true }
+      }
+    }
+  }
+  let tx = if Pk.into == 0 { Pk.x0 } else { Pk.x1 }
+  let ty = if Pk.into == 0 { Pk.y0 } else { Pk.y1 }
+  Shapes += { x: View.ox + tx * scale - 4.0, y: View.oy - ty * scale - 4.0, w: 8.0, h: 8.0, color: 0xffffff, round: true }
+}
+
+// The place in the window: as much of it as the scene says across, its
+// middle in the middle of what is left above the words.
+system layout() {
+  let scene = scenes[Stage.scene]
+  View.ui = clamp(Window.width as f32 / 1100.0, 0.45, 1.0)
+  let room = Window.height as f32 - 110.0 - 200.0 * View.ui
+  View.scale = min(Window.width as f32 / scene.across, room / (scene.across * 0.5))
+  View.ox = Window.width as f32 * 0.5 - scene.cx * View.scale
+  View.oy = 110.0 + room * 0.5 + scene.cy * View.scale
+}
+
+// The body's corners, every sixth step that it moves.
+system sweep() {
+  for c: Car, p: Pose, m: Motion where m.v != 0.0 {
+    let x = p.x as f32
+    let y = p.y as f32
+    let cs = cos(p.heading as f32)
+    let sn = sin(p.heading as f32)
+    let back = 0.0 - c.kind.rear
+    let nose = c.kind.wheelbase + c.kind.front
+    let half = c.kind.width * 0.5
+    Trail += { x: x + back * cs - half * sn, y: y + back * sn + half * cs }
+    Trail += { x: x + back * cs + half * sn, y: y + back * sn - half * cs }
+    Trail += { x: x + nose * cs - half * sn, y: y + nose * sn + half * cs }
+    Trail += { x: x + nose * cs + half * sn, y: y + nose * sn - half * cs }
+  }
+}
+
+system tick() {
+  View.left -= 1
+  View.room = len(Trail) < 16000
+}
+
+// The slot, the things, and the edge nearest the vehicle.
+system place() {
+  let scale = View.scale
+  let ox = View.ox
+  let oy = View.oy
+  // Every vehicle's slot.
+  for g: Goal where g.length > 0.0 {
+    let sc = cos(g.heading)
+    let ss = sin(g.heading)
+    let l = g.length * 0.5
+    let w = g.width * 0.5
+    turned_box(g.x, g.y, sc, ss, 0.0 - l, 0.0 - w, l, w, scale, ox, oy,
+               if g.parked { 0x2f6b46 } else { GROUND })
+    // Its sides, as lines painted on the ground.
+    for k in 0..4 {
+      let x0 = if k == 0 || k == 3 { 0.0 - l } else { l }
+      let y0 = if k < 2 { 0.0 - w } else { w }
+      let x1 = if k < 2 { l } else { 0.0 - l }
+      let y1 = if k == 0 || k == 3 { 0.0 - w } else { w }
+      line(ox + (g.x + x0 * sc - y0 * ss) * scale, oy - (g.y + x0 * ss + y0 * sc) * scale,
+           ox + (g.x + x1 * sc - y1 * ss) * scale, oy - (g.y + x1 * ss + y1 * sc) * scale,
+           if g.parked { 0x4cc76a } else { 0x7a828e })
+    }
+  }
+  // The car park's things are edges alone, four a box: its walls, and
+  // the vehicles that stand in its bays (not those that drive: they
+  // are drawn as vehicles).
+  if Stage.scene >= SINGLE && View.mode != 2 {
+    for i in 0..len(Edges) / 4 {
+      let e = 4 * i
+      if Edges[e].owner < 0 {
+        let wide = (Edges[e].x1 - Edges[e].x0) * (Edges[e].x1 - Edges[e].x0) +
+                   (Edges[e].y1 - Edges[e].y0) * (Edges[e].y1 - Edges[e].y0)
+        quad(ox + Edges[e].x0 * scale, oy - Edges[e].y0 * scale, ox + Edges[e + 1].x0 * scale,
+             oy - Edges[e + 1].y0 * scale, ox + Edges[e + 2].x0 * scale, oy - Edges[e + 2].y0 * scale,
+             ox + Edges[e + 3].x0 * scale, oy - Edges[e + 3].y0 * scale,
+             if wide < 100.0 { PARKED } else { WALL })
+      }
+    }
+  }
+  for thing in things {
+    if thing.scene == Stage.scene && View.mode != 2 {
+      let c = cos(radians(thing.heading))
+      let s = sin(radians(thing.heading))
+      let hl = thing.length * 0.5
+      let hw = thing.width * 0.5
+      if thing.height == Height.Tall && thing.width > 1.0 && thing.length < 6.0 {
+        // Another vehicle.
+        turned_round(thing.x, thing.y, c, s, 0.0 - hl, 0.0 - hw, hl, hw, 0.3, scale, ox, oy, PARKED)
+        turned_round(thing.x, thing.y, c, s, 0.0 - hl * 0.55, 0.12 - hw, hl * 0.3, hw - 0.12, 0.2,
+                     scale, ox, oy, GLASS)
+      } else {
+        let color = if thing.height == Height.Kerb { KERB } else if thing.height == Height.Low { LOW }
+                    else if thing.height == Height.Over { OVER } else if thing.plain { PLAIN } else { WALL }
+        turned_box(thing.x, thing.y, c, s, 0.0 - hl, 0.0 - hw, hl, hw, scale, ox, oy, color)
+      }
+    }
+  }
+  // What moves: a car, someone walking (from above: shoulders and a
+  // head), a trolley, a door.
+  for i in 0..len(Moving) {
+    if View.mode != 2 {
+      let m = movers[Moving[i].row]
+      let c = cos(Moving[i].heading)
+      let s = sin(Moving[i].heading)
+      let hl = m.length * 0.5
+      let hw = m.width * 0.5
+      if m.kind == Mover.Drive {
+        turned_round(Moving[i].x, Moving[i].y, c, s, 0.0 - hl, 0.0 - hw, hl, hw, 0.3, scale, ox, oy, MOVING)
+        turned_round(Moving[i].x, Moving[i].y, c, s, 0.0 - hl * 0.55, 0.12 - hw, hl * 0.3, hw - 0.12, 0.2,
+                     scale, ox, oy, GLASS)
+      } else if m.kind == Mover.Walk {
+        turned_round(Moving[i].x, Moving[i].y, c, s, 0.0 - hl * 0.6, 0.0 - hw, hl * 0.6, hw, 0.12, scale, ox, oy, WALKER)
+        turned_disc(Moving[i].x, Moving[i].y, c, s, 0.0, 0.0, 0.12, scale, ox, oy, 0x3a2f28)
+      } else {
+        turned_box(Moving[i].x, Moving[i].y, c, s, 0.0 - hl, 0.0 - hw, hl, hw, scale, ox, oy,
+                   if m.kind == Mover.Roll { LOW } else { PARKED })
+      }
+    }
+  }
+  if View.trail && View.mode != 2 {
+    for i in 0..len(Trail) {
+      Shapes += { x: ox + Trail[i].x * scale - 1.0, y: oy - Trail[i].y * scale - 1.0, w: 2.0, h: 2.0,
+                  color: 0x4a8fd6, round: false }
+    }
+  }
+}
+
+fn sight_color(sight: Sight) -> i32 {
+  if sight == Sight.Kerb { 0xb8c0cc } else if sight == Sight.Low { 0xffb14a }
+  else if sight == Sight.Over { 0xc79bff } else { 0x6fe3ff }
+}
+
+// What the vehicle believes: every cell of the grid it is sure of, in
+// the colour of how high it took the thing to be, or pink where it has
+// not seen it for two seconds and goes by what it remembers.
+system believed() {
+  let scale = View.scale
+  let ox = View.ox
+  let oy = View.oy
+  let size = max(2.0, CELL * scale)
+  let step = Sim.step
+  for row in 0..SIDE {
+    for col in 0..SIDE {
+      let at = View.car * GRID + row * SIDE + col
+      if Cells[at].sure >= SURE {
+        Shapes += { x: ox + (Bel.gx + CELL * col as f32) * scale,
+                    y: oy - (Bel.gy + CELL * (row + 1) as f32) * scale, w: size, h: size,
+                    color: if step - Cells[at].seen > 240 { 0xff5fa2 } else { sight_color(Cells[at].sight) },
+                    round: false }
+      }
+    }
+  }
+}
+
+// What the sensors report, drawn where the vehicle is: an ultrasonic
+// sensor's range as an arc across its cone, in the colour of how near
+// (its cone faintly, as far as it hears), and red at the sensor where it
+// says "stop"; a camera's points, in the colour of how high the thing
+// is taken to be. And the least of what they report: an ultrasonic
+// range as it is, a camera's point by how far it is from the body.
+system sensed() {
+  let scale = View.scale
+  let ox = View.ox
+  let oy = View.oy
+  View.reads = 1000.0
+  let shown = View.car
+  let each = len(sensors)
+  for s: Sensor, w: Rays[s.first, s.rows] where s.number / each == shown {
+    if let px = Pose(s.car).x, let py = Pose(s.car).y, let ph = Pose(s.car).heading,
+       let car = Car(s.car).kind, let suite = Suite(s.car).which {
+      let spec = s.spec
+      if (spec.suites >> suite) & 1 != 0 {
+        let x = px as f32
+        let y = py as f32
+        let cs = cos(ph as f32)
+        let sn = sin(ph as f32)
+        let (sx, sy) = mount(car, spec)
+        // Where the sensor is in the window.
+        let mx = ox + (x + sx * cs - sy * sn) * scale
+        let my = oy - (y + sx * sn + sy * cs) * scale
+        let facing = ph as f32 + radians(spec.facing)
+        let half = radians(spec.across * 0.5)
+        if spec.kind == Kind.Sonic {
+          let far = spec.far * scale
+          line(mx, my, mx + cos(facing - half) * far, my - sin(facing - half) * far, 0x2c3a44)
+          line(mx, my, mx + cos(facing + half) * far, my - sin(facing + half) * far, 0x2c3a44)
+          let sight = w[0].sight
+          if something(sight) {
+            let range = w[0].range
+            let color = if sight == Sight.Stop { 0xe0383c } else { gap_color(range) }
+            // The arc, twice for its width.
+            for k in 0..10 {
+              let a0 = facing - half + half * 0.2 * k as f32
+              let a1 = a0 + half * 0.2
+              for thick in 0..2 {
+                let r = range * scale + thick as f32
+                line(mx + cos(a0) * r, my - sin(a0) * r, mx + cos(a1) * r, my - sin(a1) * r, color)
+              }
+            }
+            View.reads min= range
+          }
+          circle(mx, my, 2.5, 0x6fe3ff)
+        } else {
+          let reach = 2.5 * scale
+          line(mx, my, mx + cos(facing - half) * reach, my - sin(facing - half) * reach, 0x2c3a44)
+          line(mx, my, mx + cos(facing + half) * reach, my - sin(facing + half) * reach, 0x2c3a44)
+          let round = car.corner
+          let wide = car.width * 0.5
+          for k in 0..len(w) {
+            let sight = w[k].sight
+            if something(sight) && w[k].range < 40.0 {
+              let lx = w[k].x
+              let ly = w[k].y
+              rect(ox + (x + lx * cs - ly * sn) * scale - 1.5, oy - (y + lx * sn + ly * cs) * scale - 1.5,
+                   3.0, 3.0, sight_color(sight))
+              if sight != Sight.Kerb {
+                View.reads min= point_box(lx, ly, round - car.rear, round - wide,
+                                          car.wheelbase + car.front - round, wide - round) - round
+              }
+            }
+          }
+          circle(mx, my, 2.5, 0xffb14a)
+        }
+      }
+    }
+  }
+}
+
+// The vehicle: its tyres, turned as they are steered, its body, its
+// mirrors and its glass (the windscreen is the wider end).
+system vehicle() {
+  let scale = View.scale
+  let ox = View.ox
+  let oy = View.oy
+  let alone = View.mode == 2
+  let which = View.car
+  // (With the belief alone, only the vehicle whose belief it is.)
+  for c: Car, ch: Chassis, p: Pose, m: Motion, n: Near, tr: Trailer, bk: Tow, ey: Eyes
+      where (!ey.asleep || c.number < View.cars) && (!alone || c.number == which) {
+    let me = c.number == which
+    // Where it is, or with the belief alone where it believes it is.
+    let x = if alone { Bel.x as f32 } else { p.x as f32 }
+    let y = if alone { Bel.y as f32 } else { p.y as f32 }
+    let heading = if alone { Bel.heading as f32 } else { p.heading as f32 }
+    let cs = cos(heading)
+    let sn = sin(heading)
+    let car = c.kind
+    let back = 0.0 - car.rear
+    let nose = car.wheelbase + car.front
+    let half = car.width * 0.5
+    let side = car.track * 0.5
+    let tl = car.tyre * 0.5
+    let tw = car.tyre_width * 0.5
+    let rho = 0.0 - ch.back * m.steer
+    // The nearest edge.
+    if n.edge >= 0 && n.gap < 1.5 && !alone && me {
+      let color = gap_color(n.gap)
+      line(ox + Edges[n.edge].x0 * scale, oy - Edges[n.edge].y0 * scale,
+           ox + Edges[n.edge].x1 * scale, oy - Edges[n.edge].y1 * scale, color)
+    }
+    let paint = if n.stopped { 0xe0383c } else { PAINT }
+    // Its trailer: the drawbar from the ball to the body, the body,
+    // its tyres and lights; red where it is what stopped the vehicle.
+    // With the knob, where the trailer is to come to as a line.
+    if tr.kind >= 0 {
+      let t = trailers[tr.kind]
+      let towed = heading - across_of(p.heading, tr.heading)
+      let tc = cos(towed)
+      let ts = sin(towed)
+      let hx = x - hitch_of(car) * cs
+      let hy = y - hitch_of(car) * sn
+      let tx = hx - t.drawbar * tc
+      let ty = hy - t.drawbar * ts
+      let wide = t.width * 0.5
+      let front = t.length - t.behind
+      let touches = n.stopped && (tr.jack || min(tr.gap, tr.kerb) < 0.02)
+      let body = if touches { 0xe0383c } else if tr.kind == 0 { 0xb9c0c9 } else { 0xf1efe6 }
+      if bk.mode == Backing.Knob {
+        let far = t.drawbar + t.behind + 1.5
+        line(ox + hx * scale, oy - hy * scale, ox + (hx - far * cos(heading - bk.want)) * scale,
+             oy - (hy - far * sin(heading - bk.want)) * scale, 0x6fe3ff)
+      }
+      for k in 0..2 {
+        let to = if k == 0 { wide * 0.7 } else { 0.0 - wide * 0.7 }
+        line(ox + hx * scale, oy - hy * scale, ox + (tx + front * tc - to * ts) * scale,
+             oy - (ty + front * ts + to * tc) * scale, 0x8b93a1)
+      }
+      turned_box(tx, ty, tc, ts, front, -0.04, t.drawbar, 0.04, scale, ox, oy, 0x8b93a1)
+      turned_disc(hx, hy, cs, sn, 0.0, 0.0, 0.07, scale, ox, oy, 0x8b93a1)
+      turned_round(tx, ty, tc, ts, 0.0 - t.behind, 0.0 - wide, front, wide, 0.12, scale, ox, oy, body)
+      if tr.kind == 1 {
+        // A caravan's roof lights.
+        turned_round(tx, ty, tc, ts, 0.6 - t.behind, -0.35, 1.3 - t.behind, 0.35, 0.1, scale, ox, oy, GLASS)
+        turned_round(tx, ty, tc, ts, front - 1.6, -0.45, front - 0.7, 0.45, 0.1, scale, ox, oy, GLASS)
+      } else {
+        // A box trailer's lid, in two.
+        turned_box(tx, ty, tc, ts, 0.1 - t.behind, -0.02, front - 0.1, 0.02, scale, ox, oy, 0x8b93a1)
+      }
+      for k in 0..2 {
+        let to = if k == 0 { t.track * 0.5 } else { 0.0 - t.track * 0.5 }
+        turned_box(tx - to * ts, ty + to * tc, tc, ts, -0.3, -0.1, 0.3, 0.1, scale, ox, oy, SEEN_TYRE)
+        let y0 = if k == 0 { wide - 0.4 } else { 0.1 - wide }
+        turned_box(tx, ty, tc, ts, 0.04 - t.behind, y0, 0.14 - t.behind, y0 + 0.3, scale, ox, oy, 0xc0392b)
+      }
+    }
+    let m0 = mirror_from(car)
+    turned_box(x, y, cs, sn, m0, half - 0.05, m0 + MIRROR_LONG, car.mirrors * 0.5, scale, ox, oy, paint)
+    turned_box(x, y, cs, sn, m0, 0.0 - car.mirrors * 0.5, m0 + MIRROR_LONG, 0.05 - half, scale, ox, oy,
+               paint)
+    turned_round(x, y, cs, sn, back, 0.0 - half, nose, half, car.corner, scale, ox, oy, paint)
+    // The glass: from behind the bonnet to the boot.
+    let length = car.length
+    turned_round(x, y, cs, sn, back + length * 0.14, 0.14 - half, back + length * 0.74, half - 0.14,
+                 0.2, scale, ox, oy, GLASS)
+    turned_box(x, y, cs, sn, back + length * 0.26, 0.2 - half, back + length * 0.54, half - 0.2,
+               scale, ox, oy, paint)
+    // A rear tyre and a front one on each side, over the body, which
+    // shows through them: where the wheels point is seen from above.
+    for k in 0..2 {
+      let to = if k == 0 { side } else { 0.0 - side }
+      let rc = cos(heading + rho)
+      let rs = sin(heading + rho)
+      turned_box(x - to * sn, y + to * cs, rc, rs, 0.0 - tl, 0.0 - tw, tl, tw, scale, ox, oy, SEEN_TYRE)
+      let fc = cos(heading + m.steer)
+      let fs = sin(heading + m.steer)
+      turned_box(x + car.wheelbase * cs - to * sn, y + car.wheelbase * sn + to * cs, fc, fs,
+                 0.0 - tl, 0.0 - tw, tl, tw, scale, ox, oy, SEEN_TYRE)
+    }
+    // Its lights: pale at the front, red at the back.
+    for k in 0..2 {
+      let y0 = if k == 0 { half - 0.6 } else { 0.22 - half }
+      turned_box(x, y, cs, sn, nose - 0.3, y0, nose - 0.12, y0 + 0.38, scale, ox, oy, 0xf5d76e)
+      turned_box(x, y, cs, sn, back + 0.08, y0, back + 0.2, y0 + 0.38, scale, ox, oy, 0xc0392b)
+    }
+    // Where it believes it is, as an outline, with the truth.
+    if View.mode == 1 && View.suite < len(suites) && me {
+      let gx = Bel.x as f32
+      let gy = Bel.y as f32
+      let gc = cos(Bel.heading as f32)
+      let gs = sin(Bel.heading as f32)
+      for k in 0..4 {
+        let x0 = if k == 0 || k == 3 { back } else { nose }
+        let y0 = if k < 2 { 0.0 - half } else { half }
+        let x1 = if k < 2 { nose } else { back }
+        let y1 = if k == 0 || k == 3 { 0.0 - half } else { half }
+        line(ox + (gx + x0 * gc - y0 * gs) * scale, oy - (gy + x0 * gs + y0 * gc) * scale,
+             ox + (gx + x1 * gc - y1 * gs) * scale, oy - (gy + x1 * gs + y1 * gc) * scale, 0xf2c94c)
+      }
+    }
+  }
+}
+
+// What is written: the place, the vehicle and its numbers, how fast it
+// goes, where its wheel is and how near it is. In lines one under
+// another, smaller in a narrow window.
+system words() {
+  let scene = scenes[Stage.scene]
+  let w = Window.width as f32
+  let h = Window.height as f32
+  let u = View.ui
+  let size = max(u, 0.6)
+  let base = h - 56.0 * u
+  let cy = base - 76.0 * u
+  var light: text[10] = ""
+  if scene.dark { light = " (dark)" }
+  label("{Stage.scene + 1}: {scene.name}{light}", 16.0, 10.0, 20.0 * size, 0xffffff)
+  for c: Car, ch: Chassis, p: Pose, m: Motion, n: Near, tr: Trailer, tw: Tow where c.number == View.car {
+    let car = c.kind
+    let turning = car.circle
+    // Its trailer: how far across it stands, how near it is, and what
+    // the backing does.
+    if tr.kind >= 0 {
+      let across = degrees(across_of(p.heading, tr.heading))
+      let deg = (abs(across) + 0.5) as i32
+      var side: text[8] = ""
+      if deg > 0 { side = if across > 0.0 { " left" } else { " right" } }
+      if tr.jack {
+        label("Trailer: {trailers[tr.kind].name}, jackknifed: forwards to free it", 16.0, 22.0 + 116.0 * size,
+              15.0 * size, 0xe0383c)
+      } else {
+        label("Trailer: {trailers[tr.kind].name}, {deg} deg across{side} (jackknifed at 60)", 16.0,
+              22.0 + 116.0 * size, 15.0 * size, if deg >= 45 { 0xf2c94c } else { 0xa0a6ad })
+      }
+      if min(tr.gap, tr.kerb) < 1.5 && View.mode != 2 {
+        let near = min(tr.gap, tr.kerb)
+        label("trailer {(max(0.0, near) * 100.0 + 0.5) as i32} cm", 16.0 + 150.0 * size, cy - 56.0 * u, 20.0 * size,
+              gap_color(near))
+      }
+      var backing: text[80] = ""
+      var backing_color = 0x6fe3ff
+      if tw.mode == Backing.Knob {
+        let want = (abs(degrees(tw.want)) + 0.5) as i32
+        var to: text[8] = ""
+        if want > 0 { to = if tw.want > 0.0 { " left" } else { " right" } }
+        backing = "Backing assist: the trailer to {want} deg{to} (left, right, C); backing, the car steers"
+      }
+      if tw.mode == Backing.Line { backing = "Backs the trailer in: steers it along the way into the slot" }
+      if tw.mode == Backing.Pull { backing = "Backs the trailer in: pulls forwards to straighten it ({tw.pulls} of 2)" }
+      if tw.mode == Backing.Done {
+        backing = "Backs the trailer in: done"
+        backing_color = 0x4cc76a
+      }
+      if tw.mode == Backing.GaveUp {
+        backing = "Backs the trailer in: stopped by something (it does not look where it goes)"
+        backing_color = 0xe0383c
+      }
+      if tw.mode != Backing.Off { label(backing, 16.0, 20.0 + 98.0 * size, 15.0 * size, backing_color) }
+    }
+    var number: text[16] = "{Stage.kind + 1}"
+    if View.cars > 1 { number = "Vehicle {View.car + 1}" }
+    label("{number}: {car.name}, {car.length} x {car.width} m ({car.mirrors} with mirrors), turns in {turning} m",
+          16.0, 12.0 + 24.0 * size, 15.0 * size, 0xa0a6ad)
+    let kmh = (abs(m.v) * 36.0 + 0.5) as i32
+    var way: text[12] = "standing"
+    if m.v > 0.0 { way = "forwards" } else if m.v < 0.0 { way = "backwards" }
+    label("{kmh / 10}.{kmh % 10} km/h {way}", 16.0, cy + 10.0 * u, 20.0 * size, 0xffffff)
+    // The true distance, and what the car makes of it: by its grid,
+    // or with mode 0 by what its sensors report now. With the belief
+    // alone only what the car reads is shown, as in the car.
+    let reads = if View.mode == 0 { View.reads } else { Bel.reads }
+    let has = View.suite < len(suites) && reads < 10.0
+    if View.mode == 2 {
+      if has {
+        let cm = (max(0.0, reads) * 100.0 + 0.5) as i32
+        label("{cm} cm", 16.0, cy - 44.0 * u, 40.0 * size, gap_color(reads))
+      }
+    } else {
+      if n.edge >= 0 && n.gap < 10.0 {
+        let cm = (max(0.0, n.gap) * 100.0 + 0.5) as i32
+        label("{cm} cm", 16.0, cy - 44.0 * u, 40.0 * size, gap_color(n.gap))
+      }
+      if has {
+        let cm = (max(0.0, reads) * 100.0 + 0.5) as i32
+        let off = ((reads - n.gap) * 100.0 + (if reads < n.gap { -0.5 } else { 0.5 })) as i32
+        label("the car reads {cm} cm ({off})", 16.0 + 150.0 * size, cy - 30.0 * u, 20.0 * size, gap_color(reads))
+      } else if View.suite < len(suites) {
+        label("the car reads nothing", 16.0 + 150.0 * size, cy - 30.0 * u, 20.0 * size, 0x8a9099)
+      }
+    }
+    if n.kerb < 0.3 {
+      let cm = (max(0.0, n.kerb) * 100.0 + 0.5) as i32
+      label("tyre to kerb {cm} cm", 16.0, cy + 40.0 * u, 18.0 * size, gap_color(n.kerb + 0.3))
+    }
+    if n.hits > 0 { label("touched {n.hits} times", w - 200.0 * size, 14.0 + 44.0 * size, 18.0 * size, 0xe0383c) }
+    // The steering wheel's turns from straight, in degrees, and the
+    // wheels', under the two that `gauge` draws.
+    let wheel = (m.steer / ch.lock * car.turns * 180.0) as i32
+    let wheels = (degrees(m.steer) + (if m.steer < 0.0 { -0.5 } else { 0.5 })) as i32
+    var to: text[12] = ""
+    if wheel > 0 { to = " left" } else if wheel < 0 { to = " right" }
+    label("{iabs(wheel)} deg{to}", w - 236.0 * u, base - 22.0 * u, 15.0 * size, 0xffffff)
+    label("{iabs(wheels)} deg", w - 84.0 * u, base - 22.0 * u, 15.0 * size, 0xffffff)
+  }
+  var errors: text[20] = ", without errors"
+  if Sensing.errors { errors = "" }
+  if View.suite < len(suites) {
+    label("Sensors: {suites[View.suite].name}{errors}", 16.0, 14.0 + 44.0 * size, 15.0 * size, 0x6fe3ff)
+  } else {
+    label("Sensors: none", 16.0, 14.0 + 44.0 * size, 15.0 * size, 0x8a9099)
+  }
+  var shown: text[60] = "the truth, and what the sensors report now"
+  if View.mode == 1 { shown = "the truth, and what the car believes (pink: remembered)" }
+  if View.mode == 2 { shown = "what the car believes, alone" }
+  label("Shown: {shown}", 16.0, 16.0 + 62.0 * size, 15.0 * size, 0xa0a6ad)
+  if View.mode == 1 && View.suite < len(suites) {
+    for c: Car, p: Pose where c.number == View.car {
+      let off = (sqrt64((p.x - Bel.x) * (p.x - Bel.x) + (p.y - Bel.y) * (p.y - Bel.y)) * 100.0) as f32
+      let tenths = (abs(degrees((p.heading - Bel.heading) as f32)) * 10.0 + 0.5) as i32
+      label("believed place off by {(off + 0.5) as i32} cm, {tenths / 10}.{tenths % 10} deg", 16.0, 18.0 + 80.0 * size,
+            15.0 * size, 0xf2c94c)
+    }
+  }
+  var parker: text[60] = ""
+  var parker_color = 0x6fe3ff
+  if Pk.phase == Phase.Plan { parker = "looks for a way" }
+  if Pk.phase == Phase.Follow { parker = "drives the way it found (search {Pk.searches})" }
+  if Pk.phase == Phase.Wait { parker = "finds no way now, waits (try {Pk.tries} of 6)" }
+  if (Pk.phase == Phase.Follow || Pk.phase == Phase.Settle) && Pk.barred {
+    parker = "stands: something is in its way"
+    parker_color = 0xf2c94c
+  }
+  if (Pk.phase == Phase.Follow || Pk.phase == Phase.Settle) && Pk.alert && Pk.quiet == 0 {
+    parker = "stands: something moves near its way"
+    parker_color = 0xf2c94c
+  }
+  if Pk.phase == Phase.Settle { parker = "settles in the slot" }
+  if Pk.phase == Phase.Done {
+    parker = "done"
+    parker_color = 0x4cc76a
+  }
+  if Pk.phase == Phase.GaveUp {
+    parker_color = 0xe0383c
+    parker = "gave up: it finds no way in"
+    if Pk.bump != 0.0 { parker = "gave up: stopped by something it did not see" }
+    if Pk.blind { parker = "does not start without cameras" }
+  }
+  if Pk.phase != Phase.Off { label("Parks itself: {parker}", 16.0, 20.0 + 98.0 * size, 15.0 * size, parker_color) }
+  if Pk.parked && View.cars < 2 { label("parked", w - 200.0 * size, 10.0, 30.0 * size, 0x4cc76a) }
+  if View.cars > 1 {
+    label("{View.parked} of {View.cars} parked", w - 260.0 * size, 10.0, 26.0 * size,
+          if View.parked == View.cars { 0x4cc76a } else { 0xa0a6ad })
+    label("Tab: the next vehicle's belief, sensors and wheel", 16.0, 22.0 + 116.0 * size, 15.0 * size, 0xa0a6ad)
+  }
+  label("Arrows: drive and steer (shift: slowly)   C: wheel straight   Space: brake   A: parks itself   H: trailer   B: backing assist", 16.0, base + 6.0 * u,
+        14.0 * size, 0x8a9099)
+  label("1-5: vehicle  N/P: place  R: again  T: swept path  S: sensors  E: their errors  V: what is shown", 16.0, base + 30.0 * u, 14.0 * size, 0x8a9099)
+}
+
+// The steering wheel as the driver has it, turned as far as it is (a
+// mark at its top when it is straight, and a dot above it for every
+// whole turn it is from that), and beside it the vehicle's wheels from
+// above, the front ones (and the rear ones, where they steer) at their
+// angles, with the most they can turn as faint lines.
+system gauge() {
+  let w = Window.width as f32
+  let h = Window.height as f32
+  for c: Car, ch: Chassis, m: Motion where c.number == View.car {
+    let car = c.kind
+    // The steering wheel.
+    let u = View.ui
+    let cx = w - 196.0 * u
+    let cy = h - 132.0 * u
+    let r = 46.0 * u
+    let turned = m.steer / ch.lock * car.turns * pi()
+    let tc = cos(turned)
+    let ts = sin(turned)
+    circle(cx, cy, r, 0x3a4048)
+    circle(cx, cy, r * 0.8, Window.background)
+    turned_box(0.0, 0.0, tc, ts, -0.85, -0.1, 0.85, 0.1, r, cx, cy, 0x3a4048)
+    turned_box(0.0, 0.0, tc, ts, -0.1, -0.85, 0.1, 0.0, r, cx, cy, 0x3a4048)
+    circle(cx, cy, r * 0.26, 0x4a515b)
+    turned_box(0.0, 0.0, tc, ts, -0.07, 0.78, 0.07, 1.02, r, cx, cy,
+               if abs(turned) < 0.02 { 0x4cc76a } else { 0xf2c94c })
+    let whole = (abs(turned) / tau()) as i32
+    for k in 0..whole {
+      circle(cx - 6.0 * u * (whole - 1) as f32 + 12.0 * u * k as f32, cy - r - 9.0 * u, 3.5 * u, 0xf2c94c)
+    }
+    // The wheels from above, the vehicle headed up.
+    let scale = 92.0 * u / car.length
+    let ax = w - 60.0 * u
+    let ay = cy + (car.wheelbase + car.front - car.rear) * 0.5 * scale
+    let side = car.track * 0.5
+    let tl = car.tyre * 0.5
+    let tw = car.tyre_width * 0.5 + 0.03
+    let rho = 0.0 - ch.back * m.steer
+    turned_box(0.0, 0.0, 0.0, 1.0, 0.0 - car.rear, 0.0 - car.width * 0.5, car.wheelbase + car.front,
+               car.width * 0.5, scale, ax, ay, 0x22262c)
+    turned_box(0.0, 0.0, 0.0, 1.0, -0.03, 0.0 - side, 0.03, side, scale, ax, ay, 0x4a515b)
+    turned_box(0.0, 0.0, 0.0, 1.0, car.wheelbase - 0.03, 0.0 - side, car.wheelbase + 0.03, side,
+               scale, ax, ay, 0x4a515b)
+    turned_box(0.0, 0.0, 0.0, 1.0, 0.0, -0.03, car.wheelbase, 0.03, scale, ax, ay, 0x4a515b)
+    for k in 0..2 {
+      let to = if k == 0 { side } else { 0.0 - side }
+      // (Headed up: ahead is up the window, the left is its left.)
+      let fx = ax - to * scale
+      let fy = ay - car.wheelbase * scale
+      for e in 0..2 {
+        let most = half_pi() + (if e == 0 { ch.lock } else { 0.0 - ch.lock })
+        line(fx, fy, fx + cos(most) * tl * 1.5 * scale, fy - sin(most) * tl * 1.5 * scale, 0x4a515b)
+      }
+      turned_box(0.0, 0.0, cos(half_pi() + m.steer), sin(half_pi() + m.steer), 0.0 - tl, 0.0 - tw, tl, tw,
+                 scale, fx, fy, PAINT)
+      turned_box(0.0, 0.0, cos(half_pi() + rho), sin(half_pi() + rho), 0.0 - tl, 0.0 - tw, tl, tw,
+                 scale, ax - to * scale, ay, if ch.back > 0.0 { PAINT } else { 0x8b93a1 })
+    }
+  }
+}
+
+schedule frame() {
+  begin()
+  mirror()
+  look()
+  stage() run_if View.restage
+  lot_away() run_if View.restage && Stage.scene < SINGLE
+  lot() run_if View.restage && Stage.scene >= SINGLE
+  bodies() run_if View.restage
+  measure() run_if View.restage
+  recall() run_if View.restage
+  fresh() run_if View.restage
+  command()
+  mirror()
+  layout()
+}
+
+schedule advance() run_if View.left > 0 {
+  watch_car()
+  move()
+  bodies()
+  park_step()
+  tow_step()
+  step()
+  reckon()
+  sense() run_if Sim.step % 4 == 0
+  chart() run_if Sim.step % 4 == 0
+  sweep() run_if Sim.step % 6 == 0 && View.room
+  judge()
+  tick()
+}
+
+schedule draw() {
+  read()
+  mirror()
+  place()
+  believed() run_if View.mode != 0
+  way() run_if Pk.phase == Phase.Follow || Pk.phase == Phase.Settle
+  shapes()
+  sensed() run_if View.mode == 0
+  vehicle()
+  words()
+  gauge()
+  present()
+}
+
+schedule sensors() {
+  fit()
+  minds()
+  minds_park()
+  hitches()
+}
+
+main {
+  setup()
+  sensors()
+  loop {
+    frame()
+    loop { advance() } until View.left <= 0
+    draw()
+  } until Window.closed
+}

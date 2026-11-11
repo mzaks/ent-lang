@@ -1,0 +1,21 @@
+// examples/parking/show.ent compiles: a vehicle parked by the keys in a
+// window, drawn turned with the window's `quad`, a step of park.ent's
+// model for each of a frame's steps. Running it needs a display and
+// raylib, which a test cannot ask for.
+// RUN: ent-translate --import-ent %S/../../examples/parking/show.ent \
+// RUN:     -I %S/../../devices -I %S/../../examples/parking -o %t.mlir
+// RUN: ent-opt %t.mlir --ent-indexes --ent-lower-to-loops=fuse-systems=1 \
+// RUN:     --symbol-dce --convert-scf-to-cf --convert-to-llvm \
+// RUN:     --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir | FileCheck %s
+
+// CHECK-DAG: declare void @ent_window_quad(
+// CHECK-DAG: declare void @ent_window_draw_shapes(
+
+// CHECK-LABEL: define void @advance(
+// CHECK: call void @park.drive
+// CHECK: call void @sweep
+
+// And check/sweep.ent compiles (sixty vehicles, each in a gap of its
+// own: 3.5 GB and minutes, which a test does not run).
+// RUN: %ent build -I %S/../../examples/parking %S/../../examples/parking/check/sweep.ent -o %t.sweep 2>/dev/null
