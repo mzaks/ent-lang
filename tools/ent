@@ -2133,9 +2133,17 @@ def build(arguments, output, directory):
         # Binaryen, and the locals of a function the program's code
         # left unoptimised (what makes the world) shared out: browsers
         # take no function of more than 50,000.)
-        maths += ["-O2", "-sASYNCIFY", "-sALLOW_MEMORY_GROWTH=1",
+        # (What the program's functions hold where it waits for a frame
+        # kept in ASYNCIFY_STACK_SIZE: 4 KB by default, too few for the
+        # layout's drawing, examples/layout_demo.ent.)
+        maths += ["-O2", "-sASYNCIFY", "-sASYNCIFY_STACK_SIZE=1MB",
+                  "-sALLOW_MEMORY_GROWTH=1",
                   "-sMAXIMUM_MEMORY=4GB", "-sSTACK_SIZE=8MB",
                   "-sEXIT_RUNTIME=1"]
+        # (ENT_WEB_DEBUG=1: the functions' names kept and Emscripten's
+        # own checks on, for where a page stops to say where and why.)
+        if os.environ.get("ENT_WEB_DEBUG") == "1":
+            maths += ["--profiling-funcs", "-sASSERTIONS=1"]
         for name, where in assets.items():
             maths += ["--preload-file", f"{os.path.abspath(where)}@/{name}"]
         shell = os.path.join(ROOT, "devices", "web.html")

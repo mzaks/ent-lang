@@ -88,7 +88,13 @@ static float ent_window_asked_scale(void) {
 void ent_window_open_window(int32_t width, int32_t height,
                             const ent_text62 *title, bool resizable) {
   ENT_WINDOW_TEXT(name, title);
+#ifdef __EMSCRIPTEN__
+  // (In a web page what raylib warns of is WebGL's, nothing a visitor
+  // can do about, shown under the canvas: only its errors are.)
+  SetTraceLogLevel(LOG_ERROR);
+#else
   SetTraceLogLevel(LOG_WARNING);
+#endif
   // (In points: on a screen with small pixels the picture has more of
   // them, and everything is as big as on any other.)
   SetConfigFlags(FLAG_WINDOW_HIGHDPI | (resizable ? FLAG_WINDOW_RESIZABLE : 0));
