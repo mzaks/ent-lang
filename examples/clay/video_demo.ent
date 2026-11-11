@@ -135,6 +135,8 @@ world {
   if Face == 0 { Face = font("/usr/share/fonts/noto/NotoSans-Regular.ttf", 24) }
   if Face == 0 { Face = font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24) }
   if Face == 0 { Face = font("/System/Library/Fonts/Supplemental/Arial.ttf", 24) }
+  // (On a web page: the font `ent build --web` put in it.)
+  if Face == 0 { Face = font("/ent/plain.ttf", 24) }
   Shows = -1
 
   // OuterContainer: as big as the window, a column with 16 around and

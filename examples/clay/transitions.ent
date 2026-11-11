@@ -77,6 +77,8 @@ world {
   if Face == 0 { Face = font("/usr/share/fonts/noto/NotoSans-Regular.ttf", 32) }
   if Face == 0 { Face = font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 32) }
   if Face == 0 { Face = font("/System/Library/Fonts/Supplemental/Arial.ttf", 32) }
+  // (On a web page: the font `ent build --web` put in it.)
+  if Face == 0 { Face = font("/ent/plain.ttf", 32) }
   Count = 30
   Next = 30
 

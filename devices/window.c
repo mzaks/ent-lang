@@ -476,6 +476,8 @@ static const char *ent_window_plain_file(void) {
     return ent_window_plain_face.file;
   }
   static const char *known[] = {
+      // (On a web page, the one `ent build --web` put in it.)
+      "/ent/plain.ttf",
       "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
       "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
       "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",

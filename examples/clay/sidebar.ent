@@ -50,6 +50,8 @@ world {
   if Face == 0 { Face = font("/usr/share/fonts/noto/NotoSans-Regular.ttf", 24) }
   if Face == 0 { Face = font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24) }
   if Face == 0 { Face = font("/System/Library/Fonts/Supplemental/Arial.ttf", 24) }
+  // (On a web page: the font `ent build --web` put in it.)
+  if Face == 0 { Face = font("/ent/plain.ttf", 24) }
   Image = picture_load(portrait)
 
   // OuterContainer: as big as the window, a row with 16 around and

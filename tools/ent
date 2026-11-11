@@ -280,6 +280,28 @@ def raylib_web():
         ROOT, "build", "raylib", "src")
 
 
+def web_font():
+    """The font a window's `label` and `paragraph` draw with on a web page,
+    where there are no fonts of the machine's: the one the window would
+    find here (ENT_WINDOW_FONT, else the first of those most machines
+    have), put in the page as /ent/plain.ttf. None where there is none
+    (or ENT_WINDOW_FONT=none): the window library's own letters."""
+    asked = os.environ.get("ENT_WINDOW_FONT")
+    if asked:
+        return asked if asked != "none" and os.path.isfile(asked) else None
+    known = ["/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+             "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+             "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
+             "/usr/share/fonts/TTF/DejaVuSans.ttf",
+             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+             "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+             "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+             "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+             "/System/Library/Fonts/Supplemental/Arial.ttf",
+             "/Library/Fonts/Arial.ttf"]
+    return next((path for path in known if os.path.isfile(path)), None)
+
+
 def c_compilers(arguments):
     """The C and C++ compilers for the program's own C: the machine's
     (host_compiler), or with --windows MinGW's clang (llvm-mingw's
@@ -1720,6 +1742,16 @@ def build(arguments, output, directory):
                 said = os.path.expandvars(said.replace(
                     "$ENT_RAYLIB_WEB", raylib_web()))
             link = shlex.split(said, comments=True) + link
+    # (A page with a window has a font in it: there are none of the
+    # machine's on the web.)
+    if arguments.web and any(
+            os.path.splitext(os.path.basename(path))[0] == "window"
+            and os.path.dirname(os.path.abspath(path)) ==
+            os.path.join(ROOT, "devices") for path in files):
+        font = web_font()
+        if font:
+            link += ["--preload-file",
+                     f"{os.path.realpath(font)}@/ent/plain.ttf"]
     # (And what writes the IR of a module in another language, Mojo's.)
     emits = [os.path.splitext(path)[0] + ".emit" for path in given
              if path.endswith(".build") and os.path.isfile(
