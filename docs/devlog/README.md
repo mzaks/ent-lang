@@ -20,4 +20,5 @@ and openly so.
 | 10 | [Pixalorien: a hackathon game](10-pixalorien.md) | 27 Oct – 4 Nov |
 | 11 | [Other languages behind devices, and v0.1](11-other-languages-and-v0-1.md) | 31 Oct – 4 Nov |
 | 12 | [A device in Goose, and which language a device function wants](12-goose-and-device-languages.md) | 4 – 6 Nov |
+| 13 | [A crawler on a pipeline of requests](13-a-crawler.md) | 6 – 11 Nov |
 
