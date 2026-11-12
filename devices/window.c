@@ -74,6 +74,91 @@ void ent_window_shift(float dx, float dy) {
 // QT_SCALE_FACTOR, which such desktops set for programs like this one.
 static float ent_window_more = 1;
 
+// How many of the picture's pixels a point is across, as the screen says
+// (where the window is told of small pixels). On a web page they are in
+// ent_window_more, with how big the page has the window (ent_window_fit).
+static float ent_window_dpi(void) {
+#ifdef __EMSCRIPTEN__
+  return 1;
+#else
+  return GetWindowScaleDPI().x;
+#endif
+}
+
+#ifdef __EMSCRIPTEN__
+// On a web page the window is as big as the browser's tab, and sharp on
+// a screen of small pixels (the picture has devicePixelRatio of them to a
+// pixel of the page). A window the program lets be made another size has
+// the whole tab, in as many points as the tab is pixels across; where the
+// tab is smaller than the window's least (`min_width` by `min_height`, at
+// least half the size the program asked for: a phone's), a point is less
+// than a pixel, so that the window still has its least, smaller. A
+// window of one size keeps its points and is made as big as fits in the
+// tab. Looked at after every frame: the tab may be made another size, a
+// phone turned.
+#include <emscripten.h>
+
+// (What raylib says of a picture read before the window opens, too: only
+// its errors, as in open_window.)
+__attribute__((constructor)) static void ent_window_quiet(void) {
+  SetTraceLogLevel(LOG_ERROR);
+}
+
+static int32_t ent_window_asked_width, ent_window_asked_height;
+static int32_t ent_window_least_width, ent_window_least_height;
+static bool ent_window_any_size;
+static double ent_window_page_was[3];
+
+EM_JS(double, ent_window_page_width, (void), { return window.innerWidth; });
+EM_JS(double, ent_window_page_height, (void), { return window.innerHeight; });
+EM_JS(double, ent_window_page_pixels, (void), {
+  return window.devicePixelRatio || 1;
+});
+EM_JS(void, ent_window_page_canvas, (double width, double height), {
+  Module.canvas.style.width = width + "px";
+  Module.canvas.style.height = height + "px";
+});
+// (A window made for a screen that is wider than high, on a phone held
+// upright: the page says it has more room turned (devices/web.html).)
+EM_JS(void, ent_window_page_turn, (bool turn), {
+  const hint = document.getElementById("turn");
+  if (hint)
+    hint.hidden = !turn;
+});
+
+static void ent_window_fit(void) {
+  double wide = ent_window_page_width(), high = ent_window_page_height(),
+         pixels = ent_window_page_pixels();
+  if (wide < 1 || high < 1 || pixels <= 0)
+    return;
+  if (wide == ent_window_page_was[0] && high == ent_window_page_was[1] &&
+      pixels == ent_window_page_was[2])
+    return;
+  ent_window_page_was[0] = wide;
+  ent_window_page_was[1] = high;
+  ent_window_page_was[2] = pixels;
+  double points_wide, points_high, part;
+  if (ent_window_any_size) {
+    double least_wide = fmax(ent_window_least_width, ent_window_asked_width / 2.0);
+    double least_high = fmax(ent_window_least_height, ent_window_asked_height / 2.0);
+    part = fmin(1, fmin(wide / fmax(least_wide, 1), high / fmax(least_high, 1)));
+    points_wide = wide / part;
+    points_high = high / part;
+  } else {
+    points_wide = ent_window_asked_width;
+    points_high = ent_window_asked_height;
+    part = fmin(wide / points_wide, high / points_high);
+  }
+  ent_window_page_turn(ent_window_asked_width > ent_window_asked_height * 1.15 &&
+                       wide < high && wide < 600);
+  ent_window_more = (float)(part * pixels);
+  int across = (int)(points_wide * part * pixels + 0.5);
+  int down = (int)(points_high * part * pixels + 0.5);
+  SetWindowSize(across, down);
+  ent_window_page_canvas(across / pixels, down / pixels);
+}
+#endif
+
 static float ent_window_asked_scale(void) {
   const char *names[] = {"ENT_WINDOW_SCALE", "GDK_SCALE", "QT_SCALE_FACTOR"};
   for (int i = 0; i < 3; ++i) {
@@ -97,53 +182,100 @@ void ent_window_open_window(int32_t width, int32_t height,
 #endif
   // (In points: on a screen with small pixels the picture has more of
   // them, and everything is as big as on any other.)
+#ifdef __EMSCRIPTEN__
+  // (Its size the page's, ent_window_fit: raylib is told of none.)
+  ent_window_asked_width = width > 0 ? width : 800;
+  ent_window_asked_height = height > 0 ? height : 450;
+  ent_window_any_size = resizable;
+  InitWindow(width, height, name);
+#else
   SetConfigFlags(FLAG_WINDOW_HIGHDPI | (resizable ? FLAG_WINDOW_RESIZABLE : 0));
   InitWindow(width, height, name);
+#endif
   // (No screen to open it on, one that is off, say: nothing can be drawn.)
   if (!IsWindowReady()) {
     fprintf(stderr, "%s: the window could not be opened: is a display on?\n",
             name);
     exit(1);
   }
+#ifdef __EMSCRIPTEN__
+  ent_window_fit();
+#else
   // (Only where the window is told nothing of small pixels itself.)
   float asked = ent_window_asked_scale();
   if (GetWindowScaleDPI().x <= 1.01f && asked > 1.01f) {
     ent_window_more = asked;
     SetWindowSize((int)(width * asked + 0.5f), (int)(height * asked + 0.5f));
   }
+#endif
 }
 
 void ent_window_window_limits(int32_t min_width, int32_t min_height) {
+#ifdef __EMSCRIPTEN__
+  ent_window_least_width = min_width;
+  ent_window_least_height = min_height;
+  ent_window_page_was[0] = 0;
+  ent_window_fit();
+#else
   SetWindowMinSize((int)(min_width * ent_window_more + 0.5f),
                    (int)(min_height * ent_window_more + 0.5f));
+#endif
 }
 
 float ent_window_window_scale(void) {
-  return GetWindowScaleDPI().x * ent_window_more;
+  return ent_window_dpi() * ent_window_more;
 }
 
 void ent_window_resize_window(int32_t width, int32_t height) {
+#ifdef __EMSCRIPTEN__
+  // (The page has it as big as the tab; the size asked for is the one
+  // made to fit in it.)
+  ent_window_asked_width = width;
+  ent_window_asked_height = height;
+  ent_window_page_was[0] = 0;
+  ent_window_fit();
+#else
   SetWindowSize((int)(width * ent_window_more + 0.5f),
                 (int)(height * ent_window_more + 0.5f));
+#endif
 }
 
 // How big the window is, in points: by the picture that is drawn into,
 // which is as big as the window really is (one that the program asked
 // another size for may not have got it).
 int32_t ent_window_window_width(void) {
-  float scale = GetWindowScaleDPI().x * ent_window_more;
+  float scale = ent_window_dpi() * ent_window_more;
   return (int32_t)((float)GetRenderWidth() / (scale > 0 ? scale : 1) + 0.5f);
 }
 int32_t ent_window_window_height(void) {
-  float scale = GetWindowScaleDPI().y * ent_window_more;
+  float scale = ent_window_dpi() * ent_window_more;
   return (int32_t)((float)GetRenderHeight() / (scale > 0 ? scale : 1) + 0.5f);
 }
+
+#ifdef __EMSCRIPTEN__
+// (On a web page: the browser's full screen, which a page may ask for
+// only just after a key or a touch, as the program's asking is.)
+EM_JS(void, ent_window_page_full, (bool on), {
+  const now = !!document.fullscreenElement;
+  if (on && !now && document.documentElement.requestFullscreen)
+    document.documentElement.requestFullscreen().catch(() => {});
+  else if (!on && now && document.exitFullscreen)
+    document.exitFullscreen().catch(() => {});
+});
+#endif
 
 // Without a border, as big as the screen it is on: no other video mode,
 // and it is as it was when it is no longer asked for.
 void ent_window_fill_screen(bool on) {
+#ifdef __EMSCRIPTEN__
+  static bool held = false;
+  if (on != held)
+    ent_window_page_full(on);
+  held = on;
+#else
   if (IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE) != on)
     ToggleBorderlessWindowed();
+#endif
 }
 
 // The key that closes the window: Escape, or none where the program
@@ -158,7 +290,6 @@ void ent_window_own_escape(bool own) { SetExitKey(own ? KEY_NULL : KEY_ESCAPE); 
 // It gives the browser its turn so (Asyncify), where raylib would wait
 // in EndDrawing without (busy) and then 12 ms more in WindowShouldClose.
 // The page is never closed by the program's window.
-#include <emscripten.h>
 
 EM_ASYNC_JS(void, ent_window_next_frame, (double seconds), {
   if (!Module.entFrameAt)
@@ -214,6 +345,7 @@ void ent_window_end_frame(void) {
   EndDrawing();
 #ifdef __EMSCRIPTEN__
   ent_window_next_frame(ent_window_fps > 0 ? 1.0 / ent_window_fps : 0);
+  ent_window_fit();
   double now = GetTime();
   if (ent_window_frame_end > 0)
     ent_window_frame_was = now - ent_window_frame_end;
@@ -238,12 +370,22 @@ void ent_window_again(void) {
 }
 // How many of the picture's pixels a point is across (with the zoom).
 float ent_window_pixels(void) {
-  return GetWindowScaleDPI().x * ent_window_zoom;
+  return ent_window_dpi() * ent_window_zoom;
 }
 
 float ent_window_mouse_x(void) { return (float)GetMouseX() / ent_window_more; }
 float ent_window_mouse_y(void) { return (float)GetMouseY() / ent_window_more; }
-bool ent_window_mouse_down(int32_t button) { return IsMouseButtonDown(button); }
+bool ent_window_mouse_down(int32_t button) {
+#ifdef __EMSCRIPTEN__
+  // (A touch is the left button. It puts the pointer where it is in the
+  // frame it starts: down from the frame after, as a mouse that was
+  // moved there first, so that what is under the pointer (a layout's
+  // box that is pressed) is known before.)
+  return IsMouseButtonDown(button) && !IsMouseButtonPressed(button);
+#else
+  return IsMouseButtonDown(button);
+#endif
+}
 bool ent_window_key_down(int32_t key) { return IsKeyDown(key); }
 
 void ent_window_rect(float x, float y, float width, float height,
@@ -505,7 +647,7 @@ static Font ent_window_plain(float size) {
   const char *file = ent_window_plain_file();
   if (!file || !IsWindowReady())
     return GetFontDefault();
-  int pixels = (int)(size * ent_window_zoom_now() * GetWindowScaleDPI().y + 0.5f);
+  int pixels = (int)(size * ent_window_zoom_now() * ent_window_dpi() + 0.5f);
   if (pixels < 8)
     pixels = 8;
   for (int i = 0; i < ENT_WINDOW_PLAIN_SIZES; ++i)
@@ -528,8 +670,12 @@ static Font ent_window_plain(float size) {
   SetTextureFilter(made.texture, TEXTURE_FILTER_BILINEAR);
   int slot = ent_window_plain_face.next;
   ent_window_plain_face.next = (slot + 1) % ENT_WINDOW_PLAIN_SIZES;
-  if (ent_window_plain_face.pixels[slot])
+  if (ent_window_plain_face.pixels[slot]) {
+    // (What was written with the letters given up may not be on the
+    // screen yet: it is put there first.)
+    rlDrawRenderBatchActive();
     UnloadFont(ent_window_plain_face.at[slot]);
+  }
   ent_window_plain_face.at[slot] = made;
   ent_window_plain_face.pixels[slot] = pixels;
   return made;
@@ -687,10 +833,17 @@ static int ent_window_font_known(int32_t font) {
   return ent_window_faces[font].read && !ent_window_faces[font].broken;
 }
 
+// Font 0, the window's own (and one that cannot be read): that of
+// `label` and `paragraph`, where there is one; else the window library's
+// own letters of a few pixels.
+static int ent_window_plain_there(void) {
+  return ent_window_plain_file() && IsWindowReady();
+}
+
 static Font ent_window_font_shown(int32_t font, float size) {
   if (!ent_window_font_known(font))
-    return GetFontDefault();
-  int pixels = (int)(size * ent_window_zoom * GetWindowScaleDPI().y + 0.5f);
+    return ent_window_plain_there() ? ent_window_plain(size) : GetFontDefault();
+  int pixels = (int)(size * ent_window_zoom * ent_window_dpi() + 0.5f);
   if (pixels <= ent_window_fonts[font].baseSize)
     return ent_window_fonts[font];
   pixels = (pixels + 3) / 4 * 4;
@@ -719,9 +872,9 @@ static Font ent_window_font_shown(int32_t font, float size) {
   return made;
 }
 
-static Font ent_window_font_of(int32_t font) {
+static Font ent_window_font_of(int32_t font, float size) {
   if (!ent_window_font_known(font))
-    return GetFontDefault();
+    return ent_window_plain_there() ? ent_window_plain(size) : GetFontDefault();
   return ent_window_fonts[font];
 }
 
@@ -854,7 +1007,7 @@ void ent_window_plain_font(const ent_text126 *file) {
 
 // (raylib draws its own font with a tenth of the size between letters.)
 static float ent_window_spacing(int32_t font, float size, float spacing) {
-  if (!ent_window_font_known(font))
+  if (!ent_window_font_known(font) && !ent_window_plain_there())
     spacing += size < 10 ? 1 : size / 10;
   return spacing;
 }
@@ -863,7 +1016,7 @@ static float ent_window_measure(const char *text, int32_t font, float size,
                                 float spacing) {
   if (!*text)
     return 0;
-  return MeasureTextEx(ent_window_font_of(font), text, size,
+  return MeasureTextEx(ent_window_font_of(font, size), text, size,
                        ent_window_spacing(font, size, spacing))
       .x;
 }
@@ -1310,11 +1463,16 @@ void ent_window_clip(float x, float y, float width, float height) {
     ent_window_unclip();
     return;
   }
-  int at[4] = {(int)x, (int)y, (int)(width + 0.5f), (int)(height + 0.5f)};
-  if (at[2] < 0)
-    at[2] = 0;
-  if (at[3] < 0)
-    at[3] = 0;
+  // (Cut to the window before it is made whole pixels: a clip that does
+  // not limit one way (a layout's box that clips only up and down) comes
+  // as one of thousands of millions of points across, more pixels than
+  // an int holds where a point is three of them.)
+  float right = fminf(x + width, (float)GetScreenWidth());
+  float bottom = fminf(y + height, (float)GetScreenHeight());
+  x = fmaxf(x, 0);
+  y = fmaxf(y, 0);
+  int at[4] = {(int)x, (int)y, (int)(fmaxf(right - x, 0) + 0.5f),
+               (int)(fmaxf(bottom - y, 0) + 0.5f)};
   if (ent_window_clipped && !memcmp(at, ent_window_clip_at, sizeof at))
     return;
   if (ent_window_clipped)
