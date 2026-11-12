@@ -16,7 +16,10 @@ llvm_config.with_environment("PATH", config.llvm_tools_dir, append_path=True)
 # (ENT_WORLD_DIR passed on: the tests run with every world, and the texts
 # fields hold, in files in that directory, as devices/memory.c and
 # devices/text.c put them there, where it is set.)
-llvm_config.with_system_environment(["ENT_WORLD_DIR"])
+# (CUDA_PATH too: the tests marked `gpu` are run where it says CUDA is
+# (see below), and their builds must find cuda.h there, not in /opt/cuda;
+# on a machine with CUDA in /usr/local/cuda gpu.test failed.)
+llvm_config.with_system_environment(["ENT_WORLD_DIR", "CUDA_PATH"])
 llvm_config.add_tool_substitutions(
     ["ent-opt", "ent-translate", "ent-lsp"], [config.ent_tools_dir]
 )
