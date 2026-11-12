@@ -9,8 +9,11 @@
 // it points. What falls leaves a gem; gems make the hero stronger (more
 // shots at once, sooner). Enter starts, and starts again after a fall.
 // F fills the screen, M turns the sound off, and B is the stress: the
-// field filled to what it holds and the hero shooting rings, to see what
-// the machine makes of it (the numbers are at the top left).
+// hero shooting rings and the field filled with ever more foes, until
+// the frames come slower than the window's pace; then the number is
+// narrowed down to the most this machine moves at that pace, and a
+// chart shows the foes and the frames on the way (the numbers are at
+// the top left).
 //
 // What it is made of, and what it asks of the language:
 //
@@ -118,9 +121,31 @@ unique Pace: f32
 // are too many: those out of sight, and where they are not enough (a
 // crowd round the hero), some of those in it too; at that pace with
 // the room nearly full, it is made a quarter more. On one thread (a web
-// page) that is a few thousand, on many cores far more; the stress is
-// not held to it.
+// page) that is a few thousand, on many cores far more. (The stress
+// sets the room itself, see `Probe`.)
 unique Room { foes: i32, time: f32, frames: i32, cut: f32, cut_seen: f32 }
+// The stress looks for the most foes the machine moves at the window's
+// pace: it gives the field room for half as many again every time the
+// frames keep the pace (climbing), and once they do not, it tries the
+// middle between the most that kept it and the least that did not
+// (narrowing), until the two are a twentieth apart (found). Each number
+// is judged by half a second of frames once the field holds it, after
+// half a second to settle. `time` and `frames` are the half second's.
+// The field does not stay as it was when judged (the foes close in on
+// the hero, and more of them are held against the shots), so a number
+// found is watched: two half seconds in a row slower than the pace, and
+// it is narrowed again, from a quarter less (`slow` counts them). Where
+// nothing has kept the pace yet, a quarter less is tried, not the
+// middle.
+enum Search { Climbing, Narrowing, Found }
+unique Probe {
+  search: Search, lo: i32, hi: i32, time: f32, frames: i32, settled: bool,
+  since: f32, slow: i32
+}
+// What the stress saw every half second: since when, how many foes, how
+// long a frame took, and what the half second was (0 settling, 1 kept
+// the pace, 2 did not, 3 after the number was found).
+buffer Samples { at: f32, foes: i32, ms: f32, judged: i32 } capacity 600
 unique Seed: i64
 unique Was { stress: bool, full: bool, go: bool, mute: bool }
 default_capacity 256
@@ -199,6 +224,18 @@ system control() {
   let stress = key_down('B' as i32)
   if stress && !Was.stress && Game.state == State.Playing {
     Game.stress = !Game.stress
+    if Game.stress {
+      Probe.search = Search.Climbing
+      Probe.lo = 0
+      Probe.hi = 0
+      Probe.time = 0.0
+      Probe.frames = 0
+      Probe.settled = false
+      Probe.since = 0.0
+      Probe.slow = 0
+      Room.foes = max(2000, Count.foes)
+      Samples = []
+    }
   }
   Was.stress = stress
 
@@ -288,12 +325,12 @@ system count() {
 }
 
 // Foes come: round the hero, out of sight; more the longer a game goes.
-// In the stress, all over the field, until it holds no more.
+// In the stress, all over the field, as many as it has room for.
 system arrive() {
   let dt = min(Window.dt, 0.05)
   var come = 0
   if Game.stress {
-    come = min(6000, most_foes() - Count.foes)
+    come = min(6000, min(most_foes(), Room.foes) - Count.foes)
   } else {
     Game.owed += crowd(Game.time) * dt
     come = min(Game.owed as i32, min(most_foes(), Room.foes) - Count.foes)
@@ -345,6 +382,68 @@ system room() {
     Room.time = 0.0
     Room.frames = 0
   }
+}
+
+// The stress's search (see `Probe`): every half second, once the field
+// holds the number tried and has settled, whether the frames kept the
+// pace, and the next number to try.
+system probe() {
+  if Window.dt < 0.25 {
+    Probe.time += Window.dt
+    Probe.frames += 1
+  }
+  Probe.since += Window.dt
+  if Probe.time >= 0.5 && Probe.frames > 0 {
+    let frame = Probe.time / Probe.frames as f32
+    Probe.time = 0.0
+    Probe.frames = 0
+    let aim = 1.0 / max(1, Window.fps) as f32
+    var judged = 0
+    if Probe.search == Search.Found {
+      judged = 3
+      Probe.slow = if frame > aim * 1.1 { Probe.slow + 1 } else { 0 }
+      if Probe.slow >= 2 {
+        judged = 2
+        Probe.slow = 0
+        Probe.search = Search.Narrowing
+        Probe.hi = Room.foes
+        Probe.lo = 0
+        Room.foes = max(100, Room.foes * 3 / 4)
+      }
+    } else if Count.foes as f32 < Room.foes as f32 * 0.97 {
+      Probe.settled = false
+    } else if !Probe.settled {
+      Probe.settled = true
+    } else {
+      let kept = frame <= aim * 1.1
+      judged = if kept { 1 } else { 2 }
+      if kept { Probe.lo = Room.foes } else { Probe.hi = Room.foes }
+      if Probe.hi == 0 {
+        if Room.foes >= most_foes() {
+          Probe.search = Search.Found
+        } else {
+          Room.foes = min(most_foes(), Room.foes * 3 / 2)
+        }
+      } else if Probe.hi - Probe.lo <= Probe.hi / 20 || Probe.hi <= 100 {
+        Probe.search = Search.Found
+        Room.foes = max(100, Probe.lo)
+      } else {
+        Probe.search = Search.Narrowing
+        Room.foes = if Probe.lo == 0 { max(100, Probe.hi * 3 / 4) }
+                    else { (Probe.lo + Probe.hi) / 2 }
+      }
+      Probe.settled = false
+    }
+    if len(Samples) < 600 {
+      Samples += { at: Probe.since, foes: Count.foes, ms: frame * 1000.0,
+                   judged: judged }
+    }
+  }
+}
+
+// Of the foes, the part out of sight and the part in it that go where
+// there are more than there is room for.
+system cut() {
   Room.cut = 0.0
   Room.cut_seen = 0.0
   let many = Count.foes - Room.foes
@@ -458,9 +557,11 @@ system spend() {
   }
 }
 
-// A foe with nothing left falls: a gem where it was, sparks off it.
+// A foe with nothing left falls: a gem where it was, sparks off it. (In
+// the stress no gem: no one gathers them, and the field would hold more
+// and more of them while the foes are judged.)
 system reap() {
-  let gems = Count.gems < most_gems()
+  let gems = Count.gems < most_gems() && !Game.stress
   let sparks = Count.sparks < most_sparks()
   for e, f: Foe, a: At, h: Health where h.hp <= 0.0 {
     Fell += 1
@@ -666,6 +767,68 @@ system front() {
   circle(hx, hy, 6.0, 0x3b82f6)
 }
 
+// The stress's chart, at the bottom right: the foes (orange) and how
+// long a frame took (blue, the window's pace the line across), every
+// half second, a dot where a number was judged (green kept the pace, red
+// did not), and what the search knows so far.
+system chart() {
+  let wide = Window.width as f32
+  let high = Window.height as f32
+  let w = min(460.0, wide - 40.0)
+  let h = 190.0
+  let x = wide - w - 14.0
+  let y = high - h - 60.0
+  rounded(x - 10.0, y - 58.0, w + 20.0, h + 78.0, 6.0, 6.0, 6.0, 6.0,
+          0xf00d1117)
+  let fps = max(1, Window.fps)
+  var say: text[100] = "climbing: room for {Room.foes} foes"
+  if Probe.search == Search.Narrowing {
+    say = "narrowing: between {Probe.lo} and {Probe.hi} foes"
+    if Probe.lo == 0 { say = "narrowing: fewer than {Probe.hi} foes" }
+  }
+  if Probe.search == Search.Found {
+    say = "this machine moves {Probe.lo} foes at {fps} fps"
+    if Probe.hi == 0 { say = "all {Probe.lo} foes at {fps} fps: the most there is" }
+  }
+  label(say, x, y - 50.0, 20.0,
+        if Probe.search == Search.Found { 0x7ee787 } else { 0xffb454 })
+  let n = len(Samples)
+  var top = max(Room.foes, max(Probe.lo, Probe.hi))
+  var slowest = 1000.0 / fps as f32 * 3.0
+  for i in 0..n {
+    top = max(top, Samples[i].foes)
+    slowest = max(slowest, Samples[i].ms)
+  }
+  let aim_y = y + h - h * (1000.0 / fps as f32) / slowest
+  line(x, aim_y, x + w, aim_y, 0x4a5a70)
+  let tenths = (10000.0 / fps as f32) as i32
+  label("{tenths / 10}.{tenths % 10} ms", x + w - 60.0, aim_y - 18.0, 14.0,
+        0x7fb6ff)
+  label("{top} foes", x, y - 22.0, 14.0, 0xf08a5d)
+  label("{(slowest * 10.0) as i32 / 10} ms", x + w - 60.0, y - 22.0, 14.0,
+        0x7fb6ff)
+  line(x, y + h, x + w, y + h, 0x4a5a70)
+  let step = w / max(1, n - 1) as f32
+  for i in 1..n {
+    let x0 = x + (i - 1) as f32 * step
+    let x1 = x + i as f32 * step
+    line(x0, y + h - h * Samples[i - 1].foes as f32 / top as f32, x1,
+         y + h - h * Samples[i].foes as f32 / top as f32, 0xf08a5d)
+    line(x0, y + h - h * Samples[i - 1].ms / slowest, x1,
+         y + h - h * Samples[i].ms / slowest, 0x7fb6ff)
+  }
+  for i in 0..n {
+    if Samples[i].judged == 1 || Samples[i].judged == 2 {
+      circle(x + i as f32 * step, y + h - h * Samples[i].foes as f32 / top as f32,
+             4.0, if Samples[i].judged == 1 { 0x7ee787 } else { 0xf85149 })
+    }
+  }
+  if n > 0 {
+    label("{(Samples[n - 1].at) as i32} s", x + w - 40.0, y + h + 4.0, 14.0,
+          0x9fb0c3)
+  }
+}
+
 // What is written over the field: the hero's state, the numbers, the
 // whole field small, and what to do.
 system hud() {
@@ -739,7 +902,9 @@ schedule frame() {
   control()
   count()
   room() run_if Game.state == State.Playing && !Game.stress
-  thin() run_if Game.state == State.Playing && !Game.stress
+  probe() run_if Game.state == State.Playing && Game.stress
+  cut() run_if Game.state == State.Playing
+  thin() run_if Game.state == State.Playing
   arrive() run_if Game.state == State.Playing
   steer() run_if Game.state == State.Playing
   gather() run_if Game.state == State.Playing
@@ -759,6 +924,7 @@ schedule frame() {
   shapes()
   front()
   hud()
+  chart() run_if Game.state == State.Playing && Game.stress
   present()
 }
 
