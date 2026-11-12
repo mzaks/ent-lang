@@ -1,0 +1,26 @@
+// Subnormal numbers on the GPU (gpu_subnormal.test): f32 and f64 below the
+// least normal one, halved, divided, added, multiplied and given to sqrt,
+// keep their bits as on the CPU; nothing flushes them to nought.
+import console
+component V { a: f32, b: f32, c: f64, d: f64, s: f32, t: f64 } capacity 64
+gpu system shrink() {
+  for v: mut V {
+    v.a = v.a * 0.5
+    v.b = v.b / 3.0
+    v.c = v.c * 0.5
+    v.d = v.d / 3.0
+    v.s = sqrt(v.a) + v.a * v.b + v.a
+    v.t = sqrt(v.c) + v.c * v.d + v.c
+  }
+}
+system show() {
+  for v: V { put("{bits_of(v.a)} {bits_of(v.b)} {bits_of(v.c)} {bits_of(v.d)} {bits_of(v.s)} {bits_of(v.t)}") }
+}
+world {
+  for i in 0..40 {
+    let k = i as f64
+    spawn { V { a: 2.0e-38 * (k + 1.0) as f32, b: 3.0e-39 as f32, c: 4.0e-308 * (k + 1.0), d: 3.0e-308, s: 0.0, t: 0.0 } }
+  }
+}
+schedule go() { shrink() shrink() show() }
+main { go() }

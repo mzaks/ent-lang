@@ -452,3 +452,10 @@
 // RUN: %ent run %S/Inputs/partition.ent > %t.part.cpu
 // RUN: %ent run %t.part.ent --gpu > %t.part.gpu
 // RUN: diff %t.part.cpu %t.part.gpu
+// Subnormal numbers, f32 and f64, are kept on the GPU as on the CPU: the
+// bits of every field after two steps (Inputs/gpu_subnormal.ent).
+// RUN: %ent run %S/Inputs/gpu_subnormal.ent > %t.subcpu
+// RUN: %ent run %S/Inputs/gpu_subnormal.ent --gpu > %t.subgpu
+// RUN: diff %t.subcpu %t.subgpu
+// RUN: FileCheck %s --check-prefix=SUB --input-file=%t.subgpu
+// SUB: 3568119 237875 2024022533073106 674674177691035 531035643 2302874149838667426
