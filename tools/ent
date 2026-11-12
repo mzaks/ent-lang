@@ -302,6 +302,26 @@ def web_font():
     return next((path for path in known if os.path.isfile(path)), None)
 
 
+def touch_keys(said):
+    """The keys of --touch-keys, as the page (devices/web.html) names
+    them: `arrows`, `wasd`, Enter, Space, Escape, Tab, Shift, Backspace, a
+    letter (upper case) or a digit."""
+    if not said:
+        return []
+    named = {"arrows", "wasd", "Enter", "Space", "Escape", "Tab", "Shift",
+             "Backspace"}
+    keys = []
+    for key in re.split(r"[,\s]+", said.strip()):
+        if len(key) == 1 and key.isascii() and key.isalnum():
+            key = key.upper()
+        elif key not in named:
+            sys.exit(f"ent: --touch-keys: '{key}' is no key a page has "
+                     "(arrows, wasd, Enter, Space, Escape, Tab, Shift, "
+                     "Backspace, A to Z, 0 to 9)")
+        keys.append(key)
+    return keys
+
+
 def c_compilers(arguments):
     """The C and C++ compilers for the program's own C: the machine's
     (host_compiler), or with --windows MinGW's clang (llvm-mingw's
@@ -2179,6 +2199,17 @@ def build(arguments, output, directory):
         for name, where in assets.items():
             maths += ["--preload-file", f"{os.path.abspath(where)}@/{name}"]
         shell = os.path.join(ROOT, "devices", "web.html")
+        # (With the keys a touch screen is given, where there are: the
+        # page with them written in.)
+        if arguments.touch_keys:
+            with open(shell) as source:
+                page = source.read()
+            page = page.replace("var entTouchKeys = [];",
+                                "var entTouchKeys = "
+                                f"{json.dumps(arguments.touch_keys)};")
+            shell = os.path.join(directory, "web.html")
+            with open(shell, "w") as written_page:
+                written_page.write(page)
         if output.endswith(".html"):
             maths += ["--shell-file", shell]
     run([cxx if uses_cxx else cc] + objects + link + maths + ["-o", output],
@@ -2262,6 +2293,12 @@ def main():
                         help="give a component, buffer, relation or "
                         "archetype another capacity, as `capacity Name N` "
                         "after the program would (again for each)")
+    parser.add_argument("--touch-keys", metavar="keys",
+                        help="with --web: keys drawn on the page where it is "
+                        "shown on a touch screen (a phone), which press the "
+                        "program's keys: `arrows` or `wasd` (a pad of four), "
+                        "Enter, Space, Escape, Tab, Shift, Backspace, A to Z, "
+                        "0 to 9; apart by commas or spaces")
     parser.add_argument("--check-externs", action="store_true",
                         help="check as the program runs that each extern fn "
                         "gives the same result for the same arguments, and "
@@ -2278,6 +2315,8 @@ def main():
     arguments = parser.parse_args(own)
     if arguments.instrument and arguments.profile:
         parser.error("--instrument and --profile are for two builds")
+    if arguments.touch_keys and not arguments.web:
+        sys.exit("ent: --touch-keys: for a web page (--web)")
 
     stem = os.path.splitext(os.path.basename(arguments.program))[0]
     if arguments.web:
@@ -2289,6 +2328,7 @@ def main():
         if arguments.command == "run":
             sys.exit("ent run --web: build it (ent build --web) and open "
                      "the .html through a web server")
+        arguments.touch_keys = touch_keys(arguments.touch_keys)
         # (A page is three files: not kept as one in the cache.)
         arguments.no_cache = True
         # (A name.js alone, without the page, runs under Node.js too.)

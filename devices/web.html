@@ -2,6 +2,9 @@
 <!-- The page of a program built with `ent build --web`: its window is the
      canvas, as big as the browser's tab (the window device makes it so,
      devices/window.c), and what it writes out is shown over its foot.
+     On a touch screen, keys the program was built with (`ent build --web
+     --touch-keys`) are drawn under it, or over its sides where the screen
+     is wider than high; they press the program's keys.
      Emscripten puts the program's script where SCRIPT is. -->
 <html lang="en">
 <head>
@@ -31,6 +34,40 @@
           background: rgba(22, 24, 29, 0.85); white-space: nowrap;
           font: 14px/1.4 system-ui, sans-serif; animation: fade 1s 5s forwards; }
   @keyframes fade { to { opacity: 0; } }
+  body.keys #turn { bottom: calc(var(--pad) + 16px); }
+
+  /* The keys of a touch screen: under the window (which the window device
+     makes smaller by as much, devices/window.c), or over its sides. */
+  #pad { position: fixed; left: 0; right: 0; bottom: 0; height: var(--pad);
+         display: flex; align-items: center; justify-content: space-between;
+         gap: 16px; box-sizing: border-box;
+         padding: 8px max(16px, env(safe-area-inset-right))
+                  max(8px, env(safe-area-inset-bottom))
+                  max(16px, env(safe-area-inset-left));
+         background: #101216; touch-action: none; user-select: none;
+         -webkit-user-select: none; -webkit-touch-callout: none;
+         font: 600 15px/1 system-ui, sans-serif; color: #d8dde6; }
+  body.keys main { bottom: var(--pad); }
+  @media (orientation: landscape) {
+    body.keys main { bottom: 0; }
+    #pad { background: none; pointer-events: none; }
+    #pad > * { pointer-events: auto; opacity: 0.55; }
+  }
+  .cross { position: relative; width: 150px; height: 150px; flex: none;
+           border-radius: 50%; background: #252a33; }
+  .cross span { position: absolute; width: 50px; height: 50px; display: grid;
+                place-items: center; border-radius: 12px; background: #333a46;
+                font-size: 22px; }
+  .cross span.on, .buttons span.on { background: #4b7bd8; color: #fff; }
+  .cross .up { left: 50px; top: 4px; }
+  .cross .down { left: 50px; bottom: 4px; }
+  .cross .left { left: 4px; top: 50px; }
+  .cross .right { right: 4px; top: 50px; }
+  .buttons { display: flex; flex-wrap: wrap-reverse; justify-content: flex-end;
+             gap: 12px; margin-left: auto; max-width: 60%; }
+  .buttons span { min-width: 64px; height: 64px; padding: 0 10px;
+                  box-sizing: border-box; display: grid; place-items: center;
+                  border-radius: 32px; background: #333a46; }
 </style>
 </head>
 <body>
@@ -54,6 +91,106 @@
   // (The keys go to the program wherever on the page one clicks.)
   document.addEventListener("click", function () { canvas.focus(); });
   window.onerror = function () { statusLine.textContent = "The program stopped: see below."; };
+
+  // The keys of a touch screen (`ent build --web --touch-keys`), shown
+  // where there is no mouse and a finger points: a phone or a tablet.
+  // Each presses a key as the keyboard would (keydown, keyup, with the
+  // keyCode the window library reads); a pad of four presses the one its
+  // finger is towards, and another when the finger slides round.
+  var entTouchKeys = [];
+  (function () {
+    if (!entTouchKeys.length ||
+        !matchMedia("(hover: none) and (pointer: coarse)").matches)
+      return;
+    function key(name) {
+      var named = {
+        Enter: [" Enter", "Enter", 13], Space: ["Space", " ", 32, "Space"],
+        Escape: ["Esc", "Escape", 27], Tab: ["Tab", "Tab", 9],
+        Shift: ["Shift", "Shift", 16, "ShiftLeft"],
+        Backspace: ["\u232b", "Backspace", 8],
+        ArrowUp: ["\u2191", "ArrowUp", 38], ArrowDown: ["\u2193", "ArrowDown", 40],
+        ArrowLeft: ["\u2190", "ArrowLeft", 37], ArrowRight: ["\u2192", "ArrowRight", 39],
+      }[name];
+      if (named)
+        return { label: named[0].trim(), key: named[1], keyCode: named[2],
+                 code: named[3] || name };
+      var digit = name >= "0" && name <= "9";
+      return { label: name, key: name.toLowerCase(), keyCode: name.charCodeAt(0),
+               code: (digit ? "Digit" : "Key") + name };
+    }
+    function send(k, down) {
+      var e = new KeyboardEvent(down ? "keydown" : "keyup",
+                                { key: k.key, code: k.code, bubbles: true, cancelable: true });
+      Object.defineProperty(e, "keyCode", { get: function () { return k.keyCode; } });
+      Object.defineProperty(e, "which", { get: function () { return k.keyCode; } });
+      window.dispatchEvent(e);
+    }
+    var pad = document.createElement("div");
+    pad.id = "pad";
+    var buttons = document.createElement("div");
+    buttons.className = "buttons";
+    var cross = false;
+    entTouchKeys.forEach(function (name) {
+      if (name == "arrows" || name == "wasd") {
+        if (cross) return;
+        cross = true;
+        var ways = name == "arrows"
+          ? { up: "ArrowUp", left: "ArrowLeft", down: "ArrowDown", right: "ArrowRight" }
+          : { up: "W", left: "A", down: "S", right: "D" };
+        var box = document.createElement("div"), shown = {}, held = null;
+        box.className = "cross";
+        Object.keys(ways).forEach(function (way) {
+          var span = document.createElement("span");
+          span.className = way;
+          ways[way] = key(ways[way]);
+          span.textContent = ways[way].label;
+          shown[way] = span;
+          box.appendChild(span);
+        });
+        // (Towards which of the four the finger is, from the middle.)
+        function hold(way) {
+          if (way == held) return;
+          if (held) { send(ways[held], false); shown[held].classList.remove("on"); }
+          held = way;
+          if (held) { send(ways[held], true); shown[held].classList.add("on"); }
+        }
+        function towards(e) {
+          e.preventDefault();
+          var touch = e.targetTouches[0];
+          if (!touch) return hold(null);
+          var r = box.getBoundingClientRect();
+          var dx = touch.clientX - (r.left + r.width / 2);
+          var dy = touch.clientY - (r.top + r.height / 2);
+          if (dx * dx + dy * dy < 144) return hold(null);
+          hold(Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? "left" : "right")
+                                           : (dy < 0 ? "up" : "down"));
+        }
+        ["touchstart", "touchmove", "touchend", "touchcancel"].forEach(function (n) {
+          box.addEventListener(n, towards, { passive: false });
+        });
+        pad.appendChild(box);
+        return;
+      }
+      var k = key(name), span = document.createElement("span");
+      span.textContent = k.label;
+      function press(down) {
+        return function (e) {
+          e.preventDefault();
+          if (down == span.classList.contains("on")) return;
+          span.classList.toggle("on", down);
+          send(k, down);
+        };
+      }
+      span.addEventListener("touchstart", press(true), { passive: false });
+      span.addEventListener("touchend", press(false), { passive: false });
+      span.addEventListener("touchcancel", press(false), { passive: false });
+      buttons.appendChild(span);
+    });
+    pad.appendChild(buttons);
+    document.body.appendChild(pad);
+    document.body.classList.add("keys");
+    document.documentElement.style.setProperty("--pad", cross ? "176px" : "96px");
+  })();
 </script>
 {{{ SCRIPT }}}
 </body>

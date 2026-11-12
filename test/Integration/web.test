@@ -41,6 +41,15 @@
 // RUN: not %ent build --capacity Grid=many %S/Inputs/web_large.ent -o %t/x 2>&1 | FileCheck %s --check-prefix=FORM
 // FORM: ent: --capacity: 'Grid=many' is not Name=N
 //
+// Keys for a touch screen are written into the page, and only known
+// keys, and only for a page.
+// RUN: %ent build --web --touch-keys "arrows, Enter,b" %S/Inputs/web_large.ent --capacity Grid=1000 -o %t/keys.html
+// RUN: grep -c 'entTouchKeys=\["arrows","Enter","B"\]' %t/keys.html
+// RUN: not %ent build --web --touch-keys arrows,Fn %S/Inputs/web_large.ent -o %t/x.html 2>&1 | FileCheck %s --check-prefix=KEY
+// KEY: ent: --touch-keys: 'Fn' is no key a page has
+// RUN: not %ent build --touch-keys arrows %S/Inputs/web_large.ent -o %t/x 2>&1 | FileCheck %s --check-prefix=PAGE
+// PAGE: ent: --touch-keys: for a web page (--web)
+//
 // Not on many threads, nor run here.
 // RUN: not %ent build --web --parallel %S/Inputs/web_large.ent -o %t/x.js 2>&1 | FileCheck %s --check-prefix=ONE
 // ONE: ent: --web: on one thread

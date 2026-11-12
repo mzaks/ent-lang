@@ -109,8 +109,16 @@ static int32_t ent_window_least_width, ent_window_least_height;
 static bool ent_window_any_size;
 static double ent_window_page_was[3];
 
-EM_JS(double, ent_window_page_width, (void), { return window.innerWidth; });
-EM_JS(double, ent_window_page_height, (void), { return window.innerHeight; });
+// (The page's room for the window: all of the tab but for the keys of a
+// touch screen, where they are under it (devices/web.html).)
+EM_JS(double, ent_window_page_width, (void), {
+  const room = document.querySelector("main");
+  return room ? room.clientWidth : window.innerWidth;
+});
+EM_JS(double, ent_window_page_height, (void), {
+  const room = document.querySelector("main");
+  return room ? room.clientHeight : window.innerHeight;
+});
 EM_JS(double, ent_window_page_pixels, (void), {
   return window.devicePixelRatio || 1;
 });

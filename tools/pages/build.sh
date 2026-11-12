@@ -16,12 +16,13 @@ out=${1:?"the folder to write the site to"}
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 
-# folder  source  build flags (the folders of its modules; capacities)
+# folder  source  build flags (the folders of its modules; capacities;
+# the keys a phone is given, for the games)
 demos=(
-  "pacman|examples/pacman.ent|"
-  "snake|examples/snake.ent|"
-  "towers|examples/towers.ent|-I examples"
-  "swarm|examples/swarm/swarm.ent|-I examples"
+  "pacman|examples/pacman.ent|--touch-keys arrows,Enter"
+  "snake|examples/snake.ent|--touch-keys arrows,Space"
+  "towers|examples/towers.ent|-I examples --touch-keys Space"
+  "swarm|examples/swarm/swarm.ent|-I examples --touch-keys wasd,Enter,B"
   # (Room for the grids and searches of 8 vehicles, where the program
   # has it for 96: a web page's memory is at most 4 GB.)
   "parking|examples/parking/show.ent|--capacity Cells=5120000 --capacity Field=5120000 --capacity Nodes=4800000 --capacity Heap=4800000 --capacity Best=23040000 --capacity Way=4096 --capacity Ahead=512"
