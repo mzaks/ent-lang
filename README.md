@@ -373,9 +373,10 @@ come with the compiler, in `devices/`, and two more that need
   `--capacity Name=N` gives a component or buffer another capacity
   without changing the program (as `capacity Name N` after it would),
   and a world over 3 GB is not built for the web. The window fills the
-  browser's tab; on a phone or a tablet `--touch-keys arrows,Enter`
-  (`arrows` or `wasd` for a pad of four, Enter, Space, Escape, Tab,
-  Shift, Backspace, A to Z, 0 to 9) draws keys under it that press the
+  browser's tab; on a phone or a tablet `--touch-keys arrows,Enter,A:park`
+  (`arrows` or `wasd` for a pad of four, Up, Down, Left, Right, Enter,
+  Space, Escape, Tab, Shift, Backspace, A to Z, 0 to 9; after a colon
+  what the key's button says) draws keys under it that press the
   program's own. A font file is checked before it is used (its
   tables are all there and add up to their sums): a damaged one is no
   font, and said so.

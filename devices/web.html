@@ -38,7 +38,7 @@
 
   /* The keys of a touch screen: under the window (which the window device
      makes smaller by as much, devices/window.c), or over its sides. */
-  #pad { position: fixed; left: 0; right: 0; bottom: 0; height: var(--pad);
+  #pad { position: fixed; left: 0; right: 0; bottom: 0; min-height: 96px;
          display: flex; align-items: center; justify-content: space-between;
          gap: 16px; box-sizing: border-box;
          padding: 8px max(16px, env(safe-area-inset-right))
@@ -63,11 +63,15 @@
   .cross .down { left: 50px; bottom: 4px; }
   .cross .left { left: 4px; top: 50px; }
   .cross .right { right: 4px; top: 50px; }
-  .buttons { display: flex; flex-wrap: wrap-reverse; justify-content: flex-end;
-             gap: 12px; margin-left: auto; max-width: 60%; }
+  .buttons { display: flex; flex-wrap: wrap; justify-content: flex-end;
+             align-content: flex-end; gap: 12px; margin-left: auto; max-width: 60%; }
   .buttons span { min-width: 64px; height: 64px; padding: 0 10px;
                   box-sizing: border-box; display: grid; place-items: center;
-                  border-radius: 32px; background: #333a46; }
+                  border-radius: 32px; background: #333a46; white-space: nowrap; }
+  /* (Many keys: smaller, in as many rows as they take.) */
+  .buttons.many { gap: 8px; }
+  .buttons.many span { width: 58px; min-width: 0; height: 46px; padding: 0;
+                       border-radius: 12px; font-size: 14px; }
 </style>
 </head>
 <body>
@@ -102,7 +106,14 @@
     if (!entTouchKeys.length ||
         !matchMedia("(hover: none) and (pointer: coarse)").matches)
       return;
-    function key(name) {
+    function key(given) {
+      var name = given.split(":")[0], label = given.split(":")[1];
+      var made = keyOf({ Up: "ArrowUp", Down: "ArrowDown", Left: "ArrowLeft",
+                         Right: "ArrowRight" }[name] || name);
+      if (label) made.label = label.replace(/_/g, " ");
+      return made;
+    }
+    function keyOf(name) {
       var named = {
         Enter: [" Enter", "Enter", 13], Space: ["Space", " ", 32, "Space"],
         Escape: ["Esc", "Escape", 27], Tab: ["Tab", "Tab", 9],
@@ -186,10 +197,17 @@
       span.addEventListener("touchcancel", press(false), { passive: false });
       buttons.appendChild(span);
     });
+    if (buttons.children.length > 4) buttons.classList.add("many");
     pad.appendChild(buttons);
     document.body.appendChild(pad);
     document.body.classList.add("keys");
-    document.documentElement.style.setProperty("--pad", cross ? "176px" : "96px");
+    // (The room under the window: as high as the keys are, in as many
+    // rows as they take on this screen.)
+    function room() {
+      document.documentElement.style.setProperty("--pad", pad.offsetHeight + "px");
+    }
+    room();
+    window.addEventListener("resize", room);
   })();
 </script>
 {{{ SCRIPT }}}

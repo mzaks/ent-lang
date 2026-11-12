@@ -111,6 +111,16 @@ unique Fell: i32
 // How long a frame takes, evened out; for what comes by chance; the keys
 // a frame ago.
 unique Pace: f32
+// How many foes the field has room for on this machine: as many as it
+// moves and draws at the window's pace (`Window.fps` frames a second).
+// Every half second of play the frames are judged: slower than that, the
+// room is made a fifth less than the foes there are, and as many go as
+// are too many: those out of sight, and where they are not enough (a
+// crowd round the hero), some of those in it too; at that pace with
+// the room nearly full, it is made a quarter more. On one thread (a web
+// page) that is a few thousand, on many cores far more; the stress is
+// not held to it.
+unique Room { foes: i32, time: f32, frames: i32, cut: f32, cut_seen: f32 }
 unique Seed: i64
 unique Was { stress: bool, full: bool, go: bool, mute: bool }
 default_capacity 256
@@ -171,6 +181,7 @@ world {
   Hero.y = 4000.0
   Hero.hp = 100.0
   Seed = 20261009
+  Room.foes = 4000
   Music.volume = 0.5
 }
 
@@ -285,7 +296,7 @@ system arrive() {
     come = min(6000, most_foes() - Count.foes)
   } else {
     Game.owed += crowd(Game.time) * dt
-    come = min(Game.owed as i32, most_foes() - Count.foes)
+    come = min(Game.owed as i32, min(most_foes(), Room.foes) - Count.foes)
     Game.owed -= (Game.owed as i32) as f32
   }
   for i in 0..come {
@@ -308,6 +319,59 @@ system arrive() {
       At { x: clamp(Hero.x + cos(angle) * out, 10.0, field() - 10.0),
            y: clamp(Hero.y + sin(angle) * out, 10.0, field() - 10.0) }
     }
+  }
+}
+
+// The room for foes, by how long the frames take (see `Room`), and the
+// part of the foes out of sight, and of those in it, that goes where
+// there are too many: every foe whose number's last three digits are
+// below a thousand times that part. (Out of sight: a foe's width past the
+// window's edges.)
+system room() {
+  // (A frame of a quarter second or more is no measure: the window was
+  // hidden, or the machine was busy with something else.)
+  if Window.dt < 0.25 {
+    Room.time += Window.dt
+    Room.frames += 1
+  }
+  if Room.time >= 0.5 && Room.frames > 0 {
+    let frame = Room.time / Room.frames as f32
+    let aim = 1.0 / max(1, Window.fps) as f32
+    if frame > aim * 1.15 {
+      Room.foes = max(500, min(Room.foes, (Count.foes as f32 * 0.8) as i32))
+    } else if frame < aim * 1.05 && Count.foes as f32 > Room.foes as f32 * 0.9 {
+      Room.foes = min(most_foes(), (Room.foes as f32 * 1.25) as i32)
+    }
+    Room.time = 0.0
+    Room.frames = 0
+  }
+  Room.cut = 0.0
+  Room.cut_seen = 0.0
+  let many = Count.foes - Room.foes
+  if many > 0 {
+    let x0 = Cam.x - 60.0
+    let y0 = Cam.y - 60.0
+    let x1 = Cam.x + Window.width as f32 + 60.0
+    let y1 = Cam.y + Window.height as f32 + 60.0
+    let unseen = for a: At with Foe
+        where a.x < x0 || a.x > x1 || a.y < y0 || a.y > y1 { }
+    if unseen > 0 { Room.cut = min(1.0, many as f32 / unseen as f32) }
+    let seen = Count.foes - unseen
+    if many > unseen && seen > 0 {
+      Room.cut_seen = min(1.0, (many - unseen) as f32 / seen as f32)
+    }
+  }
+}
+system thin() {
+  let x0 = Cam.x - 60.0
+  let y0 = Cam.y - 60.0
+  let x1 = Cam.x + Window.width as f32 + 60.0
+  let y1 = Cam.y + Window.height as f32 + 60.0
+  for e, f: Foe, a: At
+      where (f.lot % 1000) as f32 <
+            (if a.x < x0 || a.x > x1 || a.y < y0 || a.y > y1 { Room.cut }
+             else { Room.cut_seen }) * 1000.0 {
+    e.destroy()
   }
 }
 
@@ -627,7 +691,8 @@ system hud() {
           6.0, 6.0, 6.0, 0xc00d1117)
   label("{all} entities   {tenths / 10}.{tenths % 10} ms a frame", 20.0, 16.0,
         16.0, 0xe8eef5)
-  label("foes {Count.foes}   close {Count.close}", 20.0, 38.0, 16.0, 0x9fb0c3)
+  label("foes {Count.foes} (room {Room.foes})   close {Count.close}", 20.0, 38.0,
+        16.0, 0x9fb0c3)
   label("shots {Count.shots}   bolts {Count.bolts}", 20.0, 58.0, 16.0,
         0x9fb0c3)
   label("gems {Count.gems}   sparks {Count.sparks}", 20.0, 78.0, 16.0,
@@ -673,6 +738,8 @@ schedule frame() {
   begin()
   control()
   count()
+  room() run_if Game.state == State.Playing && !Game.stress
+  thin() run_if Game.state == State.Playing && !Game.stress
   arrive() run_if Game.state == State.Playing
   steer() run_if Game.state == State.Playing
   gather() run_if Game.state == State.Playing

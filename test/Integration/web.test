@@ -47,6 +47,10 @@
 // RUN: grep -c 'entTouchKeys=\["arrows","Enter","B"\]' %t/keys.html
 // RUN: not %ent build --web --touch-keys arrows,Fn %S/Inputs/web_large.ent -o %t/x.html 2>&1 | FileCheck %s --check-prefix=KEY
 // KEY: ent: --touch-keys: 'Fn' is no key a page has
+// RUN: %ent build --web --touch-keys "Up:faster,a:park" %S/Inputs/web_large.ent --capacity Grid=1000 -o %t/labels.html
+// RUN: grep -c 'entTouchKeys=\["Up:faster","A:park"\]' %t/labels.html
+// RUN: not %ent build --web --touch-keys "arrows:pad" %S/Inputs/web_large.ent -o %t/x.html 2>&1 | FileCheck %s --check-prefix=LABEL
+// LABEL: ent: --touch-keys: 'arrows:pad': a key's button says at most 12 letters
 // RUN: not %ent build --touch-keys arrows %S/Inputs/web_large.ent -o %t/x 2>&1 | FileCheck %s --check-prefix=PAGE
 // PAGE: ent: --touch-keys: for a web page (--web)
 //

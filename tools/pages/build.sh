@@ -17,7 +17,7 @@ mkdir -p "$out"
 out=$(cd "$out" && pwd)
 
 # folder  source  build flags (the folders of its modules; capacities;
-# the keys a phone is given, for the games)
+# the keys a phone is given, where a demo is played or steered with keys)
 demos=(
   "pacman|examples/pacman.ent|--touch-keys arrows,Enter"
   "snake|examples/snake.ent|--touch-keys arrows,Space"
@@ -25,12 +25,12 @@ demos=(
   "swarm|examples/swarm/swarm.ent|-I examples --touch-keys wasd,Enter,B"
   # (Room for the grids and searches of 8 vehicles, where the program
   # has it for 96: a web page's memory is at most 4 GB.)
-  "parking|examples/parking/show.ent|--capacity Cells=5120000 --capacity Field=5120000 --capacity Nodes=4800000 --capacity Heap=4800000 --capacity Best=23040000 --capacity Way=4096 --capacity Ahead=512"
-  "traffic|examples/traffic/show.ent|"
-  "junctions|examples/traffic/junctions.ent|"
-  "orrery|examples/orrery.ent|"
-  "bounce|examples/bounce.ent|"
-  "layout|examples/layout_demo.ent|-I examples"
+  "parking|examples/parking/show.ent|--capacity Cells=5120000 --capacity Field=5120000 --capacity Nodes=4800000 --capacity Heap=4800000 --capacity Best=23040000 --capacity Way=4096 --capacity Ahead=512 --touch-keys arrows,Space:brake,A:park,R:again,P:prev,N:next,V:view,H:trailer,B:assist,Shift:slow,1,2,3,4,5"
+  "traffic|examples/traffic/show.ent|--touch-keys Space:hold,Up:faster,Down:slower,B:brake,1,2,3"
+  "junctions|examples/traffic/junctions.ent|--touch-keys arrows,Space:hold,P:polite+,O:polite-,Q:NS+,A:NS-,W:EW+,S:EW-,1,2,3,4,5,6,7"
+  "orrery|examples/orrery.ent|--touch-keys Space:hold"
+  "bounce|examples/bounce.ent|--touch-keys Space:hold"
+  "layout|examples/layout_demo.ent|-I examples --touch-keys Space:stack,Enter:card,I:inspect,O:hide,Z:zoom"
   "clay-sidebar|examples/clay/sidebar.ent|-I examples"
   "clay-transitions|examples/clay/transitions.ent|-I examples"
   "clay-video|examples/clay/video_demo.ent|-I examples"

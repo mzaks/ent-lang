@@ -304,21 +304,29 @@ def web_font():
 
 def touch_keys(said):
     """The keys of --touch-keys, as the page (devices/web.html) names
-    them: `arrows`, `wasd`, Enter, Space, Escape, Tab, Shift, Backspace, a
-    letter (upper case) or a digit."""
+    them: `arrows`, `wasd`, Up, Down, Left, Right, Enter, Space, Escape,
+    Tab, Shift, Backspace, a letter (upper case) or a digit; each with
+    what its button says after a colon, where it says more than the
+    key's name (`A:park`; `_` a space)."""
     if not said:
         return []
-    named = {"arrows", "wasd", "Enter", "Space", "Escape", "Tab", "Shift",
-             "Backspace"}
+    named = {"arrows", "wasd", "Up", "Down", "Left", "Right", "Enter",
+             "Space", "Escape", "Tab", "Shift", "Backspace"}
     keys = []
-    for key in re.split(r"[,\s]+", said.strip()):
+    for given in re.split(r"[,\s]+", said.strip()):
+        key, colon, label = given.partition(":")
         if len(key) == 1 and key.isascii() and key.isalnum():
             key = key.upper()
         elif key not in named:
             sys.exit(f"ent: --touch-keys: '{key}' is no key a page has "
-                     "(arrows, wasd, Enter, Space, Escape, Tab, Shift, "
-                     "Backspace, A to Z, 0 to 9)")
-        keys.append(key)
+                     "(arrows, wasd, Up, Down, Left, Right, Enter, Space, "
+                     "Escape, Tab, Shift, Backspace, A to Z, 0 to 9)")
+        if colon and (key in ("arrows", "wasd") or
+                      not re.fullmatch(r"[A-Za-z0-9_+./-]{1,12}", label)):
+            sys.exit(f"ent: --touch-keys: '{given}': a key's button says "
+                     "at most 12 letters, digits or _+./- after the colon "
+                     "(and a pad nothing)")
+        keys.append(key + (":" + label if colon else ""))
     return keys
 
 
