@@ -165,6 +165,15 @@ fn most_shots() -> i32 { 15500 }
 fn most_bolts() -> i32 { 58000 }
 fn most_gems() -> i32 { 97000 }
 fn most_sparks() -> i32 { 94000 }
+// Of `ready` foes that would each spawn, how many in a thousand may (by
+// the last three digits of their number), so that `left` is not
+// overrun: all where there is room for all, else half of it, so that a
+// share that comes out a little more than its part still fits (and the
+// room under the capacity, past the most above, takes what does not).
+fn share(left: i32, ready: i32) -> i32 {
+  if ready <= left { 1000 }
+  else { (left as f32 * 500.0 / ready as f32) as i32 }
+}
 
 fn next(seed: i64) -> i64 { (seed * 1103515245 + 12345) % 2147483648 }
 // (From 0 to 1, and a whole number below `n`.)
@@ -508,10 +517,15 @@ system gather() {
 }
 
 // A close spitter that is ready shoots at the hero.
+// (Where more are ready than there is room for bolts, a share of them.
+// A spitter's wait runs down out of reach too, so in the stress, with
+// tens of thousands of foes, a crowd of ready spitters comes into reach
+// at once, and its bolts of one frame overran the capacity.)
 system spit() {
-  let room = Count.bolts < most_bolts()
+  let ready = for f: Foe with Close where f.breed.spits && f.cool <= 0.0 { }
+  let part = share(most_bolts() - Count.bolts, ready)
   for f: mut Foe, a: At with Close
-      where f.breed.spits && f.cool <= 0.0 && room {
+      where f.breed.spits && f.cool <= 0.0 && f.lot % 1000 < part {
     f.cool = 2.4
     let dx = Hero.x - a.x
     let dy = Hero.y - a.y
@@ -560,13 +574,18 @@ system spend() {
 // A foe with nothing left falls: a gem where it was, sparks off it. (In
 // the stress no gem: no one gathers them, and the field would hold more
 // and more of them while the foes are judged.)
+// (Where more fall than there is room for their gems or sparks, a share
+// of them leaves them, see `share`.)
 system reap() {
-  let gems = Count.gems < most_gems() && !Game.stress
-  let sparks = Count.sparks < most_sparks()
+  let fall = for h: Health with Foe where h.hp <= 0.0 { }
+  let gems = if Game.stress { 0 } else { share(most_gems() - Count.gems, fall) }
+  let sparks = share((most_sparks() - Count.sparks) / 3, fall)
   for e, f: Foe, a: At, h: Health where h.hp <= 0.0 {
     Fell += 1
-    if gems { spawn { At { x: a.x, y: a.y }, Gem { worth: f.breed.worth } } }
-    if sparks {
+    if f.lot % 1000 < gems {
+      spawn { At { x: a.x, y: a.y }, Gem { worth: f.breed.worth } }
+    }
+    if f.lot % 1000 < sparks {
       let turn = chance(a.x, a.y) * tau()
       spawn { At { x: a.x, y: a.y },
               Dir { dx: cos(turn) * 150.0, dy: sin(turn) * 150.0 },
