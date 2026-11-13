@@ -17,15 +17,16 @@
 __declspec(dllimport) void __stdcall Sleep(unsigned long milliseconds);
 #elif !defined(__EMSCRIPTEN__)
 #include <time.h>
+#endif
 // Pictures are read with a copy of stb_image of the window's own (static:
-// raylib has stb_image's functions too, built without .jpg).
+// raylib has stb_image's functions too, built without .jpg). On every
+// system, a web page's and Windows' too.
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_HDR
 #define STBI_NO_PIC
 #define STBI_NO_PNM
 #include "stb_image.h"
-#endif
 
 // 0xRRGGBB, opaque; or 0xAARRGGBB, so much of it (AA from 01, nearly
 // nothing, to ff, all; 00 is all too, so that 0xRRGGBB is itself).
