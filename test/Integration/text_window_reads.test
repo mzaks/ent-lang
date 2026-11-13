@@ -1,0 +1,41 @@
+// A loop that reads a text's bytes at its index and a number from outside
+// it (`t[base + j]`) has a test before it: where every byte it reads is
+// inside the text, a copy of it runs that checks none (and the loop can be
+// vector code); otherwise the loop as it was, 0 past either end. A loop
+// from 0 to the text's length needs no test.
+// RUN: %ent run %S/Inputs/text_window_reads.ent 2>/dev/null | FileCheck %s
+// RUN: ent-translate --import-ent %S/Inputs/text_window_reads.ent -I %S/../../devices -o %t.mlir
+// RUN: ent-opt %t.mlir --ent-lower-to-loops -o %t.lowered.mlir
+// RUN: FileCheck %s --check-prefix=IR --input-file=%t.lowered.mlir
+// RUN: ent-translate --import-ent %S/Inputs/text_bytes.ent -I %S/../../devices -o %t.bytes.mlir
+// RUN: ent-opt %t.bytes.mlir --ent-lower-to-loops -o %t.bytes.lowered.mlir
+// RUN: FileCheck %s --check-prefix=LENGTH --input-file=%t.bytes.lowered.mlir
+
+// CHECK: windows 421 428 327 104
+// CHECK: blocks 2130 315
+// CHECK: swapped 300 231
+
+// The test, then the copy with no check, then the loop as it was.
+// IR-LABEL: func.func private @ent_window
+// IR: arith.cmpi sge
+// IR: arith.cmpi slt
+// IR: scf.if
+// IR: scf.for
+// IR-NOT: scf.if
+// IR: llvm.load %{{.*}} : !llvm.ptr -> i8
+// IR: } else {
+// IR: scf.for
+// IR: scf.if
+// IR: llvm.load %{{.*}} : !llvm.ptr -> i8
+
+// IR-LABEL: func.func private @swapped
+// IR: arith.cmpi sge
+// IR: scf.if
+// IR: arith.cmpi sge
+// IR: scf.if
+
+// LENGTH-LABEL: func.func private @ent_spaces
+// LENGTH-NOT: arith.cmpi sge
+// LENGTH: scf.for
+// LENGTH-NOT: scf.if
+// LENGTH: llvm.load %{{.*}} : !llvm.ptr -> i8

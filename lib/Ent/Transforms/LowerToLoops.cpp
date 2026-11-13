@@ -25728,6 +25728,221 @@ static void declareTextRuntime(IRRewriter &rewriter, ModuleOp module,
   declare("ent_text_release", {}, {});
 }
 
+/// A loop that reads bytes of a text at its own index, or at its index
+/// and a number that stays the same while it runs (`t[base + j]`, the
+/// text and `base` from outside the loop): a test before it says whether
+/// every byte it reads is inside the text, from the first index to the
+/// last, and a copy of the loop that reads them with no check runs then
+/// (marked `ent.text_in_bounds`, and the compiler can make vector code of
+/// it); the loop as it was runs otherwise. One test for all its reads.
+static void versionTextReads(IRRewriter &rewriter, ModuleOp module) {
+  auto throughCasts = [](Value v) {
+    while (Operation *def = v.getDefiningOp()) {
+      if (isa<arith::IndexCastOp, arith::IndexCastUIOp, arith::ExtSIOp,
+              arith::ExtUIOp>(def))
+        v = def->getOperand(0);
+      else
+        break;
+    }
+    return v;
+  };
+  auto outside = [](scf::ForOp loop, Value v) {
+    Region *region = v.getParentRegion();
+    return !loop.getRegion().isAncestor(region);
+  };
+  // The text a read is of, as it is before the loop: the same value where
+  // it comes from outside, or a unique's text loaded (in the loop) from
+  // the world where nothing in the loop stores to it or calls anything.
+  // Null where neither. With `at`, the load is made again there.
+  std::function<Value(scf::ForOp, Value, Operation *)> before;
+  before = [&](scf::ForOp loop, Value v, Operation *at) -> Value {
+    if (outside(loop, v))
+      return v;
+    Operation *def = v.getDefiningOp();
+    if (!def)
+      return {};
+    if (isa<arith::ConstantOp>(def)) {
+      if (!at)
+        return v;
+      IRRewriter local(def->getContext());
+      local.setInsertionPoint(at);
+      return local.clone(*def)->getResult(0);
+    }
+    if (auto cast = dyn_cast<UnrealizedConversionCastOp>(def)) {
+      if (cast->getNumOperands() != 1 || cast->getNumResults() != 1)
+        return {};
+      Value from = before(loop, cast->getOperand(0), at);
+      if (!from || !at)
+        return from;
+      IRRewriter local(def->getContext());
+      local.setInsertionPoint(at);
+      return UnrealizedConversionCastOp::create(local, def->getLoc(),
+                                                v.getType(), from)
+          .getResult(0);
+    }
+    auto load = dyn_cast<memref::LoadOp>(def);
+    if (!load || !outside(loop, load.getMemRef()) ||
+        !llvm::all_of(load.getIndices(),
+                      [&](Value i) { return before(loop, i, nullptr); }))
+      return {};
+    bool written = false;
+    loop.walk([&](Operation *op) {
+      if (auto store = dyn_cast<memref::StoreOp>(op))
+        written |= store.getMemRef() == load.getMemRef();
+      else if (isa<CallOpInterface>(op) && !isa<TextAtOp, TextLengthOp>(op))
+        written = true;
+    });
+    if (written)
+      return {};
+    if (!at)
+      return v;
+    IRRewriter local(def->getContext());
+    local.setInsertionPoint(at);
+    SmallVector<Value> indices;
+    for (Value i : load.getIndices())
+      indices.push_back(before(loop, i, at));
+    local.setInsertionPoint(at);
+    return memref::LoadOp::create(local, def->getLoc(), load.getMemRef(),
+                                  indices);
+  };
+  // The loop whose index a read's index is (and the number added, or none).
+  struct Read {
+    TextAtOp at;
+    Value offset;
+  };
+  llvm::MapVector<Operation *, SmallVector<Read>> loops;
+  module.walk([&](TextAtOp at) {
+    if (at->hasAttr("ent.text_in_bounds"))
+      return;
+    Value index = throughCasts(at.getIndex());
+    auto loopOf = [](Value v) -> scf::ForOp {
+      auto arg = dyn_cast<BlockArgument>(v);
+      if (!arg)
+        return {};
+      auto loop = dyn_cast<scf::ForOp>(arg.getOwner()->getParentOp());
+      return loop && loop.getInductionVar() == arg ? loop : scf::ForOp();
+    };
+    scf::ForOp loop = loopOf(index);
+    Value offset;
+    if (!loop) {
+      auto add = index.getDefiningOp<arith::AddIOp>();
+      if (!add)
+        return;
+      for (int k = 0; k < 2 && !loop; ++k) {
+        scf::ForOp candidate = loopOf(throughCasts(add->getOperand(k)));
+        Value other = add->getOperand(1 - k);
+        if (candidate && before(candidate, other, nullptr)) {
+          loop = candidate;
+          offset = other;
+        }
+      }
+    }
+    // A loop from a number not below 0 to the text's length: inside as it
+    // is, with no test.
+    APInt from;
+    if (loop && !offset) {
+      auto length =
+          throughCasts(loop.getUpperBound()).getDefiningOp<TextLengthOp>();
+      if (length && length.getValue() == at.getValue() &&
+          matchPattern(throughCasts(loop.getLowerBound()),
+                       m_ConstantInt(&from)) &&
+          !from.isNegative()) {
+        at->setAttr("ent.text_in_bounds", UnitAttr::get(at->getContext()));
+        return;
+      }
+    }
+    APInt step;
+    if (!loop || !before(loop, at.getValue(), nullptr) ||
+        !matchPattern(loop.getStep(), m_ConstantInt(&step)) ||
+        !step.isStrictlyPositive())
+      return;
+    // (The add is in the index's own width, which wraps; the test is in
+    // 64 bits, and where it holds no index wraps on the way.)
+    loops[loop.getOperation()].push_back({at, offset});
+  });
+  Type i64 = rewriter.getI64Type();
+  auto wide = [&](Location loc, Value v) -> Value {
+    if (v.getType() == i64)
+      return v;
+    if (v.getType().isIndex())
+      return arith::IndexCastOp::create(rewriter, loc, i64, v);
+    return arith::ExtSIOp::create(rewriter, loc, i64, v);
+  };
+  // Inner loops first: an outer one's copy then has theirs as they are.
+  SmallVector<std::pair<int, Operation *>> order;
+  for (auto &[op, reads] : loops) {
+    int depth = 0;
+    for (Operation *p = op->getParentOp(); p; p = p->getParentOp())
+      depth += isa<scf::ForOp>(p);
+    order.push_back({depth, op});
+  }
+  llvm::stable_sort(order, [](auto &a, auto &b) { return a.first > b.first; });
+  for (auto &[depth, op] : order) {
+    auto &reads = loops[op];
+    auto loop = cast<scf::ForOp>(op);
+    Location loc = loop.getLoc();
+    rewriter.setInsertionPoint(loop);
+    Value first = wide(loc, loop.getLowerBound());
+    Value last = arith::SubIOp::create(
+        rewriter, loc, wide(loc, loop.getUpperBound()),
+        arith::ConstantIntOp::create(rewriter, loc, i64, 1));
+    Value zero = arith::ConstantIntOp::create(rewriter, loc, i64, 0);
+    Value inside = arith::ConstantIntOp::create(rewriter, loc, 1, 1);
+    for (Read &read : reads) {
+      Value low = first, high = last;
+      if (read.offset) {
+        Value offset = wide(loc, before(loop, read.offset, loop));
+        low = arith::AddIOp::create(rewriter, loc, low, offset);
+        high = arith::AddIOp::create(rewriter, loc, high, offset);
+      }
+      Value length = wide(
+          loc, TextLengthOp::create(rewriter, loc, rewriter.getI32Type(),
+                                    before(loop, read.at.getValue(), loop)));
+      inside = arith::AndIOp::create(
+          rewriter, loc, inside,
+          arith::AndIOp::create(
+              rewriter, loc,
+              arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::sge,
+                                    low, zero),
+              arith::CmpIOp::create(rewriter, loc, arith::CmpIPredicate::slt,
+                                    high, length)));
+    }
+    // The reads of the loop, in order, to find their copies by.
+    SmallVector<Operation *> mine;
+    llvm::DenseSet<Operation *> checked;
+    for (Read &read : reads)
+      checked.insert(read.at);
+    loop.walk([&](TextAtOp at) { mine.push_back(at); });
+    auto choice = scf::IfOp::create(rewriter, loc, loop.getResultTypes(),
+                                    inside, /*withElseRegion=*/true);
+    // The copy, where all is inside.
+    Block *thenBlock = &choice.getThenRegion().front();
+    if (thenBlock->empty() || !thenBlock->back().hasTrait<OpTrait::IsTerminator>()) {
+      rewriter.setInsertionPointToEnd(thenBlock);
+    } else {
+      rewriter.setInsertionPoint(&thenBlock->back());
+    }
+    auto fast = cast<scf::ForOp>(rewriter.clone(*loop));
+    SmallVector<Operation *> copies;
+    fast.walk([&](TextAtOp at) { copies.push_back(at); });
+    for (auto [original, copy] : llvm::zip(mine, copies))
+      if (checked.contains(original))
+        copy->setAttr("ent.text_in_bounds", rewriter.getUnitAttr());
+    if (!thenBlock->empty() && thenBlock->back().hasTrait<OpTrait::IsTerminator>())
+      rewriter.eraseOp(&thenBlock->back());
+    rewriter.setInsertionPointToEnd(thenBlock);
+    scf::YieldOp::create(rewriter, loc, fast.getResults());
+    // The loop as it was, otherwise.
+    loop.getResults().replaceAllUsesWith(choice.getResults());
+    Block *elseBlock = &choice.getElseRegion().front();
+    if (!elseBlock->empty() && elseBlock->back().hasTrait<OpTrait::IsTerminator>())
+      rewriter.eraseOp(&elseBlock->back());
+    loop->moveBefore(elseBlock, elseBlock->end());
+    rewriter.setInsertionPointToEnd(elseBlock);
+    scf::YieldOp::create(rewriter, loc, loop.getResults());
+  }
+}
+
 /// Lower the ops on texts of any length: to their blocks, and to calls
 /// of the functions that keep them.
 static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
@@ -25749,6 +25964,7 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
       joinedToOwn.push_back({own, join});
     }
   }
+  versionTextReads(rewriter, module);
   SmallVector<Operation *> ops;
   bool makes = false;
   module.walk([&](Operation *op) {
@@ -25926,6 +26142,10 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
     auto at = dyn_cast<TextAtOp>(op);
     if (!at)
       continue;
+    if (at->hasAttr("ent.text_in_bounds")) {
+      inBounds.insert(op);
+      continue;
+    }
     auto index = dyn_cast<BlockArgument>(throughCasts(at.getIndex()));
     auto loop = index ? dyn_cast<scf::ForOp>(index.getOwner()->getParentOp())
                       : scf::ForOp();
@@ -26056,19 +26276,57 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
       // text, whose length is 0).
       Value view = address(loc, at.getValue());
       Type i8 = rewriter.getI8Type();
+      // (The address by a GEP from the block's: the compiler sees then
+      // that a loop reads one byte after another.)
       auto byteAt = [&](Value index) -> Value {
-        Value where = arith::AddIOp::create(
-            rewriter, loc, view,
-            arith::AddIOp::create(
+        auto pointer = LLVM::LLVMPointerType::get(rewriter.getContext());
+        Value block = LLVM::IntToPtrOp::create(rewriter, loc, pointer, view);
+        Value where = LLVM::GEPOp::create(
+            rewriter, loc, pointer, i8, block,
+            ValueRange{arith::AddIOp::create(
                 rewriter, loc, index,
-                arith::ConstantIntOp::create(rewriter, loc, 4, 64)));
-        return LLVM::LoadOp::create(
-            rewriter, loc, i8,
-            LLVM::IntToPtrOp::create(
-                rewriter, loc,
-                LLVM::LLVMPointerType::get(rewriter.getContext()), where));
+                arith::ConstantIntOp::create(rewriter, loc, 4, 64))});
+        return LLVM::LoadOp::create(rewriter, loc, i8, where);
       };
       if (inBounds.contains(op)) {
+        // A read at a loop's index and a number known to be inside the
+        // text (versionTextReads): the sum in 64 bits, as that test made
+        // it, so that the compiler sees it step by one with the index.
+        // (A loop's index is taken from under its casts, a narrowing one
+        // too: the sum in the narrow width, wrapping, is the 64-bit sum
+        // where that is inside the text. Any other number is widened as
+        // it is, as the test widened it.)
+        auto wide64 = [&](Value v) -> Value {
+          Value under = v;
+          while (Operation *def = under.getDefiningOp()) {
+            if (isa<arith::IndexCastOp, arith::ExtSIOp>(def))
+              under = def->getOperand(0);
+            else
+              break;
+          }
+          if (auto arg = dyn_cast<BlockArgument>(under);
+              arg && isa<scf::ForOp>(arg.getOwner()->getParentOp()) &&
+              cast<scf::ForOp>(arg.getOwner()->getParentOp())
+                      .getInductionVar() == arg)
+            v = under;
+          if (v.getType().isIndex())
+            return arith::IndexCastOp::create(rewriter, loc, i64, v);
+          if (v.getType() == i64)
+            return v;
+          return arith::ExtSIOp::create(rewriter, loc, i64, v);
+        };
+        Value given = at.getIndex();
+        while (Operation *def = given.getDefiningOp()) {
+          if (isa<arith::IndexCastOp, arith::ExtSIOp>(def))
+            given = def->getOperand(0);
+          else
+            break;
+        }
+        if (auto add = given.getDefiningOp<arith::AddIOp>())
+          index = arith::AddIOp::create(rewriter, loc, wide64(add.getLhs()),
+                                        wide64(add.getRhs()));
+        else
+          index = wide64(given);
         rewriter.replaceOp(op, byteAt(index));
         continue;
       }

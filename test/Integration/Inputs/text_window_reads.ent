@@ -1,0 +1,51 @@
+// Bytes of a text read at a loop's index and a number from outside it,
+// `t[base + j]` (text_window_reads.test): a test before the loop says
+// whether all it reads is inside the text; then a copy of the loop runs
+// that checks no byte, and otherwise the loop as it was, where a byte
+// past either end is 0. The text is a unique's, read in the loop.
+import text
+import console
+
+unique Words: text
+unique Sums: text
+
+// The bytes of a window of 4 from `base`, as numbers.
+fn window(t: text, base: i32) -> i32 {
+  var n = 0
+  for j in 0..4 { n += t[base + j] as i32 }
+  n
+}
+
+// Windows of 8 over the unique's text, each read in a loop of its own.
+system blocks() {
+  var all = 0
+  var firsts = 0
+  for k in 0..(len(Words) + 7) / 8 {
+    let base = k * 8
+    var b = 0
+    for j in 0..8 { b += Words[base + j] as i32 }
+    all += b
+    firsts += Words[base] as i32
+  }
+  put("blocks {all} {firsts}")
+}
+
+system go() {
+  Words = "abcdefghijklmnopqrst"
+  let w = "hello"
+  // Inside: 104+101+108+108, 101+108+108+111; past the end: 108+108+111
+  // and 0; before the start: 0+0+0+104.
+  put("windows {window(w, 0)} {window(w, 1)} {window(w, 2)} {window(w, -3)}")
+}
+
+// (j + base, the other way round: inside, then past the end.)
+system swapped() {
+  var m = 0
+  for j in 0..3 { m += Words[j + 2] as i32 }
+  var e = 0
+  for j in 0..3 { e += Words[j + 18] as i32 }
+  put("swapped {m} {e}")
+}
+
+schedule run() { go() blocks() swapped() }
+main { run() }
