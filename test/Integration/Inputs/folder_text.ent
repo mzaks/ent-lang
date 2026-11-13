@@ -26,6 +26,12 @@ system look() {
   put("[{sub}]")
   let not_written = write_text("not_there/x.txt", words)
   put("not written: {not_written}")
+  let renamed = rename_file("listed/sub/w.txt", "listed/w2.txt")
+  let gone = file_size("listed/sub/w.txt")
+  let there = read_text("listed/w2.txt")
+  put("renamed: {renamed} {gone} {there == words}")
+  let not_renamed = rename_file("listed/nothing.txt", "listed/x.txt")
+  put("not renamed: {not_renamed}")
 }
 
 schedule go() { look() }

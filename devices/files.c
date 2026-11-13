@@ -3,6 +3,7 @@
 #include "ent_files.h"
 
 #include <dirent.h>
+#include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -258,4 +259,17 @@ bool ent_files_write_text(const ent_text *name, const ent_text *t) {
   uint32_t length = t ? t->length : 0;
   bool written = fwrite(length ? t->bytes : "", 1, length, to) == length;
   return fclose(to) == 0 && written;
+}
+
+bool ent_files_rename_file(const ent_text *from, const ent_text *to) {
+  char old[4096], made[4096];
+  if (!ent_files_path(from, old, sizeof old) ||
+      !ent_files_path(to, made, sizeof made) || !old[0] || !made[0])
+    return false;
+#ifdef _WIN32
+  // (Windows renames onto no file that is there.)
+  if (strcmp(old, made) != 0)
+    remove(made);
+#endif
+  return rename(old, made) == 0;
 }

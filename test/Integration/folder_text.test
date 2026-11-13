@@ -2,7 +2,7 @@
 // followed by a line end, in the order of their bytes, a folder's with
 // "/"; none for a folder that is empty or not there, which `is_folder`
 // tells apart. `write_text` writes a text as a file, which `read_text`
-// gives back byte for byte. From where the program is started.
+// gives back byte for byte, and `rename_file` moves it. From where the program is started.
 // RUN: rm -rf %t.d && mkdir -p %t.d/listed/sub %t.d/empty
 // RUN: touch %t.d/listed/b.txt %t.d/listed/a.txt %t.d/listed/.hidden
 // RUN: cd %t.d && %ent run %S/Inputs/folder_text.ent | FileCheck %s
@@ -19,3 +19,5 @@
 // CHECK-NEXT: [w.txt
 // CHECK-NEXT: ]
 // CHECK-NEXT: not written: false
+// CHECK-NEXT: renamed: true -1 true
+// CHECK-NEXT: not renamed: false

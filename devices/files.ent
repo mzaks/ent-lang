@@ -76,3 +76,7 @@ extern proc is_folder(name: text) -> bool
 // started, or where a whole path says), in place of one that is there;
 // false where it could not.
 extern proc write_text(name: text, t: text) -> bool
+// Gives the file (or folder) `from` the name `to`, which may be in
+// another folder of the same disk, in place of a file of that name;
+// false where it could not (no such file, no such folder for it).
+extern proc rename_file(from: text, to: text) -> bool
