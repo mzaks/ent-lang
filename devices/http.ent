@@ -49,6 +49,14 @@ extern proc http_session(user_agent: text, cookies: bool, per_host: i32,
                          total: i32, http2: bool, verify_tls: bool,
                          ca_file: text, proxy: text) -> i64
 
+// Puts a session on a thread of its own, before its first request: its
+// requests are then moved on there, while the program does other things,
+// and handed back to `http_poll` (the program sees no difference, but
+// that its main thread does less: a thread drives a session's
+// transfers, several sessions on threads drive theirs side by side).
+// False where the session is none or has requests running already.
+extern proc http_on_thread(session: i64) -> bool
+
 // Starts a request of a session: `method` by name ("GET", "HEAD",
 // "POST", "PUT", "PATCH", "DELETE", "OPTIONS" or any other), `headers`
 // as "Name: value" lines (each ended by "\n" or "\r\n"), `body` its bytes

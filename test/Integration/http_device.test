@@ -7,6 +7,7 @@
 // RUN: %python %S/Inputs/http/serve.py %t -- %ent run %S/Inputs/http/device.ent > %t.out
 // RUN: sort %t.out | FileCheck %s
 // RUN: %python %S/Inputs/http/serve.py %t -- %ent run %S/Inputs/http/many.ent | FileCheck %s --check-prefix=MANY
+// RUN: %python %S/Inputs/http/serve.py %t -- %ent run %S/Inputs/http/threads.ent | FileCheck %s --check-prefix=THREADS
 
 // CHECK: big-body 200 ok cut=false length={{[0-9]+}} found=true
 // CHECK: big-bytes 200 ok cut=false length=10485760 found=true
@@ -53,3 +54,7 @@
 // CHECK: tls-untrusted 0 tls
 
 // MANY: many: 10000 answered, 10000 right, 0 running
+
+// Sessions on threads of their own (Inputs/http/threads.ent).
+// THREADS: threads: 4 on threads, 4000 answered, 4000 right, 0 cancelled answered, 0 running, running one kept off a thread true
+// THREADS-NEXT: closed: 0 running

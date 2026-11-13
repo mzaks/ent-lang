@@ -1,0 +1,93 @@
+// Sessions on threads of their own (http_on_thread, test/Integration/
+// http_device.test): 4,000 requests over 4 sessions, each answered with
+// its own body, so handles are not mixed up; 20 slow ones (/delay/2000)
+// cancelled while they run, which are not answered; then a session closed
+// with slow ones still running. A session with requests running already
+// is not put on a thread.
+import console
+import text
+import files
+import http
+
+default_capacity 8192
+
+component Ask { i: i32 }
+component Sent { handle: i64 }
+component Answer { right: bool }
+buffer Sessions { id: i64 } capacity 4
+buffer Slow { handle: i64 } capacity 64
+unique Web { base: text, left: i32, polls: i32, threaded: i32, late: i32, refused: bool }
+unique Count { answered: i32, right: i32 }
+
+system setup() {
+  Web.base = read_text("server.url")
+  Web.left = 1
+  for k in 0..4 {
+    let s = http_session("ent-test/1", false, 64, 64, false, true, "", "")
+    if http_on_thread(s) { Web.threaded += 1 }
+    Sessions += { id: s }
+  }
+  // Slow ones on the first session, cancelled at once.
+  for k in 0..20 {
+    Slow += { handle: http_start(Sessions[0].id, "GET", Web.base + "/delay/2000", "", "", 30.0, 0, 0) }
+  }
+  for k in 0..20 { http_cancel(Slow[k].handle) }
+  // One not yet on a thread, with a request running: it stays as it is.
+  let other = http_session("ent-test/1", false, 4, 4, false, true, "", "")
+  let h = http_start(other, "GET", Web.base + "/n/1", "", "", 30.0, 0, 0)
+  Web.refused = !http_on_thread(other)
+  http_close(other)
+  for i in 0..4000 { spawn { Ask { i: i } } }
+}
+
+system send() {
+  for e, a: Ask without Sent in turn by a.i {
+    let h = http_start(Sessions[a.i % 4].id, "GET", Web.base + "/n/{a.i}", "", "", 30.0, 0, 0)
+    e.add(Sent { handle: h })
+  }
+}
+
+system receive() {
+  let n = http_poll(0.05, Done)
+  Web.polls += 1
+  // An answer to a cancelled one would be a mistake.
+  for i in 0..n {
+    for k in 0..20 { if Done[i].handle == Slow[k].handle { Web.late += 1 } }
+  }
+}
+
+system fetch() {
+  for e, a: Ask, s: Sent without Answer {
+    let status = http_status(s.handle)
+    if status >= 0 {
+      e.add(Answer { right: status == 200 && http_body(s.handle) == "n {a.i}" })
+      http_forget(s.handle)
+    }
+  }
+}
+
+system tally() {
+  let answered = for a: Answer { }
+  let right = for a: Answer where a.right { }
+  Count.answered = answered
+  Count.right = right
+  Web.left = 4000 - answered
+}
+
+system said() {
+  put("threads: {Web.threaded} on threads, {Count.answered} answered, {Count.right} right, {Web.late} cancelled answered, {http_running()} running, running one kept off a thread {Web.refused}")
+  // Closed with slow ones running: its thread stops, they are let go.
+  for k in 0..3 { let h = http_start(Sessions[1].id, "GET", Web.base + "/delay/2000", "", "", 30.0, 0, 0) }
+  http_close(Sessions[1].id)
+  put("closed: {http_running()} running")
+}
+
+schedule start() { setup() }
+schedule frame() { send() receive() fetch() tally() }
+schedule finish() { said() }
+
+main {
+  start()
+  loop { frame() } until Web.left == 0 || Web.polls > 20000
+  finish()
+}
