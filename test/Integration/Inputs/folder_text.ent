@@ -5,7 +5,7 @@ import text
 import files
 
 system look() {
-  let listed = folder_text("listed")
+  let listed = folder_text("made")
   put("[{listed}]")
   let empty = folder_text("empty")
   let empty_is = is_folder("empty")
@@ -13,24 +13,24 @@ system look() {
   let none = folder_text("not_there")
   let none_is = is_folder("not_there")
   put("none: [{none}] {none_is}")
-  let a = is_folder("listed")
-  let b = is_folder("listed/sub")
-  let c = is_folder("listed/a.txt")
+  let a = is_folder("made")
+  let b = is_folder("made/sub")
+  let c = is_folder("made/a.txt")
   put("folders: {a} {b} {c}")
   let words = "one\nzwei é\n"
-  let written = write_text("listed/sub/w.txt", words)
+  let written = write_text("made/sub/w.txt", words)
   put("written: {written}")
-  let back = read_text("listed/sub/w.txt")
+  let back = read_text("made/sub/w.txt")
   put("read back: {back == words} {len(back)}")
-  let sub = folder_text("listed/sub/")
+  let sub = folder_text("made/sub/")
   put("[{sub}]")
   let not_written = write_text("not_there/x.txt", words)
   put("not written: {not_written}")
-  let renamed = rename_file("listed/sub/w.txt", "listed/w2.txt")
-  let gone = file_size("listed/sub/w.txt")
-  let there = read_text("listed/w2.txt")
+  let renamed = rename_file("made/sub/w.txt", "made/w2.txt")
+  let gone = file_size("made/sub/w.txt")
+  let there = read_text("made/w2.txt")
   put("renamed: {renamed} {gone} {there == words}")
-  let not_renamed = rename_file("listed/nothing.txt", "listed/x.txt")
+  let not_renamed = rename_file("made/nothing.txt", "made/x.txt")
   put("not renamed: {not_renamed}")
 }
 
