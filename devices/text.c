@@ -692,3 +692,29 @@ ENT_TEXT_SAME_RESULT int64_t ent_text_number(const ent_text *text) {
     value = value * 10 + (uint64_t)(text->bytes[i] - '0');
   return negative ? -(int64_t)value : (int64_t)value;
 }
+
+// A code point as its UTF-8 bytes; none where it is no character.
+ENT_TEXT_SAME_RESULT const ent_text *ent_text_character(int32_t code) {
+  if (code < 1 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF))
+    return 0;
+  uint32_t c = (uint32_t)code;
+  uint32_t length = c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+  ent_text *made = ent_text_new(length);
+  unsigned char *b = (unsigned char *)made->bytes;
+  if (length == 1) {
+    b[0] = (unsigned char)c;
+  } else if (length == 2) {
+    b[0] = (unsigned char)(0xC0 | c >> 6);
+    b[1] = (unsigned char)(0x80 | (c & 0x3F));
+  } else if (length == 3) {
+    b[0] = (unsigned char)(0xE0 | c >> 12);
+    b[1] = (unsigned char)(0x80 | (c >> 6 & 0x3F));
+    b[2] = (unsigned char)(0x80 | (c & 0x3F));
+  } else {
+    b[0] = (unsigned char)(0xF0 | c >> 18);
+    b[1] = (unsigned char)(0x80 | (c >> 12 & 0x3F));
+    b[2] = (unsigned char)(0x80 | (c >> 6 & 0x3F));
+    b[3] = (unsigned char)(0x80 | (c & 0x3F));
+  }
+  return made;
+}

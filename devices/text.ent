@@ -31,3 +31,7 @@ extern fn lower(t: text) -> text
 // The whole number `t` starts with (after spaces, with a sign), as
 // strtoll reads it; 0 where it starts with none.
 extern fn number(t: text) -> i64
+// The character of a Unicode code point, as its bytes in UTF-8 (one to
+// four); none where `code` is no character (below 1, past 0x10FFFF, or
+// one of the halves 0xD800 to 0xDFFF that only UTF-16 has).
+extern fn character(code: i32) -> text

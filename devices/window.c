@@ -395,6 +395,45 @@ bool ent_window_mouse_down(int32_t button) {
 #endif
 }
 bool ent_window_key_down(int32_t key) { return IsKeyDown(key); }
+bool ent_window_key_pressed(int32_t key) {
+  return IsKeyPressed(key) || IsKeyPressedRepeat(key);
+}
+
+// The characters typed: raylib queues them as they come, and gives them
+// one at a time until it has none (0). All are taken, those that do not
+// fit counted and lost, so that none is left for the frame after.
+int32_t ent_window_take_typed(int32_t *count, int32_t capacity,
+                              int32_t *code) {
+  int32_t typed = 0;
+  for (int c = GetCharPressed(); c > 0; c = GetCharPressed()) {
+    if (typed < capacity)
+      code[typed] = c;
+    typed++;
+  }
+  *count = typed < capacity ? typed : capacity;
+  return typed;
+}
+
+const ent_text *ent_window_clipboard(void) {
+  const char *held = GetClipboardText();
+  size_t length = held ? strlen(held) : 0;
+  if (!length || length > UINT32_MAX)
+    return NULL;
+  ent_text *text = ent_text_new((uint32_t)length);
+  memcpy(text->bytes, held, length);
+  return text;
+}
+
+void ent_window_set_clipboard(const ent_text *t) {
+  uint32_t length = t ? t->length : 0;
+  char *bytes = malloc((size_t)length + 1);
+  if (!bytes)
+    return;
+  memcpy(bytes, length ? t->bytes : "", length);
+  bytes[length] = 0;
+  SetClipboardText(bytes);
+  free(bytes);
+}
 
 void ent_window_rect(float x, float y, float width, float height,
                      int32_t color) {

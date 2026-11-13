@@ -52,7 +52,7 @@ transient unique Window {
   width: i32, height: i32, title: text[62], background: i32, fps: i32,
   open: bool, closed: bool, dt: f32, frame: i64, resizable: bool,
   fullscreen: bool, min_width: i32, min_height: i32, scale: f32, zoom: f32,
-  escape: bool, grab: bool, dropped: i32
+  escape: bool, grab: bool, dropped: i32, typed: i32
 }
 
 // The path of the file dropped on the window, a byte a row (`dropped`).
@@ -80,6 +80,25 @@ transient unique Keys {
 // Any other key: a letter or digit by its character ('A' as i32), the
 // rest by raylib's key numbers.
 extern proc key_down(key: i32) -> bool
+// Whether a key went down since the frame before, or is held down long
+// enough to go on as if pressed again and again (as Backspace or an arrow
+// held in a text does): by the same numbers as `key_down`.
+extern proc key_pressed(key: i32) -> bool
+
+// The characters typed since the frame before, in the order they were
+// typed, a row each: its Unicode code point, as the keyboard and the
+// system made it (a capital where Shift was down, a letter of an accent
+// put together by the system). Keys that type nothing (Enter, Tab,
+// Backspace, the arrows) are not among them: `key_pressed` says those.
+// `Window.typed` says how many came (more than it holds: the rest are
+// lost).
+transient buffer Typed { code: i32 } capacity 256
+
+// The text on the system's clipboard (none where it holds none, or no
+// text), and a text put on it in place of what it held. (In a web page
+// the browser does not give a page the clipboard when asked: none.)
+extern proc clipboard() -> text
+extern proc set_clipboard(t: text)
 
 // A filled rectangle, by its top left corner and its size.
 extern proc rect(x: f32, y: f32, width: f32, height: f32, color: i32)
@@ -262,6 +281,9 @@ extern proc grab_mouse(grab: bool)
 // many bytes long it is (more than `into` holds where it did not fit);
 // 0 where none was.
 extern proc take_dropped(into: mut Dropped) -> i32
+// The characters typed since it was last asked, into `into`: how many
+// (more than `into` holds where they did not fit).
+extern proc take_typed(into: mut Typed) -> i32
 
 system begin() {
   if !Window.open {
@@ -285,6 +307,7 @@ system begin() {
   Window.dt = frame_seconds()
   Window.frame += 1
   Window.dropped = take_dropped(Dropped)
+  Window.typed = take_typed(Typed)
   Mouse.x = mouse_x() / zoom
   Mouse.y = mouse_y() / zoom
   Mouse.left = mouse_down(0)

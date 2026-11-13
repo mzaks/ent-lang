@@ -48,6 +48,8 @@ system show() {
   let mixed = "MiXed 123 \xC4B"
   let plain = "plain"
   put("lower: '{lower(mixed)}' '{lower(plain)}' '{lower(none)}'")
+  let chars = character(65) + character(0xE9) + character(0x20AC) + character(0x1F600)
+  put("character: '{chars}' {len(chars)} none: {len(character(0))} {len(character(0xD800))} {len(character(0x110000))}")
   let hey = "hey"
   put("shout: '{shout(hey)}' nothing: '{nothing(x)}' ({len(nothing(x))})")
   put("drift: {drift(hey)}")

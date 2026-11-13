@@ -1,7 +1,7 @@
 // Texts C gives back: an extern fn or proc may give a `text` (of any
 // length), a block C makes with `ent_text_new` (kept while the schedule
 // runs, as a joined text is), one it was given, or none. The text
-// module's `find`, `slice` and `lower` are such fns; with them a program
+// module's `find`, `slice`, `lower` and `character` are such fns; with them a program
 // takes the links out of a page. `ent build` reads that `ent_text_new`
 // changes nothing a fn gives back; --check-externs compares the texts by
 // their bytes; nothing is left held or kept at the end.
@@ -24,6 +24,7 @@
 // STATIC-NOT: 'find'
 // STATIC-NOT: 'slice'
 // STATIC-NOT: 'lower'
+// STATIC-NOT: 'character'
 // STATIC:     text_extern.ent:17:11: warning: extern fn 'drift' is no fn
 // STATIC-NOT: warning
 
@@ -33,6 +34,7 @@
 // CHECK-NEXT: find: 2 5 -1 3 -1 0
 // CHECK-NEXT: slice: 'bc' 'ab' 'ef' '' '' same: true
 // CHECK-NEXT: lower: 'mixed 123 {{.}}b' 'plain' ''
+// CHECK-NEXT: character: 'Aé€😀' 10 none: 0 0 0
 // CHECK-NEXT: shout: 'HEY!' nothing: '' (0)
 // CHECK-NEXT: drift: hey
 // CHECK-NEXT: said: hello 3 times
@@ -47,4 +49,4 @@
 // HEADER: const ent_text * ent_shout(const ent_text * arg0);
 // HEADER: const ent_text * ent_greeting(int32_t arg0);
 
-// RANKS: text_extern.ent:54:10: error: on many ranks a proc that rank 0 calls cannot give a text back yet
+// RANKS: text_extern.ent:56:10: error: on many ranks a proc that rank 0 calls cannot give a text back yet
