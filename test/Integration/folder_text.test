@@ -1,0 +1,21 @@
+// A folder's names as one text (devices/files.ent: `folder_text`): each
+// followed by a line end, in the order of their bytes, a folder's with
+// "/"; none for a folder that is empty or not there, which `is_folder`
+// tells apart. `write_text` writes a text as a file, which `read_text`
+// gives back byte for byte. From where the program is started.
+// RUN: rm -rf %t.d && mkdir -p %t.d/listed/sub %t.d/empty
+// RUN: touch %t.d/listed/b.txt %t.d/listed/a.txt %t.d/listed/.hidden
+// RUN: cd %t.d && %ent run %S/Inputs/folder_text.ent | FileCheck %s
+
+// CHECK:      [a.txt
+// CHECK-NEXT: b.txt
+// CHECK-NEXT: sub/
+// CHECK-NEXT: ]
+// CHECK-NEXT: empty: [] true
+// CHECK-NEXT: none: [] false
+// CHECK-NEXT: folders: true true false
+// CHECK-NEXT: written: true
+// CHECK-NEXT: read back: true 12
+// CHECK-NEXT: [w.txt
+// CHECK-NEXT: ]
+// CHECK-NEXT: not written: false

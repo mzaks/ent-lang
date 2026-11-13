@@ -1,0 +1,32 @@
+// A folder as a text, whether a name is a folder, and a text written and
+// read back (devices/files.ent: `folder_text`, `is_folder`, `write_text`).
+import console
+import text
+import files
+
+system look() {
+  let listed = folder_text("listed")
+  put("[{listed}]")
+  let empty = folder_text("empty")
+  let empty_is = is_folder("empty")
+  put("empty: [{empty}] {empty_is}")
+  let none = folder_text("not_there")
+  let none_is = is_folder("not_there")
+  put("none: [{none}] {none_is}")
+  let a = is_folder("listed")
+  let b = is_folder("listed/sub")
+  let c = is_folder("listed/a.txt")
+  put("folders: {a} {b} {c}")
+  let words = "one\nzwei é\n"
+  let written = write_text("listed/sub/w.txt", words)
+  put("written: {written}")
+  let back = read_text("listed/sub/w.txt")
+  put("read back: {back == words} {len(back)}")
+  let sub = folder_text("listed/sub/")
+  put("[{sub}]")
+  let not_written = write_text("not_there/x.txt", words)
+  put("not written: {not_written}")
+}
+
+schedule go() { look() }
+main { go() }

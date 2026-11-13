@@ -16,7 +16,8 @@
 // `write_file` writes a buffer's bytes as a file, where the program was
 // started (or where a whole path says).
 //
-// `read_text` reads a whole file as a text (of any length), however big.
+// `read_text` reads a whole file as a text (of any length), however big,
+// and `write_text` writes one; `folder_text` lists a folder as a text.
 //
 // `read_file` and `write_file` are implemented in devices/files.c.
 import text
@@ -62,3 +63,16 @@ extern proc make_folder(name: text[126]) -> bool
 // fit are not in `into`); -1 where there is no such folder (where the
 // program was started, or where a whole path says).
 extern proc list_files(folder: text[126], into: mut Bytes) -> i32
+// The same as one text: the names of what is in a folder, each followed
+// by "\n", in the order of their bytes, a folder's with "/" at its end
+// ("notes.txt\nold/\n"); names that start with a "." left out. None
+// where there is no such folder, or nothing is in it (`is_folder` tells
+// which). Any number of names, and paths of any length.
+extern proc folder_text(folder: text) -> text
+// Whether `name` is a folder (where the program was started, or where a
+// whole path says).
+extern proc is_folder(name: text) -> bool
+// Writes the bytes of `t` as the file `name` (where the program was
+// started, or where a whole path says), in place of one that is there;
+// false where it could not.
+extern proc write_text(name: text, t: text) -> bool

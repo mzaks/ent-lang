@@ -180,3 +180,82 @@ int32_t ent_files_list_files(const ent_text126 *folder, int32_t *count,
   *count = at;
   return found;
 }
+
+// (Whether `path` is a folder.)
+static bool ent_files_folder_at(const char *path) {
+  struct stat about;
+  return stat(path, &about) == 0 && S_ISDIR(about.st_mode);
+}
+
+bool ent_files_is_folder(const ent_text *name) {
+  char path[4096];
+  return ent_files_path(name, path, sizeof path) && ent_files_folder_at(path);
+}
+
+const ent_text *ent_files_folder_text(const ent_text *folder) {
+  char path[4096];
+  if (!ent_files_path(folder, path, sizeof path))
+    return NULL;
+  DIR *open = opendir(path);
+  if (!open)
+    return NULL;
+  char **names = 0;
+  int32_t found = 0, room = 0;
+  size_t base = strlen(path);
+  for (struct dirent *entry; (entry = readdir(open));) {
+    if (entry->d_name[0] == '.')
+      continue;
+    if (found == room) {
+      room = room ? room * 2 : 64;
+      names = realloc(names, sizeof(char *) * (size_t)room);
+    }
+    // (A folder's name with "/" after it, by asking for what the path is.)
+    size_t length = strlen(entry->d_name);
+    char *name = malloc(length + 2);
+    memcpy(name, entry->d_name, length + 1);
+    char *whole = malloc(base + length + 2);
+    memcpy(whole, path, base);
+    size_t at = base;
+    if (base && path[base - 1] != '/' && path[base - 1] != '\\')
+      whole[at++] = '/';
+    memcpy(whole + at, entry->d_name, length + 1);
+    if (ent_files_folder_at(whole)) {
+      name[length] = '/';
+      name[length + 1] = 0;
+    }
+    free(whole);
+    names[found++] = name;
+  }
+  closedir(open);
+  qsort(names, (size_t)found, sizeof(char *), ent_files_by_name);
+  size_t total = 0;
+  for (int32_t i = 0; i < found; i++)
+    total += strlen(names[i]) + 1;
+  ent_text *text = NULL;
+  if (total > 0 && total < UINT32_MAX) {
+    text = ent_text_new((uint32_t)total);
+    size_t at = 0;
+    for (int32_t i = 0; i < found; i++) {
+      size_t length = strlen(names[i]);
+      memcpy(text->bytes + at, names[i], length);
+      text->bytes[at + length] = '\n';
+      at += length + 1;
+    }
+  }
+  for (int32_t i = 0; i < found; i++)
+    free(names[i]);
+  free(names);
+  return text;
+}
+
+bool ent_files_write_text(const ent_text *name, const ent_text *t) {
+  char path[4096];
+  if (!ent_files_path(name, path, sizeof path) || !path[0])
+    return false;
+  FILE *to = fopen(path, "wb");
+  if (!to)
+    return false;
+  uint32_t length = t ? t->length : 0;
+  bool written = fwrite(length ? t->bytes : "", 1, length, to) == length;
+  return fclose(to) == 0 && written;
+}
