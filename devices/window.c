@@ -12,6 +12,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(_WIN32)
+// (Not windows.h, whose names raylib's clash with.)
+__declspec(dllimport) void __stdcall Sleep(unsigned long milliseconds);
+#elif !defined(__EMSCRIPTEN__)
+#include <time.h>
+#endif
 
 // 0xRRGGBB, opaque; or 0xAARRGGBB, so much of it (AA from 01, nearly
 // nothing, to ff, all; 00 is all too, so that 0xRRGGBB is itself).
@@ -319,8 +325,14 @@ static double ent_window_frame_was = 1.0 / 60, ent_window_frame_end = 0;
 bool ent_window_should_close(void) { return false; }
 float ent_window_frame_seconds(void) { return (float)ent_window_frame_was; }
 #else
+// (Once a frame went without a picture (`still_frame`), its length is
+// measured here: raylib's GetFrameTime counts the frames it drew.)
+static int ent_window_any_still;
+static double ent_window_frame_was = 1.0 / 60, ent_window_frame_end = 0;
 bool ent_window_should_close(void) { return WindowShouldClose(); }
-float ent_window_frame_seconds(void) { return GetFrameTime(); }
+float ent_window_frame_seconds(void) {
+  return ent_window_any_still ? (float)ent_window_frame_was : GetFrameTime();
+}
 #endif
 
 // Everything is drawn so many times as big as it says (`Window.zoom`).
@@ -354,11 +366,46 @@ void ent_window_end_frame(void) {
 #ifdef __EMSCRIPTEN__
   ent_window_next_frame(ent_window_fps > 0 ? 1.0 / ent_window_fps : 0);
   ent_window_fit();
+#endif
   double now = GetTime();
   if (ent_window_frame_end > 0)
     ent_window_frame_was = now - ent_window_frame_end;
   ent_window_frame_end = now;
+}
+
+// A frame without a picture: no drawing and no swap, so the window shows
+// the picture it had; what happened is taken in (as EndDrawing does),
+// and the frame lasts as long as `fps` says (on a web page: until the
+// browser's next frame, as many as `fps` asks for).
+void ent_window_still_frame(int32_t fps) {
+#ifdef __EMSCRIPTEN__
+  ent_window_fps = fps;
+  PollInputEvents();
+  ent_window_next_frame(fps > 0 ? 1.0 / fps : 0);
+  ent_window_fit();
+#else
+  ent_window_any_still = 1;
+  PollInputEvents();
+  if (fps > 0) {
+    double until = ent_window_frame_end + 1.0 / fps;
+    double now = GetTime();
+    // (Asleep all the while: raylib's WaitTime spins the end of it.)
+    if (until > now) {
+#if defined(_WIN32)
+      Sleep((unsigned long)((until - now) * 1000));
+#else
+      double wait = until - now;
+      struct timespec span = {(time_t)wait,
+                              (long)((wait - (double)(time_t)wait) * 1e9)};
+      nanosleep(&span, NULL);
 #endif
+    }
+  }
+#endif
+  double now = GetTime();
+  if (ent_window_frame_end > 0)
+    ent_window_frame_was = now - ent_window_frame_end;
+  ent_window_frame_end = now;
 }
 
 // For a device that draws in three dimensions within the frame (the

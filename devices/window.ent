@@ -46,13 +46,22 @@ import text
 // `dropped`: a file was dropped on the window since the frame before,
 // and its path is so many bytes long; its bytes are in `Dropped`, as many
 // as it holds (of several dropped at once, the last). 0: none was.
+// `lazy`: the window is drawn only in the frames that ask for it, by
+// running `paint` (with `run_if`, where something changed): `begin` takes
+// in what happened but starts no picture, and in a frame without `paint`
+// `present` draws nothing and the window shows the picture it had, while
+// it keeps the pace of `fps` all the same. So a program that waits for
+// the user costs next to nothing between what the user does. (Draw only
+// after `paint`; and paint where the window got another size.) `painted`
+// says whether this frame started a picture.
 // (The window, the mouse, the keys and what is drawn in a frame are the
 // machine's and not a saved world's: `transient`, see devices/world.ent.)
 transient unique Window {
   width: i32, height: i32, title: text[62], background: i32, fps: i32,
   open: bool, closed: bool, dt: f32, frame: i64, resizable: bool,
   fullscreen: bool, min_width: i32, min_height: i32, scale: f32, zoom: f32,
-  escape: bool, grab: bool, dropped: i32, typed: i32
+  escape: bool, grab: bool, dropped: i32, typed: i32, lazy: bool,
+  painted: bool
 }
 
 // The path of the file dropped on the window, a byte a row (`dropped`).
@@ -268,6 +277,9 @@ extern proc should_close() -> bool
 extern proc frame_seconds() -> f32
 extern proc begin_frame(background: i32, fps: i32, zoom: f32)
 extern proc end_frame()
+// A frame without a picture: the window as it was, what happened taken
+// in, and the frame as long as `fps` says.
+extern proc still_frame(fps: i32)
 extern proc mouse_x() -> f32
 extern proc mouse_y() -> f32
 extern proc mouse_down(button: i32) -> bool
@@ -330,9 +342,22 @@ system begin() {
   Keys.up = key_down(265)
   Keys.space = key_down(32)
   Keys.enter = key_down(257)
-  begin_frame(Window.background, Window.fps, zoom)
+  Window.painted = false
+  if !Window.lazy {
+    begin_frame(Window.background, Window.fps, zoom)
+    Window.painted = true
+  }
+}
+
+// Of a `lazy` window: this frame is drawn (from here on).
+system paint() {
+  if !Window.painted {
+    let zoom = if Window.zoom > 0.0 { Window.zoom } else { 1.0 }
+    begin_frame(Window.background, Window.fps, zoom)
+    Window.painted = true
+  }
 }
 
 system present() {
-  end_frame()
+  if Window.painted { end_frame() } else { still_frame(Window.fps) }
 }
