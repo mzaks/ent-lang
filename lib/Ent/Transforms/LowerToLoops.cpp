@@ -26989,7 +26989,26 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
     rewriter.setInsertionPoint(freeing.elseBlock()->getTerminator());
     callC("free", voidType, ValueRange{memory});
   }
-  Value status = arith::ConstantIntOp::create(rewriter, loc, 0, 32);
+  // The status the program ends with: what the console's `exit_status`
+  // said (devices/console.c), 0 where it is not linked in.
+  auto exitStatus =
+      weakDeclaration("ent_console_exit_code", rewriter.getI32Type(), {});
+  auto ending = scf::IfOp::create(rewriter, loc,
+                                  TypeRange{rewriter.getI32Type()},
+                                  linked(exitStatus), /*withElseRegion=*/true);
+  {
+    OpBuilder::InsertionGuard branch(rewriter);
+    rewriter.setInsertionPointToStart(ending.thenBlock());
+    scf::YieldOp::create(
+        rewriter, loc,
+        ValueRange{LLVM::CallOp::create(rewriter, loc, exitStatus, ValueRange{})
+                       .getResult()});
+    rewriter.setInsertionPointToStart(ending.elseBlock());
+    scf::YieldOp::create(
+        rewriter, loc,
+        ValueRange{arith::ConstantIntOp::create(rewriter, loc, 0, 32)});
+  }
+  Value status = ending.getResult(0);
   func::ReturnOp::create(rewriter, loc, ValueRange{status});
   // On many ranks, `main`: devices/ranks.c runs the program once for each
   // partition the process has (a thread each), MPI around them.

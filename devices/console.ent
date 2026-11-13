@@ -21,6 +21,19 @@ component Print { line: text } capacity 1024
 extern proc put(line: text)
 // Hands what was written on to whoever reads it.
 extern proc flush()
+// Writes one line to standard error (where messages go that are not the
+// program's output).
+extern proc put_error(line: text)
+
+// The words the program was started with, after its own name
+// (`program a b`: 2, "a", "b"); none past the last. (A program on a web
+// page has none.)
+extern proc argument_count() -> i32
+extern proc argument(n: i32) -> text
+
+// The status the program ends with, once `main` is done (0 where none is
+// given: all went well; a script or CI takes another as a failure).
+extern proc exit_status(code: i32)
 
 system write() {
   for p: Print { put(p.line) }

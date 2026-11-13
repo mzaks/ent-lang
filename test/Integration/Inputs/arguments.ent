@@ -1,0 +1,16 @@
+// The words a program is started with, and the status it ends with
+// (arguments.test).
+import console
+import text
+
+system go() {
+  let n = argument_count()
+  put("{n} words")
+  for i in 0..n { put("[{argument(i)}]") }
+  put("past the last: [{argument(n)}] [{argument(-1)}]")
+  put_error("to standard error")
+  if n > 0 { exit_status(number(argument(0)) as i32) }
+}
+
+schedule run() { go() }
+main { run() }

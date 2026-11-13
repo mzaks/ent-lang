@@ -39,7 +39,16 @@ ent.schedule @frame(%dt: f32) {
 // CHECK:        call @ent.main(%[[WORLD]])
 // CHECK:          llvm.call @ent_world_free(%[[MEMORY]])
 // CHECK:          llvm.call @free(%[[MEMORY]])
-// CHECK:        %[[STATUS:.*]] = arith.constant 0 : i32
+// The exit status: what the console device was told, where it is linked
+// in (a weak symbol), else 0.
+// CHECK:        %[[LINKED:.*]] = llvm.icmp "ne"
+// CHECK:        %[[STATUS:.*]] = scf.if %[[LINKED]] -> (i32) {
+// CHECK-NEXT:     %[[TOLD:.*]] = llvm.call @ent_console_exit_code() : () -> i32
+// CHECK-NEXT:     scf.yield %[[TOLD]] : i32
+// CHECK-NEXT:   } else {
+// CHECK-NEXT:     %[[ZERO:.*]] = arith.constant 0 : i32
+// CHECK-NEXT:     scf.yield %[[ZERO]] : i32
+// CHECK-NEXT:   }
 // CHECK-NEXT:   return %[[STATUS]] : i32
 
 // CHECK: func.func private @ent.main(%[[ARENA:.*]]: memref<[[BYTES]]xi8>) {

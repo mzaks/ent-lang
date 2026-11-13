@@ -1,0 +1,21 @@
+// A program's words (the console's argument_count and argument), the
+// status it ends with (exit_status, given back by main), and a line to
+// standard error (put_error).
+// RUN: %ent build %S/Inputs/arguments.ent -o %t.program
+// RUN: %t.program 2>/dev/null | FileCheck %s --check-prefix=NONE
+// RUN: %t.program 0 "two words" x 2>/dev/null | FileCheck %s
+// RUN: not %t.program 7 > %t.out 2>&1
+// RUN: FileCheck %s --check-prefix=FAILS --input-file=%t.out
+// RUN: sh -c '%t.program 7 2>/dev/null; test $? -eq 7'
+
+// NONE: 0 words
+// NONE-NEXT: past the last: [] []
+
+// CHECK: 3 words
+// CHECK-NEXT: [0]
+// CHECK-NEXT: [two words]
+// CHECK-NEXT: [x]
+// CHECK-NEXT: past the last: [] []
+
+// FAILS: 1 words
+// FAILS: to standard error
