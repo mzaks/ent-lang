@@ -87,7 +87,7 @@ with `ent-translate --import-ent`; the syntax is described in
 written that way (the integration tests run both forms and expect the same
 output; `examples/filters.ent`, for filters, `has` and `run_if`,
 `examples/snn*.ent`, for relations, and `examples/orrery.ent`,
-`examples/river.ent` and `examples/layout.ent`, for trees, exist only in
+`examples/river.ent` and `lib/layout.ent`, for trees, exist only in
 ent-lang):
 
 ```
@@ -302,13 +302,14 @@ come with the compiler, in `devices/`, and two more that need
   `tools/ent run examples/bounce.ent`; `examples/orrery.ent` has moons
   around planets around a sun, each placed from where the body it circles
   is; `examples/layout_demo.ent` is a window of boxes inside boxes, laid
-  out by the library `examples/layout.ent`, which sizes and places boxes
+  out by the library `lib/layout.ent` (the modules in `lib/` are found
+  without `-I`, as the devices are), which sizes and places boxes
   as Clay does (fixed, fit, grow and percent sizes with limits, padding,
   gaps, alignment, ratios, boxes that float, clip and scroll, boxes that
   are in a box but not in its row), for the window as big as it is, in
   reactive `for`s along a tree whose children are in an order, each
   running only where something it reads changed;
-  `examples/layout_window.ent` measures the texts, draws (rounded
+  `lib/layout_window.ent` measures the texts, draws (rounded
   corners, borders, pictures, colours that let what is under them show,
   a colour laid on a box and all that is in it), moves what scrolls with
   the wheel or the pointer, takes boxes from where and what they were to
@@ -320,14 +321,14 @@ come with the compiler, in `devices/`, and two more that need
   the program's for a box the program draws itself (`Custom`), lists
   the boxes in a panel (`Inspector`), and offers all the steps as one
   schedule, `ui`:
-  `tools/ent run -I examples examples/layout_demo.ent`;
+  `tools/ent run examples/layout_demo.ent`;
   `examples/clay` has three of Clay's own examples written with it: its
   video demo (documents picked from a list, a menu that drops down), its
   transitions (boxes that are shuffled, removed, added and given other
   colours, each on its way to where it now is) and its side bar with a
   container that scrolls (pictures, boxes that float, a list of a hundred
   texts, a bar that is dragged):
-  `tools/ent run -I examples examples/clay/video_demo.ent`; `examples/swarm/swarm.ent` is a shoot-'em-up on a field bigger than
+  `tools/ent run examples/clay/video_demo.ent`; `examples/swarm/swarm.ent` is a shoot-'em-up on a field bigger than
   the window with foes, shots and sparks in their hundreds of thousands
   (its B key fills the field to what it holds; `bench/swarm/run.py`
   plays it by itself and says how long a frame takes), all of them drawn
@@ -337,7 +338,7 @@ come with the compiler, in `devices/`, and two more that need
   library around a board that is drawn into the box between them; towers
   that look at the foes with a `for` inside their own, and send what
   they do to the one they pick; two maps, each one's road a table that
-  a fn gives as a value): `tools/ent run -I examples
+  a fn gives as a value): `tools/ent run
   examples/towers.ent`; `examples/snake.ent` is snake on a board as big as fits in the
   window, each piece of the snake an entity that stays for so many more
   steps; and `examples/pacman.ent` is a whole game: the maze is a text that fns read, the pellets and ghosts are

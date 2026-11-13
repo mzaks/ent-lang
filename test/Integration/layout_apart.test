@@ -3,7 +3,7 @@
 // need; it is so far from where what is in that box starts. The box
 // after it starts where it would have, also after two of them, and at
 // the start of the row.
-// RUN: %ent run -I %S/../../examples %S/Inputs/layout_apart.ent 2>/dev/null | FileCheck %s
+// RUN: %ent run %S/Inputs/layout_apart.ent 2>/dev/null | FileCheck %s
 
 // Four of 50 with gaps of 10 and 5 around them.
 // CHECK:      1: 9 at 0.0 0.0, 240.0 x 40.0

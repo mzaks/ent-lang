@@ -1,4 +1,4 @@
-// The sizes of examples/layout.ent: fixed, fit, grow and percent, limits,
+// The sizes of lib/layout.ent: fixed, fit, grow and percent, limits,
 // padding side by side, where the boxes stand in the room they leave, a
 // ratio, a box's own content, and a row whose boxes do not fit
 // (layout_sizes.test). In the second frame much of it changes.

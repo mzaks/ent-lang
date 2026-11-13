@@ -1,17 +1,17 @@
-// The sizes examples/layout.ent gives, as Clay does: fixed, as big as the
+// The sizes lib/layout.ent gives, as Clay does: fixed, as big as the
 // content, growing into the room that is left (the smallest first, each
 // to its most), a share of the box it is in; padding side by side; where
 // the boxes stand in the room they leave; a ratio of width to height; a
 // box's own content; and a row whose boxes do not fit, which shrink, the
 // largest first, each to its least.
-// RUN: %ent run -I %S/../../examples %S/Inputs/layout_sizes.ent 2>/dev/null > %t.out
+// RUN: %ent run %S/Inputs/layout_sizes.ent 2>/dev/null > %t.out
 // RUN: FileCheck %s --input-file=%t.out
 // What `layout` works out from what changed in the second frame is what
 // it works out from nothing: the same with the changes made before it
 // first runs.
 // RUN: sed 's/Frame == 2/Frame == 1/' %S/Inputs/layout_sizes.ent > %t.direct.ent
 // RUN: grep "^3:" %t.out > %t.late
-// RUN: %ent run -I %S/../../examples %t.direct.ent 2>/dev/null | grep "^3:" | cmp - %t.late
+// RUN: %ent run %t.direct.ent 2>/dev/null | grep "^3:" | cmp - %t.late
 
 // 570 wide inside the padding. A quarter of 600 less padding and gaps
 // (60) is 135; the column is 100 by its tight row, which may be 90; so

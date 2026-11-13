@@ -12,7 +12,8 @@
 //   schedule.
 //
 // Modules are found as `tools/ent` finds them: next to the importing file,
-// in the `-I` directories, and in the devices that come with the compiler.
+// in the `-I` directories, and in the devices and library modules that
+// come with the compiler.
 // An imported file is read as it is on disk.
 
 #include "Ent/Access.h"
@@ -683,16 +684,21 @@ int main(int argc, char **argv) {
   llvm::cl::ParseCommandLineOptions(argc, argv, "ent-lang language server\n");
   lsp::Logger::setLogLevel(logLevel);
 
-  // The devices that come with the compiler: next to the build directory
-  // (build/bin/ent-lsp and devices/), or where ENT_DEVICES says.
+  // The devices and the library modules that come with the compiler: next
+  // to the build directory (build/bin/ent-lsp, devices/ and lib/), or where
+  // ENT_DEVICES and ENT_LIB say.
   std::vector<std::string> directories;
-  if (const char *devices = std::getenv("ENT_DEVICES")) {
-    directories.push_back(devices);
-  } else {
+  for (auto [variable, folder] :
+       {std::pair<const char *, const char *>{"ENT_DEVICES", "devices"},
+        {"ENT_LIB", "lib"}}) {
+    if (const char *given = std::getenv(variable)) {
+      directories.push_back(given);
+      continue;
+    }
     SmallString<256> path(
         llvm::sys::fs::getMainExecutable(argv[0], (void *)&main));
     llvm::sys::path::remove_filename(path);
-    llvm::sys::path::append(path, "..", "..", "devices");
+    llvm::sys::path::append(path, "..", "..", folder);
     llvm::sys::path::remove_dots(path, /*remove_dot_dot=*/true);
     if (llvm::sys::fs::is_directory(path))
       directories.push_back(std::string(path));

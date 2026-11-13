@@ -1,5 +1,5 @@
-// A window laid out by examples/layout.ent and drawn by
-// examples/layout_window.ent: a bar at the side, and next to it a header,
+// A window laid out by lib/layout.ent and drawn by
+// lib/layout_window.ent: a bar at the side, and next to it a header,
 // three cards and a footer. Every box says how big it is to be (so many
 // pixels, what is inside it, the room there is, or a share of it) and
 // which box it is in; where it ends up is worked out every frame.

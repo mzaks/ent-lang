@@ -2,7 +2,7 @@
 // what is slow, what went wrong, and how many answers came each second.
 // It only reads the pipeline and the crawler (pipeline.ent, crawl.ent);
 // nothing of theirs waits for it, and they run the same without it.
-// Laid out by examples/layout.ent, drawn by examples/layout_window.ent;
+// Laid out by lib/layout.ent, drawn by lib/layout_window.ent;
 // crawl_window.ent is the program. A program runs `watch_setup` once,
 // `tally` every frame of the crawl (it keeps up with `History`), and,
 // between the window's `begin` and `present`, `look` (the texts, again

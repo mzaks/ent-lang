@@ -3,7 +3,7 @@
 // frame. Among many boxes, where the passes go only to what their events
 // lead to: that a box lost one is such an event, which what happens to
 // the tree after it must not wipe out.
-// RUN: %ent run -I %S/../../examples %S/Inputs/layout_leave.ent 2>/dev/null | FileCheck %s
+// RUN: %ent run %S/Inputs/layout_leave.ent 2>/dev/null | FileCheck %s
 
 // Four share the 290 of the row.
 // CHECK:      1: 7 at 10.0 wide 290.0

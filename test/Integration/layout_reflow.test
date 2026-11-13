@@ -5,7 +5,7 @@
 // its width: it does not set out again, for its own half second, each
 // time the text takes another line.)
 // RUN: sh %S/Inputs/headless.sh %t.dir
-// RUN: %ent run -I %t.dir -I %S/../../examples %S/Inputs/layout_reflow.ent \
+// RUN: %ent run -I %t.dir %S/Inputs/layout_reflow.ent \
 // RUN:     2>/dev/null | FileCheck %s
 
 // CHECK:      2: 320.0 x 32.0, to be 320.0 x 32.0

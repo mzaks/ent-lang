@@ -51,7 +51,7 @@ and `connections N` where the site is, then the program;
 `check/crawl.py --live` does that for every site of its checks.
 
 With a window (`crawl_window.ent`, the same crawl and report): build it
-with `-I examples -I examples/http`; `close_when_done 1` in live.conf
+with `-I examples/http`; `close_when_done 1` in live.conf
 closes it as the crawl ends, `screenshot shot.png` takes a picture then.
 
 For a public site (sites.md) `crawl.conf` also has `min_delay_ms` (the

@@ -1,4 +1,4 @@
-// examples/layout.ent in a window: what a box looks like and says, the
+// lib/layout.ent in a window: what a box looks like and says, the
 // measuring of texts, which only what draws them can do, and the
 // drawing; what moves by the wheel and the pointer, boxes that take
 // their time to get where they are to be (`Transition`), and a panel

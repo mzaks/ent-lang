@@ -2,7 +2,7 @@
 // are as big as they want (a row of them is not shrunk to fit, and one
 // across can be wider than the box), `Scroll` moves them, each shows only
 // within the box, and the pointer is over it only there.
-// RUN: %ent run -I %S/../../examples %S/Inputs/layout_clip.ent 2>/dev/null | FileCheck %s
+// RUN: %ent run %S/Inputs/layout_clip.ent 2>/dev/null | FileCheck %s
 
 // Five rows of 60 with gaps of 5 are 320 in a list that is 180 high: none
 // is made smaller. Each shows within the list's 100, the third being 150

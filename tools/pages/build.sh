@@ -21,7 +21,7 @@ out=$(cd "$out" && pwd)
 demos=(
   "pacman|examples/pacman.ent|--touch-keys arrows,Enter"
   "snake|examples/snake.ent|--touch-keys arrows,Space"
-  "towers|examples/towers.ent|-I examples --touch-keys Space"
+  "towers|examples/towers.ent|--touch-keys Space"
   "swarm|examples/swarm/swarm.ent|-I examples --touch-keys wasd,Enter,B"
   # (Room for the grids and searches of 8 vehicles, where the program
   # has it for 96: a web page's memory is at most 4 GB.)
@@ -30,10 +30,10 @@ demos=(
   "junctions|examples/traffic/junctions.ent|--touch-keys arrows,Space:hold,P:polite+,O:polite-,Q:NS+,A:NS-,W:EW+,S:EW-,1,2,3,4,5,6,7"
   "orrery|examples/orrery.ent|--touch-keys Space:hold"
   "bounce|examples/bounce.ent|--touch-keys Space:hold"
-  "layout|examples/layout_demo.ent|-I examples --touch-keys Space:stack,Enter:card,I:inspect,O:hide,Z:zoom"
-  "clay-sidebar|examples/clay/sidebar.ent|-I examples"
-  "clay-transitions|examples/clay/transitions.ent|-I examples"
-  "clay-video|examples/clay/video_demo.ent|-I examples"
+  "layout|examples/layout_demo.ent|--touch-keys Space:stack,Enter:card,I:inspect,O:hide,Z:zoom"
+  "clay-sidebar|examples/clay/sidebar.ent|"
+  "clay-transitions|examples/clay/transitions.ent|"
+  "clay-video|examples/clay/video_demo.ent|"
 )
 
 cd "$root"

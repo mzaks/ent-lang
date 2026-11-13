@@ -13,7 +13,7 @@
 // between the boxes in it, and says where they stand (`Align`); it can
 // keep a ratio of width to height (`Aspect`), float over another box
 // (`Float`, `Over`), and its own content can have a size (`Natural`: a
-// text, a picture), which examples/layout_window.ent measures, and draws.
+// text, a picture), which lib/layout_window.ent measures, and draws.
 
 // Where a box is and how big: what `layout` works out. Of a `Fixed` box
 // it takes the width or height from here.
@@ -50,7 +50,7 @@ component Aspect { ratio: f32 }
 // a picture. `min_w` is the least it can be made (the longest word of a
 // text that may go on in the next line); `h` may follow from the width
 // the box got, and is then set between `layout_widths` and
-// `layout_heights` (examples/layout_window.ent does, for texts).
+// `layout_heights` (lib/layout_window.ent does, for texts).
 component Natural { w: f32, min_w: f32, h: f32 }
 
 // A box that floats over another (`Over`): in nobody's row, and with all
@@ -82,13 +82,13 @@ tag Confined
 // What is inside a box is laid out as if the box were this wide and
 // high; for the box it is in, the box is as big as it is. (So a box can
 // be shown on its way from one size to another with what is in it as it
-// fits right then: examples/layout_window.ent does, for a `Transition`.)
+// fits right then: lib/layout_window.ent does, for a `Transition`.)
 component Inner { w: f32, h: f32 }
 // So much more on every side than its box, for what draws it and for the
 // pointer; the boxes inside it stay where they are.
 component Expand { w: f32, h: f32 }
 
-// The pointer, which a program sets (examples/layout_window.ent, from the
+// The pointer, which a program sets (lib/layout_window.ent, from the
 // mouse), and what `point` makes of it: the boxes it is over have
 // `Hovered`, and `Pressed` while it is down. Of the boxes it is over,
 // those in the topmost layer: what floats takes the pointer from what is
@@ -983,7 +983,7 @@ system point() {
 
 // All of it. (A program that has texts, whose heights follow from their
 // widths, runs the two halves with the measuring between them: as
-// examples/layout_window.ent does.)
+// lib/layout_window.ent does.)
 schedule layout() {
   layout_widths()
   layout_heights()

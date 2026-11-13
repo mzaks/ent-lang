@@ -1,6 +1,6 @@
 // Clay's "sidebar scrolling container" example
 // (examples/raylib-sidebar-scrolling-container/main.c in
-// github.com/nicbarker/clay), with examples/layout.ent: a side bar with a
+// github.com/nicbarker/clay), with lib/layout.ent: a side bar with a
 // picture, a text and four boxes; a header with three buttons; a box of
 // texts and pictures that scrolls, with a bar at its right that shows how
 // far, and takes it there when dragged; a box that floats at its top; and

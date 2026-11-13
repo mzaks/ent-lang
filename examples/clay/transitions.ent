@@ -1,5 +1,5 @@
 // Clay's transitions example (examples/raylib-transitions in
-// github.com/nicbarker/clay), with examples/layout.ent: thirty boxes in
+// github.com/nicbarker/clay), with lib/layout.ent: thirty boxes in
 // five rows of six, and four buttons. "Randomise" puts the boxes in
 // another order, "Blue" and "Pink" give them other colours, "Add Box"
 // adds one (while there are fewer than thirty), and a box that is

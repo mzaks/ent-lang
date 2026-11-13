@@ -1,4 +1,4 @@
-// A small window laid out by examples/layout.ent and printed
+// A small window laid out by lib/layout.ent and printed
 // (layout.test): a side bar of a fixed width, and next to it a header as
 // high as its two buttons need, a body with the room that is left, and
 // in the body two columns that share its width.

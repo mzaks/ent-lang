@@ -20,8 +20,8 @@ Three things, which the editors share:
   of a file, as the compiler does, and while a file does not parse it
   answers from the last version that did. An imported module is read as it
   is on disk. Modules are looked for next to the importing file, in the
-  directories given with `-I`, and in `devices/` (next to `build/`, or
-  where `ENT_DEVICES` says).
+  directories given with `-I`, in `devices/` and in `lib/` (next to
+  `build/`, or where `ENT_DEVICES` and `ENT_LIB` say).
 
 - `editors/tree-sitter-ent`, the grammar for tree-sitter with its queries
   (colours, outline, brackets, indentation), for Zed and the other editors

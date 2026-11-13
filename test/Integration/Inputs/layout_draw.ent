@@ -1,4 +1,4 @@
-// examples/layout_window.ent without a window: what it draws, frame by
+// lib/layout_window.ent without a window: what it draws, frame by
 // frame (layout_draw.test).
 import console
 import window

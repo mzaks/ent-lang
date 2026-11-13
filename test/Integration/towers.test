@@ -4,7 +4,7 @@
 // a `for` inside its own `for`. Running it needs a display, raylib and
 // sound, which a test cannot ask for: it compiles, and says what it reads.
 // RUN: ent-translate --import-ent %S/../../examples/towers.ent \
-// RUN:     -I %S/../../devices -I %S/../../examples -o %t.mlir
+// RUN:     -I %S/../../devices -I %S/../../lib -o %t.mlir
 // RUN: FileCheck %s --check-prefix=IR --input-file=%t.mlir
 // RUN: ent-opt %t.mlir --ent-lower-to-loops --cse --ent-lower-views \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \

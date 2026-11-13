@@ -2,7 +2,7 @@
 // box under to a point of their own, as big as that box or a share of it,
 // a layer above it or in one they ask for; and the pointer, which is over
 // the boxes of the topmost layer it is in, unless they let it through.
-// RUN: %ent run -I %S/../../examples %S/Inputs/layout_floats.ent 2>/dev/null | FileCheck %s
+// RUN: %ent run %S/Inputs/layout_floats.ent 2>/dev/null | FileCheck %s
 
 // The badge has its middle on the panel's bottom right corner, 3 to the
 // right. The veil is as big as the window, in the layer it asked for. The

@@ -360,7 +360,8 @@ def made_of(arguments, known={}):
         own = [os.environ.get("ENT_BIN"), os.path.join(ROOT, "build/bin")]
         translate = find_tool("ent-translate", [path for path in own if path])
         includes = [flag
-                    for path in arguments.I + [os.path.join(ROOT, "devices")]
+                    for path in arguments.I + [os.path.join(ROOT, "devices"),
+                                                os.path.join(ROOT, "lib")]
                     for flag in ("-I", path)]
         listed = subprocess.run(
             [translate, "--ent-to-sources", arguments.program] + includes,
@@ -478,7 +479,8 @@ def cache_key(arguments):
     note_file(os.path.join(ROOT, "devices", "memory.c"))
     note_file(os.path.join(ROOT, "devices", "edges.c"))
 
-    include_directories = arguments.I + [os.path.join(ROOT, "devices")]
+    include_directories = arguments.I + [os.path.join(ROOT, "devices"),
+                                         os.path.join(ROOT, "lib")]
     files, assets = made_of(arguments)
     directories = []
     for path in files:
@@ -1578,7 +1580,8 @@ def build(arguments, output, directory):
     optimise = find_tool("ent-opt", own)
     clang = find_tool("clang", llvm_directories())
 
-    include_directories = arguments.I + [os.path.join(ROOT, "devices")]
+    include_directories = arguments.I + [os.path.join(ROOT, "devices"),
+                                         os.path.join(ROOT, "lib")]
     program = arguments.program
     stem = os.path.splitext(os.path.basename(program))[0]
     # With --capacity, the program as it is with `capacity Name N` after

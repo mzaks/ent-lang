@@ -656,7 +656,7 @@ for (b: mut Box)-[Inside]->(outer: Box), optional (prev: Box)~[Inside]~>(b)
 }
 ```
 
-`examples/layout.ent` places boxes this way: each where the one before
+`lib/layout.ent` places boxes this way: each where the one before
 it in the same box ends, the first where the box they are in starts.
 
 - The children of an entity are ordered by the field, smallest first. A
@@ -863,7 +863,7 @@ thereby passed down: the next time it runs that is no event.
   other writes, in a `loop` until neither has anything to do
   (`loop { let a = for ... { }  let b = for ... { } } until a + b == 0`).
 - `changed` means changed: a write of the value a field has is no
-  event. So passes that feed each other (as in `examples/layout.ent`,
+  event. So passes that feed each other (as in `lib/layout.ent`,
   where sizes go up the tree and room comes down) settle by themselves,
   each running only as long as something still gets another value.
   (Compared where the field is written, and only for fields some `for`
@@ -891,7 +891,7 @@ thereby passed down: the next time it runs that is no event.
   them does, though, since it jumps where that reads on: once more than
   a node in a hundred or so is placed again, the `for` without `on` is
   the faster one, up to four times where most of the tree moves.
-  In `examples/layout.ent` every pass is such a `for`: with 90,000
+  In `lib/layout.ent` every pass is such a `for`: with 90,000
   boxes of which one is another height each frame, a frame takes 18 us,
   against 1,500 going through all of them (`bench/boxes`).
 - Over a `sorted` tree the events are followed by its rows where the
@@ -1086,7 +1086,7 @@ of a depth.
   that gives a value, of which only one branch is. So rounds end
   when no `for` has anything left to do,
   `loop { let placed = for ... { }  let floated = for ... { } } until
-  placed + floated == 0` (as `examples/layout.ent` places what floats,
+  placed + floated == 0` (as `lib/layout.ent` places what floats,
   however deep).
 
 ### Vars

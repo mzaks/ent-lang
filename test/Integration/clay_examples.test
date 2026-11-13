@@ -5,17 +5,17 @@
 // RUN: sh %S/Inputs/headless.sh %t.dir
 // RUN: sed 's/until Window.closed/until Window.frame > 2/' \
 // RUN:     %S/../../examples/clay/video_demo.ent > %t.video.ent
-// RUN: %ent run -I %t.dir -I %S/../../examples %t.video.ent 2>/dev/null \
+// RUN: %ent run -I %t.dir %t.video.ent 2>/dev/null \
 // RUN:   | FileCheck %s --check-prefix=VIDEO
 // RUN: sed 's/until Window.closed/until Window.frame > 2/' \
 // RUN:     %S/../../examples/clay/transitions.ent > %t.transitions.ent
-// RUN: %ent run -I %t.dir -I %S/../../examples %t.transitions.ent \
+// RUN: %ent run -I %t.dir %t.transitions.ent \
 // RUN:     2>/dev/null | FileCheck %s --check-prefix=MOVES
 // RUN: sed 's/until Window.closed/until Window.frame > 2/' \
 // RUN:     %S/../../examples/clay/sidebar.ent > %t.dir/sidebar.ent
 // (The picture it declares, next to it.)
 // RUN: cp %S/../../examples/clay/profile-picture.png %t.dir
-// RUN: %ent run -I %t.dir -I %S/../../examples %t.dir/sidebar.ent \
+// RUN: %ent run -I %t.dir %t.dir/sidebar.ent \
 // RUN:     2>/dev/null | FileCheck %s --check-prefix=SIDE
 
 // The bar with its buttons, the list of documents, and the first of them.

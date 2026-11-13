@@ -1,5 +1,5 @@
 // Clay's "video demo" (examples/shared-layouts/clay-video-demo.c in
-// github.com/nicbarker/clay), with examples/layout.ent: a header bar with
+// github.com/nicbarker/clay), with lib/layout.ent: a header bar with
 // buttons, of which "File" has a menu that drops down while the pointer
 // is on it; a side bar with five documents; and the one that is chosen,
 // in a box that scrolls. The sizes, paddings, gaps and colours are

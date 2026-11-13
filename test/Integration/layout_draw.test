@@ -1,4 +1,4 @@
-// examples/layout_window.ent without a window: a device that prints what
+// lib/layout_window.ent without a window: a device that prints what
 // would be drawn stands in for devices/window.c, which needs a display
 // and raylib. What is drawn, in which order, clipped, shifted and shaded
 // how; boxes on their way to another place, size, colour, corners and
@@ -7,7 +7,7 @@
 // overlays on
 // one another, what scrolls dragged and let go, and the inspector.
 // RUN: sh %S/Inputs/headless.sh %t.dir
-// RUN: %ent run -I %t.dir -I %S/../../examples %S/Inputs/layout_draw.ent \
+// RUN: %ent run -I %t.dir %S/Inputs/layout_draw.ent \
 // RUN:     2>/dev/null | FileCheck %s
 
 // Under half of black, the window and the list; what is in the list

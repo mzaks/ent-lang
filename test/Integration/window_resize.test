@@ -5,7 +5,7 @@
 // (it is "dragged" 100 wider and 60 higher in its third frame, and 1280
 // by 720 while it fills the screen, and as big as the program asks).
 // RUN: sh %S/Inputs/headless.sh %t.dir
-// RUN: %ent run -I %t.dir -I %S/../../examples %S/Inputs/window_resize.ent \
+// RUN: %ent run -I %t.dir %S/Inputs/window_resize.ent \
 // RUN:     2>/dev/null | FileCheck %s
 
 // As it was opened: 400 less the bar, the padding and the gap.

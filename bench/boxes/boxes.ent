@@ -1,8 +1,8 @@
-// Many boxes laid out by examples/layout.ent, and one of them another
+// Many boxes laid out by lib/layout.ent, and one of them another
 // height every frame: what a frame costs when little changes.
 //
 //   LLVM_PREFIX=... ENT_CFLAGS=-march=native \
-//     tools/ent run -I examples bench/boxes/boxes.ent
+//     tools/ent run bench/boxes/boxes.ent
 //
 // 300 columns of 300 boxes in a row (90,301 boxes). A column is as high as
 // its boxes; the change is in the middle of one, so the column and the
