@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 // (StringZilla, where it is found: searches and the bytes made lower case
 // by the processor's vector instructions, those the compiler is told of.)
 #if defined(__has_include)
@@ -694,6 +695,37 @@ ENT_TEXT_SAME_RESULT int64_t ent_text_number(const ent_text *text) {
 }
 
 // A code point as its UTF-8 bytes; none where it is no character.
+// (strftime of the local time; Windows has localtime_s for localtime_r.)
+ENT_TEXT_SAME_RESULT const ent_text *ent_text_date_text(double seconds,
+                                                        const ent_text *format) {
+  char pattern[256];
+  char out[512];
+  uint32_t length = format ? format->length : 0;
+  if (length == 0 || length >= sizeof pattern || !(seconds == seconds) ||
+      seconds < -1e15 || seconds > 1e15)
+    return 0;
+  memcpy(pattern, format->bytes, length);
+  pattern[length] = 0;
+  double whole = (double)(int64_t)seconds;
+  if (whole > seconds)
+    whole -= 1.0;
+  time_t when = (time_t)whole;
+  struct tm local;
+#ifdef _WIN32
+  if (localtime_s(&local, &when) != 0)
+    return 0;
+#else
+  if (!localtime_r(&when, &local))
+    return 0;
+#endif
+  size_t made = strftime(out, sizeof out, pattern, &local);
+  if (made == 0)
+    return 0;
+  ent_text *text = ent_text_new((uint32_t)made);
+  memcpy(text->bytes, out, made);
+  return text;
+}
+
 ENT_TEXT_SAME_RESULT const ent_text *ent_text_character(int32_t code) {
   if (code < 1 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF))
     return 0;

@@ -24,6 +24,11 @@ transient unique Epoch: f64
 // what it shows then.
 extern proc wait_until(due: f64) -> f64
 
+// The time of day: seconds since 1970-01-01 00:00 UTC, as the machine's
+// clock is set (it may go back where the clock is set back).
+// (`date_text`, of the module `text`, writes one as a date.)
+extern proc wall_time() -> f64
+
 system tick() {
   let first = Time.frame == 0
   // Frame n is due n periods after the first; no drift adds up.

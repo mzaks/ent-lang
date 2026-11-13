@@ -1,0 +1,26 @@
+// The time of day (wall_time.test): seconds since 1970 from the clock,
+// and a date in words by a strftime format, in the time zone TZ says.
+import console
+import clock
+import text
+
+fn full() -> text { "%Y-%m-%d %H:%M:%S" }
+
+system go() {
+  let now = wall_time()
+  // (After 2026-01-01 and before 2100.)
+  put("now plausible {now > 1767225600.0 && now < 4102444800.0}")
+  let start = date_text(0.0, full())
+  let later = date_text(1700000000.5, full() + " %a")
+  let before = date_text(-0.5, full())
+  let none = date_text(1700000000.0, "")
+  let year = date_text(now, "%Y")
+  put(start)
+  put(later)
+  put(before)
+  put("empty [{none}]")
+  put("year {len(year)}")
+}
+
+schedule run() { go() }
+main { run() }

@@ -1,0 +1,15 @@
+// The time of day: the clock's wall_time (seconds since 1970, UTC) and
+// the text module's date_text (a date by a strftime format, in the local
+// time zone; half a second before 1970 is still 1969).
+// RUN: env TZ=UTC %ent run %S/Inputs/wall_time.ent 2>/dev/null | FileCheck %s
+// RUN: env TZ=Asia/Tokyo %ent run %S/Inputs/wall_time.ent 2>/dev/null | FileCheck %s --check-prefix=TOKYO
+
+// CHECK: now plausible true
+// CHECK-NEXT: 1970-01-01 00:00:00
+// CHECK-NEXT: 2023-11-14 22:13:20 Tue
+// CHECK-NEXT: 1969-12-31 23:59:59
+// CHECK-NEXT: empty []
+// CHECK-NEXT: year 4
+
+// TOKYO: 1970-01-01 09:00:00
+// TOKYO-NEXT: 2023-11-15 07:13:20 Wed

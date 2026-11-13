@@ -6,6 +6,8 @@
 
 #include "ent_extern.h"
 
+#include <time.h>
+
 #ifdef _WIN32
 // (On Windows: the performance counter, and Sleep with the system's timer
 // at 1 ms, as raylib sets it too; a wait under a millisecond is not slept.)
@@ -55,3 +57,11 @@ double ent_clock_wait_until(double due) {
   return seconds;
 }
 #endif
+
+double ent_clock_wall_time(void) {
+  struct timespec now;
+  if (timespec_get(&now, TIME_UTC) != TIME_UTC)
+    return (double)time(NULL);
+  return (double)now.tv_sec + (double)now.tv_nsec * 1e-9;
+}
+

@@ -35,3 +35,9 @@ extern fn number(t: text) -> i64
 // four); none where `code` is no character (below 1, past 0x10FFFF, or
 // one of the halves 0xD800 to 0xDFFF that only UTF-16 has).
 extern fn character(code: i32) -> text
+// A time of day (seconds since 1970-01-01 00:00 UTC, as the clock's
+// `wall_time` gives it) as a date and time in words, in the machine's own
+// time zone, by C's strftime `format` ("%Y-%m-%d %H:%M:%S", say); none
+// where the format makes nothing or the time is not one (on Windows, one
+// before 1970).
+extern fn date_text(seconds: f64, format: text) -> text
