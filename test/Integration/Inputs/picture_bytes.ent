@@ -1,0 +1,37 @@
+// Pictures from their bytes (devices/window.ent: `picture_from`,
+// `picture_width`, `picture_height`, `picture_free`), without opening
+// the window: a .png and a .jpg written by the pictures device, read
+// back as bytes.
+import console
+import files
+import pictures
+import window
+
+capacity Pixmap 16
+
+system go() {
+  Pixmap = []
+  Pixmap += { color: 0xff0000 }
+  Pixmap += { color: 0x00ff00 }
+  Pixmap += { color: 0x0000ff }
+  Pixmap += { color: 0xffffff }
+  Pixmap += { color: 0x000000 }
+  Pixmap += { color: 0x808080 }
+  let png = write_png("picture_bytes.png", Pixmap, 3, 2)
+  let jpg = write_jpg("picture_bytes.jpg", Pixmap, 3, 2, 90)
+  let a = picture_from(read_text("picture_bytes.png"))
+  let b = picture_from(read_text("picture_bytes.jpg"))
+  put("written {png} {jpg}; png {a}: {picture_width(a)} x {picture_height(a)}, jpg {b}: {picture_width(b)} x {picture_height(b)}")
+  let none = picture_from("not a picture at all")
+  let empty = picture_from("")
+  put("no picture: {none} {empty}")
+  picture_free(a)
+  picture_free(a)
+  put("let go: {picture_width(a)} x {picture_height(a)}")
+  let c = picture_from(read_text("picture_bytes.png"))
+  let d = picture_from(read_text("picture_bytes.png"))
+  put("again: {c} {d}, {picture_width(c)} x {picture_height(c)}, ratio {picture_ratio(d)}")
+}
+
+schedule run() { go() }
+main { run() }

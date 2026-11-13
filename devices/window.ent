@@ -233,6 +233,17 @@ extern proc picture_load(file: text[126]) -> i32
 extern proc picture(image: i32, x: f32, y: f32, width: f32, height: f32,
                     tint: i32)
 extern proc picture_ratio(image: i32) -> f32
+// A picture from its bytes, as a file has them (.png, .jpg, .gif, .bmp
+// and the others `picture_load` reads; the kind is told by how they
+// start): its number, 0 if they are no picture. How many pixels wide and
+// high one is (0 for none). And `picture_free` lets one go: its memory
+// and the graphics card's are given back, and the number to the next
+// picture read (a program that shows pictures as they come, one after
+// another, lets each go when it is no longer shown).
+extern proc picture_from(bytes: text) -> i32
+extern proc picture_width(image: i32) -> i32
+extern proc picture_height(image: i32) -> i32
+extern proc picture_free(image: i32)
 // A part of a picture into a rectangle: the part by its top left corner
 // and its size, in the picture's own pixels (a sheet of many little
 // pictures is read once, and each drawn so). The picture may be far

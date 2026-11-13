@@ -17,6 +17,14 @@
 __declspec(dllimport) void __stdcall Sleep(unsigned long milliseconds);
 #elif !defined(__EMSCRIPTEN__)
 #include <time.h>
+// Pictures are read with a copy of stb_image of the window's own (static:
+// raylib has stb_image's functions too, built without .jpg).
+#define STB_IMAGE_STATIC
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_NO_HDR
+#define STBI_NO_PIC
+#define STBI_NO_PNM
+#include "stb_image.h"
 #endif
 
 // 0xRRGGBB, opaque; or 0xAARRGGBB, so much of it (AA from 01, nearly
@@ -1341,20 +1349,87 @@ struct ent_window_sheet {
 static struct ent_window_sheet ent_window_pictures[ENT_WINDOW_PICTURES];
 static Image ent_window_images[ENT_WINDOW_PICTURES];
 static int ent_window_picture_count = 1;
+// The numbers of pictures let go (`picture_free`), given again first.
+static int32_t ent_window_picture_let_go[ENT_WINDOW_PICTURES];
+static int ent_window_picture_let_gone = 0;
+
+// A number for a picture read: one let go, or the next; 0 where there is
+// none left.
+static int32_t ent_window_picture_keep(Image image) {
+  if (!image.data)
+    return 0;
+  int32_t number;
+  if (ent_window_picture_let_gone > 0)
+    number = ent_window_picture_let_go[--ent_window_picture_let_gone];
+  else if (ent_window_picture_count < ENT_WINDOW_PICTURES)
+    number = ent_window_picture_count++;
+  else {
+    UnloadImage(image);
+    return 0;
+  }
+  ent_window_images[number] = image;
+  ent_window_pictures[number].strips = 0;
+  return number;
+}
+
+// A picture from bytes as a file has them (.png, .jpg, .gif's first
+// picture, .bmp, .tga, .psd): stb_image tells the kind by how they start.
+static Image ent_window_picture_read(const unsigned char *bytes, size_t size) {
+  int width = 0, height = 0, channels = 0;
+  if (size == 0 || size > 0x7fffffff)
+    return (Image){0};
+  unsigned char *pixels = stbi_load_from_memory(bytes, (int)size, &width,
+                                                &height, &channels, 4);
+  if (!pixels)
+    return (Image){0};
+  // (stb_image's memory is malloc's, which UnloadImage gives back.)
+  return (Image){.data = pixels, .width = width, .height = height,
+                 .mipmaps = 1, .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+}
 
 int32_t ent_window_picture_load(const ent_text126 *file) {
   ENT_WINDOW_TEXT(named, file);
-  const char *kind = GetFileExtension(named);
   struct ent_file held;
-  if (ent_window_picture_count >= ENT_WINDOW_PICTURES || !kind ||
-      !ent_file_open(named, &held))
+  if (!ent_file_open(named, &held))
     return 0;
-  Image image = LoadImageFromMemory(kind, held.bytes, (int)held.size);
+  Image image = ent_window_picture_read((const unsigned char *)held.bytes,
+                                        (size_t)held.size);
+  // (Kinds stb_image does not read, and raylib does: .qoi, .dds.)
+  const char *kind = GetFileExtension(named);
+  if (!image.data && kind)
+    image = LoadImageFromMemory(kind, (const unsigned char *)held.bytes,
+                                (int)held.size);
   ent_file_close(&held);
-  if (!image.data)
+  return ent_window_picture_keep(image);
+}
+
+// A picture from its bytes (as an answer over the network brings them).
+int32_t ent_window_picture_from(const ent_text *bytes) {
+  if (!bytes)
     return 0;
-  ent_window_images[ent_window_picture_count] = image;
-  return ent_window_picture_count++;
+  return ent_window_picture_keep(ent_window_picture_read(
+      (const unsigned char *)bytes->bytes, bytes->length));
+}
+
+// A picture let go: its memory, and the graphics card's, given back, and
+// its number given to the next picture read. Drawing it after draws
+// nothing (until the number is given again).
+void ent_window_picture_free(int32_t image) {
+  if (image <= 0 || image >= ent_window_picture_count)
+    return;
+  for (int i = 0; i < ent_window_picture_let_gone; i++)
+    if (ent_window_picture_let_go[i] == image)
+      return;
+  struct ent_window_sheet *sheet = &ent_window_pictures[image];
+  for (int i = 0; i < sheet->strips; i++)
+    if (sheet->strip[i].id)
+      UnloadTexture(sheet->strip[i]);
+  sheet->strips = 0;
+  sheet->width = sheet->height = 0;
+  if (ent_window_images[image].data)
+    UnloadImage(ent_window_images[image]);
+  ent_window_images[image] = (Image){0};
+  ent_window_picture_let_go[ent_window_picture_let_gone++] = image;
 }
 
 // The picture as the screen has it: given to it now, if it was not.
@@ -1457,6 +1532,20 @@ void ent_window_draw_pixels(int32_t count, const int32_t *color, int32_t width,
   UpdateTexture(texture, pixels);
   DrawTexturePro(texture, (Rectangle){0, 0, (float)width, (float)height},
                  (Rectangle){x, y, w, h}, (Vector2){0, 0}, 0, WHITE);
+}
+
+// How many pixels wide and high a picture is (0 for none).
+int32_t ent_window_picture_width(int32_t image) {
+  if (image <= 0 || image >= ent_window_picture_count)
+    return 0;
+  return ent_window_images[image].data ? ent_window_images[image].width
+                                       : ent_window_pictures[image].width;
+}
+int32_t ent_window_picture_height(int32_t image) {
+  if (image <= 0 || image >= ent_window_picture_count)
+    return 0;
+  return ent_window_images[image].data ? ent_window_images[image].height
+                                       : ent_window_pictures[image].height;
 }
 
 float ent_window_picture_ratio(int32_t image) {
