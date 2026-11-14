@@ -1359,11 +1359,12 @@ component is removed or its entity destroyed.
 - A `var` of it grows as it is joined to (`var all = ""`, then
   `all += line + "\n"` in a loop): it holds what joining made, kept as
   that is, till the schedule is done. Where nothing else has its old
-  text (no other name, no fn it was given to; read before is fine) it
-  grows where it is, given room twice its length when it is copied, so
-  a text made of n pieces costs time and memory in proportion to its
-  length, not n copies of it; otherwise each `+=` is a copy of all it
-  has. A field that is given it takes its copy.
+  text (no other name, no fn it was given to unless as `mut text`, see
+  Fns; read before is fine) it grows where it is, given room twice its
+  length when it is copied (from 256 bytes on), so a text made of n
+  pieces costs time and memory in proportion to its length, not n
+  copies of it; otherwise each `+=` is a copy of all it has. A field
+  that is given it takes its copy.
 - In the C header such a column is an array of `const ent_text *` (none:
   no bytes), which C reads and leaves to the program to change.
 - The module `text` keeps the bytes (`devices/text.ent`, with its C): a
@@ -1591,6 +1592,43 @@ stands between it and its body may call it. The body follows further
 down in the same file, once, with the same parameters and result; a fn
 or proc that is said and never given one is an error. (`extern` is
 another thing: that one's body is in C.)
+
+### A var's text to add to
+
+```
+import text
+
+proc tree(out: mut text, depth: i32) {
+  out += "("
+  if depth > 0 {
+    tree(out, depth - 1)
+    out += " "
+    tree(out, depth - 1)
+  }
+  out += ")"
+}
+
+system show() {
+  var all = ""
+  tree(all, 3)
+  put(all)
+}
+```
+
+A fn or proc may be given a var's text (one of any length) to add to,
+`out: mut text`. In its body the parameter is a var; what it holds at
+the end, the var it was given holds after the call. So a text made by
+many calls, a recursion that writes JSON or a tree, is one text that
+grows where it is (see Text of any length), not a text each call makes
+and its caller copies into its own.
+
+- The argument is a `var` of text, by its name, and not one from outside
+  a `for` over entities. One var is given to one such parameter of a
+  call.
+- What was read of the var before the call stays as it was, and so does
+  a text the fn also gives as its value: where something may still have
+  the text, the call is given a copy.
+- Not to C (`extern`), and not through a value of a fn or proc.
 
 ### Fns and procs as values
 

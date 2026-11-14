@@ -301,6 +301,11 @@ struct Function {
   /// For each parameter: the component it is given, or nothing. (Such a
   /// parameter is of the type of a buffer's, by the component's name.)
   SmallVector<std::string> components;
+  /// The parameters that are a var's text to add to (`out: mut text`), by
+  /// their numbers: each is a var in the body, and what it holds at the
+  /// end is given back after the values the function gives, which the
+  /// call puts in the var it was given (ent.handed on the op).
+  SmallVector<int32_t> handed;
   /// Said, with its body yet to come (`proc name(..)` with none): its op,
   /// and where it was said, until the body is there.
   Operation *later = nullptr;
@@ -2750,6 +2755,10 @@ FailureOr<mlir::Value> Parser::emitFunctionValue(const Expr &expr,
     return error(expr.loc, "'" + expr.name + "' is a " +
                                (function.proc ? "proc" : "fn") + ", and a " +
                                kind + " is expected here");
+  if (!function.handed.empty())
+    return error(expr.loc, "'" + expr.name + "' adds to a var's text it is "
+                           "given ('mut text'), which a call through a " +
+                               kind + " value cannot give it");
   if (TypeRange(function.params) != TypeRange(callable.params) ||
       function.results.size() != (callable.result ? 1u : 0u) ||
       (callable.result && function.result != callable.result))
@@ -7068,9 +7077,18 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
         return error(typeAt, "a fn only computes: it reads rows it is "
                              "given, and a proc may change them ('mut')");
       *type = RowsType::get(context, rows.getName(), changed);
+    } else if (changed && isa<StringType>(*type)) {
+      if (isExtern)
+        return error(typeAt, "a var's text is given to add to ('mut text') "
+                             "to a fn or proc of the program, not to C");
+      function.handed.push_back(function.params.size());
+    } else if (changed && isa<TextType>(*type)) {
+      return error(typeAt, "a var's text is given to add to as one of any "
+                           "length ('mut text', with 'import text')");
     } else if (changed) {
       return error(typeAt, "'mut' is of a buffer a proc is given to "
-                           "change; a value is its own");
+                           "change, or of a var's text ('mut text'); a "
+                           "value is its own");
     } else if (isExtern && isa<IndexOfType>(*type)) {
       return error(typeAt, "C is given numbers: an i32 for a row number "
                            "('as i32')");
@@ -7135,7 +7153,8 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
     Function &before = said->second;
     if (before.proc != proc || before.params != function.params ||
         before.results != function.results ||
-        before.components != function.components) {
+        before.components != function.components ||
+        before.handed != function.handed) {
       emitError(loc(at)) << "'" << *name << "' was said to take and give "
                             "otherwise where it was said without its body";
       emitError(loc(before.laterAt)) << "said here";
@@ -7149,9 +7168,16 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
       return error(at, "'" + *name + "' was said before, without its body: "
                        "what follows is its body, once");
     StringAttr symbolName = declareSymbol(at, *name);
+    // (A var's text it is given comes back after what it gives.)
+    SmallVector<Type> gives(function.results);
+    for (size_t i = 0; i < function.handed.size(); ++i)
+      gives.push_back(StringType::get(context));
     op = FunctionOp::create(builder, loc(at), symbolName,
                             builder.getTypeArrayAttr(function.params),
-                            builder.getTypeArrayAttr(function.results), proc);
+                            builder.getTypeArrayAttr(gives), proc);
+    if (!function.handed.empty())
+      op->setAttr("ent.handed",
+                  builder.getDenseI32ArrayAttr(function.handed));
     if (later) {
       function.later = op;
       function.laterAt = at;
@@ -7162,6 +7188,7 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
   SmallVector<Type> results = function.results;
   SmallVector<Type> params = function.params;
   SmallVector<std::string> given = function.components;
+  SmallVector<int32_t> handed = function.handed;
   if (!defines)
     functions[*name] = std::move(function);
   if (isExtern || later)
@@ -7172,8 +7199,13 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
   OpBuilder::InsertionGuard guard(builder);
   builder.setInsertionPointToEnd(block);
   ScopeGuard scope(*this);
-  for (auto [param, type] : llvm::zip(names, params)) {
+  unsigned paramScope = scopes.size() - 1;
+  for (auto [number, param, type] : llvm::enumerate(names, params)) {
     mlir::Value arg = block->addArgument(type, loc(at));
+    if (llvm::is_contained(handed, (int32_t)number)) {
+      bind(param, Variable::ofVar(arg));
+      continue;
+    }
     // (Rows it is given: a window of them, from 0.)
     if (auto rows = dyn_cast<RowsType>(type)) {
       Variable window{Variable::Window,
@@ -7189,6 +7221,13 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
     }
     bind(param, Variable::ofValue(arg));
   }
+  // What the vars of the texts it was given hold at the end.
+  auto handedTexts = [&] {
+    SmallVector<mlir::Value> texts;
+    for (int32_t number : handed)
+      texts.push_back(scopes[paramScope][names[number]].value);
+    return texts;
+  };
   givenComponents.clear();
   for (auto [param, component] : llvm::zip(names, given))
     if (!component.empty())
@@ -7208,7 +7247,7 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
       consumeIf(Token::Semicolon);
     }
     advance();
-    YieldOp::create(builder, loc(at), ValueRange());
+    YieldOp::create(builder, loc(at), handedTexts());
     return success();
   }
   // Statements, then the value the fn gives.
@@ -7273,6 +7312,7 @@ LogicalResult Parser::parseFunction(bool proc, bool isExtern) {
     return error("expected '}' after the fn's value, found '" +
                  token.spelling + "'");
   advance();
+  values.append(handedTexts());
   YieldOp::create(builder, loc(at), values);
   return success();
 }
@@ -14161,8 +14201,34 @@ FailureOr<SmallVector<mlir::Value>> Parser::emitCall(const Expr &expr) {
                                " argument(s), not " +
                                Twine(expr.operands.size()));
   SmallVector<mlir::Value> args;
+  // (The vars whose texts it is given to add to, by their scopes.)
+  SmallVector<std::pair<unsigned, std::string>> handedVars;
   for (auto [number, operand, type] :
        llvm::enumerate(expr.operands, function.params)) {
+    // A var's text to add to: the var, by its name; it holds what the
+    // call gives back for it.
+    if (llvm::is_contained(function.handed, (int32_t)number)) {
+      const Variable *var =
+          operand->kind == Expr::Name ? lookup(operand->name) : nullptr;
+      if (!var || !var->isVar || !isa<StringType>(var->value.getType()))
+        return error(operand->loc, "'" + expr.name + "' adds to the text of "
+                                   "a var it is given here ('mut text'): "
+                                   "name a 'var' of text");
+      unsigned scope = scopes.size();
+      while (!scopes[--scope].count(operand->name))
+        ;
+      if (inQuery && scope < queryScopes)
+        return error(operand->loc,
+                     "'" + operand->name + "' is a var from outside the "
+                     "'for': every entity would add to it");
+      for (auto &[otherScope, other] : handedVars)
+        if (other == operand->name && otherScope == scope)
+          return error(operand->loc, "'" + operand->name + "' is given "
+                                     "twice to add to");
+      handedVars.push_back({scope, operand->name});
+      args.push_back(var->value);
+      continue;
+    }
     // The entities that have a component are given by its name, or
     // passed on by the name they were given under.
     if (const std::string &component = function.components[number];
@@ -14253,10 +14319,16 @@ FailureOr<SmallVector<mlir::Value>> Parser::emitCall(const Expr &expr) {
                                  "parameter");
     args.push_back(*arg);
   }
+  SmallVector<Type> results(function.results);
+  for (size_t i = 0; i < handedVars.size(); ++i)
+    results.push_back(StringType::get(context));
   auto invoke = InvokeOp::create(
-      builder, loc(expr.loc), function.results, symbol(expr.name), args,
+      builder, loc(expr.loc), results, symbol(expr.name), args,
       function.proc ? builder.getUnitAttr() : UnitAttr());
-  return SmallVector<mlir::Value>(invoke.getResults());
+  size_t gives = function.results.size();
+  for (auto [i, var] : llvm::enumerate(handedVars))
+    scopes[var.first][var.second].value = invoke->getResult(gives + i);
+  return SmallVector<mlir::Value>(invoke.getResults().take_front(gives));
 }
 
 /// Emit an expression that is several values, as many as `expected` has

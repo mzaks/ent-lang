@@ -1,0 +1,23 @@
+// A var's text given to a fn or proc to add to (`out: mut text`): the
+// var holds what it added, through recursion too; what was read of it
+// before stays as it was, and so does a text the function also gives as
+// its value; a function may give the var another text. Given over and
+// over, it grows where it is (run with its memory limited to 1 GB:
+// copied at each call, the large one would take some 70 GB).
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: %ent build %S/Inputs/text_handed.ent -o %t/text_handed
+// RUN: %ent build --parallel %S/Inputs/text_handed.ent -o %t/text_handed_parallel
+// RUN: env ENT_TEXT_REPORT=1 %python %S/Inputs/run_limited.py 1024 %t/text_handed > %t/out 2> %t/err
+// RUN: FileCheck %s --input-file=%t/out
+// RUN: FileCheck %s --check-prefix=HELD --input-file=%t/err
+// RUN: %t/text_handed_parallel | cmp - %t/out
+
+// CHECK:      (((x) (x) (x)) ((x) (x) (x)) ((x) (x) (x))) 13
+// CHECK-NEXT: abcbc 4
+// CHECK-NEXT: k k11 2
+// CHECK-NEXT: b! b!?
+// CHECK-NEXT: new 0
+// CHECK-NEXT: [<0><0><1><1><2><2>]
+// CHECK-NEXT: 1377782 [<0><0><1><1 999><99999>]
+// HELD:       texts held: 0
+// HELD-NEXT:  texts kept: 0

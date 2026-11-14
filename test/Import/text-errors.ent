@@ -88,3 +88,63 @@ system s() {
 import text
 // expected-error @+1 {{an edge does not hold a text of any length yet ('note'): give it a capacity ('text[N]')}}
 relation Link { note: text } capacity 8
+
+// -----
+
+// A var's text to add to ('mut text') is given by the var's name.
+import text
+proc add(out: mut text) { out += "!" }
+system s() {
+  let fixed = "a"
+  // expected-error @+1 {{'add' adds to the text of a var it is given here ('mut text'): name a 'var' of text}}
+  add(fixed)
+}
+
+// -----
+
+// Not the same var twice.
+import text
+proc both(a: mut text, b: mut text) { a += b }
+system s() {
+  var out = "a"
+  // expected-error @+1 {{'out' is given twice to add to}}
+  both(out, out)
+}
+
+// -----
+
+// Of any length, and not to C.
+import text
+// expected-error @+1 {{a var's text is given to add to as one of any length ('mut text', with 'import text')}}
+proc add(out: mut text[8]) { }
+
+// -----
+
+import text
+// expected-error @+1 {{a var's text is given to add to ('mut text') to a fn or proc of the program, not to C}}
+extern proc add(out: mut text)
+
+// -----
+
+// Not a var from outside a 'for' over entities.
+import text
+component Label { name: text }
+proc add(out: mut text, t: text) { out += t }
+system s() {
+  var all = ""
+  for l: Label {
+    // expected-error @+1 {{'all' is a var from outside the 'for': every entity would add to it}}
+    add(all, l.name)
+  }
+}
+
+// -----
+
+// Not through a value of a proc.
+import text
+component Doer { act: proc(i32) }
+proc add(out: mut text) { out += "!" }
+system s() {
+  // expected-error @+1 {{'add' adds to a var's text it is given ('mut text'), which a call through a proc value cannot give it}}
+  spawn { Doer { act: add } }
+}

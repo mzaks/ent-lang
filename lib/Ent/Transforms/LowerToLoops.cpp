@@ -24330,6 +24330,14 @@ declareFunction(IRRewriter &rewriter, FunctionOp function,
   auto func = func::FuncOp::create(rewriter, function.getLoc(), name,
                                    rewriter.getFunctionType(inputs, results));
   func.setPrivate();
+  // (A var's text it is given to add to, and that text given back: its
+  // own, see handOverTexts.)
+  if (auto handed = function->getAttrOfType<DenseI32ArrayAttr>("ent.handed"))
+    for (auto [j, i] : llvm::enumerate(handed.asArrayRef())) {
+      func.setArgAttr(i, "ent.owned", rewriter.getUnitAttr());
+      func.setResultAttr(results.size() - handed.size() + j, "ent.owned",
+                         rewriter.getUnitAttr());
+    }
   if (!defined)
     return success();
   rewriter.inlineRegionBefore(function.getBody(), func.getBody(),
@@ -25994,6 +26002,48 @@ struct TextAppends {
     return false;
   }
 
+  /// Whether `value`'s other uses only read it.
+  static bool onlyRead(Value value, Operation *passedBack) {
+    return llvm::all_of(value.getUses(), [&](OpOperand &use) {
+      return reads(use.getOwner()) || use.getOwner() == passedBack;
+    });
+  }
+
+  /// Whether a loop that takes the text as its operand `operand` (a var
+  /// it carries) only reads it and passes it on as it is, and gives it
+  /// to nothing after: as a read.
+  static bool passesThrough(Operation *loop, unsigned operand) {
+    if (auto forOp = dyn_cast<scf::ForOp>(loop)) {
+      unsigned first = forOp.getNumControlOperands();
+      if (operand < first)
+        return false;
+      unsigned i = operand - first;
+      auto yield = cast<scf::YieldOp>(forOp.getBody()->getTerminator());
+      BlockArgument carried = forOp.getRegionIterArg(i);
+      return yield.getOperand(i) == carried && onlyRead(carried, yield) &&
+             forOp.getResult(i).use_empty();
+    }
+    if (auto whileOp = dyn_cast<scf::WhileOp>(loop)) {
+      BlockArgument before = whileOp.getBeforeArguments()[operand];
+      scf::ConditionOp condition = whileOp.getConditionOp();
+      // (Passed to the after region and to the results at one place.)
+      std::optional<unsigned> at;
+      for (auto [j, arg] : llvm::enumerate(condition.getArgs()))
+        if (arg == before) {
+          if (at)
+            return false;
+          at = j;
+        }
+      if (!at || !onlyRead(before, condition) ||
+          !whileOp.getResult(*at).use_empty())
+        return false;
+      BlockArgument after = whileOp.getAfterArguments()[*at];
+      scf::YieldOp yield = whileOp.getYieldOp();
+      return yield.getOperand(operand) == after && onlyRead(after, yield);
+    }
+    return false;
+  }
+
   /// Whether `consumer` is the only one to take `value`.
   static bool sole(Value value, Operation *consumer) {
     unsigned taken = 0;
@@ -26004,8 +26054,8 @@ struct TextAppends {
           return false;
         continue;
       }
-      if (!(reads(user) && before(user, consumer)) &&
-          !exclusive(user, consumer))
+      bool read = reads(user) || passesThrough(user, use.getOperandNumber());
+      if (!(read && before(user, consumer)) && !exclusive(user, consumer))
         return false;
     }
     return taken == 1;
@@ -26043,6 +26093,20 @@ struct TextAppends {
       if (isa<TextJoinOp, TextKeepOp, TextConstantOp>(def))
         return true;
       unsigned i = cast<OpResult>(value).getResultNumber();
+      // (What a call gives back of a var's text it was given: its own.)
+      if (auto invoke = dyn_cast<InvokeOp>(def)) {
+        auto function = SymbolTable::lookupNearestSymbolFrom<FunctionOp>(
+            invoke, invoke.getCalleeAttr());
+        auto handed = function ? function->getAttrOfType<DenseI32ArrayAttr>(
+                                     "ent.handed")
+                               : DenseI32ArrayAttr();
+        return handed && i >= invoke.getNumResults() - handed.size();
+      }
+      if (auto call = dyn_cast<func::CallOp>(def)) {
+        auto func = SymbolTable::lookupNearestSymbolFrom<func::FuncOp>(
+            call, call.getCalleeAttr());
+        return func && func.getResultAttr(i, "ent.owned");
+      }
       if (auto loop = dyn_cast<scf::ForOp>(def)) {
         auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
         return flows(loop.getInitArgs()[i], loop) &&
@@ -26064,6 +26128,14 @@ struct TextAppends {
     Block *block = argument.getOwner();
     Operation *parent = block->getParentOp();
     unsigned i = argument.getArgNumber();
+    // (A var's text a function is given: the caller hands it over.)
+    if (auto function = dyn_cast_or_null<FunctionOp>(parent)) {
+      auto handed = function->getAttrOfType<DenseI32ArrayAttr>("ent.handed");
+      return block->isEntryBlock() && handed &&
+             llvm::is_contained(handed.asArrayRef(), (int32_t)i);
+    }
+    if (auto func = dyn_cast_or_null<func::FuncOp>(parent))
+      return block->isEntryBlock() && func.getArgAttr(i, "ent.owned");
     if (auto loop = dyn_cast_or_null<scf::ForOp>(parent)) {
       if (i < 1 || block != loop.getBody())
         return false;
@@ -26104,6 +26176,49 @@ struct TextAppends {
   }
 };
 } // namespace
+
+/// A var's text that a function is given to add to (`out: mut text`,
+/// ent.handed) is handed over: the function may add to it where it is,
+/// and the call gives it back as the function's own. So where a call
+/// gives one that something else may still have (it is read after the
+/// call, say), or a function gives one back that something else may have
+/// (it also gives it as its value), a copy is given (`ent.text.keep`).
+/// Before functions are lowered, while they have their bodies.
+static void handOverTexts(IRRewriter &rewriter, ModuleOp module) {
+  TextAppends appends;
+  auto handOver = [&](Operation *consumer, unsigned operand) {
+    Value text = consumer->getOperand(operand);
+    if (appends.flows(text, consumer))
+      return;
+    rewriter.setInsertionPoint(consumer);
+    consumer->setOperand(
+        operand,
+        TextKeepOp::create(rewriter, consumer->getLoc(), text.getType(), text)
+            .getResult());
+  };
+  for (FunctionOp function : module.getOps<FunctionOp>()) {
+    auto handed = function->getAttrOfType<DenseI32ArrayAttr>("ent.handed");
+    if (!handed || !function.isDefined())
+      continue;
+    function.walk([&](YieldOp yield) {
+      if (yield->getParentOp() != function)
+        return;
+      unsigned first = yield->getNumOperands() - handed.size();
+      for (unsigned i = first; i < yield->getNumOperands(); ++i)
+        handOver(yield, i);
+    });
+  }
+  module.walk([&](InvokeOp invoke) {
+    auto function = SymbolTable::lookupNearestSymbolFrom<FunctionOp>(
+        invoke, invoke.getCalleeAttr());
+    auto handed = function ? function->getAttrOfType<DenseI32ArrayAttr>(
+                                 "ent.handed")
+                           : DenseI32ArrayAttr();
+    if (handed)
+      for (int32_t i : handed.asArrayRef())
+        handOver(invoke, i);
+  });
+}
 
 /// Lower the ops on texts of any length: to their blocks, and to calls
 /// of the functions that keep them.
@@ -29267,6 +29382,7 @@ struct EntLowerToLoops
     for (FunctionOp function : module.getOps<FunctionOp>())
       onlyRowsChanged[function.getSymName()] = changesOnlyRows(
           function, FlatSymbolRefAttr::get(function.getSymNameAttr()));
+    handOverTexts(rewriter, module);
     for (FunctionOp function : module.getOps<FunctionOp>()) {
       if (function.isDefined())
         defined.insert(function);
@@ -29664,6 +29780,13 @@ struct EntLowerToLoops
         return signalPassFailure();
     emitPendingFunction(rewriter, module, *layout);
     lowerTexts(rewriter, module, symbols, scheduleFuncs);
+    // (What handOverTexts said of a function's texts, read by now.)
+    module.walk([&](func::FuncOp func) {
+      for (unsigned i = 0; i < func.getNumArguments(); ++i)
+        func.removeArgAttr(i, "ent.owned");
+      for (unsigned i = 0; i < func.getNumResults(); ++i)
+        func.removeResultAttr(i, rewriter.getStringAttr("ent.owned"));
+    });
 
     for (Operation &op : llvm::make_early_inc_range(module.getOps()))
       if (isa<ComponentOp, ResourceOp, ArchetypeOp, RelationOp, ExternOp,

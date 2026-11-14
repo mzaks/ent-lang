@@ -7,7 +7,7 @@ fn plot(screen: mut Screen, at: i32) -> i32 { at }
 // -----
 
 buffer Screen { pixel: u8 } capacity 8
-// expected-error @+1 {{'mut' is of a buffer a proc is given to change; a value is its own}}
+// expected-error @+1 {{'mut' is of a buffer a proc is given to change, or of a var's text ('mut text'); a value is its own}}
 proc plot(at: mut i32) { }
 
 // -----

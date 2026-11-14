@@ -278,6 +278,7 @@ typedef struct ent_text_arena {
   ent_text *last;              // (the block cut last from `chunk`, or none)
   ent_text_grown *grown;
   size_t grown_slots, grown_count; // (slots: 0 or a power of two)
+  int grown_shift;                 // (64 less the bits of a slot's number)
 } ent_text_arena;
 static ent_text_arena *ent_text_arenas;
 static __thread ent_text_arena *ent_text_mine;
@@ -460,9 +461,10 @@ uint64_t ent_text_join_own(uint64_t a, uint64_t b) {
 // would go.
 static ent_text_grown *ent_text_grown_slot(ent_text_arena *arena,
                                            const ent_text *text) {
+  // (Fibonacci hashing: the high bits of the address times 2^64 / phi.)
   size_t mask = arena->grown_slots - 1;
-  size_t i = (size_t)(((uintptr_t)text >> 3) * 0x9E3779B97F4A7C15ull >> 20) &
-             mask;
+  size_t i = (size_t)(((uint64_t)(uintptr_t)text * 0x9E3779B97F4A7C15ull) >>
+                      arena->grown_shift);
   while (arena->grown[i].text && arena->grown[i].text != text)
     i = (i + 1) & mask;
   return &arena->grown[i];
@@ -481,6 +483,7 @@ static void ent_text_grown_add(ent_text_arena *arena, ent_text_grown grown) {
     ent_text_grown *old = arena->grown;
     size_t slots = arena->grown_slots;
     arena->grown_slots = slots ? slots * 2 : 64;
+    arena->grown_shift = 64 - __builtin_ctzll(arena->grown_slots);
     arena->grown = calloc(arena->grown_slots, sizeof(ent_text_grown));
     if (!arena->grown)
       abort();
@@ -542,6 +545,8 @@ uint64_t ent_text_extend(uint64_t a, uint64_t b) {
   return ent_text_join(a, b);
 }
 
+enum { ent_text_short = 256 };
+
 // `a` with the bytes of `b` after them, where the compiler knows that
 // nothing has `a` any more (it is the old value of a var that is added
 // to, `out = out + b`): `a` itself where it can grow, so that a text
@@ -549,8 +554,9 @@ uint64_t ent_text_extend(uint64_t a, uint64_t b) {
 // till the schedule is done). It grows where it is the block cut last
 // from the arena (into the room after it), and where it was given room
 // when it was copied; otherwise it is copied to a block of twice the
-// bytes, which is given that room. A copy that was a block of its own
-// (a large one) is given back at once.
+// bytes, which is given that room (one shorter than ent_text_short as it
+// is). A copy that was a block of its own (a large one) is given back at
+// once.
 uint64_t ent_text_append(uint64_t a, uint64_t b) {
   if (ent_partitions_here() > 1)
     return ent_text_join(a, b);
@@ -569,7 +575,10 @@ uint64_t ent_text_append(uint64_t a, uint64_t b) {
     left->bytes[length] = 0;
     return a;
   }
-  size_t room = (size_t)length * 2;
+  // (A short text is copied as it is, given no room and not kept in the
+  // table: copying it again costs at most so many bytes, and texts that
+  // are joined to once, as most are, cost no more than a join.)
+  size_t room = length < ent_text_short ? length : (size_t)length * 2;
   if (room > UINT32_MAX)
     room = length;
   ent_text *both = ent_text_cut_room(length, room);
@@ -590,7 +599,8 @@ uint64_t ent_text_append(uint64_t a, uint64_t b) {
         }
     ent_text_grown_remove(arena, grown);
   }
-  ent_text_grown_add(arena, now);
+  if (room > length)
+    ent_text_grown_add(arena, now);
   return (uint64_t)(uintptr_t)both;
 }
 

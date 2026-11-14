@@ -1,0 +1,90 @@
+// A var's text given to a fn or proc to add to (`out: mut text`): the
+// var holds what it added after the call, and grows where it is through
+// calls, recursion too (text_handed.test).
+import console
+import text
+
+unique Out: text
+buffer Depth { d: i32 } capacity 1
+
+// A tree as text, `out` passed down: "(" its children ")".
+proc tree(out: mut text, depth: i32, wide: i32, c: mut Depth) {
+  c[0].d += 1
+  out += "("
+  if depth > 0 {
+    for i in 0..wide {
+      if i > 0 { out += " " }
+      tree(out, depth - 1, wide, c)
+    }
+  } else {
+    out += "x"
+  }
+  out += ")"
+}
+
+// Adds and gives a value too: the count of what it added.
+fn add_twice(out: mut text, piece: text) -> i32 {
+  out = out + piece
+  out += piece
+  2 * len(piece)
+}
+
+// Gives the text it was given as its value too: two that may not be one.
+fn and_back(out: mut text) -> text {
+  out += "!"
+  out
+}
+
+// Gives another text in its place.
+fn replaced(out: mut text) -> i32 {
+  out = "new"
+  0
+}
+
+// Many pieces through a call each: one text that grows.
+fn many(n: i32) -> text {
+  var out = "["
+  for i in 0..n {
+    let added = add_twice(out, "<{i}>")
+    if added < 0 { out += "?" }
+  }
+  out + "]"
+}
+
+system go() {
+  var t = ""
+  tree(t, 2, 3, Depth)
+  put("{t} {Depth[0].d}")
+
+  var s = "a"
+  let n = add_twice(s, "bc")
+  put("{s} {n}")
+
+  // Read after the call: what it was before stays as it was.
+  var k = "k"
+  let before = k
+  let added = add_twice(k, "1")
+  put("{before} {k} {added}")
+
+  var b = "b"
+  let back = and_back(b)
+  b += "?"
+  put("{back} {b}")
+
+  var r = "old"
+  let z = replaced(r)
+  put("{r} {z}")
+
+  put(many(3))
+  Out = many(100000)
+  put("{len(Out)} {slice(Out, 0, 12)} {slice(Out, len(Out) - 12, len(Out))}")
+}
+
+system start() { Depth += { d: 0 } }
+
+schedule boot() { start() }
+schedule run() { go() }
+main {
+  boot()
+  run()
+}
