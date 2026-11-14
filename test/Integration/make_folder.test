@@ -1,0 +1,11 @@
+// `make_folder` makes a folder and those it is in, for a path of any
+// length (here 12 levels, over 126 bytes); true where it is there then,
+// false under a file or for no name.
+// RUN: rm -rf %t.d && mkdir -p %t.d
+// RUN: %ent run %S/Inputs/make_folder.ent -- %t.d | FileCheck %s
+
+// CHECK:      length over 126: true
+// CHECK-NEXT: made: true true
+// CHECK-NEXT: again: true
+// CHECK-NEXT: under a file: true false
+// CHECK-NEXT: empty name: false

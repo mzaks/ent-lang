@@ -1604,6 +1604,11 @@ void ent_window_grab_mouse(bool grab) {
     EnableCursor();
 }
 
+// The paths of all the files dropped when take_dropped last found some,
+// a line each (dropped_paths).
+static char *ent_window_dropped_all;
+static size_t ent_window_dropped_length;
+
 // The last of the files dropped on the window since it was last asked.
 int32_t ent_window_take_dropped(int32_t *count, int32_t capacity,
                                 uint8_t *value) {
@@ -1619,9 +1624,34 @@ int32_t ent_window_take_dropped(int32_t *count, int32_t capacity,
     int32_t kept = length < capacity ? length : capacity;
     memcpy(value, path, (size_t)kept);
     *count = kept;
+    size_t all = 0;
+    for (unsigned i = 0; i < dropped.count; i++)
+      all += strlen(dropped.paths[i]) + 1;
+    char *joined = malloc(all);
+    if (joined) {
+      size_t at = 0;
+      for (unsigned i = 0; i < dropped.count; i++) {
+        size_t m = strlen(dropped.paths[i]);
+        memcpy(joined + at, dropped.paths[i], m);
+        joined[at + m] = '\n';
+        at += m + 1;
+      }
+      free(ent_window_dropped_all);
+      ent_window_dropped_all = joined;
+      ent_window_dropped_length = all;
+    }
   }
   UnloadDroppedFiles(dropped);
   return length;
+}
+
+const ent_text *ent_window_dropped_paths(void) {
+  size_t length = ent_window_dropped_length;
+  if (!length || length > UINT32_MAX)
+    return NULL;
+  ent_text *text = ent_text_new((uint32_t)length);
+  memcpy(text->bytes, ent_window_dropped_all, length);
+  return text;
 }
 
 // The rectangle drawing is clipped to, if any: set again only where it

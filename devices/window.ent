@@ -304,6 +304,10 @@ extern proc grab_mouse(grab: bool)
 // many bytes long it is (more than `into` holds where it did not fit);
 // 0 where none was.
 extern proc take_dropped(into: mut Dropped) -> i32
+// The paths of all the files dropped when `dropped` last said some were
+// (several may be dropped at once), a line each, every byte as it is;
+// none before any was.
+extern proc dropped_paths() -> text
 // The characters typed since it was last asked, into `into`: how many
 // (more than `into` holds where they did not fit).
 extern proc take_typed(into: mut Typed) -> i32

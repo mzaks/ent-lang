@@ -56,7 +56,7 @@ extern proc read_bytes(name: text[126], into: mut Bytes, first: i32, count: i32)
 // Makes the folder `name` (where the program was started, or where a
 // whole path says), and those it is in that are not there; true where it
 // is there then, made or not.
-extern proc make_folder(name: text[126]) -> bool
+extern proc make_folder(name: text) -> bool
 // The names of what is in a folder, into `into` in place of what that
 // had: each followed by "\n", in the order of their bytes; names that
 // start with a "." are left out. How many there are (those that did not

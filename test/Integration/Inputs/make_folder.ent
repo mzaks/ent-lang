@@ -1,0 +1,27 @@
+// Folders made with a path longer than 126 bytes, those on the way too
+// (devices/files.ent: `make_folder`). In the folder given as the first
+// word; with none (as parallel_same.test runs it) nothing is made.
+import console
+import text
+import files
+
+system make() {
+  if argument_count() > 0 {
+    let base = argument(0)
+    var deep = base
+    for i in 0..12 { deep = deep + "/folder-number-{i}" }
+    put("length over 126: {len(deep) > 126}")
+    let made = make_folder(deep)
+    put("made: {made} {is_folder(deep)}")
+    let again = make_folder(deep)
+    put("again: {again}")
+    let file = write_text(deep + "/f.txt", "x")
+    let blocked = make_folder(deep + "/f.txt/under")
+    put("under a file: {file} {blocked}")
+    let none = make_folder("")
+    put("empty name: {none}")
+  } else { put("no folder given") }
+}
+
+schedule go() { make() }
+main { go() }

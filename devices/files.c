@@ -125,11 +125,9 @@ static bool ent_files_one_folder(const char *path) {
   return false;
 }
 
-bool ent_files_make_folder(const ent_text126 *name) {
-  char path[127];
-  memcpy(path, name->bytes, name->length);
-  path[name->length] = 0;
-  if (path[0] == 0)
+bool ent_files_make_folder(const ent_text *name) {
+  char path[4096];
+  if (!ent_files_path(name, path, sizeof path) || path[0] == 0)
     return false;
   // (Each folder on the way, then the folder itself.)
   for (char *at = path + 1; *at; at++) {
