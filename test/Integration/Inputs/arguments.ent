@@ -1,4 +1,5 @@
-// The words a program is started with, and the status it ends with
+// The words a program is started with, a variable of its environment,
+// and the status it ends with
 // (arguments.test).
 import console
 import text
@@ -8,6 +9,10 @@ system go() {
   put("{n} words")
   for i in 0..n { put("[{argument(i)}]") }
   put("past the last: [{argument(n)}] [{argument(-1)}]")
+  let word = environment_variable("ENT_TEST_WORD")
+  let none = environment_variable("ENT_TEST_NONE")
+  let no_name = environment_variable("")
+  put("variable: [{word}] [{none}] [{no_name}]")
   put_error("to standard error")
   if n > 0 { exit_status(number(argument(0)) as i32) }
 }

@@ -392,11 +392,25 @@ int64_t ent_sends_slice_value(int64_t world, int64_t number, int64_t slice) {
 // in case it no longer does. It is timed until ent_sends_chosen.
 // ENT_COMBINE, where the program runs, says `groups` or `one` instead.
 static int ent_sends_forced = -2;
+#ifdef _WIN32
+// (On Windows the performance counter: MinGW has clock_gettime only in
+// winpthreads, which a program is not linked with.)
+#include <windows.h>
+static int64_t ent_sends_clock(void) {
+  static LARGE_INTEGER rate;
+  LARGE_INTEGER now;
+  if (!rate.QuadPart)
+    QueryPerformanceFrequency(&rate);
+  QueryPerformanceCounter(&now);
+  return (int64_t)((double)now.QuadPart * 1e9 / (double)rate.QuadPart);
+}
+#else
 static int64_t ent_sends_clock(void) {
   struct timespec now;
   clock_gettime(CLOCK_MONOTONIC, &now);
   return (int64_t)now.tv_sec * 1000000000 + now.tv_nsec;
 }
+#endif
 int64_t ent_sends_choose(int64_t world, int64_t number, int64_t count,
                          int64_t least, int64_t guess) {
   ent_send_lists *lists = __atomic_load_n(&ent_sends[number], __ATOMIC_ACQUIRE);

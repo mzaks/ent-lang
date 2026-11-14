@@ -31,6 +31,11 @@ extern proc put_error(line: text)
 extern proc argument_count() -> i32
 extern proc argument(n: i32) -> text
 
+// The value of a variable of the program's environment (`HOME`, or one a
+// script or CI sets: `TOKEN=... program`); none where it has none. (A
+// program on a web page has none.)
+extern proc environment_variable(name: text) -> text
+
 // The status the program ends with, once `main` is done (0 where none is
 // given: all went well; a script or CI takes another as a failure).
 extern proc exit_status(code: i32)

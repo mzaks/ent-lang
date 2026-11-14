@@ -5,6 +5,7 @@
 #include "ent_extern.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 // Where it writes: standard output, or where devices/ranks.c says a
@@ -69,6 +70,27 @@ const ent_text *ent_console_argument(int32_t n) {
   ent_text *made = ent_text_new((uint32_t)length);
   memcpy(made->bytes, word, length);
   return made;
+}
+
+const ent_text *ent_console_environment_variable(const ent_text *name) {
+#if defined(__EMSCRIPTEN__)
+  (void)name;
+  return 0;
+#else
+  uint32_t n = name ? name->length : 0;
+  if (n == 0 || n > 4096 || memchr(name->bytes, 0, n))
+    return 0;
+  char key[4097];
+  memcpy(key, name->bytes, n);
+  key[n] = 0;
+  const char *value = getenv(key);
+  size_t length = value ? strlen(value) : 0;
+  if (length == 0 || length > UINT32_MAX)
+    return 0;
+  ent_text *made = ent_text_new((uint32_t)length);
+  memcpy(made->bytes, value, length);
+  return made;
+#endif
 }
 
 // The status `main` gives back (the program asks for it at its end).

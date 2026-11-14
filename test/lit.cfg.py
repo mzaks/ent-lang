@@ -20,6 +20,12 @@ llvm_config.with_environment("PATH", config.llvm_tools_dir, append_path=True)
 # (see below), and their builds must find cuda.h there, not in /opt/cuda;
 # on a machine with CUDA in /usr/local/cuda gpu.test failed.)
 llvm_config.with_system_environment(["ENT_WORLD_DIR", "CUDA_PATH"])
+# The machine's keyring, only where asked for (ENT_TEST_KEYRING=1): a test
+# should neither write to the user's keyring nor ask to unlock it.
+if os.environ.get("ENT_TEST_KEYRING") == "1":
+    config.available_features.add("keyring")
+    llvm_config.with_system_environment(
+        ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"])
 llvm_config.add_tool_substitutions(
     ["ent-opt", "ent-translate", "ent-lsp"], [config.ent_tools_dir]
 )
