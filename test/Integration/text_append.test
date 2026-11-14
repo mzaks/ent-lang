@@ -1,0 +1,25 @@
+// A var that is added to grows where it is (ent_text_append), where
+// nothing else has its old text: in a `for` and a `while`, in the
+// branches of an `if` with the text read before, past a block of its own.
+// Where something has the old text it stays as it was: kept under another
+// name, a fn's argument, what a call gives back, a text joined outside a
+// loop and added to in it. Nothing is held or kept at the end.
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: %ent build %S/Inputs/text_append.ent -o %t/text_append
+// RUN: %ent build --parallel %S/Inputs/text_append.ent -o %t/text_append_parallel
+// (At most 1 GB: each copy kept, the large text would take terabytes.)
+// RUN: env ENT_TEXT_REPORT=1 %python %S/Inputs/run_limited.py 1024 %t/text_append > %t/out 2> %t/err
+// RUN: FileCheck %s --input-file=%t/out
+// RUN: FileCheck %s --check-prefix=HELD --input-file=%t/err
+// RUN: %t/text_append_parallel | cmp - %t/out
+
+// CHECK:      kept ab<1> s ab<1>cdef
+// CHECK-NEXT: base q<2> q<2>x q<2>x
+// CHECK-NEXT: base q<2> back q<2> more q<2>!
+// CHECK-NEXT: head h<3> all h<3><0> h<3><1> h<3><2> {{$}}
+// CHECK-NEXT: before g<0><1><2><3><4> g g<0><1><2><3><4>+++ g<0><1><2><3><4>+++A g<0><1><2><3><4>+++B
+// CHECK-NEXT: a<1>;<2>;<3>;<4>
+// CHECK-NEXT: [<0>,<1>,<2>,<0><1><2>]
+// CHECK-NEXT: 3177782 [<0>,<1>,<2> 98><199999>]
+// HELD:       texts held: 0
+// HELD-NEXT:  texts kept: 0

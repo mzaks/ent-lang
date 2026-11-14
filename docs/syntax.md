@@ -1358,8 +1358,12 @@ component is removed or its entity destroyed.
   text[N]` is a copy; so is what is joined, `"" + t`.)
 - A `var` of it grows as it is joined to (`var all = ""`, then
   `all += line + "\n"` in a loop): it holds what joining made, kept as
-  that is, till the schedule is done; each `+=` is a copy of all it has.
-  A field that is given it takes its copy.
+  that is, till the schedule is done. Where nothing else has its old
+  text (no other name, no fn it was given to; read before is fine) it
+  grows where it is, given room twice its length when it is copied, so
+  a text made of n pieces costs time and memory in proportion to its
+  length, not n copies of it; otherwise each `+=` is a copy of all it
+  has. A field that is given it takes its copy.
 - In the C header such a column is an array of `const ent_text *` (none:
   no bytes), which C reads and leaves to the program to change.
 - The module `text` keeps the bytes (`devices/text.ent`, with its C): a

@@ -1,0 +1,82 @@
+// A var that is added to grows where it is, where nothing else has its
+// old text; where something has, that text stays as it was
+// (text_append.test).
+import console
+import text
+
+unique Out: text
+
+fn piece(i: i32) -> text { "<{i}>" }
+fn same(t: text) -> text { t }
+fn with_x(t: text) -> text { t + "x" }
+
+// Many pieces, in a `for` and in a `while`: one text that grows.
+fn many(n: i32) -> text {
+  var out = "["
+  for i in 0..n { out = out + piece(i) + "," }
+  var j = 0
+  while j < n {
+    out += piece(j)
+    j += 1
+  }
+  out + "]"
+}
+
+// In the branches of an `if`, the old text read before.
+fn branches(n: i32) -> text {
+  var out = ""
+  var first = true
+  for i in 0..n {
+    if len(out) > 0 && out[len(out) - 1] == '>' { out += ";" }
+    if first { out = out + "a" } else { out = out + piece(i) }
+    first = false
+  }
+  out
+}
+
+system go() {
+  // The old text kept under another name: it stays as it was.
+  var s = "ab" + piece(1)
+  let kept = s
+  s = s + "cd"
+  s = s + "ef"
+  put("kept {kept} s {s}")
+
+  // A fn's argument and what a call gives back: another has them.
+  let base = "q" + piece(2)
+  let one = with_x(base)
+  let two = with_x(base)
+  put("base {base} {one} {two}")
+  let back = same(base)
+  let more = back + "!"
+  put("base {base} back {back} more {more}")
+
+  // Joined outside a loop, added to in it: a copy each turn.
+  let head = "h" + piece(3)
+  var all = ""
+  for i in 0..3 {
+    let t = head + piece(i)
+    all = all + t + " "
+  }
+  put("head {head} all {all}")
+
+  // A var copied before it grows on, and joined twice in a row.
+  var g = "g"
+  for i in 0..5 { g = g + piece(i) }
+  let before = g
+  for i in 0..3 { g = g + "+" }
+  let ab = g + "A"
+  let cd = g + "B"
+  put("before {before} g {g} {ab} {cd}")
+
+  put(branches(5))
+  let m = many(3)
+  put(m)
+
+  // Large: past a block of its own (1 MB), a field keeps a copy.
+  Out = many(200000)
+  put("{len(Out)} {slice(Out, 0, 12)} {slice(Out, len(Out) - 12, len(Out))}")
+}
+
+schedule run() { go() }
+main { run() }

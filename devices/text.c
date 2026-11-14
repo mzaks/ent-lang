@@ -260,12 +260,24 @@ typedef struct ent_text_chunk {
   size_t room;
   char bytes[];
 } ent_text_chunk;
+// (A text that is added to, `ent_text_append`, is given room to grow
+// into where it was copied to: the texts that have it are in `grown`,
+// an open-addressed table by their address, with how many bytes they
+// may hold; given back with the arena.)
+typedef struct {
+  ent_text *text;
+  uint32_t room; // (bytes, not counting the 0 after them)
+  uint32_t big;  // (1: its block is a chunk of `big` of its own)
+} ent_text_grown;
 typedef struct ent_text_arena {
   ent_text_chunk *chunk; // (the newest; the older ones after it)
   size_t used;
   ent_text_chunk *big; // (one a block)
   long count;
   struct ent_text_arena *next; // (every thread's)
+  ent_text *last;              // (the block cut last from `chunk`, or none)
+  ent_text_grown *grown;
+  size_t grown_slots, grown_count; // (slots: 0 or a power of two)
 } ent_text_arena;
 static ent_text_arena *ent_text_arenas;
 static __thread ent_text_arena *ent_text_mine;
@@ -283,7 +295,7 @@ static ent_text_chunk *ent_text_chunk_new(size_t room, ent_text_chunk *next) {
   return chunk;
 }
 
-static ent_text *ent_text_cut_out(uint32_t length) {
+static ent_text_arena *ent_text_arena_mine(void) {
   ent_text_arena *arena = ent_text_mine;
   if (!arena) {
     arena = calloc(1, sizeof(ent_text_arena));
@@ -296,9 +308,19 @@ static ent_text *ent_text_cut_out(uint32_t length) {
     ent_text_mine = arena;
     ent_text_count(0); // (said at the end where asked)
   }
+  return arena;
+}
+
+// (The length, the bytes and a 0, 8-byte aligned.)
+static size_t ent_text_size(size_t length) {
+  return (sizeof(uint32_t) + length + 1 + 7) & ~(size_t)7;
+}
+
+// A block for `length` bytes, with room for `room` (no fewer).
+static ent_text *ent_text_cut_room(uint32_t length, size_t room) {
+  ent_text_arena *arena = ent_text_arena_mine();
   ++arena->count;
-  // (The length, the bytes and a 0, 8-byte aligned.)
-  size_t size = (sizeof(uint32_t) + (size_t)length + 1 + 7) & ~(size_t)7;
+  size_t size = ent_text_size(room);
   if (size > ent_text_most_chunk / 4) {
     arena->big = ent_text_chunk_new(size, arena->big);
     ent_text *text = (ent_text *)arena->big->bytes;
@@ -317,9 +339,14 @@ static ent_text *ent_text_cut_out(uint32_t length) {
   }
   ent_text *text = (ent_text *)(arena->chunk->bytes + arena->used);
   arena->used += size;
+  arena->last = text;
   text->length = length;
   text->bytes[length] = 0;
   return text;
+}
+
+static ent_text *ent_text_cut_out(uint32_t length) {
+  return ent_text_cut_room(length, length);
 }
 
 static void ent_text_chunks_free(ent_text_chunk *chunk) {
@@ -346,6 +373,11 @@ static void ent_text_arenas_reset(void) {
     arena->big = 0;
     arena->used = 0;
     arena->count = 0;
+    arena->last = 0;
+    if (arena->grown_count) {
+      memset(arena->grown, 0, arena->grown_slots * sizeof(ent_text_grown));
+      arena->grown_count = 0;
+    }
   }
 }
 
@@ -391,6 +423,10 @@ static void ent_text_free(ent_text_made *made) {
 // Any thread may make one.
 ent_text *ent_text_new(uint32_t length) { return ent_text_make(length); }
 
+uint64_t ent_text_join(uint64_t a, uint64_t b);
+static uint64_t ent_text_extend_last(ent_text_arena *arena, ent_text *left,
+                                     const ent_text *right);
+
 // The bytes of `a` and then those of `b`.
 uint64_t ent_text_join(uint64_t a, uint64_t b) {
   const ent_text *left = ent_text_of(a), *right = ent_text_of(b);
@@ -418,6 +454,144 @@ uint64_t ent_text_join_own(uint64_t a, uint64_t b) {
   held->bytes[length] = 0;
   ent_text_count(1);
   return (uint64_t)(uintptr_t)held;
+}
+
+// The slot of `text` in the table of grown texts, or of none where it
+// would go.
+static ent_text_grown *ent_text_grown_slot(ent_text_arena *arena,
+                                           const ent_text *text) {
+  size_t mask = arena->grown_slots - 1;
+  size_t i = (size_t)(((uintptr_t)text >> 3) * 0x9E3779B97F4A7C15ull >> 20) &
+             mask;
+  while (arena->grown[i].text && arena->grown[i].text != text)
+    i = (i + 1) & mask;
+  return &arena->grown[i];
+}
+
+static ent_text_grown *ent_text_grown_find(ent_text_arena *arena,
+                                           const ent_text *text) {
+  if (!arena->grown_count)
+    return 0;
+  ent_text_grown *slot = ent_text_grown_slot(arena, text);
+  return slot->text ? slot : 0;
+}
+
+static void ent_text_grown_add(ent_text_arena *arena, ent_text_grown grown) {
+  if ((arena->grown_count + 1) * 2 > arena->grown_slots) {
+    ent_text_grown *old = arena->grown;
+    size_t slots = arena->grown_slots;
+    arena->grown_slots = slots ? slots * 2 : 64;
+    arena->grown = calloc(arena->grown_slots, sizeof(ent_text_grown));
+    if (!arena->grown)
+      abort();
+    for (size_t i = 0; i < slots; ++i)
+      if (old[i].text)
+        *ent_text_grown_slot(arena, old[i].text) = old[i];
+    free(old);
+  }
+  *ent_text_grown_slot(arena, grown.text) = grown;
+  ++arena->grown_count;
+}
+
+// (Taken out, the ones after it in its run moved back to where they
+// would be found.)
+static void ent_text_grown_remove(ent_text_arena *arena,
+                                  ent_text_grown *slot) {
+  size_t mask = arena->grown_slots - 1;
+  size_t i = (size_t)(slot - arena->grown);
+  arena->grown[i].text = 0;
+  --arena->grown_count;
+  for (size_t j = (i + 1) & mask; arena->grown[j].text; j = (j + 1) & mask) {
+    ent_text_grown moved = arena->grown[j];
+    arena->grown[j].text = 0;
+    *ent_text_grown_slot(arena, moved.text) = moved;
+  }
+}
+
+// Where `left` is the block cut last from the arena: `right`'s bytes
+// put after its own, in the arena's room after it (where it was given
+// room already, that is not taken back); 0 where there is none.
+static uint64_t ent_text_extend_last(ent_text_arena *arena, ent_text *left,
+                                     const ent_text *right) {
+  if (left != arena->last || !arena->chunk)
+    return 0;
+  uint32_t length = left->length + right->length;
+  size_t end = (size_t)((char *)left - arena->chunk->bytes) +
+               ent_text_size(length);
+  if (end > arena->chunk->room)
+    return 0;
+  if (end > arena->used)
+    arena->used = end;
+  memcpy(left->bytes + left->length, right->bytes, right->length);
+  left->length = length;
+  left->bytes[length] = 0;
+  return 1;
+}
+
+// `a` with the bytes of `b` after them, where nothing has `a` any more
+// and it was joined just before (`x + y + z`, joined to again): `a`
+// itself where it is the block cut last, as a join otherwise.
+uint64_t ent_text_extend(uint64_t a, uint64_t b) {
+  const ent_text *right = ent_text_of(b);
+  if (!right->length)
+    return a;
+  if (a && ent_partitions_here() <= 1 &&
+      ent_text_extend_last(ent_text_arena_mine(), (ent_text *)ent_text_of(a),
+                           right))
+    return a;
+  return ent_text_join(a, b);
+}
+
+// `a` with the bytes of `b` after them, where the compiler knows that
+// nothing has `a` any more (it is the old value of a var that is added
+// to, `out = out + b`): `a` itself where it can grow, so that a text
+// joined to again and again is not copied each time (and every copy kept
+// till the schedule is done). It grows where it is the block cut last
+// from the arena (into the room after it), and where it was given room
+// when it was copied; otherwise it is copied to a block of twice the
+// bytes, which is given that room. A copy that was a block of its own
+// (a large one) is given back at once.
+uint64_t ent_text_append(uint64_t a, uint64_t b) {
+  if (ent_partitions_here() > 1)
+    return ent_text_join(a, b);
+  const ent_text *right = ent_text_of(b);
+  if (!right->length)
+    return a;
+  ent_text *left = (ent_text *)ent_text_of(a);
+  uint32_t length = left->length + right->length;
+  ent_text_arena *arena = ent_text_arena_mine();
+  if (a && ent_text_extend_last(arena, left, right))
+    return a;
+  ent_text_grown *grown = a ? ent_text_grown_find(arena, left) : 0;
+  if (grown && grown->room >= length) {
+    memcpy(left->bytes + left->length, right->bytes, right->length);
+    left->length = length;
+    left->bytes[length] = 0;
+    return a;
+  }
+  size_t room = (size_t)length * 2;
+  if (room > UINT32_MAX)
+    room = length;
+  ent_text *both = ent_text_cut_room(length, room);
+  memcpy(both->bytes, left->bytes, left->length);
+  memcpy(both->bytes + left->length, right->bytes, right->length);
+  ent_text_grown now = {both, (uint32_t)room,
+                        ent_text_size(room) > ent_text_most_chunk / 4};
+  if (grown) {
+    // (A block of its own is given back: nothing has it.)
+    if (grown->big)
+      for (ent_text_chunk **at = &arena->big; *at; at = &(*at)->next)
+        if ((*at)->bytes == (char *)left) {
+          ent_text_chunk *gone = *at;
+          *at = gone->next;
+          ent_held_give(gone, sizeof(ent_text_chunk) + gone->room);
+          --arena->count;
+          break;
+        }
+    ent_text_grown_remove(arena, grown);
+  }
+  ent_text_grown_add(arena, now);
+  return (uint64_t)(uintptr_t)both;
 }
 
 // A copy that is kept as long as a joined text is.

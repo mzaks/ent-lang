@@ -25723,6 +25723,8 @@ static void declareTextRuntime(IRRewriter &rewriter, ModuleOp module,
   declare("ent_text_equal", {i64, i64}, {i8});
   declare("ent_text_cut", {i64, i64, i32}, {});
   declare("ent_text_join", {i64, i64}, {i64});
+  declare("ent_text_append", {i64, i64}, {i64});
+  declare("ent_text_extend", {i64, i64}, {i64});
   declare("ent_text_join_own", {i64, i64}, {i64});
   declare("ent_text_keep", {i64}, {i64});
   declare("ent_text_release", {}, {});
@@ -25943,6 +25945,166 @@ static void versionTextReads(IRRewriter &rewriter, ModuleOp module) {
   }
 }
 
+namespace {
+/// Which joins may add to their first text where it is
+/// (`ent_text_append`): those where nothing has that text any more once
+/// it is joined to, so that it may grow, or be given back where it is
+/// copied to grow. That is the old value of a var that is added to,
+/// `out = out + piece`, in a loop or not: a value that this join is the
+/// only one to take, others only reading it before (its length, a byte,
+/// a comparison, a copy) or in the other branch of an `if`; and one that
+/// was made by joining (or is a text written out), or that a loop or an
+/// `if` carries from such values, each of them taken by that edge alone,
+/// once each time it is made (not from outside a loop it is in). Not a
+/// text a fn is given or one a call gives back, which another may have.
+struct TextAppends {
+  /// The values whose ownership is being looked at: assumed owned, as
+  /// what a loop carries from one turn to the next is.
+  DenseSet<Value> visiting;
+
+  static bool reads(Operation *op) {
+    return isa<TextLengthOp, TextAtOp, TextEqualOp, TextHashOp, TextOwnOp,
+               TextKeepOp, TextCutOp, TextJoinOp>(op);
+  }
+
+  /// Whether `use` is done before `consumer` runs: before it in its
+  /// block, or before an op that `consumer` is in.
+  static bool before(Operation *use, Operation *consumer) {
+    for (Operation *op = consumer; op && op->getBlock();
+         op = op->getParentOp())
+      if (Operation *at = op->getBlock()->findAncestorOpInBlock(*use))
+        return at != op && at->isBeforeInBlock(op);
+    return false;
+  }
+
+  /// Whether `use` and `consumer` are in the two branches of one `if`.
+  static bool exclusive(Operation *use, Operation *consumer) {
+    for (Operation *parent = consumer->getParentOp(); parent;
+         parent = parent->getParentOp()) {
+      auto branch = dyn_cast<scf::IfOp>(parent);
+      if (!branch || branch.getElseRegion().empty())
+        continue;
+      bool consumerThen =
+          branch.getThenRegion().isAncestor(consumer->getParentRegion());
+      Region &other =
+          consumerThen ? branch.getElseRegion() : branch.getThenRegion();
+      if (other.isAncestor(use->getParentRegion()))
+        return true;
+    }
+    return false;
+  }
+
+  /// Whether `consumer` is the only one to take `value`.
+  static bool sole(Value value, Operation *consumer) {
+    unsigned taken = 0;
+    for (OpOperand &use : value.getUses()) {
+      Operation *user = use.getOwner();
+      if (user == consumer) {
+        if (++taken > 1)
+          return false;
+        continue;
+      }
+      if (!(reads(user) && before(user, consumer)) &&
+          !exclusive(user, consumer))
+        return false;
+    }
+    return taken == 1;
+  }
+
+  /// Whether `consumer` runs at most once each time `value` is made: no
+  /// loop between them, only `if`s.
+  static bool once(Value value, Operation *consumer) {
+    Block *home = value.getParentBlock();
+    Operation *op = consumer;
+    while (op->getBlock() != home) {
+      Operation *parent = op->getParentOp();
+      if (!parent || !isa<scf::IfOp>(parent))
+        return false;
+      op = parent;
+    }
+    return true;
+  }
+
+  bool flows(Value value, Operation *consumer) {
+    return sole(value, consumer) && once(value, consumer) && owned(value);
+  }
+
+  /// Whether nothing else may have the text `value` is.
+  bool owned(Value value) {
+    if (!visiting.insert(value).second)
+      return true;
+    bool result = made(value);
+    visiting.erase(value);
+    return result;
+  }
+
+  bool made(Value value) {
+    if (Operation *def = value.getDefiningOp()) {
+      if (isa<TextJoinOp, TextKeepOp, TextConstantOp>(def))
+        return true;
+      unsigned i = cast<OpResult>(value).getResultNumber();
+      if (auto loop = dyn_cast<scf::ForOp>(def)) {
+        auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+        return flows(loop.getInitArgs()[i], loop) &&
+               flows(yield.getOperand(i), yield);
+      }
+      if (auto branch = dyn_cast<scf::IfOp>(def)) {
+        if (branch.getElseRegion().empty())
+          return false;
+        return flows(branch.thenYield().getOperand(i), branch.thenYield()) &&
+               flows(branch.elseYield().getOperand(i), branch.elseYield());
+      }
+      if (auto loop = dyn_cast<scf::WhileOp>(def)) {
+        scf::ConditionOp condition = loop.getConditionOp();
+        return flows(condition.getArgs()[i], condition);
+      }
+      return false;
+    }
+    auto argument = cast<BlockArgument>(value);
+    Block *block = argument.getOwner();
+    Operation *parent = block->getParentOp();
+    unsigned i = argument.getArgNumber();
+    if (auto loop = dyn_cast_or_null<scf::ForOp>(parent)) {
+      if (i < 1 || block != loop.getBody())
+        return false;
+      auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+      return flows(loop.getInitArgs()[i - 1], loop) &&
+             flows(yield.getOperand(i - 1), yield);
+    }
+    if (auto loop = dyn_cast_or_null<scf::WhileOp>(parent)) {
+      if (block == loop.getBeforeBody())
+        return flows(loop.getInits()[i], loop) &&
+               flows(loop.getYieldOp().getOperand(i), loop.getYieldOp());
+      scf::ConditionOp condition = loop.getConditionOp();
+      return flows(condition.getArgs()[i], condition);
+    }
+    return false;
+  }
+
+  /// How `join` may add to its first text where it is: `ent_text_append`
+  /// for a text a loop or an `if` carries (a var that is added to again
+  /// and again, given room to grow into), `ent_text_extend` for one that
+  /// was joined just before (`x + y + z`: only where it is the block cut
+  /// last, else copied as a join copies; no room); none for a text
+  /// written out, which a join copies as it would.
+  /// (A text joined just before by `ent_text_append` grows on as it does:
+  /// `out = out + a + b`. Joins are looked at in order, defs first.)
+  DenseMap<Operation *, StringRef> how;
+  StringRef appends(TextJoinOp join) {
+    Value lhs = join.getLhs();
+    StringRef result;
+    if (!lhs.getDefiningOp<TextConstantOp>() && flows(lhs, join)) {
+      auto before = lhs.getDefiningOp<TextJoinOp>();
+      result = before && how.lookup(before) != "ent_text_append"
+                   ? "ent_text_extend"
+                   : "ent_text_append";
+    }
+    how[join] = result;
+    return result;
+  }
+};
+} // namespace
+
 /// Lower the ops on texts of any length: to their blocks, and to calls
 /// of the functions that keep them.
 static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
@@ -25965,6 +26127,18 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
     }
   }
   versionTextReads(rewriter, module);
+  // (Which joins add to their first text, decided before any is lowered.)
+  DenseMap<Operation *, StringRef> appending;
+  {
+    TextAppends appends;
+    module.walk([&](TextJoinOp join) {
+      bool owns = llvm::any_of(joinedToOwn,
+                               [&](auto &pair) { return pair.second == join; });
+      StringRef how = owns ? StringRef() : appends.appends(join);
+      if (!how.empty())
+        appending[join] = how;
+    });
+  }
   SmallVector<Operation *> ops;
   bool makes = false;
   module.walk([&](Operation *op) {
@@ -26372,7 +26546,11 @@ static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
                                  rewriter, loc, rewriter.getI1Type(), is)
                                  .getResult());
     } else if (auto join = dyn_cast<TextJoinOp>(op)) {
-      Value block = call(loc, "ent_text_join", {i64},
+      Value block = call(loc,
+                         appending.lookup(join).empty()
+                             ? StringRef("ent_text_join")
+                             : appending.lookup(join),
+                         {i64},
                          {address(loc, join.getLhs()),
                           address(loc, join.getRhs())})
                         .getResult(0);
