@@ -2,7 +2,8 @@
 // keyring. Linux: libsecret, loaded with dlopen when first needed (so a
 // program does not need it to start, and builds without its headers:
 // the few types it takes are written out below, as libsecret 0.20 has
-// them). Windows: the Credential Manager. Elsewhere: none.
+// them). Windows: the Credential Manager. macOS: the login keychain
+// (generic passwords, by the Security framework). Elsewhere: none.
 
 #include "ent_extern.h"
 
@@ -48,10 +49,11 @@ static char *ent_secrets_target(const ent_text *service,
   return target;
 }
 
-bool ent_secrets_secrets_available(void) { return true; }
+static bool ent_secrets_os_available(void) { return true; }
 
-bool ent_secrets_secret_put(const ent_text *service, const ent_text *account,
-                            const ent_text *value) {
+static bool ent_secrets_os_put(const ent_text *service,
+                               const ent_text *account,
+                               const ent_text *value) {
   char *target = ent_secrets_target(service, account);
   if (!target)
     return false;
@@ -67,8 +69,8 @@ bool ent_secrets_secret_put(const ent_text *service, const ent_text *account,
   return kept;
 }
 
-const ent_text *ent_secrets_secret_get(const ent_text *service,
-                                       const ent_text *account) {
+static const ent_text *ent_secrets_os_get(const ent_text *service,
+                                          const ent_text *account) {
   char *target = ent_secrets_target(service, account);
   if (!target)
     return 0;
@@ -83,8 +85,8 @@ const ent_text *ent_secrets_secret_get(const ent_text *service,
   return found;
 }
 
-bool ent_secrets_secret_forget(const ent_text *service,
-                               const ent_text *account) {
+static bool ent_secrets_os_forget(const ent_text *service,
+                                  const ent_text *account) {
   char *target = ent_secrets_target(service, account);
   if (!target)
     return false;
@@ -158,7 +160,7 @@ static bool ent_secrets_failed(ent_g_error *error) {
 
 // (Available: libsecret is there and a keyring answers a lookup.)
 static int ent_secrets_answers;
-bool ent_secrets_secrets_available(void) {
+static bool ent_secrets_os_available(void) {
   if (!ent_secrets_load())
     return false;
   if (ent_secrets_answers == 0) {
@@ -172,8 +174,9 @@ bool ent_secrets_secrets_available(void) {
   return ent_secrets_answers == 1;
 }
 
-bool ent_secrets_secret_put(const ent_text *service, const ent_text *account,
-                            const ent_text *value) {
+static bool ent_secrets_os_put(const ent_text *service,
+                               const ent_text *account,
+                               const ent_text *value) {
   if (!ent_secrets_load())
     return false;
   char *s = ent_secrets_string(service), *a = ent_secrets_string(account),
@@ -195,8 +198,8 @@ bool ent_secrets_secret_put(const ent_text *service, const ent_text *account,
   return kept;
 }
 
-const ent_text *ent_secrets_secret_get(const ent_text *service,
-                                       const ent_text *account) {
+static const ent_text *ent_secrets_os_get(const ent_text *service,
+                                          const ent_text *account) {
   if (!ent_secrets_load())
     return 0;
   char *s = ent_secrets_string(service), *a = ent_secrets_string(account);
@@ -215,8 +218,8 @@ const ent_text *ent_secrets_secret_get(const ent_text *service,
   return found;
 }
 
-bool ent_secrets_secret_forget(const ent_text *service,
-                               const ent_text *account) {
+static bool ent_secrets_os_forget(const ent_text *service,
+                                  const ent_text *account) {
   if (!ent_secrets_load())
     return false;
   char *s = ent_secrets_string(service), *a = ent_secrets_string(account);
@@ -232,21 +235,144 @@ bool ent_secrets_secret_forget(const ent_text *service,
   return gone;
 }
 
+#elif defined(__APPLE__)
+#include <CoreFoundation/CoreFoundation.h>
+#include <Security/Security.h>
+
+// The frameworks are asked for here, not in a .link (which every
+// system's build would read): every Mac has them.
+__asm__(".linker_option \"-framework\", \"Security\"\n"
+        ".linker_option \"-framework\", \"CoreFoundation\"");
+
+static CFStringRef ent_secrets_cf(const ent_text *t) {
+  if (t && t->length && memchr(t->bytes, 0, t->length))
+    return NULL;
+  return CFStringCreateWithBytes(NULL, t ? (const UInt8 *)t->bytes : NULL,
+                                 t ? t->length : 0, kCFStringEncodingUTF8,
+                                 false);
+}
+
+// A generic password of the login keychain, found by its service and
+// account; none where either is not a text of UTF-8 without a 0.
+static CFMutableDictionaryRef ent_secrets_query(const ent_text *service,
+                                                const ent_text *account) {
+  CFStringRef s = ent_secrets_cf(service), a = ent_secrets_cf(account);
+  CFMutableDictionaryRef query = NULL;
+  if (s && a &&
+      (query = CFDictionaryCreateMutable(NULL, 0,
+                                         &kCFTypeDictionaryKeyCallBacks,
+                                         &kCFTypeDictionaryValueCallBacks))) {
+    CFDictionarySetValue(query, kSecClass, kSecClassGenericPassword);
+    CFDictionarySetValue(query, kSecAttrService, s);
+    CFDictionarySetValue(query, kSecAttrAccount, a);
+  }
+  if (s)
+    CFRelease(s);
+  if (a)
+    CFRelease(a);
+  return query;
+}
+
+static bool ent_secrets_os_available(void) { return true; }
+
+static bool ent_secrets_os_put(const ent_text *service,
+                               const ent_text *account,
+                               const ent_text *value) {
+  CFMutableDictionaryRef query = ent_secrets_query(service, account);
+  if (!query)
+    return false;
+  CFDataRef data = CFDataCreate(
+      NULL, value ? (const UInt8 *)value->bytes : NULL, value ? value->length : 0);
+  OSStatus status = errSecParam;
+  if (data) {
+    // Kept again where it is there (its access as it was), else added.
+    CFDictionaryRef change = CFDictionaryCreate(
+        NULL, (const void **)&kSecValueData, (const void **)&data, 1,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    status = change ? SecItemUpdate(query, change) : errSecAllocate;
+    if (change)
+      CFRelease(change);
+    if (status == errSecItemNotFound) {
+      CFDictionarySetValue(query, kSecValueData, data);
+      status = SecItemAdd(query, NULL);
+    }
+    CFRelease(data);
+  }
+  CFRelease(query);
+  return status == errSecSuccess;
+}
+
+static const ent_text *ent_secrets_os_get(const ent_text *service,
+                                          const ent_text *account) {
+  CFMutableDictionaryRef query = ent_secrets_query(service, account);
+  if (!query)
+    return 0;
+  CFDictionarySetValue(query, kSecReturnData, kCFBooleanTrue);
+  CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitOne);
+  CFTypeRef data = NULL;
+  const ent_text *found = 0;
+  if (SecItemCopyMatching(query, &data) == errSecSuccess && data &&
+      CFGetTypeID(data) == CFDataGetTypeID())
+    found = ent_secrets_text((const char *)CFDataGetBytePtr(data),
+                             (size_t)CFDataGetLength(data));
+  if (data)
+    CFRelease(data);
+  CFRelease(query);
+  return found;
+}
+
+static bool ent_secrets_os_forget(const ent_text *service,
+                                  const ent_text *account) {
+  CFMutableDictionaryRef query = ent_secrets_query(service, account);
+  if (!query)
+    return false;
+  OSStatus status = SecItemDelete(query);
+  CFRelease(query);
+  return status == errSecSuccess || status == errSecItemNotFound;
+}
+
 #else
-bool ent_secrets_secrets_available(void) { return false; }
-bool ent_secrets_secret_put(const ent_text *service, const ent_text *account,
-                            const ent_text *value) {
+static bool ent_secrets_os_available(void) { return false; }
+static bool ent_secrets_os_put(const ent_text *service,
+                               const ent_text *account,
+                               const ent_text *value) {
   (void)service, (void)account, (void)value;
   return false;
 }
-const ent_text *ent_secrets_secret_get(const ent_text *service,
-                                       const ent_text *account) {
+static const ent_text *ent_secrets_os_get(const ent_text *service,
+                                          const ent_text *account) {
   (void)service, (void)account;
   return 0;
 }
-bool ent_secrets_secret_forget(const ent_text *service,
-                               const ent_text *account) {
+static bool ent_secrets_os_forget(const ent_text *service,
+                                  const ent_text *account) {
   (void)service, (void)account;
   return false;
 }
 #endif
+
+// ENT_SECRETS=none: no keyring, as if there were none, on every system
+// (for tests, which should neither read nor write the user's keyring).
+static bool ent_secrets_none(void) {
+  const char *said = getenv("ENT_SECRETS");
+  return said && strcmp(said, "none") == 0;
+}
+
+bool ent_secrets_secrets_available(void) {
+  return !ent_secrets_none() && ent_secrets_os_available();
+}
+
+bool ent_secrets_secret_put(const ent_text *service, const ent_text *account,
+                            const ent_text *value) {
+  return !ent_secrets_none() && ent_secrets_os_put(service, account, value);
+}
+
+const ent_text *ent_secrets_secret_get(const ent_text *service,
+                                       const ent_text *account) {
+  return ent_secrets_none() ? 0 : ent_secrets_os_get(service, account);
+}
+
+bool ent_secrets_secret_forget(const ent_text *service,
+                               const ent_text *account) {
+  return !ent_secrets_none() && ent_secrets_os_forget(service, account);
+}
