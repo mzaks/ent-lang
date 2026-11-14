@@ -26220,6 +26220,76 @@ static void handOverTexts(IRRewriter &rewriter, ModuleOp module) {
   });
 }
 
+/// Whether a text may be one `ent.text.of` makes: a view of a text of a
+/// capacity, its bytes on the stack of the function it is made in.
+static bool mayViewStack(Value value, llvm::SmallPtrSetImpl<Value> &seen) {
+  if (!seen.insert(value).second)
+    return false;
+  if (Operation *def = value.getDefiningOp()) {
+    if (isa<TextOfOp>(def))
+      return true;
+    unsigned i = cast<OpResult>(value).getResultNumber();
+    if (auto loop = dyn_cast<scf::ForOp>(def)) {
+      auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+      return mayViewStack(loop.getInitArgs()[i], seen) ||
+             mayViewStack(yield.getOperand(i), seen);
+    }
+    if (auto loop = dyn_cast<scf::WhileOp>(def))
+      return mayViewStack(loop.getConditionOp().getArgs()[i], seen);
+    // (An `if` and the like: what any of its regions gives.)
+    bool any = false;
+    for (Region &region : def->getRegions())
+      for (Block &block : region)
+        if (auto yield = dyn_cast<scf::YieldOp>(block.getTerminator()))
+          if (i < yield->getNumOperands())
+            any = any || mayViewStack(yield.getOperand(i), seen);
+    return any;
+  }
+  auto argument = cast<BlockArgument>(value);
+  Operation *parent = argument.getOwner()->getParentOp();
+  unsigned i = argument.getArgNumber();
+  if (auto loop = dyn_cast<scf::ForOp>(parent)) {
+    if (i == 0)
+      return false;
+    auto yield = cast<scf::YieldOp>(loop.getBody()->getTerminator());
+    return mayViewStack(loop.getInitArgs()[i - 1], seen) ||
+           mayViewStack(yield.getOperand(i - 1), seen);
+  }
+  if (auto loop = dyn_cast<scf::WhileOp>(parent)) {
+    if (argument.getOwner() == loop.getBeforeBody())
+      return mayViewStack(loop.getInits()[i], seen) ||
+             mayViewStack(loop.getYieldOp().getOperand(i), seen);
+    return mayViewStack(loop.getConditionOp().getArgs()[i], seen);
+  }
+  return false;
+}
+
+/// A text a function gives back (as its value, or a var's text it was
+/// given to add to) is kept where it may be a view of a text of a
+/// capacity: that one's bytes are on the function's stack, gone when it
+/// has run. (`var out = ""  out = "a" + "b"  out` gave back such a view,
+/// read after the call as whatever was then on the stack.)
+static void keepStackTexts(IRRewriter &rewriter, ModuleOp module) {
+  for (FunctionOp function : module.getOps<FunctionOp>()) {
+    if (!function.isDefined())
+      continue;
+    function.walk([&](YieldOp yield) {
+      if (yield->getParentOp() != function)
+        return;
+      for (unsigned i = 0; i < yield->getNumOperands(); ++i) {
+        Value text = yield->getOperand(i);
+        llvm::SmallPtrSet<Value, 8> seen;
+        if (!isa<StringType>(text.getType()) || !mayViewStack(text, seen))
+          continue;
+        rewriter.setInsertionPoint(yield);
+        yield->setOperand(i, TextKeepOp::create(rewriter, yield->getLoc(),
+                                                text.getType(), text)
+                                 .getResult());
+      }
+    });
+  }
+}
+
 /// Lower the ops on texts of any length: to their blocks, and to calls
 /// of the functions that keep them.
 static void lowerTexts(IRRewriter &rewriter, ModuleOp module,
@@ -29382,6 +29452,7 @@ struct EntLowerToLoops
     for (FunctionOp function : module.getOps<FunctionOp>())
       onlyRowsChanged[function.getSymName()] = changesOnlyRows(
           function, FlatSymbolRefAttr::get(function.getSymNameAttr()));
+    keepStackTexts(rewriter, module);
     handOverTexts(rewriter, module);
     for (FunctionOp function : module.getOps<FunctionOp>()) {
       if (function.isDefined())

@@ -1,0 +1,17 @@
+// A short text (a text of a capacity, as a join of short literals is)
+// that a function gives back through a var of any length, an `if`, a
+// loop, or a var's text it was given to add to: its bytes were on the
+// function's stack, so it gives a copy (keepStackTexts). It gave a view
+// of where they had been: an empty text, another's bytes, or a crash.
+// And `if c { "ab" } else { "" }` with no type asked for is a text.
+// RUN: %ent run %S/Inputs/text_stack.ent | FileCheck %s
+
+// CHECK:      [abc] true
+// CHECK-NEXT: [HBasic {{[{][{]}}user{{[}][}]}}:{{[{][{]}}password{{[}][}]}}
+// CHECK-NEXT: E# user =
+// CHECK-NEXT: Esecret password
+// CHECK-NEXT: ] [A a
+// CHECK-NEXT: ] [HBasic {{[{][{]}}user{{[}][}]}}:{{[{][{]}}password{{[}][}]}}
+// CHECK:      [xy] [zw] [lp] []
+// CHECK-NEXT: [mut] true
+// CHECK-NEXT: [long one] []

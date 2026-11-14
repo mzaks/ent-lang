@@ -1,0 +1,61 @@
+// A text of a capacity (a join of short literals is one) given to a var
+// of any length, and given back by the function: the function gives a
+// copy, as its bytes were on its stack (text_stack.test).
+import console
+import text
+
+fn assigned(n: i32) -> text {
+  var out = ""
+  out = "a" + "b" + "c"
+  out
+}
+proc in_branch(kind: text, n: i32) -> text {
+  var out = ""
+  if len(kind) == 0 || n < 0 { out = "" }
+  else if kind == "a" {
+    let x = slice(kind, 0, 1)
+    out = "A " + x + "\n"
+  } else if kind == "b" {
+    out = "HBasic \{\{user\}\}:\{\{password\}\}\n" + "E# user = \n" + "Esecret password\n"
+  } else { out = "other\n" }
+  out
+}
+fn by_if(n: i32) -> text { if n > 0 { "x" + "y" } else { "z" + "w" } }
+fn in_loop(n: i32) -> text {
+  var out = ""
+  for i in 0..n { out = "l" + "p" }
+  out
+}
+proc added(out: mut text, n: i32) {
+  if n > 0 { out = "m" + "u" + "t" }
+}
+// (Something on the stack after the call, where the view pointed.)
+fn noise(n: i32) -> i64 {
+  var s: i64 = 0
+  for i in 0..n { s += (i * 7919) as i64 }
+  s
+}
+
+system go() {
+  let a = assigned(1)
+  let z = noise(100)
+  put("[{a}] {z > 0}")
+  let b = in_branch("b", 1)
+  let c = in_branch("a", 1)
+  let d = in_branch("b", 1)
+  put("[{b}] [{c}] [{d}]")
+  let e = by_if(1)
+  let f = by_if(0)
+  put("[{e}] [{f}] [{in_loop(3)}] [{in_loop(0)}]")
+  var t = "start"
+  added(t, 1)
+  let z2 = noise(50)
+  put("[{t}] {z2 > 0}")
+  // Texts written out of other lengths in the branches of an `if` with
+  // no type asked for: a text of any length.
+  let w = if z2 > 0 { "long one" } else { "" }
+  let v = if z2 < 0 { "long one" } else { "" }
+  put("[{w}] [{v}]")
+}
+schedule run() { go() }
+main { run() }

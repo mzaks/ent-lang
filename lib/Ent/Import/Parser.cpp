@@ -16762,6 +16762,12 @@ FailureOr<mlir::Value> Parser::emitIf(const Expr &expr, Type expected) {
   if (!condition->getType().isInteger(1))
     return error(expr.loc, "an 'if' condition must be a bool");
   Type type = typeOf(expr);
+  // (Texts written out in both, `if c { "ab" } else { "" }`, of other
+  // lengths: a text of any length where the module `text` keeps them.)
+  if (!type && !expected && importsText() &&
+      isTextLiteral(*expr.thenBranch->value) &&
+      isTextLiteral(*expr.elseBranch->value))
+    type = StringType::get(context);
   if (!type)
     type = expected ? expected : defaultType(*expr.thenBranch->value);
   auto branch = scf::IfOp::create(builder, at, TypeRange{type}, *condition,
