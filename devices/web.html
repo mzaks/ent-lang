@@ -94,6 +94,28 @@
   };
   // (The keys go to the program wherever on the page one clicks.)
   document.addEventListener("click", function () { canvas.focus(); });
+  // The keys are the program's, not the browser's: F1 to F10 (F5 reloaded
+  // the page, F6 went to the address bar, F3 found, F7 asked about caret
+  // browsing) and, in Firefox, / and ' (quick find). F11 and F12 are left
+  // to the browser, and so is anything with Ctrl, Alt or Cmd (Ctrl+R
+  // still reloads). Backspace and Tab Emscripten's GLFW keeps itself.
+  // (/ and ' on keypress: on keydown it would take the character typed
+  // from the program too.)
+  function plain(event) { return !event.ctrlKey && !event.altKey && !event.metaKey; }
+  window.addEventListener("keydown", function (event) {
+    if (plain(event) && /^F([1-9]|10)$/.test(event.key)) event.preventDefault();
+  }, true);
+  window.addEventListener("keypress", function (event) {
+    if (plain(event) && (event.key === "/" || event.key === "'")) event.preventDefault();
+  }, true);
+  // In the browser's full screen Escape is the program's too, where the
+  // browser lets a page have it (Chrome, Edge: the Keyboard Lock API; the
+  // browser says to hold Escape to leave); elsewhere Escape leaves it.
+  document.addEventListener("fullscreenchange", function () {
+    if (!navigator.keyboard || !navigator.keyboard.lock) return;
+    if (document.fullscreenElement) navigator.keyboard.lock(["Escape"]).catch(function () {});
+    else navigator.keyboard.unlock();
+  });
   window.onerror = function () { statusLine.textContent = "The program stopped: see below."; };
 
   // The keys of a touch screen (`ent build --web --touch-keys`), shown

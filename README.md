@@ -370,7 +370,11 @@ come with the compiler, in `devices/`, and two more that need
   the web (`make PLATFORM=PLATFORM_WEB` in raylib's `src`, at
   `build/raylib/src` or `ENT_RAYLIB_WEB`); `-o name.js` gives a program
   for Node.js. Its frames are the browser's (60 a second, or as
-  `Window.fps` says). A web page has at most 4 GB, the world in it:
+  `Window.fps` says). Its keys are the program's: F1 to F10 do
+  not reload, find or go to the address bar, nor / and ' find in
+  Firefox (F11, F12 and keys with Ctrl, Alt or Cmd stay the
+  browser's), and in the browser's full screen Chrome gives it Escape
+  too (held, Escape leaves). A web page has at most 4 GB, the world in it:
   `--capacity Name=N` gives a component or buffer another capacity
   without changing the program (as `capacity Name N` after it would),
   and a world over 3 GB is not built for the web. The window fills the
