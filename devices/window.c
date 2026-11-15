@@ -303,7 +303,12 @@ void ent_window_fill_screen(bool on) {
 
 // The key that closes the window: Escape, or none where the program
 // wants that key for itself.
-void ent_window_own_escape(bool own) { SetExitKey(own ? KEY_NULL : KEY_ESCAPE); }
+// (Whether the program has Escape: a menu takes it while it is open.)
+static bool ent_window_escape_owned;
+void ent_window_own_escape(bool own) {
+  ent_window_escape_owned = own;
+  SetExitKey(own ? KEY_NULL : KEY_ESCAPE);
+}
 
 #ifdef __EMSCRIPTEN__
 // In a web page the browser shows the frames: the program waits for the
@@ -348,6 +353,9 @@ float ent_window_frame_seconds(void) {
 static float ent_window_zoom = 1;
 static float ent_window_zoom_now(void) { return ent_window_zoom; }
 
+// (Between begin_frame and end_frame: a picture is being drawn.)
+static bool ent_window_drawing;
+
 void ent_window_begin_frame(int32_t background, int32_t fps, float zoom) {
 #ifdef __EMSCRIPTEN__
   ent_window_fps = fps;
@@ -359,6 +367,7 @@ void ent_window_begin_frame(int32_t background, int32_t fps, float zoom) {
   }
 #endif
   BeginDrawing();
+  ent_window_drawing = true;
   ent_window_shading_part = 0;
   ClearBackground(ent_window_color(background));
   // (With what a point is across beyond what the window says.)
@@ -372,6 +381,7 @@ void ent_window_end_frame(void) {
   ent_window_unclip();
   rlPopMatrix();
   EndDrawing();
+  ent_window_drawing = false;
 #ifdef __EMSCRIPTEN__
   ent_window_next_frame(ent_window_fps > 0 ? 1.0 / ent_window_fps : 0);
   ent_window_fit();
@@ -439,7 +449,7 @@ float ent_window_pixels(void) {
 
 float ent_window_mouse_x(void) { return (float)GetMouseX() / ent_window_more; }
 float ent_window_mouse_y(void) { return (float)GetMouseY() / ent_window_more; }
-bool ent_window_mouse_down(int32_t button) {
+static bool ent_window_button(int32_t button) {
 #ifdef __EMSCRIPTEN__
   // (A touch is the left button. It puts the pointer where it is in the
   // frame it starts: down from the frame after, as a mouse that was
@@ -450,6 +460,59 @@ bool ent_window_mouse_down(int32_t button) {
   return IsMouseButtonDown(button);
 #endif
 }
+
+// The buttons as the system means them, taken in once a frame
+// (ent_window_mouse_clicks, which `begin` asks first): on a Mac a left
+// press with Control down is the secondary button's, for as long as it
+// is held; a press of the left button within the system's double-click
+// time and a few points of the one before goes on a run of clicks.
+static bool ent_window_left_was, ent_window_right_was;
+static bool ent_window_control_press, ent_window_secondary_now;
+static int32_t ent_window_click_run;
+static double ent_window_click_at;
+static float ent_window_click_x, ent_window_click_y;
+
+static double ent_window_double_click(void);
+
+bool ent_window_mouse_down(int32_t button) {
+  if (button == 0)
+    return ent_window_button(0) && !ent_window_control_press;
+  if (button == 1)
+    return ent_window_button(1) ||
+           (ent_window_button(0) && ent_window_control_press);
+  return ent_window_button(button);
+}
+
+int32_t ent_window_mouse_clicks(void) {
+  bool left = ent_window_button(0), right = ent_window_button(1);
+  bool left_new = left && !ent_window_left_was;
+  bool right_new = right && !ent_window_right_was;
+  ent_window_left_was = left;
+  ent_window_right_was = right;
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+  if (left_new && (IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL)))
+    ent_window_control_press = true;
+#endif
+  if (!left)
+    ent_window_control_press = false;
+  ent_window_secondary_now = right_new || (left_new && ent_window_control_press);
+  if (!left_new || ent_window_control_press)
+    return 0;
+  double now = GetTime();
+  float x = ent_window_mouse_x(), y = ent_window_mouse_y();
+  if (ent_window_click_run > 0 &&
+      now - ent_window_click_at <= ent_window_double_click() &&
+      fabsf(x - ent_window_click_x) <= 4 && fabsf(y - ent_window_click_y) <= 4)
+    ent_window_click_run++;
+  else
+    ent_window_click_run = 1;
+  ent_window_click_at = now;
+  ent_window_click_x = x;
+  ent_window_click_y = y;
+  return ent_window_click_run;
+}
+
+bool ent_window_mouse_secondary(void) { return ent_window_secondary_now; }
 bool ent_window_key_down(int32_t key) { return IsKeyDown(key); }
 bool ent_window_key_pressed(int32_t key) {
   return IsKeyPressed(key) || IsKeyPressedRepeat(key);
@@ -1701,4 +1764,416 @@ void ent_window_screenshot(const ent_text126 *file) {
   // What was drawn so far is still waiting to go to the picture.
   rlDrawRenderBatchActive();
   TakeScreenshot(name);
+}
+
+// ---------------------------------------------------------------------
+// What systems say differently: the key shortcuts are made with, the
+// double-click time, the pointer's shape, and a menu at the pointer.
+
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+#include <objc/message.h>
+#include <objc/runtime.h>
+// (AppKit is the window's already, through GLFW; the program is linked
+// against it and the Objective-C runtime from here, which every Mac has.)
+__asm__(".linker_option \"-lobjc\"\n"
+        ".linker_option \"-framework\", \"AppKit\"");
+typedef struct {
+  double x, y;
+} ent_window_ns_point;
+static SEL ent_window_sel(const char *name) { return sel_registerName(name); }
+static id ent_window_send(id to, const char *name) {
+  return ((id(*)(id, SEL))objc_msgSend)(to, ent_window_sel(name));
+}
+static id ent_window_class(const char *name) { return (id)objc_getClass(name); }
+static id ent_window_ns_text(const char *s) {
+  return ((id(*)(id, SEL, const char *))objc_msgSend)(
+      ent_window_class("NSString"), ent_window_sel("stringWithUTF8String:"), s);
+}
+#elif defined(_WIN32)
+// (Not windows.h, whose names raylib's clash with.)
+__declspec(dllimport) unsigned int __stdcall GetDoubleClickTime(void);
+__declspec(dllimport) void *__stdcall CreatePopupMenu(void);
+__declspec(dllimport) int __stdcall AppendMenuW(void *menu, unsigned int flags,
+                                                unsigned long long id,
+                                                const unsigned short *text);
+__declspec(dllimport) int __stdcall TrackPopupMenu(void *menu, unsigned int flags,
+                                                   int x, int y, int reserved,
+                                                   void *window, const void *rect);
+__declspec(dllimport) int __stdcall DestroyMenu(void *menu);
+__declspec(dllimport) int __stdcall GetCursorPos(void *point);
+__declspec(dllimport) int __stdcall PostMessageW(void *window, unsigned int message,
+                                                 unsigned long long w, long long l);
+__declspec(dllimport) int __stdcall MultiByteToWideChar(unsigned int page,
+                                                        unsigned long flags,
+                                                        const char *from, int n,
+                                                        unsigned short *to,
+                                                        int room);
+#endif
+
+static double ent_window_double_click(void) {
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+  static double interval;
+  if (interval <= 0)
+    interval = ((double (*)(id, SEL))objc_msgSend)(
+        ent_window_class("NSEvent"), ent_window_sel("doubleClickInterval"));
+  return interval > 0 ? interval : 0.5;
+#elif defined(_WIN32)
+  return GetDoubleClickTime() / 1000.0;
+#else
+  return 0.5;
+#endif
+}
+
+bool ent_window_command_down(void) {
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+  return IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
+#elif defined(__EMSCRIPTEN__)
+  // (A page does not know whether the machine is a Mac: either.)
+  return IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER) ||
+         IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+#else
+  return IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+#endif
+}
+
+const ent_text *ent_window_command_name(void) {
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+  const char *name = "Cmd";
+#else
+  const char *name = "Ctrl";
+#endif
+  size_t n = strlen(name);
+  ent_text *made = ent_text_new((uint32_t)n);
+  memcpy(made->bytes, name, n);
+  return made;
+}
+
+bool ent_window_word_modifier_down(void) {
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+  return IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+#else
+  return IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+#endif
+}
+
+void ent_window_pointer_shape(int32_t shape) {
+  static int32_t shown = 0;
+  if (shape < 0 || shape > 10)
+    shape = 0;
+  if (shape != shown && IsWindowReady()) {
+    SetMouseCursor(shape);
+    shown = shape;
+  }
+}
+
+// The items of a menu: a line each; "-" a separator, "~" before one that
+// cannot be chosen. (Split in place: `lines` point into `held`.)
+#define ENT_WINDOW_MENU_ITEMS 64
+typedef struct {
+  char *held;
+  const char *lines[ENT_WINDOW_MENU_ITEMS];
+  bool dim[ENT_WINDOW_MENU_ITEMS], separator[ENT_WINDOW_MENU_ITEMS];
+  int n;
+} ent_window_menu_items;
+
+static bool ent_window_menu_split(const ent_text *items, ent_window_menu_items *m) {
+  uint32_t n = items ? items->length : 0;
+  m->n = 0;
+  m->held = malloc((size_t)n + 1);
+  if (!m->held)
+    return false;
+  if (n)
+    memcpy(m->held, items->bytes, n);
+  m->held[n] = 0;
+  char *at = m->held;
+  while (*at && m->n < ENT_WINDOW_MENU_ITEMS) {
+    char *end = strchr(at, '\n');
+    if (end)
+      *end = 0;
+    size_t length = strlen(at);
+    if (length && at[length - 1] == '\r')
+      at[length - 1] = 0;
+    m->dim[m->n] = at[0] == '~';
+    m->separator[m->n] = strcmp(at, "-") == 0;
+    m->lines[m->n] = m->dim[m->n] ? at + 1 : at;
+    m->n++;
+    if (!end)
+      break;
+    at = end + 1;
+  }
+  return true;
+}
+
+// A menu the window draws itself, where the system has none to give (or
+// ENT_WINDOW_MENU=drawn asks for it): over the picture that is shown,
+// until an item is chosen or it is let go (Escape, a click outside). It
+// is drawn in pictures of its own; the program's picture is drawn again
+// after (a lazy window's too: the program paints the frame after).
+static int32_t ent_window_menu_drawn(ent_window_menu_items *m) {
+  if (!IsWindowReady() || m->n == 0)
+    return -1;
+  float more = ent_window_more, size = 14, pad = 6, row = 22, gap = 9;
+  float w = 0, h = 2 * pad;
+  for (int i = 0; i < m->n; ++i) {
+    if (!m->separator[i]) {
+      float wide = ent_window_plain_width(m->lines[i], size);
+      if (wide > w)
+        w = wide;
+    }
+    h += m->separator[i] ? gap : row;
+  }
+  w += 2 * 14 + 2 * pad;
+  if (w < 120)
+    w = 120;
+  float room_w = GetScreenWidth() / more, room_h = GetScreenHeight() / more;
+  float x = GetMouseX() / more, y = GetMouseY() / more;
+  if (x + w > room_w)
+    x = x - w > 0 ? x - w : room_w - w;
+  if (y + h > room_h)
+    y = y - h > 0 ? y - h : room_h - h;
+  if (x < 0)
+    x = 0;
+  if (y < 0)
+    y = 0;
+  bool was_drawing = ent_window_drawing;
+  if (was_drawing) {
+    ent_window_shift(0, 0);
+    ent_window_unclip();
+    rlPopMatrix();
+    EndDrawing();
+  }
+  SetExitKey(KEY_NULL);
+  int32_t chosen = -1, hot = -1;
+  double opened = GetTime();
+  bool done = false;
+  while (!done && !WindowShouldClose()) {
+    BeginDrawing();
+    rlPushMatrix();
+    rlScalef(more, more, 1);
+    DrawRectangleRounded((Rectangle){x + 1, y + 2, w, h}, 0.04f, 6,
+                         (Color){0, 0, 0, 90});
+    DrawRectangleRounded((Rectangle){x, y, w, h}, 0.04f, 6,
+                         (Color){246, 246, 246, 255});
+    DrawRectangleRoundedLines((Rectangle){x, y, w, h}, 0.04f, 6,
+                              (Color){190, 190, 190, 255});
+    float at = y + pad;
+    for (int i = 0; i < m->n; ++i) {
+      if (m->separator[i]) {
+        DrawRectangle((int)(x + pad), (int)(at + gap / 2), (int)(w - 2 * pad), 1,
+                      (Color){210, 210, 210, 255});
+        at += gap;
+        continue;
+      }
+      if (i == hot)
+        DrawRectangleRounded((Rectangle){x + pad / 2, at, w - pad, row}, 0.2f, 4,
+                             (Color){10, 100, 220, 255});
+      Color ink = m->dim[i] ? (Color){170, 170, 170, 255}
+                  : i == hot ? (Color){255, 255, 255, 255}
+                             : (Color){30, 30, 30, 255};
+      ent_window_plain_draw(m->lines[i], x + pad + 14, at + (row - size) / 2, size,
+                            ink);
+      at += row;
+    }
+    rlPopMatrix();
+    EndDrawing();
+    // (What was done, from the input EndDrawing took in.)
+    float px = GetMouseX() / more, py = GetMouseY() / more;
+    int under = -1;
+    if (px >= x && px < x + w) {
+      float top = y + pad;
+      for (int i = 0; i < m->n; ++i) {
+        float tall = m->separator[i] ? gap : row;
+        if (py >= top && py < top + tall && !m->separator[i] && !m->dim[i])
+          under = i;
+        top += tall;
+      }
+    }
+    Vector2 moved = GetMouseDelta();
+    if (moved.x != 0 || moved.y != 0)
+      hot = under;
+    bool inside = px >= x && px < x + w && py >= y && py < y + h;
+    if (IsKeyPressed(KEY_ESCAPE)) {
+      done = true;
+    } else if ((IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER)) && hot >= 0) {
+      chosen = hot;
+      done = true;
+    } else if (IsKeyPressed(KEY_DOWN) || IsKeyPressedRepeat(KEY_DOWN) ||
+               IsKeyPressed(KEY_UP) || IsKeyPressedRepeat(KEY_UP)) {
+      int step = IsKeyDown(KEY_DOWN) ? 1 : -1;
+      for (int k = 1; k <= m->n; ++k) {
+        int i = ((hot < 0 && step < 0 ? m->n : hot) + step * k + 2 * m->n) % m->n;
+        if (!m->separator[i] && !m->dim[i]) {
+          hot = i;
+          break;
+        }
+      }
+    } else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) ||
+               IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+      if (!inside)
+        done = true;
+    } else if ((IsMouseButtonReleased(MOUSE_BUTTON_LEFT) ||
+                IsMouseButtonReleased(MOUSE_BUTTON_RIGHT)) &&
+               under >= 0 && GetTime() - opened > 0.2) {
+      // (A press that opened it and was let go on an item, or a click.)
+      chosen = under;
+      done = true;
+    }
+  }
+  SetExitKey(ent_window_escape_owned ? KEY_NULL : KEY_ESCAPE);
+  if (was_drawing) {
+    BeginDrawing();
+    rlPushMatrix();
+    rlScalef(ent_window_zoom, ent_window_zoom, 1);
+  }
+  return chosen;
+}
+
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+// The system's menu (NSMenu): its items' target an object of a class made
+// here, whose `pick:` keeps the number of the item chosen.
+static int32_t ent_window_menu_pick;
+static void ent_window_menu_picked(id self, SEL command, id sender) {
+  (void)self, (void)command;
+  ent_window_menu_pick =
+      (int32_t)((long (*)(id, SEL))objc_msgSend)(sender, ent_window_sel("tag"));
+}
+static id ent_window_menu_target(void) {
+  static id target;
+  if (!target) {
+    Class made = objc_getClass("EntWindowMenuTarget");
+    if (!made) {
+      made = objc_allocateClassPair(objc_getClass("NSObject"),
+                                    "EntWindowMenuTarget", 0);
+      class_addMethod(made, ent_window_sel("pick:"), (IMP)ent_window_menu_picked,
+                      "v@:@");
+      objc_registerClassPair(made);
+    }
+    target = ent_window_send(ent_window_send((id)made, "alloc"), "init");
+  }
+  return target;
+}
+// (The menu took the button's letting go: the window is told of it, as if
+// it had seen it, or it would hold the button down.)
+static void ent_window_menu_let_go(id window, bool left, bool right) {
+  id app = ent_window_send(ent_window_class("NSApplication"), "sharedApplication");
+  ent_window_ns_point at = ((ent_window_ns_point(*)(id, SEL))objc_msgSend)(
+      window, ent_window_sel("mouseLocationOutsideOfEventStream"));
+  long number = ((long (*)(id, SEL))objc_msgSend)(window, ent_window_sel("windowNumber"));
+  double now = ((double (*)(id, SEL))objc_msgSend)(
+      ent_window_send(ent_window_class("NSProcessInfo"), "processInfo"),
+      ent_window_sel("systemUptime"));
+  for (int b = 0; b < 2; ++b) {
+    if (!(b == 0 ? left : right))
+      continue;
+    unsigned long type = b == 0 ? 2 : 4; // NSEventTypeLeftMouseUp, RightMouseUp
+    id up = ((id(*)(id, SEL, unsigned long, ent_window_ns_point, unsigned long, double,
+                    long, id, long, long, float))objc_msgSend)(
+        ent_window_class("NSEvent"),
+        ent_window_sel("mouseEventWithType:location:modifierFlags:timestamp:"
+                       "windowNumber:context:eventNumber:clickCount:pressure:"),
+        type, at, 0, now, number, (id)0, 0, 1, 0.0f);
+    if (up)
+      ((void (*)(id, SEL, id, signed char))objc_msgSend)(
+          app, ent_window_sel("postEvent:atStart:"), up, 0);
+  }
+}
+static int32_t ent_window_menu_native(ent_window_menu_items *m) {
+  id window = (id)GetWindowHandle();
+  if (!window || m->n == 0)
+    return -1;
+  id target = ent_window_menu_target();
+  id menu = ((id(*)(id, SEL, id))objc_msgSend)(
+      ent_window_send(ent_window_class("NSMenu"), "alloc"),
+      ent_window_sel("initWithTitle:"), ent_window_ns_text(""));
+  ((void (*)(id, SEL, signed char))objc_msgSend)(
+      menu, ent_window_sel("setAutoenablesItems:"), 0);
+  for (int i = 0; i < m->n; ++i) {
+    if (m->separator[i]) {
+      ((void (*)(id, SEL, id))objc_msgSend)(
+          menu, ent_window_sel("addItem:"),
+          ent_window_send(ent_window_class("NSMenuItem"), "separatorItem"));
+      continue;
+    }
+    id item = ((id(*)(id, SEL, id, SEL, id))objc_msgSend)(
+        ent_window_send(ent_window_class("NSMenuItem"), "alloc"),
+        ent_window_sel("initWithTitle:action:keyEquivalent:"),
+        ent_window_ns_text(m->lines[i]), ent_window_sel("pick:"),
+        ent_window_ns_text(""));
+    ((void (*)(id, SEL, id))objc_msgSend)(item, ent_window_sel("setTarget:"), target);
+    ((void (*)(id, SEL, long))objc_msgSend)(item, ent_window_sel("setTag:"), i);
+    ((void (*)(id, SEL, signed char))objc_msgSend)(
+        item, ent_window_sel("setEnabled:"), !m->dim[i]);
+    ((void (*)(id, SEL, id))objc_msgSend)(menu, ent_window_sel("addItem:"), item);
+    ent_window_send(item, "release");
+  }
+  id view = ent_window_send(window, "contentView");
+  ent_window_ns_point at = ((ent_window_ns_point(*)(id, SEL))objc_msgSend)(
+      window, ent_window_sel("mouseLocationOutsideOfEventStream"));
+  at = ((ent_window_ns_point(*)(id, SEL, ent_window_ns_point, id))objc_msgSend)(
+      view, ent_window_sel("convertPoint:fromView:"), at, (id)0);
+  bool left = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+  bool right = IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
+  ent_window_menu_pick = -1;
+  ((signed char (*)(id, SEL, id, ent_window_ns_point, id))objc_msgSend)(
+      menu, ent_window_sel("popUpMenuPositioningItem:atLocation:inView:"), (id)0,
+      at, view);
+  ent_window_send(menu, "release");
+  ent_window_menu_let_go(window, left, right);
+  return ent_window_menu_pick;
+}
+#elif defined(_WIN32)
+// The system's menu (TrackPopupMenu), its items numbered from 1 (0: none).
+static int32_t ent_window_menu_native(ent_window_menu_items *m) {
+  void *window = GetWindowHandle();
+  void *menu = window && m->n ? CreatePopupMenu() : 0;
+  if (!menu)
+    return -1;
+  for (int i = 0; i < m->n; ++i) {
+    unsigned short wide[256];
+    if (m->separator[i]) {
+      AppendMenuW(menu, 0x800, 0, 0); // MF_SEPARATOR
+      continue;
+    }
+    int n = MultiByteToWideChar(65001, 0, m->lines[i], -1, wide, 255);
+    wide[n > 0 ? n : 0] = 0;
+    AppendMenuW(menu, m->dim[i] ? 1 : 0, (unsigned long long)(i + 1), wide);
+  }
+  struct { long x, y; } at;
+  GetCursorPos(&at);
+  bool left = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+  bool right = IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
+  // TPM_RETURNCMD | TPM_RIGHTBUTTON
+  int picked = TrackPopupMenu(menu, 0x100 | 0x2, at.x, at.y, 0, window, 0);
+  DestroyMenu(menu);
+  long long where = ((long long)(GetMouseY() & 0xffff) << 16) | (GetMouseX() & 0xffff);
+  if (left)
+    PostMessageW(window, 0x0202, 0, where); // WM_LBUTTONUP
+  if (right)
+    PostMessageW(window, 0x0205, 0, where); // WM_RBUTTONUP
+  return picked > 0 ? picked - 1 : -1;
+}
+#endif
+
+int32_t ent_window_context_menu(const ent_text *items) {
+  ent_window_menu_items m;
+  if (!ent_window_menu_split(items, &m))
+    return -1;
+  int32_t chosen = -1;
+  const char *asked = getenv("ENT_WINDOW_MENU");
+  bool drawn = asked && strcmp(asked, "drawn") == 0;
+#if defined(__EMSCRIPTEN__)
+  (void)drawn;
+#elif defined(__APPLE__)
+  if (drawn || !IsWindowReady()) {
+    chosen = ent_window_menu_drawn(&m);
+  } else {
+    chosen = ent_window_menu_native(&m);
+  }
+#elif defined(_WIN32)
+  chosen = drawn ? ent_window_menu_drawn(&m) : ent_window_menu_native(&m);
+#else
+  chosen = ent_window_menu_drawn(&m);
+#endif
+  free(m.held);
+  return chosen;
 }

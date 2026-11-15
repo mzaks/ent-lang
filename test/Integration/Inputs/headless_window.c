@@ -203,3 +203,13 @@ void ent_window_resize_window(int32_t width, int32_t height) {
 void ent_window_begin_frame(int32_t background, int32_t fps, float zoom) {
   ++frames;
 }
+const ent_text *ent_window_command_name(void) {
+  ent_text *made = ent_text_new(4);
+  memcpy(made->bytes, "Ctrl", 4);
+  return made;
+}
+// (No menu without a window: none is chosen.)
+int32_t ent_window_context_menu(const ent_text *items) {
+  (void)items;
+  return -1;
+}

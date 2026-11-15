@@ -1,0 +1,16 @@
+// The window's clicks, secondary button, modifiers, pointer and menu
+// (window_menu.test), with no window: no click, no menu chosen.
+import console
+import text
+import window
+
+system go() {
+  pointer_shape(pointer_text())
+  pointer_shape(pointer_arrow())
+  let chosen = context_menu("Cut\n~Copy\n-\nSelect All")
+  put("clicks {Mouse.clicks} secondary {Mouse.secondary} command {command_down()} word {word_modifier_down()}")
+  put("name {command_name()}")
+  put("menu {chosen} shapes {pointer_text()} {pointer_hand()} {pointer_resize_across()}")
+}
+schedule frame() { begin()  go()  present() }
+main { frame() }

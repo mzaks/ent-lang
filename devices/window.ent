@@ -75,9 +75,17 @@ transient buffer Dropped { value: u8 } capacity 1024
 // stays in the window however far the mouse moves, so that `dx` and `dy`
 // can turn a view around; `grabbed` is whether it is so now (in the
 // frame it changes, `dx` and `dy` are 0).
+// `right` is the secondary button: on a Mac a left click with Control
+// down is one too (and not the left, for as long as it is held).
+// `clicks`: in the frame the left button goes down, which click of a run
+// it is (1, 2 a double click, 3 a triple one, ...: each within the
+// system's double-click time and a few points of the one before); 0 in
+// every other frame. `secondary`: the secondary button went down in this
+// frame (where a program opens a `context_menu`).
 transient unique Mouse {
   x: f32, y: f32, left: bool, right: bool, wheel_x: f32, wheel_y: f32,
-  middle: bool, dx: f32, dy: f32, grabbed: bool
+  middle: bool, dx: f32, dy: f32, grabbed: bool, clicks: i32,
+  secondary: bool
 }
 
 // The keys most programs ask for: down or not.
@@ -102,6 +110,39 @@ extern proc key_pressed(key: i32) -> bool
 // `Window.typed` says how many came (more than it holds: the rest are
 // lost).
 transient buffer Typed { code: i32 } capacity 256
+
+// Whether the key shortcuts are made with is down: Command on a Mac,
+// Control elsewhere (on a web page either); and the one that moves by
+// words with the arrows and Backspace: Option on a Mac, Control
+// elsewhere.
+extern proc command_down() -> bool
+extern proc word_modifier_down() -> bool
+// What the first is called where a program writes a shortcut out: "Cmd"
+// on a Mac, "Ctrl" elsewhere (a page's: "Ctrl").
+extern proc command_name() -> text
+
+// The pointer's shape, from now on, while it is over the window: the
+// arrow, the I-beam over text, a hand over a link, a cross, and the
+// arrows of what is made wider or higher. A program says it every frame
+// for what is under the pointer (it is only changed where it differs).
+extern proc pointer_shape(shape: i32)
+fn pointer_arrow() -> i32 { 0 }
+fn pointer_text() -> i32 { 2 }
+fn pointer_cross() -> i32 { 3 }
+fn pointer_hand() -> i32 { 4 }
+fn pointer_resize_across() -> i32 { 5 }
+fn pointer_resize_up_down() -> i32 { 6 }
+
+// A menu at the pointer, of the system's own where it has one (a Mac's,
+// Windows'), else drawn by the window in its likeness (ENT_WINDOW_MENU=
+// drawn asks for that one everywhere). `items` has an item a line; "-" is
+// a line between them, and "~" before one shows it but it cannot be
+// chosen. The call waits until the menu is gone, and gives the number of
+// the item chosen (from 0, the lines between counted), or -1 where none
+// was (Escape, a click outside; on a web page there is none). The
+// program then draws its picture again (a lazy window: paint the frame
+// after), as the menu was over it.
+extern proc context_menu(items: text) -> i32
 
 // The text on the system's clipboard (none where it holds none, or no
 // text), and a text put on it in place of what it held. (In a web page
@@ -298,6 +339,11 @@ extern proc mouse_wheel_x() -> f32
 extern proc mouse_wheel_y() -> f32
 extern proc mouse_dx() -> f32
 extern proc mouse_dy() -> f32
+// (Once a frame, before the buttons are asked for: which click of a run
+// this frame's press is, as `Mouse.clicks` says; and whether the
+// secondary button went down.)
+extern proc mouse_clicks() -> i32
+extern proc mouse_secondary() -> bool
 // The pointer hidden and held in the window, or as it is again.
 extern proc grab_mouse(grab: bool)
 // The path of a file dropped since it was last asked, into `into`: how
@@ -337,6 +383,8 @@ system begin() {
   Window.typed = take_typed(Typed)
   Mouse.x = mouse_x() / zoom
   Mouse.y = mouse_y() / zoom
+  Mouse.clicks = mouse_clicks()
+  Mouse.secondary = mouse_secondary()
   Mouse.left = mouse_down(0)
   Mouse.right = mouse_down(1)
   Mouse.wheel_x = mouse_wheel_x()
