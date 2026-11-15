@@ -29618,12 +29618,14 @@ struct EntLowerToLoops
         Block *block = query->getBlock();
         Operation *before = query->getPrevNode();
         Operation *after = query->getNextNode();
+        // (Its place, kept: lowerQuery erases it.)
+        Location queryLoc = query.getLoc();
         // (What it accumulates on the GPU: its cells around it.)
         std::optional<GpuCells> cells;
         if (systemOnGpu) {
           cells.emplace(ArrayRef<QueryOp>{query}, *layout);
           rewriter.setInsertionPoint(query);
-          cells->start(rewriter, query.getLoc(), module);
+          cells->start(rewriter, queryLoc, module);
         }
         lowerQuery(rewriter, query, *layout, systemOnGpu ? *device : world,
                    systemOnGpu ? forGpu(options) : options);
@@ -29632,7 +29634,7 @@ struct EntLowerToLoops
             rewriter.setInsertionPoint(after);
           else
             rewriter.setInsertionPoint(block->getTerminator());
-          cells->finish(rewriter, query.getLoc(), *layout, world);
+          cells->finish(rewriter, queryLoc, *layout, world);
         }
         ++scope;
         for (Operation *op = before ? before->getNextNode() : &block->front();

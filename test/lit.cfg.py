@@ -106,6 +106,17 @@ if os.path.exists(os.path.join(os.path.dirname(config.test_source_root),
     config.available_features.add("mojo")
 # Rust (cargo on the PATH): the test of a device written in it
 # (examples/rust) runs only then.
+# Whether the libcurl the http device links (devices/http.link: -lcurl)
+# decodes brotli: macOS's own does not, and gives such a body as an error.
+# %curl-brotli is the FileCheck prefix of what is then expected.
+curl_config = shutil.which("curl-config")
+curl_features = subprocess.run(
+    [curl_config, "--features"], stdout=subprocess.PIPE,
+    stderr=subprocess.DEVNULL, text=True).stdout if curl_config else ""
+config.substitutions.append(
+    ("%curl-brotli", "BROTLI" if "brotli" in curl_features.split()
+     or not curl_config else "NO-BROTLI"))
+
 if shutil.which("cargo"):
     config.available_features.add("rust")
 # Goose (`goose` on the PATH, or the one examples/goose/setup.sh builds in

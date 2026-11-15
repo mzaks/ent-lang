@@ -5,14 +5,16 @@
 // is of `.invalid`, which no resolver knows).
 // RUN: rm -rf %t && mkdir -p %t && cp %S/Inputs/http/probes.txt %t/
 // RUN: %python %S/Inputs/http/serve.py %t -- %ent run %S/Inputs/http/device.ent > %t.out
-// RUN: sort %t.out | FileCheck %s
+// RUN: sort %t.out | FileCheck %s --check-prefixes=CHECK,%curl-brotli
 // RUN: %python %S/Inputs/http/serve.py %t -- %ent run %S/Inputs/http/many.ent | FileCheck %s --check-prefix=MANY
 // RUN: %python %S/Inputs/http/serve.py %t -- %ent run %S/Inputs/http/threads.ent | FileCheck %s --check-prefix=THREADS
 
 // CHECK: big-body 200 ok cut=false length={{[0-9]+}} found=true
 // CHECK: big-bytes 200 ok cut=false length=10485760 found=true
 // CHECK: binary-body 200 ok cut=false length={{[0-9]+}} found=true
-// CHECK: brotli 200 ok cut=false length=20 found=true
+// (Where libcurl has no brotli, as macOS's, a brotli body is an error.)
+// BROTLI: brotli 200 ok cut=false length=20 found=true
+// NO-BROTLI: brotli 0 other cut=false length=0 found=false
 // CHECK: cut 200 ok cut=true length=1000
 // CHECK: delete 200 ok cut=false length={{[0-9]+}} found=true
 // CHECK: dns 0 dns

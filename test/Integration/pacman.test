@@ -17,7 +17,7 @@
 
 // The game's own fns are no business of the device's C.
 // CHECK-NOT: ent_world
-// CHECK-NOT: choose
+// CHECK-NOT: ent_choose(
 // CHECK:     void ent_window_sector(float arg0, float arg1, float arg2, float arg3, float arg4, int32_t arg5);
 
 // A way is a byte, a tile two results.

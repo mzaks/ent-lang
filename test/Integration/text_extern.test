@@ -17,7 +17,9 @@
 // RUN: ent-translate --import-ent %S/Inputs/text_extern/text_extern.ent -I %S/../../devices -o %t.mlir
 // RUN: ent-translate --ent-to-c-extern-header %t.mlir | FileCheck %s --check-prefix=HEADER
 // On many ranks rank 0 alone calls a proc, and its text is not sent yet.
-// RUN: not %ent build --no-cache %S/Inputs/text_extern/text_extern.ent %S/Inputs/text_extern/shout.c --ranks 2 -o %t.ranks 2>&1 | FileCheck %s --check-prefix=RANKS
+// (Said as the ranks are lowered, so it needs no MPI.)
+// RUN: ent-translate --import-ent %S/Inputs/text_extern/text_extern.ent -I %S/../../devices --mlir-print-debuginfo \
+// RUN:   | not ent-opt "--ent-lower-to-loops=ranks=1" -o /dev/null 2>&1 | FileCheck %s --check-prefix=RANKS
 
 // STATIC-NOT: 'shout'
 // STATIC-NOT: 'nothing'

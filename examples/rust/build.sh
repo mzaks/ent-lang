@@ -13,6 +13,7 @@ RUSTFLAGS="${cpu:+-C target-cpu=$cpu} $RUSTFLAGS" \
   --manifest-path "$root/examples/rust/Cargo.toml" --target-dir "$target"
 cp "$target/release/librustdev.a" "$ENT_OUTPUT"
 case $(uname) in
-  Darwin) echo "-lSystem -lc -lm" > "$ENT_LINK" ;;
+  # (clang links libSystem itself: named again, ld warns of it twice.)
+  Darwin) echo "-lc -lm" > "$ENT_LINK" ;;
   *) echo "-lgcc_s -lutil -lrt -lpthread -lm -ldl -lc" > "$ENT_LINK" ;;
 esac

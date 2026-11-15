@@ -1343,7 +1343,9 @@ def demangled(names):
     plain = [re.sub(r"(\.llvm)?\.\d+$", "", name) for name in names]
     told = subprocess.run([tool], input="\n".join(plain) + "\n", text=True,
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    lines = told.stdout.splitlines()
+    # (Without the hash Rust's legacy names end in: "::h" and 16 digits.)
+    lines = [re.sub(r"::h[0-9a-f]{16}$", "", line)
+             for line in told.stdout.splitlines()]
     return lines if told.returncode == 0 and len(lines) == len(names) \
         else names
 
