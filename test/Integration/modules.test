@@ -6,7 +6,7 @@
 // RUN: ent-opt %t.mlir --ent-lower-to-loops \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
-// RUN: clang -O2 -Wno-override-module %t.ll -I%t.dir \
+// RUN: clang -O2 -Wno-override-module %weak-links %t.ll -I%t.dir \
 // RUN:     %S/Inputs/modules/ticker.c -o %t.exe
 // RUN: %t.exe | FileCheck %s
 

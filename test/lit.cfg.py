@@ -63,6 +63,17 @@ if os.path.exists(os.path.join(pushover, "recordings")):
 config.substitutions.append(("%pushover", pushover))
 config.substitutions.append(("%cached-ent", ent_driver))
 config.substitutions.append(("%ent", ent_driver + " --no-cache"))
+# What a program links where it is there, by weak symbols (the console's
+# exit status, the memory device's world, OpenMP's omp_in_parallel):
+# macOS's linker takes those only when told they may be missing, as
+# tools/ent tells it. For a test that links with clang itself.
+weak_symbols = ["ent_console_exit_code", "ent_world_memory", "ent_world_free",
+                "ent_world_pages", "omp_in_parallel"]
+config.substitutions.append(
+    ("%weak-links",
+     " ".join(f"-Wl,-U,_{name}" for name in weak_symbols)
+     if sys.platform == "darwin" else "")
+)
 # Link flags for the OpenMP runtime that ships with the same LLVM.
 config.substitutions.append(
     ("%openmp", f"-L{config.llvm_lib_dir} -lomp -Wl,-rpath,{config.llvm_lib_dir}")

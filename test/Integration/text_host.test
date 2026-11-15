@@ -13,7 +13,7 @@
 // RUN: ent-opt %t.mlir --ent-lower-to-loops --convert-scf-to-cf \
 // RUN:     --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
-// RUN: clang -O2 -Wno-override-module %t.ll -I%t.dir \
+// RUN: clang -O2 -Wno-override-module %weak-links %t.ll -I%t.dir \
 // RUN:     %S/Inputs/text_host_main.c %S/../../devices/text.c -o %t.exe
 // RUN: env ENT_TEXT_REPORT=1 %t.exe > %t.out 2> %t.err
 // RUN: FileCheck %s --input-file=%t.out

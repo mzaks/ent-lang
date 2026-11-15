@@ -6,11 +6,11 @@
 // RUN: ent-opt %t.mlir --ent-lower-to-loops \
 // RUN:     --convert-scf-to-cf --convert-to-llvm --reconcile-unrealized-casts \
 // RUN:   | mlir-translate --mlir-to-llvmir -o %t.ll
-// RUN: clang -O2 -Wno-override-module %t.ll -I%t.dir \
+// RUN: clang -O2 -Wno-override-module %weak-links %t.ll -I%t.dir \
 // RUN:     %S/Inputs/text_print.c -o %t.exe
 // RUN: %t.exe | FileCheck %s
 // Unoptimised, where nothing is folded.
-// RUN: clang -O0 -Wno-override-module %t.ll -I%t.dir \
+// RUN: clang -O0 -Wno-override-module %weak-links %t.ll -I%t.dir \
 // RUN:     %S/Inputs/text_print.c -o %t.O0
 // RUN: %t.O0 | FileCheck %s
 
