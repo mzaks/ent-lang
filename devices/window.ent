@@ -144,6 +144,33 @@ fn pointer_resize_up_down() -> i32 { 6 }
 // after), as the menu was over it.
 extern proc context_menu(items: text) -> i32
 
+// The menu bar's menus, where the system has one (a Mac's: the menus go
+// after the program's own and before Window). `title` names a menu; given
+// again, the menu is made anew with these items. `items` as a
+// `context_menu`'s, and also: after a tab, the key that chooses the item
+// with the command key ("o"; "O" with Shift too), and a line that starts
+// with two spaces is in a menu of the item above it (Open Recent's).
+// False where no menu is shown (Windows, Linux, a web page: the program
+// then reads the keys itself).
+extern proc menu_bar(title: text, items: text) -> bool
+// The item of the menu bar chosen since it was asked last, by the menus
+// it is in: "File/Open Folder…", "File/Open Recent/Clear Menu"; none
+// where none was.
+extern proc menu_chosen() -> text
+// The system's panel for choosing a folder (a Mac's, Linux's zenity or
+// kdialog where there is one), with `title` on it, opened at `start`
+// (none: where it was last). The call waits for it, and gives the folder
+// chosen, or none (cancelled; no panel on this system).
+extern proc choose_folder(title: text, start: text) -> text
+// The system's alert (a Mac's; elsewhere drawn by the window, at the
+// pointer): `message`, `detail` under it, and a button for each line of
+// `buttons`, the first the one Return presses ("Cancel" is Escape's). The
+// call waits, and gives the number of the button pressed (from 0), or -1
+// where it was let go without (Escape with no Cancel).
+extern proc alert(message: text, detail: text, buttons: text) -> i32
+// The window's title, given anew (a folder or file it shows, say).
+extern proc window_title(title: text)
+
 // The text on the system's clipboard (none where it holds none, or no
 // text), and a text put on it in place of what it held. (In a web page
 // the browser does not give a page the clipboard when asked: none.)
@@ -421,6 +448,11 @@ system paint() {
   }
 }
 
+// The frame's end. (On a Mac, while the window is made bigger or smaller
+// with the mouse, the program's frames go on within that, one for each
+// size, so that what it draws is laid out anew as the window changes;
+// ENT_WINDOW_LIVE=no leaves the picture stretched until the mouse is let
+// go, as raylib has it.)
 system present() {
   if Window.painted { end_frame() } else { still_frame(Window.fps) }
 }

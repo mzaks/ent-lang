@@ -1,5 +1,6 @@
-// The window's clicks, secondary button, modifiers, pointer and menu
-// (window_menu.test), with no window: no click, no menu chosen.
+// The window's clicks, secondary button, modifiers, pointer, menus,
+// folder panel and alert (window_menu.test), with no window: no click,
+// no menu shown or chosen, no folder, no button pressed.
 import console
 import text
 import window
@@ -11,6 +12,11 @@ system go() {
   put("clicks {Mouse.clicks} secondary {Mouse.secondary} command {command_down()} word {word_modifier_down()}")
   put("name {command_name()}")
   put("menu {chosen} shapes {pointer_text()} {pointer_hand()} {pointer_resize_across()}")
+  let shown = menu_bar("File", "New\tn\nOpen Recent\n  /tmp\n  -\n  Clear Menu\n-\n~Save\ts")
+  window_title("x")
+  let folder = choose_folder("Open", "/tmp")
+  let pressed = alert("Save?", "", "Save\nCancel")
+  put("bar {shown} chosen [{menu_chosen()}] folder [{folder}] alert {pressed}")
 }
 schedule frame() { begin()  go()  present() }
 main { frame() }

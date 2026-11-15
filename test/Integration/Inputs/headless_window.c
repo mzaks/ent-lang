@@ -213,3 +213,20 @@ int32_t ent_window_context_menu(const ent_text *items) {
   (void)items;
   return -1;
 }
+// No menu bar, panel or alert either: nothing shown, chosen or pressed.
+static const ent_text *none_text(void) { return ent_text_new(0); }
+bool ent_window_menu_bar(const ent_text *title, const ent_text *items) {
+  (void)title, (void)items;
+  return false;
+}
+const ent_text *ent_window_menu_chosen(void) { return none_text(); }
+const ent_text *ent_window_choose_folder(const ent_text *title, const ent_text *start) {
+  (void)title, (void)start;
+  return none_text();
+}
+int32_t ent_window_alert(const ent_text *message, const ent_text *detail,
+                         const ent_text *buttons) {
+  (void)message, (void)detail, (void)buttons;
+  return -1;
+}
+void ent_window_window_title(const ent_text *title) { (void)title; }

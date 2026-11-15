@@ -349,6 +349,166 @@ float ent_window_frame_seconds(void) {
 }
 #endif
 
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+#include <objc/message.h>
+#include <objc/runtime.h>
+// (AppKit is the window's already, through GLFW; the program is linked
+// against it and the Objective-C runtime from here, which every Mac has.)
+__asm__(".linker_option \"-lobjc\"\n"
+        ".linker_option \"-framework\", \"AppKit\"");
+typedef struct {
+  double x, y;
+} ent_window_ns_point;
+static SEL ent_window_sel(const char *name) { return sel_registerName(name); }
+static id ent_window_send(id to, const char *name) {
+  return ((id(*)(id, SEL))objc_msgSend)(to, ent_window_sel(name));
+}
+static id ent_window_class(const char *name) { return (id)objc_getClass(name); }
+static id ent_window_ns_text(const char *s) {
+  return ((id(*)(id, SEL, const char *))objc_msgSend)(
+      ent_window_class("NSString"), ent_window_sel("stringWithUTF8String:"), s);
+}
+#endif
+
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+// A window made bigger or smaller with the mouse, on a Mac: AppKit
+// follows the mouse in a loop of its own until the button is let go,
+// within the events taken in at a frame's end, and the program draws
+// nothing meanwhile (the picture it had is stretched). So the events are
+// taken in on a stack of their own (a fiber, on the same thread): where
+// the window's size changes within that loop, the program is let go on
+// with its frames, one for each size, until it ends one (the picture
+// shown at once); then the loop goes on.
+#include <sys/mman.h>
+
+// From one stack to the other: the registers a function keeps are kept
+// on the stack left, its top put in *from; then `to`'s are taken back.
+void ent_window_fiber_switch(void **from, void *to);
+#if defined(__aarch64__)
+__asm__(".text\n.p2align 2\n.globl _ent_window_fiber_switch\n"
+        "_ent_window_fiber_switch:\n"
+        "  sub sp, sp, #160\n"
+        "  stp x19, x20, [sp, #0]\n  stp x21, x22, [sp, #16]\n"
+        "  stp x23, x24, [sp, #32]\n  stp x25, x26, [sp, #48]\n"
+        "  stp x27, x28, [sp, #64]\n  stp x29, x30, [sp, #80]\n"
+        "  stp d8, d9, [sp, #96]\n  stp d10, d11, [sp, #112]\n"
+        "  stp d12, d13, [sp, #128]\n  stp d14, d15, [sp, #144]\n"
+        "  mov x9, sp\n  str x9, [x0]\n  mov sp, x1\n"
+        "  ldp x19, x20, [sp, #0]\n  ldp x21, x22, [sp, #16]\n"
+        "  ldp x23, x24, [sp, #32]\n  ldp x25, x26, [sp, #48]\n"
+        "  ldp x27, x28, [sp, #64]\n  ldp x29, x30, [sp, #80]\n"
+        "  ldp d8, d9, [sp, #96]\n  ldp d10, d11, [sp, #112]\n"
+        "  ldp d12, d13, [sp, #128]\n  ldp d14, d15, [sp, #144]\n"
+        "  add sp, sp, #160\n  ret\n");
+#define ENT_WINDOW_FIBER_KEPT 160
+#elif defined(__x86_64__)
+__asm__(".text\n.globl _ent_window_fiber_switch\n"
+        "_ent_window_fiber_switch:\n"
+        "  pushq %rbp\n  pushq %rbx\n  pushq %r12\n  pushq %r13\n"
+        "  pushq %r14\n  pushq %r15\n"
+        "  movq %rsp, (%rdi)\n  movq %rsi, %rsp\n"
+        "  popq %r15\n  popq %r14\n  popq %r13\n  popq %r12\n"
+        "  popq %rbx\n  popq %rbp\n  ret\n");
+#define ENT_WINDOW_FIBER_KEPT 48
+#endif
+
+#ifdef ENT_WINDOW_FIBER_KEPT
+static void *ent_window_main_top, *ent_window_events_top;
+// What the events' stack is asked to do (1 end the frame: EndDrawing;
+// 2 take the events in), whether it waits within AppKit's loop for the
+// program's next frame, and whether it is on it now.
+static int ent_window_events_job;
+static bool ent_window_events_parked, ent_window_on_events;
+
+static void ent_window_events_main(void) {
+  for (;;) {
+    ent_window_on_events = true;
+    if (ent_window_events_job == 1)
+      EndDrawing();
+    else
+      PollInputEvents();
+    ent_window_events_job = 0;
+    ent_window_on_events = false;
+    ent_window_fiber_switch(&ent_window_events_top, ent_window_main_top);
+  }
+}
+
+// A new size within AppKit's loop (NSWindowDidResizeNotification, after
+// GLFW's, which tells raylib): the program draws a frame for it.
+static void ent_window_resized_live(id self, SEL command, id note) {
+  (void)self, (void)command, (void)note;
+  if (!ent_window_on_events)
+    return;
+  ent_window_events_parked = true;
+  ent_window_on_events = false;
+  ent_window_fiber_switch(&ent_window_events_top, ent_window_main_top);
+  ent_window_on_events = true;
+  ent_window_events_parked = false;
+}
+
+static bool ent_window_events_ready(void) {
+  static int made; // 0 not yet, 1 made, -1 could not be
+  if (made == 0) {
+    made = -1;
+    size_t size = 8u << 20, page = 16384;
+    char *stack = mmap(0, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    id window = (id)GetWindowHandle();
+    if (stack != MAP_FAILED && window) {
+      mprotect(stack, page, PROT_NONE); // (a guard at its end)
+      // Its top as if it had been left by ent_window_fiber_switch, to go
+      // on in ent_window_events_main.
+      char *top = stack + size - 64;
+      top = (char *)((uintptr_t)top & ~(uintptr_t)15);
+#if defined(__aarch64__)
+      top -= ENT_WINDOW_FIBER_KEPT;
+      memset(top, 0, ENT_WINDOW_FIBER_KEPT);
+      ((void **)top)[11] = (void *)ent_window_events_main; // x30
+#else
+      top -= 16; // (as if called: once it is taken, the top is 8 off even)
+      *(void **)top = (void *)ent_window_events_main;
+      top -= ENT_WINDOW_FIBER_KEPT;
+      memset(top, 0, ENT_WINDOW_FIBER_KEPT);
+#endif
+      ent_window_events_top = top;
+      Class watcher = objc_getClass("EntWindowResizeWatcher");
+      if (!watcher) {
+        watcher = objc_allocateClassPair(objc_getClass("NSObject"),
+                                         "EntWindowResizeWatcher", 0);
+        class_addMethod(watcher, ent_window_sel("resized:"),
+                        (IMP)ent_window_resized_live, "v@:@");
+        objc_registerClassPair(watcher);
+      }
+      id watching = ent_window_send(ent_window_send((id)watcher, "alloc"), "init");
+      ((void (*)(id, SEL, id, SEL, id, id))objc_msgSend)(
+          ent_window_send(ent_window_class("NSNotificationCenter"), "defaultCenter"),
+          ent_window_sel("addObserver:selector:name:object:"), watching,
+          ent_window_sel("resized:"), ent_window_ns_text("NSWindowDidResizeNotification"),
+          window);
+      made = 1;
+    }
+  }
+  return made == 1;
+}
+
+// The frame's end (1) or the events (2) on the events' stack. Where it
+// waits within AppKit's loop, the frame just drawn is shown first.
+static bool ent_window_events_turn(int job, bool drawn) {
+  if (getenv("ENT_WINDOW_LIVE") && strcmp(getenv("ENT_WINDOW_LIVE"), "no") == 0)
+    return false;
+  if (!ent_window_events_parked) {
+    if (!ent_window_events_ready())
+      return false;
+    ent_window_events_job = job;
+  } else if (drawn) {
+    rlDrawRenderBatchActive();
+    SwapScreenBuffer();
+  }
+  ent_window_fiber_switch(&ent_window_main_top, ent_window_events_top);
+  return true;
+}
+#endif
+#endif
+
 // Everything is drawn so many times as big as it says (`Window.zoom`).
 static float ent_window_zoom = 1;
 static float ent_window_zoom_now(void) { return ent_window_zoom; }
@@ -380,7 +540,12 @@ void ent_window_end_frame(void) {
   ent_window_shift(0, 0);
   ent_window_unclip();
   rlPopMatrix();
+#ifdef ENT_WINDOW_FIBER_KEPT
+  if (!ent_window_events_turn(1, true))
+    EndDrawing();
+#else
   EndDrawing();
+#endif
   ent_window_drawing = false;
 #ifdef __EMSCRIPTEN__
   ent_window_next_frame(ent_window_fps > 0 ? 1.0 / ent_window_fps : 0);
@@ -404,7 +569,15 @@ void ent_window_still_frame(int32_t fps) {
   ent_window_fit();
 #else
   ent_window_any_still = 1;
+#ifdef ENT_WINDOW_FIBER_KEPT
+  bool parked = ent_window_events_parked;
+  if (!ent_window_events_turn(2, false))
+    PollInputEvents();
+  if (parked)
+    fps = 0; // (AppKit's loop sets the pace while the window is resized.)
+#else
   PollInputEvents();
+#endif
   if (fps > 0) {
     double until = ent_window_frame_end + 1.0 / fps;
     double now = GetTime();
@@ -1777,24 +1950,7 @@ void ent_window_screenshot(const ent_text126 *file) {
 // double-click time, the pointer's shape, and a menu at the pointer.
 
 #if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
-#include <objc/message.h>
-#include <objc/runtime.h>
-// (AppKit is the window's already, through GLFW; the program is linked
-// against it and the Objective-C runtime from here, which every Mac has.)
-__asm__(".linker_option \"-lobjc\"\n"
-        ".linker_option \"-framework\", \"AppKit\"");
-typedef struct {
-  double x, y;
-} ent_window_ns_point;
-static SEL ent_window_sel(const char *name) { return sel_registerName(name); }
-static id ent_window_send(id to, const char *name) {
-  return ((id(*)(id, SEL))objc_msgSend)(to, ent_window_sel(name));
-}
-static id ent_window_class(const char *name) { return (id)objc_getClass(name); }
-static id ent_window_ns_text(const char *s) {
-  return ((id(*)(id, SEL, const char *))objc_msgSend)(
-      ent_window_class("NSString"), ent_window_sel("stringWithUTF8String:"), s);
-}
+// (The Objective-C runtime's helpers are near the top.)
 #elif defined(_WIN32)
 // (Not windows.h, whose names raylib's clash with.)
 __declspec(dllimport) unsigned int __stdcall GetDoubleClickTime(void);
@@ -2038,6 +2194,16 @@ static int32_t ent_window_menu_drawn(ent_window_menu_items *m) {
 // The system's menu (NSMenu): its items' target an object of a class made
 // here, whose `pick:` keeps the number of the item chosen.
 static int32_t ent_window_menu_pick;
+// The menu bar's item chosen last, by the menus it is in ("File/Open").
+static char ent_window_bar_pick[1024];
+static void ent_window_bar_picked(id self, SEL command, id sender) {
+  (void)self, (void)command;
+  id path = ent_window_send(sender, "representedObject");
+  const char *said =
+      path ? ((const char *(*)(id, SEL))objc_msgSend)(path, ent_window_sel("UTF8String"))
+           : 0;
+  snprintf(ent_window_bar_pick, sizeof ent_window_bar_pick, "%s", said ? said : "");
+}
 static void ent_window_menu_picked(id self, SEL command, id sender) {
   (void)self, (void)command;
   ent_window_menu_pick =
@@ -2051,6 +2217,8 @@ static id ent_window_menu_target(void) {
       made = objc_allocateClassPair(objc_getClass("NSObject"),
                                     "EntWindowMenuTarget", 0);
       class_addMethod(made, ent_window_sel("pick:"), (IMP)ent_window_menu_picked,
+                      "v@:@");
+      class_addMethod(made, ent_window_sel("barPick:"), (IMP)ent_window_bar_picked,
                       "v@:@");
       objc_registerClassPair(made);
     }
@@ -2182,4 +2350,324 @@ int32_t ent_window_context_menu(const ent_text *items) {
 #endif
   free(m.held);
   return chosen;
+}
+
+// ---------------------------------------------------------------------
+// The menu bar, a folder chosen, an alert, and the window's title.
+
+// A text as C has them (malloc'd; none: "").
+static char *ent_window_c_text(const ent_text *t) {
+  uint32_t n = t ? t->length : 0;
+  char *c = malloc((size_t)n + 1);
+  if (!c)
+    return 0;
+  if (n)
+    memcpy(c, t->bytes, n);
+  c[n] = 0;
+  return c;
+}
+static const ent_text *ent_window_ent_text(const char *c) {
+  size_t n = c ? strlen(c) : 0;
+  ent_text *made = ent_text_new((uint32_t)n);
+  if (n)
+    memcpy(made->bytes, c, n);
+  return made;
+}
+
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+extern void *objc_autoreleasePoolPush(void);
+extern void objc_autoreleasePoolPop(void *pool);
+static id ent_window_with_text(id to, const char *name, const char *t) {
+  return ((id(*)(id, SEL, id))objc_msgSend)(to, ent_window_sel(name),
+                                             ent_window_ns_text(t));
+}
+static long ent_window_count(id menu) {
+  return ((long (*)(id, SEL))objc_msgSend)(menu, ent_window_sel("numberOfItems"));
+}
+static id ent_window_new_menu(const char *title) {
+  id menu = ent_window_with_text(ent_window_send(ent_window_class("NSMenu"), "alloc"),
+                                 "initWithTitle:", title);
+  ((void (*)(id, SEL, signed char))objc_msgSend)(
+      menu, ent_window_sel("setAutoenablesItems:"), 0);
+  return menu;
+}
+#endif
+
+bool ent_window_menu_bar(const ent_text *title, const ent_text *items) {
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+  if (!IsWindowReady())
+    return false;
+  id app = ent_window_send(ent_window_class("NSApplication"), "sharedApplication");
+  id bar = ent_window_send(app, "mainMenu");
+  if (!bar)
+    return false;
+  char *name = ent_window_c_text(title), *held = ent_window_c_text(items);
+  if (!name || !held) {
+    free(name);
+    free(held);
+    return false;
+  }
+  void *pool = objc_autoreleasePoolPush();
+  id target = ent_window_menu_target();
+  // In place of the menu of this title, else before Window (the last).
+  long at = ((long (*)(id, SEL, id))objc_msgSend)(
+      bar, ent_window_sel("indexOfItemWithTitle:"), ent_window_ns_text(name));
+  if (at >= 0) {
+    ((void (*)(id, SEL, long))objc_msgSend)(bar, ent_window_sel("removeItemAtIndex:"), at);
+  } else {
+    // (Window is the menu the application has as its windows'; its title
+    // may be none.)
+    id windows = ent_window_send(app, "windowsMenu");
+    long n = ent_window_count(bar);
+    at = n;
+    for (long i = 1; i < n && windows; ++i) {
+      id item = ((id(*)(id, SEL, long))objc_msgSend)(bar, ent_window_sel("itemAtIndex:"), i);
+      if (ent_window_send(item, "submenu") == windows) {
+        at = i;
+        break;
+      }
+    }
+  }
+  id menu = ent_window_new_menu(name);
+  id above = 0, inner = 0;
+  char above_name[512] = "";
+  char *line = held;
+  while (line && *line) {
+    char *end = strchr(line, '\n');
+    if (end)
+      *end = 0;
+    size_t length = strlen(line);
+    if (length && line[length - 1] == '\r')
+      line[--length] = 0;
+    bool in_inner = strncmp(line, "  ", 2) == 0;
+    char *it = in_inner ? line + 2 : line;
+    bool dim = it[0] == '~';
+    if (dim)
+      ++it;
+    char *key = strchr(it, '\t');
+    if (key)
+      *key++ = 0;
+    id into = menu;
+    if (in_inner && above) {
+      if (!inner) {
+        inner = ent_window_new_menu(above_name);
+        ((void (*)(id, SEL, id))objc_msgSend)(above, ent_window_sel("setSubmenu:"), inner);
+        ent_window_send(inner, "release");
+      }
+      into = inner;
+    }
+    if (strcmp(it, "-") == 0) {
+      ((void (*)(id, SEL, id))objc_msgSend)(
+          into, ent_window_sel("addItem:"),
+          ent_window_send(ent_window_class("NSMenuItem"), "separatorItem"));
+    } else if (*it) {
+      char path[1024];
+      if (into == inner)
+        snprintf(path, sizeof path, "%s/%s/%s", name, above_name, it);
+      else
+        snprintf(path, sizeof path, "%s/%s", name, it);
+      id item = ((id(*)(id, SEL, id, SEL, id))objc_msgSend)(
+          ent_window_send(ent_window_class("NSMenuItem"), "alloc"),
+          ent_window_sel("initWithTitle:action:keyEquivalent:"), ent_window_ns_text(it),
+          ent_window_sel("barPick:"), ent_window_ns_text(key ? key : ""));
+      ((void (*)(id, SEL, id))objc_msgSend)(item, ent_window_sel("setTarget:"), target);
+      ((void (*)(id, SEL, id))objc_msgSend)(item, ent_window_sel("setRepresentedObject:"),
+                                            ent_window_ns_text(path));
+      ((void (*)(id, SEL, signed char))objc_msgSend)(item, ent_window_sel("setEnabled:"),
+                                                     !dim);
+      ((void (*)(id, SEL, id))objc_msgSend)(into, ent_window_sel("addItem:"), item);
+      if (into == menu) {
+        above = item;
+        inner = 0;
+        snprintf(above_name, sizeof above_name, "%s", it);
+      }
+      ent_window_send(item, "release");
+    }
+    line = end ? end + 1 : 0;
+  }
+  id top = ((id(*)(id, SEL, id, SEL, id))objc_msgSend)(
+      ent_window_send(ent_window_class("NSMenuItem"), "alloc"),
+      ent_window_sel("initWithTitle:action:keyEquivalent:"), ent_window_ns_text(name),
+      (SEL)0, ent_window_ns_text(""));
+  ((void (*)(id, SEL, id))objc_msgSend)(top, ent_window_sel("setSubmenu:"), menu);
+  ((void (*)(id, SEL, id, long))objc_msgSend)(bar, ent_window_sel("insertItem:atIndex:"),
+                                             top, at);
+  ent_window_send(menu, "release");
+  ent_window_send(top, "release");
+  objc_autoreleasePoolPop(pool);
+  free(name);
+  free(held);
+  return true;
+#else
+  (void)title, (void)items;
+  return false;
+#endif
+}
+
+const ent_text *ent_window_menu_chosen(void) {
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+  const ent_text *said = ent_window_ent_text(ent_window_bar_pick);
+  ent_window_bar_pick[0] = 0;
+  return said;
+#else
+  return ent_window_ent_text("");
+#endif
+}
+
+#if !defined(__APPLE__) && !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+// A text in single quotes for the shell ("'" as '\'').
+static char *ent_window_quoted(const char *t) {
+  size_t n = strlen(t), room = 3;
+  for (size_t i = 0; i < n; ++i)
+    room += t[i] == '\'' ? 4 : 1;
+  char *q = malloc(room), *at = q;
+  if (!q)
+    return 0;
+  *at++ = '\'';
+  for (size_t i = 0; i < n; ++i) {
+    if (t[i] == '\'') {
+      memcpy(at, "'\\''", 4);
+      at += 4;
+    } else {
+      *at++ = t[i];
+    }
+  }
+  *at++ = '\'';
+  *at = 0;
+  return q;
+}
+#endif
+
+const ent_text *ent_window_choose_folder(const ent_text *title, const ent_text *start) {
+  char *asked = ent_window_c_text(title), *from = ent_window_c_text(start);
+  char chosen[4096] = "";
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+  if (asked && from && IsWindowReady()) {
+    void *pool = objc_autoreleasePoolPush();
+    id panel = ent_window_send(ent_window_class("NSOpenPanel"), "openPanel");
+    ((void (*)(id, SEL, signed char))objc_msgSend)(panel, ent_window_sel("setCanChooseFiles:"), 0);
+    ((void (*)(id, SEL, signed char))objc_msgSend)(
+        panel, ent_window_sel("setCanChooseDirectories:"), 1);
+    ((void (*)(id, SEL, signed char))objc_msgSend)(
+        panel, ent_window_sel("setCanCreateDirectories:"), 1);
+    ((void (*)(id, SEL, signed char))objc_msgSend)(
+        panel, ent_window_sel("setAllowsMultipleSelection:"), 0);
+    ent_window_with_text(panel, "setMessage:", asked);
+    ent_window_with_text(panel, "setPrompt:", "Open");
+    if (*from) {
+      id url = ((id(*)(id, SEL, id, signed char))objc_msgSend)(
+          ent_window_class("NSURL"), ent_window_sel("fileURLWithPath:isDirectory:"),
+          ent_window_ns_text(from), 1);
+      ((void (*)(id, SEL, id))objc_msgSend)(panel, ent_window_sel("setDirectoryURL:"), url);
+    }
+    long answer = ((long (*)(id, SEL))objc_msgSend)(panel, ent_window_sel("runModal"));
+    if (answer == 1) { // NSModalResponseOK
+      id path = ent_window_send(ent_window_send(panel, "URL"), "path");
+      const char *said =
+          path ? ((const char *(*)(id, SEL))objc_msgSend)(path, ent_window_sel("UTF8String"))
+               : 0;
+      snprintf(chosen, sizeof chosen, "%s", said ? said : "");
+    }
+    objc_autoreleasePoolPop(pool);
+  }
+#elif !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+  // zenity (GNOME and most others), else kdialog (KDE).
+  char *q_title = asked ? ent_window_quoted(asked) : 0;
+  char *q_from = from ? ent_window_quoted(*from ? from : ".") : 0;
+  if (q_title && q_from) {
+    size_t room = strlen(q_title) + strlen(q_from) + 256;
+    char *command = malloc(room);
+    if (command) {
+      snprintf(command, room,
+               "if command -v zenity >/dev/null 2>&1; then "
+               "zenity --file-selection --directory --title=%s --filename=%s/ 2>/dev/null; "
+               "elif command -v kdialog >/dev/null 2>&1; then "
+               "kdialog --getexistingdirectory %s --title %s 2>/dev/null; fi",
+               q_title, q_from, q_from, q_title);
+      FILE *out = popen(command, "r");
+      if (out) {
+        if (fgets(chosen, sizeof chosen, out)) {
+          size_t n = strlen(chosen);
+          while (n && (chosen[n - 1] == '\n' || chosen[n - 1] == '\r'))
+            chosen[--n] = 0;
+        }
+        pclose(out);
+      }
+      free(command);
+    }
+  }
+  free(q_title);
+  free(q_from);
+#endif
+  free(asked);
+  free(from);
+  return ent_window_ent_text(chosen);
+}
+
+int32_t ent_window_alert(const ent_text *message, const ent_text *detail,
+                         const ent_text *buttons) {
+  char *said = ent_window_c_text(message), *more = ent_window_c_text(detail),
+       *held = ent_window_c_text(buttons);
+  int32_t pressed = -1;
+  if (said && more && held) {
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+    if (IsWindowReady() && !(getenv("ENT_WINDOW_MENU") &&
+                             strcmp(getenv("ENT_WINDOW_MENU"), "drawn") == 0)) {
+      void *pool = objc_autoreleasePoolPush();
+      id alert = ent_window_send(ent_window_send(ent_window_class("NSAlert"), "alloc"), "init");
+      ent_window_with_text(alert, "setMessageText:", said);
+      ent_window_with_text(alert, "setInformativeText:", more);
+      int n = 0;
+      for (char *line = held; line && *line;) {
+        char *end = strchr(line, '\n');
+        if (end)
+          *end = 0;
+        if (*line) {
+          ent_window_with_text(alert, "addButtonWithTitle:", line);
+          ++n;
+        }
+        line = end ? end + 1 : 0;
+      }
+      long answer = ((long (*)(id, SEL))objc_msgSend)(alert, ent_window_sel("runModal"));
+      ent_window_send(alert, "release");
+      objc_autoreleasePoolPop(pool);
+      // (NSAlertFirstButtonReturn is 1000, the next 1001, ...)
+      pressed = answer >= 1000 && answer < 1000 + n ? (int32_t)(answer - 1000) : -1;
+      free(said);
+      free(more);
+      free(held);
+      return pressed;
+    }
+#endif
+#if !defined(__EMSCRIPTEN__)
+    // Drawn: the message and the detail (not to be chosen), then the
+    // buttons as items.
+    size_t room = strlen(said) + strlen(more) + strlen(held) + 16;
+    char *lines = malloc(room);
+    if (lines) {
+      snprintf(lines, room, "~%s\n%s%s%s-\n%s", said, *more ? "~" : "", more,
+               *more ? "\n" : "", held);
+      ent_text *items = (ent_text *)ent_window_ent_text(lines);
+      ent_window_menu_items m;
+      if (ent_window_menu_split(items, &m)) {
+        int first = *more ? 3 : 2;
+        int32_t chosen = ent_window_menu_drawn(&m);
+        pressed = chosen >= first ? chosen - first : -1;
+        free(m.held);
+      }
+      free(lines);
+    }
+#endif
+  }
+  free(said);
+  free(more);
+  free(held);
+  return pressed;
+}
+
+void ent_window_window_title(const ent_text *title) {
+  char *t = ent_window_c_text(title);
+  if (t && IsWindowReady())
+    SetWindowTitle(t);
+  free(t);
 }
