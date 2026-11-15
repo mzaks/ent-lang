@@ -1763,7 +1763,13 @@ void ent_window_screenshot(const ent_text126 *file) {
   ENT_WINDOW_TEXT(name, file);
   // What was drawn so far is still waiting to go to the picture.
   rlDrawRenderBatchActive();
-  TakeScreenshot(name);
+  // (Not TakeScreenshot: raylib 6.0 scales the size it reads by the
+  // screen's scale once more on a Retina Mac, where it is in pixels
+  // already, and the picture comes out twice as big with the window in
+  // a corner. The pixels drawn, as they are, are read here.)
+  Image picture = LoadImageFromScreen();
+  ExportImage(picture, name);
+  UnloadImage(picture);
 }
 
 // ---------------------------------------------------------------------
