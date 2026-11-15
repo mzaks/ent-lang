@@ -992,16 +992,20 @@ static Font ent_window_plain(float size) {
   for (int i = 0; i < ENT_WINDOW_PLAIN_SIZES; ++i)
     if (ent_window_plain_face.pixels[i] == pixels)
       return ent_window_plain_face.at[i];
-  // (The letters of Latin-1, as the library's own font has them.)
-  int letters[191];
-  for (int i = 0; i < 191; ++i)
-    letters[i] = i < 95 ? 32 + i : 160 + (i - 95);
+  // (The letters of Latin-1, as the library's own font has them, and
+  // the marks texts are written with beyond it: … – — ‘ ’ “ ” • € ™.)
+  static const int more[] = {0x2026, 0x2013, 0x2014, 0x2018, 0x2019,
+                             0x201c, 0x201d, 0x2022, 0x20ac, 0x2122};
+  enum { latin = 191, all = latin + sizeof more / sizeof more[0] };
+  int letters[all];
+  for (int i = 0; i < all; ++i)
+    letters[i] = i < 95 ? 32 + i : i < latin ? 160 + (i - 95) : more[i - latin];
   Font made = ent_window_plain_face.held.bytes
                   ? LoadFontFromMemory(ent_window_plain_face.kind,
                                        ent_window_plain_face.held.bytes,
                                        (int)ent_window_plain_face.held.size,
-                                       pixels, letters, 191)
-                  : LoadFontEx(file, pixels, letters, 191);
+                                       pixels, letters, all)
+                  : LoadFontEx(file, pixels, letters, all);
   if (!made.texture.id || !made.glyphCount) {
     ent_window_plain_face.file = 0;
     return GetFontDefault();

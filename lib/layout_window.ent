@@ -62,6 +62,41 @@ enum Breaks { Words, Lines, Nowhere }
 component TextStyle {
   font: i32, spacing: f32, line: f32, align: Place, breaks: Breaks
 }
+// A text kept on one line and cut short where its box is narrower: it
+// ends in "…" where all of it does not fit. Its box takes no room for
+// it (give the box a `Grow` or `Fixed` width), so that a long one does
+// not push the boxes beside it away. Where `tip` says, all of it shows
+// in a tip by the pointer while the pointer rests on it cut short.
+component Shorten { tip: bool }
+// (Whether a `Shorten` text under the pointer is cut short now.)
+component ShortNow { cut: bool }
+// The tip: whether one shows (from when the pointer rested `tip_wait`
+// seconds on a text cut short, until it is elsewhere or a button goes
+// down), whether that changed in this frame (a lazy window draws the
+// frame then), and where the pointer was. A program asks for a tip of
+// its own, over what it draws itself and cut short: it puts the text in
+// `TipAsk` and says `fresh`, in each frame the pointer is over it
+// (before `tips`).
+unique Tip { shown: bool, changed: bool, asked: bool, x: f32, y: f32, wait: f32 }
+unique TipAsk { text: text, fresh: bool }
+fn tip_wait() -> f32 { 0.7 }
+
+// A text cut short to fit in `room` (ending in "…"), or all of it where
+// it fits; on one line. (Not within a letter of more than a byte.)
+proc shortened(t: text, room: f32, font: i32, size: f32, spacing: f32) -> text {
+  let all = text_extent(t, font, size, spacing, 2)
+  var lo = len(t)
+  if all > room {
+    lo = 0
+    var hi = len(t)
+    while lo < hi {
+      let mid = (lo + hi + 1) / 2
+      if text_extent(slice(t, 0, mid) + "…", font, size, spacing, 2) <= room { lo = mid } else { hi = mid - 1 }
+    }
+    while lo > 0 && t[lo] as i32 >= 128 && (t[lo] as i32) < 192 { lo -= 1 }
+  }
+  if lo >= len(t) { t } else { slice(t, 0, lo) + "…" }
+}
 
 // A colour laid on a box and on all that is in it, as much of it as its
 // AA says (0x80ff0000: half red). A box with one in a box with one has
@@ -244,7 +279,7 @@ system measure() {
   for e, t: Text without Natural on added Text {
     e.add(Natural { w: 0.0, min_w: 0.0, h: 0.0 })
   }
-  for t: Text, n: mut Natural, optional st: TextStyle
+  for t: Text, n: mut Natural, optional st: TextStyle, optional cut: Shorten
       on changed t, changed st, added Natural {
     var font = 0
     var spacing = 0.0
@@ -260,6 +295,10 @@ system measure() {
     n.w = text_extent(t.text, font, t.size, spacing, breaks)
     n.min_w = text_least(t.text, font, t.size, spacing, breaks)
     n.h = line
+    if let tip = cut.tip {
+      n.w = 0.0
+      n.min_w = 0.0
+    }
   }
 }
 
@@ -267,7 +306,7 @@ system measure() {
 // gave its box.
 system wrap() {
   for b: Box, t: Text, k: Stack, n: mut Natural, optional p: Pad,
-      optional st: TextStyle
+      optional st: TextStyle, optional cut: Shorten
       on changed b.w, changed t, changed k, changed p, changed st {
     var pads = 2.0 * k.pad
     if let left = p.left, let right = p.right { pads = left + right }
@@ -282,6 +321,7 @@ system wrap() {
       breaks = br as i32
       if high > 0.0 { line = high }
     }
+    if let tip = cut.tip { breaks = 2 }
     let lines = text_lines(t.text, b.w - pads, font, t.size, spacing, breaks)
     let h = line * (lines - 1) as f32 + t.size
     n.h = h
@@ -807,7 +847,7 @@ system draw(from: i32, to: i32) {
         optional t: Text, optional k: Stack, optional p: Pad,
         optional how: Align, optional st: TextStyle, optional more: Expand,
         optional rc: Round, optional pic: Picture, optional own: Shown,
-        optional sr: ShownRound, optional cu: Custom
+        optional sr: ShownRound, optional cu: Custom, optional cut: Shorten
         top down dfs Inside
         where l.z == z &&
               (Culling.off ||
@@ -914,9 +954,15 @@ system draw(from: i32, to: i32) {
         }
         let room_w = b.w - left - right
         let room_h = b.h - top - bottom
-        let lines = text_lines(said, room_w, font, size, spacing, breaks)
+        var short = false
+        if let tip = cut.tip {
+          short = true
+          breaks = 2
+        }
+        let says = if short { shortened(said, room_w, font, size, spacing) } else { said }
+        let lines = text_lines(says, room_w, font, size, spacing, breaks)
         let high = line * (lines - 1) as f32 + size
-        write(said, b.x + left, b.y + top + (room_h - high) * fy, room_w,
+        write(says, b.x + left, b.y + top + (room_h - high) * fy, room_w,
               font, size, spacing, line, breaks, along, ink)
       }
     }
@@ -1160,6 +1206,73 @@ system inspect() {
   }
 }
 
+// Which text cut short is under the pointer, and whether its tip shows
+// (or one the program asked for): after the pointer rested on it.
+system tips() {
+  for e, s: Shorten without ShortNow on added Shorten { e.add(ShortNow { cut: false }) }
+  for b: Box, t: Text, s: Shorten, c: mut ShortNow, optional k: Stack, optional p: Pad,
+      optional st: TextStyle with Hovered {
+    var pads = 0.0
+    if let pad = k.pad { pads = 2.0 * pad }
+    if let left = p.left, let right = p.right { pads = left + right }
+    var font = 0
+    var spacing = 0.0
+    if let f = st.font, let sp = st.spacing {
+      font = f
+      spacing = sp
+    }
+    let now = s.tip && text_extent(t.text, font, t.size, spacing, 2) > b.w - pads + 0.5
+    if c.cut != now { c.cut = now }
+  }
+  let over = for c: ShortNow with Hovered where c.cut { }
+  let asked = TipAsk.fresh
+  var shown = Tip.shown
+  if (over > 0 || asked) && !Pointer.down {
+    if !shown {
+      let moved = max(Pointer.x - Tip.x, Tip.x - Pointer.x) > 2.0 ||
+                  max(Pointer.y - Tip.y, Tip.y - Pointer.y) > 2.0
+      Tip.wait = if moved { 0.0 } else { Tip.wait + Window.dt }
+      if Tip.wait >= tip_wait() { shown = true }
+    }
+  } else {
+    Tip.wait = 0.0
+    shown = false
+  }
+  Tip.changed = shown != Tip.shown || (shown && asked != Tip.asked)
+  Tip.shown = shown
+  Tip.asked = asked
+  if !shown {
+    Tip.x = Pointer.x
+    Tip.y = Pointer.y
+  }
+  TipAsk.fresh = false
+}
+// A tip: the text in a small box under the pointer, within the window.
+proc tip_box(t: text, x: f32, y: f32, room_w: f32, room_h: f32) {
+  let size = 13.0
+  let w = min(text_extent(t, 0, size, 0.0, 2) + 16.0, room_w - 8.0)
+  let h = size + 10.0
+  let bx = max(4.0, min(x + 4.0, room_w - w - 4.0))
+  let by = if y + 22.0 + h > room_h - 4.0 { y - h - 8.0 } else { y + 22.0 }
+  unclip()
+  shift(0.0, 0.0)
+  shade(0, 0.0)
+  rect(bx + 1.0, by + 2.0, w, h, 0x50000000)
+  rect(bx, by, w, h, 0x5a6068)
+  rect(bx + 1.0, by + 1.0, w - 2.0, h - 2.0, 0x2c3035)
+  write(shortened(t, w - 16.0, 0, size, 0.0), bx + 8.0, by + 5.0, w - 16.0, 0, size, 0.0, 0.0, 2, 0, 0xe8eaed)
+}
+// The tip, over all that was drawn.
+system tip_draw() {
+  if Tip.shown && Tip.asked {
+    tip_box(TipAsk.text, Tip.x, Tip.y, Window.width as f32, Window.height as f32)
+  } else if Tip.shown {
+    for t: Text, c: ShortNow with Hovered where c.cut {
+      tip_box(t.text, Tip.x, Tip.y, Window.width as f32, Window.height as f32)
+    }
+  }
+}
+
 // The whole of it, between the window's `begin` and `present`.
 schedule ui() {
   pointer()
@@ -1177,7 +1290,9 @@ schedule ui() {
   wrap()
   layout_heights()
   settle()
+  tips()
   draw(0, 8)
+  tip_draw()
   inspect()
 }
 
@@ -1204,9 +1319,11 @@ schedule ui_base() {
   wrap()
   layout_heights()
   settle()
+  tips()
   draw(0, 1)
 }
 schedule ui_top() {
   draw(1, 8)
+  tip_draw()
   inspect()
 }
