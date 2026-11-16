@@ -1,5 +1,5 @@
 // The simulated dish of examples/cl_bridge (network.ent) on its own: a
-// few seconds of it, with a firing rate of a few spikes a second a
+// few seconds of it, with a firing rate of about a spike a second a
 // neuron. The same seed gives the same list of spikes (each one's step
 // and channel, hashed in order) and the same checksum of every potential
 // and weight, run again and on many threads; another seed another dish.
@@ -15,8 +15,8 @@
 // RUN: FileCheck %s < %t.a
 // RUN: FileCheck %s --check-prefix=OTHER < %t.d
 
-// CHECK: second 1: {{[1-4]}}.{{[0-9]+}} Hz a neuron
-// CHECK: second 3: {{[1-4]}}.{{[0-9]+}} Hz a neuron
+// CHECK: second 1: {{[0-4]}}.{{[0-9]+}} Hz a neuron
+// CHECK: second 3: {{[0-4]}}.{{[0-9]+}} Hz a neuron
 // CHECK: seed 1: 1024 neurons, 3000 steps, [[N:[0-9]+]] spikes
 // CHECK: 44815 synapses, spikes heard [[HEARD:[0-9]+]], checksum [[SUM:[0-9]+]]
 // OTHER: seed 2: 1024 neurons, 3000 steps

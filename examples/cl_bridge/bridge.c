@@ -31,6 +31,7 @@ typedef struct {
   int32_t stdp;
   float a_plus, a_minus, tau_plus, tau_minus;
   float noise_rate, noise_amp, stim_gain, stim_reach;
+  float adapt_inc, tau_adapt;
 } dish_params;
 
 typedef struct {
@@ -65,6 +66,8 @@ void dish_defaults(dish_params *p) {
   p->noise_amp = *ent_Dish_noise_amp(w);
   p->stim_gain = *ent_Dish_stim_gain(w);
   p->stim_reach = *ent_Dish_stim_reach(w);
+  p->adapt_inc = *ent_Dish_adapt_inc(w);
+  p->tau_adapt = *ent_Dish_tau_adapt(w);
   ent_world_destroy(w);
 }
 
@@ -105,6 +108,8 @@ dish *dish_create(const dish_params *p) {
   *ent_Dish_noise_amp(w) = p->noise_amp;
   *ent_Dish_stim_gain(w) = p->stim_gain;
   *ent_Dish_stim_reach(w) = p->stim_reach;
+  *ent_Dish_adapt_inc(w) = p->adapt_inc;
+  *ent_Dish_tau_adapt(w) = p->tau_adapt;
   ent_create(w);
   return d;
 }
@@ -184,6 +189,9 @@ int64_t dish_spikes(dish *d, int32_t *channel, int32_t *step, int64_t max) {
     d->first = 0;
   return n;
 }
+
+// Turns learning (STDP) on or off from the next step on.
+void dish_set_stdp(dish *d, int32_t on) { *ent_Dish_stdp(d->world) = on != 0; }
 
 // The steps run so far.
 int32_t dish_tick(dish *d) { return *ent_Dish_tick(d->world); }

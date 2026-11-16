@@ -32,6 +32,8 @@ unique Dish {
   tau: f32,          // the membrane's time constant
   thr: f32,          // the threshold; the potential rests at 0, resets to 0
   refractory: f32,   // steps after a spike the neuron does not integrate
+  adapt_inc: f32,    // what a spike adds to the neuron's adaptation, which is taken off its potential
+  tau_adapt: f32,    // the adaptation's time constant
   density: f32,      // the chance of a synapse between two neurons at no distance
   reach: f32,        // the distance over which that chance falls by e
   w_exc: f32,        // an excitatory synapse's weight at the start
@@ -52,7 +54,7 @@ unique Dish {
 }
 
 // Per step, worked out from Dish when the dish is made.
-unique Decay { v: f32, plus: f32, minus: f32 }
+unique Decay { v: f32, plus: f32, minus: f32, adapt: f32 }
 
 component Neuron {
   v: f32, input: f32, fired: f32,
@@ -61,6 +63,7 @@ component Neuron {
   trace: f32,        // the presynaptic trace (STDP)
   post: f32,         // the postsynaptic trace (STDP)
   rest: f32,         // steps of refractoriness left
+  adapt: f32,        // the adaptation: what each spike leaves, fading
   gain: f32,         // how much of its electrode's stim it takes
   number: i32, channel: i32, pad: entity
 }
@@ -82,6 +85,8 @@ world {
   Dish.tau = 20.0
   Dish.thr = 1.0
   Dish.refractory = 2.0
+  Dish.adapt_inc = 0.1
+  Dish.tau_adapt = 200.0
   Dish.density = 0.3
   Dish.reach = 0.2
   Dish.w_exc = 0.09
@@ -118,6 +123,7 @@ system make() {
   Decay.v = exp(-1.0 / Dish.tau)
   Decay.plus = exp(-1.0 / Dish.tau_plus)
   Decay.minus = exp(-1.0 / Dish.tau_minus)
+  Decay.adapt = exp(-1.0 / Dish.tau_adapt)
   Pads = []
   for c in 0..64 {
     let x = ((c % 8) as f32 + 0.5) / 8.0
@@ -138,7 +144,7 @@ system make() {
     let gain = exp(-sqrt(dx * dx + dy * dy) / Dish.stim_reach)
     let n = spawn {
       Neuron { v: 0.0, input: 0.0, fired: 0.0, sign: if inhibitory { -1.0 } else { 1.0 }, out: 0.0,
-               trace: 0.0, post: 0.0, rest: 0.0, gain: gain,
+               trace: 0.0, post: 0.0, rest: 0.0, adapt: 0.0, gain: gain,
                number: i, channel: c, pad: Pads[c].who }
     }
     Place += { x: x, y: y, who: n }
@@ -184,7 +190,7 @@ system gather() {
 
 system integrate() {
   for n: mut Neuron {
-    var v = Decay.v * n.v + n.input
+    var v = Decay.v * n.v + n.input - n.adapt
     var fired = 0.0
     if n.rest > 0.0 {
       n.rest -= 1.0
@@ -198,6 +204,7 @@ system integrate() {
     }
     n.v = v
     n.fired = fired
+    n.adapt = Decay.adapt * n.adapt + Dish.adapt_inc * fired
     n.out = n.sign * fired
     n.trace = Decay.plus * n.trace + fired
     n.post = Decay.minus * n.post + fired
