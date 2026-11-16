@@ -1,0 +1,17 @@
+// The dish of examples/cl_bridge as a shared library (ent build --shared,
+// network.ent with bridge.c), driven through its C interface by
+// check/dish_check.c: the same seed twice gives the same spikes and
+// checksum, another seed others; a stim on a channel every 100 ms makes
+// that channel fire far more in the 20 ms after it than the same dish
+// without the stims.
+// REQUIRES: system-linux
+// RUN: mkdir -p %t.dir
+// RUN: %ent build --shared %S/../../examples/cl_bridge/network.ent %S/../../examples/cl_bridge/bridge.c -o %t.dir/libdish.so
+// RUN: clang -O2 %S/../../examples/cl_bridge/check/dish_check.c -L%t.dir -ldish -Wl,-rpath,%t.dir -o %t.check
+// RUN: %t.check | FileCheck %s
+
+// CHECK: seed 1: [[N:[0-9]+]] spikes
+// CHECK: seed 1 again: the same
+// CHECK: seed 2: {{[0-9]+}} spikes, other spikes and checksum
+// CHECK: channel 27, 20 stims of 1: {{[0-9]+}} spikes on it in the 20 ms after them, {{[0-9]+}} without the stims
+// CHECK: stim response: yes

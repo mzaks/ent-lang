@@ -6,9 +6,11 @@
 //
 // The host (bridge.c, or run.ent for the program on its own) sets the
 // parameters in `Dish` and runs `create`, then `step` once a millisecond
-// of the dish's time: 25 frames at 25 kHz. Each step leaves its spikes in
-// the buffer `Spikes`, a row each, the channel of the electrode nearest
-// the neuron that fired. A stim adds to an electrode's `stim`, which the
+// of the dish's time: 25 frames at 25 kHz. Each step leaves its spikes on
+// the electrodes: an electrode's `count` is how many of the neurons
+// nearest it fired in that step (a C host reads the column; a buffer it
+// could only be handed through an extern proc). A stim adds to an
+// electrode's `stim`, which the
 // neurons nearest it take in at the next step, scaled by their distance
 // from it.
 //
@@ -62,15 +64,13 @@ component Neuron {
   gain: f32,         // how much of its electrode's stim it takes
   number: i32, channel: i32, pad: entity
 }
-component Electrode { channel: i32, x: f32, y: f32, stim: f32 }
+component Electrode { channel: i32, x: f32, y: f32, stim: f32, count: i32 }
 archetype Cell { Neuron } capacity 4096
 archetype Pad { Electrode } capacity 64
 
 // plastic: 1 where the source is excitatory (the weight learns), else 0.
 relation (Neuron)-[Synapse { weight: f32, plastic: f32 }]->(Neuron) capacity 524288
 
-// The spikes of the last step: a row each.
-buffer Spikes { channel: i32, step: i32 } capacity 4096
 // Where each neuron is, while the dish is made.
 buffer Place { x: f32, y: f32, who: entity } capacity 4096
 buffer Pads { who: entity } capacity 64
@@ -122,7 +122,7 @@ system make() {
   for c in 0..64 {
     let x = ((c % 8) as f32 + 0.5) / 8.0
     let y = ((c / 8) as f32 + 0.5) / 8.0
-    let p = spawn { Electrode { channel: c, x: x, y: y, stim: 0.0 } }
+    let p = spawn { Electrode { channel: c, x: x, y: y, stim: 0.0, count: 0 } }
     Pads += { who: p }
   }
   Place = []
@@ -183,7 +183,6 @@ system gather() {
 }
 
 system integrate() {
-  Spikes = []
   for n: mut Neuron {
     var v = Decay.v * n.v + n.input
     var fired = 0.0
@@ -194,7 +193,7 @@ system integrate() {
       fired = 1.0
       v = 0.0
       n.rest = Dish.refractory
-      Spikes += { channel: n.channel, step: Dish.tick }
+      Electrode(n.pad).count += 1
       Dish.spikes += 1
     }
     n.v = v
@@ -218,6 +217,11 @@ system stdp() {
       }
     }
   }
+}
+
+// Each step starts with no spikes on the electrodes.
+system begin() {
+  for p: mut Electrode { p.count = 0 }
 }
 
 system done() {
@@ -253,6 +257,7 @@ schedule create() {
 }
 
 schedule step() {
+  begin()
   gather()
   integrate()
   stdp() run_if Dish.stdp

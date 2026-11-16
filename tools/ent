@@ -1813,6 +1813,8 @@ def build(arguments, output, directory):
                 [path for path in host.get(variable, "").split(os.pathsep)
                  if path] + more)
     others = []
+    # (With --shared, a library: its code made to be loaded anywhere.)
+    pic = ["-fPIC"] if arguments.shared else []
     for index, path in enumerate(given):
         name, extension = os.path.splitext(os.path.basename(path))
         built = os.path.join(directory, f"{name}.{index}.o")
@@ -1829,12 +1831,12 @@ def build(arguments, output, directory):
             # code: a device's results are then the same on a processor
             # that has FMA and one that has not.)
             web = ["-I", raylib_web()] if arguments.web else []
-            run([cc, "-O2", "-ffp-contract=off", *cpu_flags(), "-I", directory,
-                 *VENDORED, *cuda, *web,
+            run([cc, "-O2", "-ffp-contract=off", *cpu_flags(), *pic,
+                 "-I", directory, *VENDORED, *cuda, *web,
                  *mpi, "-c", path, "-o", built], env=host)
         elif extension == ".cpp":
-            run([cxx, "-O2", "-ffp-contract=off", *cpu_flags(), "-I", directory,
-                 *VENDORED, "-c",
+            run([cxx, "-O2", "-ffp-contract=off", *cpu_flags(), *pic,
+                 "-I", directory, *VENDORED, "-c",
                  path, "-o", built], env=host)
         else:
             with open(path) as source:
@@ -1927,7 +1929,8 @@ def build(arguments, output, directory):
          (" pointer-bits=32" if arguments.web else ""),
          "-o", os.devnull])
 
-    flags = ["-O2", "-ffp-contract=off", *cflags, "-Wno-override-module", "-c"]
+    flags = ["-O2", "-ffp-contract=off", *cflags, *pic,
+             "-Wno-override-module", "-c"]
     if arguments.instrument:
         flags.append("-fprofile-generate=" + instrumented(arguments))
         # Its library, linked by the machine's compiler: kept in by the
@@ -1980,7 +1983,7 @@ def build(arguments, output, directory):
         for built in objects:
             run([rename] + renames + [built])
         objects.append(os.path.join(directory, "ent_checks.o"))
-        run([cc, "-O1", "-I", directory, "-c", checks, "-o", objects[-1]],
+        run([cc, "-O1", *pic, "-I", directory, "-c", checks, "-o", objects[-1]],
             env=host)
     objects += others
     # Where the program's source and its modules' are, written into it:
@@ -2172,9 +2175,9 @@ def build(arguments, output, directory):
             if not apple and not arguments.windows:
                 source.write('  .section .note.GNU-stack,"",%progbits\n')
         objects.append(os.path.join(directory, "ent_assets.o"))
-        run([cc, "-c", bytes_of, "-o", objects[-1]], env=host)
+        run([cc, *pic, "-c", bytes_of, "-o", objects[-1]], env=host)
     objects.append(os.path.join(directory, "ent_folders.o"))
-    run([cc, "-c", written, "-o", objects[-1]], env=host)
+    run([cc, *pic, "-c", written, "-o", objects[-1]], env=host)
     # C++ brings its library; other languages' objects say what they need
     # in their module's .link.
     uses_cxx = any(path.endswith(".cpp") for path in given)
@@ -2227,6 +2230,8 @@ def build(arguments, output, directory):
                 written_page.write(page)
         if output.endswith(".html"):
             maths += ["--shell-file", shell]
+    if arguments.shared:
+        maths.append("-shared")
     run([cxx if uses_cxx else cc] + objects + link + maths + ["-o", output],
         env=host)
 
@@ -2295,6 +2300,11 @@ def main():
     parser.add_argument("--no-index-remarks", action="store_true",
                         help="do not say which indexes would serve the "
                         "program's `for`s")
+    parser.add_argument("--shared", action="store_true",
+                        help="build a shared library (.so, .dylib) for a "
+                        "host to load, of a program without `main`: the C "
+                        "given with it calls the world through ent_world.h "
+                        "(examples/cl_bridge)")
     parser.add_argument("--windows", action="store_true",
                         help="build a program for 64-bit Windows (an .exe), "
                         "with llvm-mingw's x86_64-w64-mingw32-clang; `run` "

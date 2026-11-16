@@ -1,7 +1,7 @@
 // The dish of network.ent on its own, without the CL SDK: made from its
 // seed, run for a few seconds of its time, with what it did said: its
 // firing rate (spikes a second a neuron), how many channels saw spikes,
-// a hash of the list of spikes (each one's step and channel, in order),
+// a hash of the spikes (how many each channel had at each step),
 // and the checksum of all potentials and weights.
 //
 //   tools/ent run examples/cl_bridge/run.ent [seconds [seed]]
@@ -9,7 +9,8 @@ import console
 import text
 import network
 
-// heard: a hash of every spike in order, its step and its channel.
+// heard: a hash of how many spikes each channel had at each step (the
+// sum of one for each, so in any order).
 unique Run { seconds: i32, steps: i32, last: i64, heard: u64 }
 
 system arguments() {
@@ -20,8 +21,8 @@ system arguments() {
 }
 
 system listen() {
-  for i in 0..len(Spikes) {
-    Run.heard = mix(Run.heard ^ ((Spikes[i].step as u64) << 8) ^ (Spikes[i].channel as u64))
+  for p: Electrode where p.count > 0 {
+    Run.heard += mix(((Dish.tick as u64) << 16) ^ ((p.channel as u64) << 8) ^ (p.count as u64))
   }
 }
 
