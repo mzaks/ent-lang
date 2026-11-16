@@ -1,0 +1,16 @@
+// The CL API against the ent-lang dish of examples/cl_bridge: demo_loop.py,
+// a program of the public CL API (cl.open, neurons.loop, neurons.stim,
+// tick.analysis.spikes, neurons.record), runs on the CL SDK's simulator
+// with ent_dish.py as its data source, in accelerated time: a stim on
+// channel 27 every 100 ms, which the channel answers. Only where a Python
+// with the CL SDK is found (build/cl_bridge/venv or CL_SDK_PYTHON); the
+// SDK is no dependency of the other tests.
+// REQUIRES: cl-sdk, system-linux
+// RUN: rm -rf %t.dir && mkdir -p %t.dir
+// RUN: %ent build --shared %S/../../examples/cl_bridge/network.ent %S/../../examples/cl_bridge/bridge.c -o %t.dir/libdish.so
+// RUN: cd %t.dir && env ENT_DISH_LIBRARY=%t.dir/libdish.so PYTHONPATH=%S/../../examples/cl_bridge CL_SDK_ACCELERATED_TIME=1 %cl-python %S/../../examples/cl_bridge/demo_loop.py 2 | FileCheck %s
+// RUN: ls %t.dir/*_ent_dish_seed1.h5
+
+// CHECK: seed 1: 2 s, {{[0-9]+}} spikes, 20 stims on channel 27
+// CHECK: recorded to {{.*}}_ent_dish_seed1.h5
+// CHECK: evoked response: yes

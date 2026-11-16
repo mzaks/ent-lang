@@ -117,6 +117,18 @@ config.substitutions.append(
     ("%curl-brotli", "BROTLI" if "brotli" in curl_features.split()
      or not curl_config else "NO-BROTLI"))
 
+# The CL SDK (pip package cl-sdk): a Python that imports `cl`, the one in
+# build/cl_bridge/venv or CL_SDK_PYTHON. examples/cl_bridge's demo of the
+# CL API against the ent-lang dish runs only then, under %cl-python.
+cl_python = os.environ.get("CL_SDK_PYTHON") or os.path.join(
+    os.path.dirname(config.test_source_root), "build", "cl_bridge", "venv",
+    "bin", "python")
+if os.path.exists(cl_python) and subprocess.run(
+        [cl_python, "-c", "import cl, numpy"], stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL).returncode == 0:
+    config.available_features.add("cl-sdk")
+    config.substitutions.append(("%cl-python", cl_python))
+
 if shutil.which("cargo"):
     config.available_features.add("rust")
 # Goose (`goose` on the PATH, or the one examples/goose/setup.sh builds in
