@@ -165,6 +165,25 @@ by up to 2x from run to run; the kernels' own times (`ENT_GPU_TIMES=1`)
 do not. Wiring every pair, as at first, took 47 s for 65,536 neurons
 (2.9 M synapses, `density` scaled down instead of `reach`) on one core.
 
+Through the CL SDK (`demo_loop.py`'s loop, 10 s of the dish in
+accelerated time, `ent_dish.use(neurons=.., reach=..)`), the same
+recording from every library:
+
+| neurons | 1 core | 24 threads | GPU |
+|---|---|---|---|
+| 1,024 | 2.5 s | 1.8 s | 2.4 s |
+| 16,384 | 34 s | 9.0 s | 9.0 s |
+
+At 16,384 neurons the SDK and Python (168,181 spikes handed over one by
+one) take about as long as the dish does on 24 threads or the GPU.
+Build the library for threads with `ENT_PARALLEL_MIN=256 tools/ent build
+--parallel --shared ..`. A library leaves its host's threads unbound: a
+program built with `--parallel` binds its threads, the first to the CPU it
+starts on, and put that in the environment; as a library in Python, that
+pinned Python's own thread to one CPU, and the SDK's simulator, a process
+it starts, got that one CPU and the settings: 16,384 neurons took 39 s on
+24 threads. `cl_bridge_abi.test` holds a library's host to what it was.
+
 Real time (a step in under a millisecond) is one core up to about 6,000
 neurons, 24 threads or the GPU up to about 35,000 (from the cost an edge,
 not measured at those sizes).
@@ -294,8 +313,9 @@ that, which the reader should weigh.
   `demo_loop.py` does in accelerated time; a read that asks for a time
   before the last one gets no spikes from before it.
 - macOS and Windows: `--shared` and the ABI test were run on Linux only.
-- The GPU build behind the CL SDK (demo_loop.py): only through C
-  (`cl_bridge_gpu.test`). More than 65,536 neurons (a pair's draw is keyed
+- The GPU build behind the CL SDK: run by hand (the table above, the same
+  HDF5 recording as the CPU's, spike by spike), not in a test (the test
+  of the SDK builds the CPU library). More than 65,536 neurons (a pair's draw is keyed
   by `i * 65536 + j`).
 - The plasticity result for other channel pairs, longer training, other
   pairing intervals or parameters.

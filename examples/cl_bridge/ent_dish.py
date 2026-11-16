@@ -96,12 +96,37 @@ def build_library(library: str | None = None) -> Path:
     return path
 
 
+def _load(library: str | None):
+    lib = ctypes.CDLL(str(library_path(library)))
+    lib.dish_defaults.argtypes = [ctypes.POINTER(DishParams)]
+    lib.dish_most_neurons.restype = ctypes.c_int32
+    return lib
+
+
+def _resolve(lib, parameters: dict) -> DishParams:
+    """The library's defaults, then these."""
+    params = DishParams()
+    lib.dish_defaults(ctypes.byref(params))
+    for name, value in parameters.items():
+        if name not in PARAMETERS:
+            raise ValueError(f"the dish has no parameter {name!r}")
+        setattr(params, name, int(value) if name in ("seed", "neurons", "stdp") else float(value))
+    if not 1 <= params.neurons <= lib.dish_most_neurons():
+        raise ValueError(f"a dish has 1 to {lib.dish_most_neurons()} neurons, not {params.neurons}")
+    return params
+
+
+def parameters_of(library: str | None = None, **parameters) -> dict:
+    """Every parameter of the dish these would make, without making it."""
+    params = _resolve(_load(library), parameters)
+    return {name: getattr(params, name) for name in PARAMETERS}
+
+
 class Dish:
     """A dish of the library, through its C interface (bridge.c)."""
 
     def __init__(self, library: str | None = None, **parameters):
-        lib = ctypes.CDLL(str(library_path(library)))
-        lib.dish_defaults.argtypes = [ctypes.POINTER(DishParams)]
+        lib = _load(library)
         lib.dish_create.argtypes = [ctypes.POINTER(DishParams)]
         lib.dish_create.restype = ctypes.c_void_p
         lib.dish_destroy.argtypes = [ctypes.c_void_p]
@@ -116,12 +141,7 @@ class Dish:
         lib.dish_tick.argtypes = [ctypes.c_void_p]
         lib.dish_tick.restype = ctypes.c_int32
         self._lib = lib
-        params = DishParams()
-        lib.dish_defaults(ctypes.byref(params))
-        for name, value in parameters.items():
-            if name not in PARAMETERS:
-                raise ValueError(f"the dish has no parameter {name!r}")
-            setattr(params, name, int(value) if name in ("seed", "neurons", "stdp") else float(value))
+        params = _resolve(lib, parameters)
         self.parameters = {name: getattr(params, name) for name in PARAMETERS}
         self._dish = lib.dish_create(ctypes.byref(params))
         if not self._dish:
@@ -171,10 +191,9 @@ def use(library: str | None = None, **parameters) -> dict:
     gives the attributes that say which dish it is."""
     import cl
     path = build_library(library)
-    # (The parameters as the library has them: its defaults, then these.)
-    dish = Dish(str(path), **parameters)
-    resolved = dish.parameters
-    dish.close()
+    # (The parameters as the library has them: its defaults, then these;
+    # the dish itself is made in the simulator's process.)
+    resolved = parameters_of(str(path), **parameters)
     cl.sim.set_simulator_data_source(
         f"{__name__}:make_source",
         config={"library": str(path), **resolved},

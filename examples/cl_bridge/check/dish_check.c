@@ -14,6 +14,11 @@
 // `dish_check one` runs a single dish (seed 1, a stim on channel 27 every
 // 100 ms) and says its spikes and checksum: what a library built for a
 // GPU, which has one dish a process, gives, to hold against the CPU's.
+// `dish_check host` says whether a dish (of a library built --parallel)
+// leaves the host as it was: the CPUs its thread may run on, and no
+// OpenMP settings put into its environment, which its children would get.
+#define _GNU_SOURCE
+#include <sched.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,9 +94,36 @@ static int one(void) {
   return 0;
 }
 
+static int cpus(void) {
+  cpu_set_t mask;
+  return sched_getaffinity(0, sizeof mask, &mask) == 0 ? CPU_COUNT(&mask) : -1;
+}
+
+static int host(void) {
+  int before = cpus();
+  dish_params p;
+  dish_defaults(&p);
+  dish *d = dish_create(&p);
+  dish_step(d, 100);
+  int after = cpus();
+  const char *set[] = {"OMP_PLACES", "OMP_PROC_BIND", "OMP_NUM_THREADS", 0};
+  int put = 0;
+  for (int k = 0; set[k]; ++k)
+    if (getenv(set[k])) {
+      printf("the environment has %s=%s\n", set[k], getenv(set[k]));
+      put = 1;
+    }
+  printf("the host's CPUs: %s\n", before == after ? "as they were" : "CHANGED");
+  printf("the host's environment: %s\n", put ? "CHANGED" : "as it was");
+  dish_destroy(d);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   if (argc > 1 && argv[1][0] == 'o')
     return one();
+  if (argc > 1 && argv[1][0] == 'h')
+    return host();
   int channel = argc > 1 ? atoi(argv[1]) : 27;
   float amount = argc > 2 ? (float)atof(argv[2]) : 1.0f;
 

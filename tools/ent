@@ -58,7 +58,9 @@ thread of a core), bound to it, but for the others of the first one's
 core, where one waiting for work would slow the first, which runs what
 the program does on one core between its loops (not with --ranks, whose
 processes would bind theirs to the same CPUs; on a Mac, where threads
-cannot be bound, a thread for each performance core). A thread without work waits five milliseconds for
+cannot be bound, a thread for each performance core; nor a library,
+--shared, whose host's threads and children are its own: as many threads,
+unbound, and nothing put in the environment). A thread without work waits five milliseconds for
 more and then sleeps, so that it is awake for the next parallel loop
 after a short stretch on one core, and what the program does on one core
 for longer (drawing, say) has the machine to itself (on a Mac, and in
@@ -2048,7 +2050,18 @@ def build(arguments, output, directory):
             # 2026-10-22). Not on many ranks, whose processes or
             # partitions would each bind theirs to the same CPUs. What
             # the environment says holds over all of this.
-            bind = "0" if arguments.ranks else "1"
+            #
+            # Not a library (--shared): binding would bind the thread of
+            # the host that runs its first loop (Python's main thread,
+            # say) to one CPU, and what it puts in the environment would
+            # go to every process the host starts, with that thread's
+            # one CPU (the CL SDK's simulator, with a dish of
+            # examples/cl_bridge in it: all its threads on one CPU,
+            # 16384 neurons 7.4 ms a step where they take 0.37). A
+            # library's threads are as many, unbound (0.37 ms), and set
+            # by a call, not the environment.
+            bind = "0" if arguments.ranks or arguments.shared else "1"
+            library = "1" if arguments.shared else "0"
             # (A program whose main thread waits on the world outside:
             # the window module (devices/window.ent, or one standing in
             # for it, as the tests' window without a window), or the http
@@ -2137,6 +2150,7 @@ def build(arguments, output, directory):
                 "  return 0;\n"
                 "#endif\n"
                 "}\n"
+                "void omp_set_num_threads(int);\n"
                 "__attribute__((constructor)) static void "
                 "ent_threads_wait(void) {\n"
                 "#if defined(__APPLE__) || defined(_WIN32)\n"
@@ -2146,6 +2160,15 @@ def build(arguments, output, directory):
                 '  if (!getenv("OMP_WAIT_POLICY")) '
                 f'setenv("KMP_BLOCKTIME", "{wait}", 0);\n'
                 "#endif\n"
+                "  // (A library: set by a call, after the wait above, which\n"
+                "  // OpenMP reads as it starts.)\n"
+                f"  if ({library}) {{\n"
+                '    static char places[16384];\n'
+                '    int count = getenv("OMP_NUM_THREADS") ? 0\n'
+                '      : ent_places(places, sizeof places);\n'
+                '    if (count > 0) omp_set_num_threads(count);\n'
+                '    return;\n'
+                "  }\n"
                 f"  if (!{bind} || getenv(\"OMP_NUM_THREADS\") || "
                 'getenv("OMP_PLACES") ||\n'
                 '      getenv("OMP_PROC_BIND") || getenv("KMP_AFFINITY")) return;\n'

@@ -5,13 +5,22 @@
 // that channel fire far more in the 20 ms after it than the same dish
 // without the stims.
 // REQUIRES: system-linux
-// RUN: mkdir -p %t.dir
+// RUN: mkdir -p %t.dir %t.dir/par
 // RUN: %ent build --shared %S/../../examples/cl_bridge/network.ent %S/../../examples/cl_bridge/bridge.c -o %t.dir/libdish.so
 // RUN: clang -O2 %S/../../examples/cl_bridge/check/dish_check.c -L%t.dir -ldish -Wl,-rpath,%t.dir -o %t.check
 // RUN: %t.check | FileCheck %s
+// Built --parallel, the library leaves its host as it was: the CPUs the
+// host's thread may run on, and no OpenMP settings in its environment
+// (a process the host starts would get them, and that thread's CPUs).
+// RUN: env ENT_PARALLEL_MIN=256 %ent build --parallel --shared %S/../../examples/cl_bridge/network.ent %S/../../examples/cl_bridge/bridge.c -o %t.dir/par/libdish.so
+// RUN: %host-cc -O2 %S/../../examples/cl_bridge/check/dish_check.c -L%t.dir/par -ldish -Wl,-rpath,%t.dir/par -o %t.par
+// RUN: env -u OMP_PLACES -u OMP_PROC_BIND -u OMP_NUM_THREADS %t.par host | FileCheck %s --check-prefix=HOST
 
 // CHECK: seed 1: [[N:[0-9]+]] spikes
 // CHECK: seed 1 again: the same
 // CHECK: seed 2: {{[0-9]+}} spikes, other spikes and checksum
 // CHECK: channel 27, 20 stims of 1: {{[0-9]+}} spikes on it in the 20 ms after them, {{[0-9]+}} without the stims
 // CHECK: stim response: yes
+
+// HOST: the host's CPUs: as they were
+// HOST: the host's environment: as it was
