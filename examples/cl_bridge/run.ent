@@ -1,0 +1,62 @@
+// The dish of network.ent on its own, without the CL SDK: made from its
+// seed, run for a few seconds of its time, with what it did said: its
+// firing rate (spikes a second a neuron), how many channels saw spikes,
+// a hash of the list of spikes (each one's step and channel, in order),
+// and the checksum of all potentials and weights.
+//
+//   tools/ent run examples/cl_bridge/run.ent [seconds [seed]]
+import console
+import text
+import network
+
+// heard: a hash of every spike in order, its step and its channel.
+unique Run { seconds: i32, steps: i32, last: i64, heard: u64 }
+
+system arguments() {
+  Run.seconds = 2
+  if argument_count() > 0 { Run.seconds = number(argument(0)) as i32 }
+  if argument_count() > 1 { Dish.seed = number(argument(1)) }
+  Run.steps = Run.seconds * 1000
+}
+
+system listen() {
+  for i in 0..len(Spikes) {
+    Run.heard = mix(Run.heard ^ ((Spikes[i].step as u64) << 8) ^ (Spikes[i].channel as u64))
+  }
+}
+
+system second() {
+  if Dish.tick % 1000 == 0 {
+    let rate = (Dish.spikes - Run.last) as f32 / Dish.neurons as f32
+    put("second {Dish.tick / 1000}: {rate} Hz a neuron")
+    Run.last = Dish.spikes
+  }
+}
+
+system report() {
+  let rate = (Dish.spikes as f64) / (Dish.neurons as f64 * Run.seconds as f64)
+  put("seed {Dish.seed}: {Dish.neurons} neurons, {Dish.tick} steps, {Dish.spikes} spikes, {rate} Hz a neuron")
+  put("{Hashes.synapses} synapses, spikes heard {Run.heard}, checksum {Dish.check}")
+}
+
+schedule start() {
+  arguments()
+  create()
+}
+
+schedule each() {
+  step()
+  listen()
+  second()
+}
+
+schedule end() {
+  checksum()
+  report()
+}
+
+main {
+  start()
+  loop { each() } until Dish.tick == Run.steps
+  end()
+}

@@ -1,0 +1,265 @@
+// A simulated "dish": leaky integrate-and-fire neurons on a square, wired
+// at random by distance, about one in five inhibitory, with trace-based
+// STDP on the excitatory synapses, background noise, and 64 electrodes on
+// an 8 x 8 grid over the same square that record spikes and stimulate.
+// A simplified model, not a validated model of a biological culture.
+//
+// The host (bridge.c, or run.ent for the program on its own) sets the
+// parameters in `Dish` and runs `create`, then `step` once a millisecond
+// of the dish's time: 25 frames at 25 kHz. Each step leaves its spikes in
+// the buffer `Spikes`, a row each, the channel of the electrode nearest
+// the neuron that fired. A stim adds to an electrode's `stim`, which the
+// neurons nearest it take in at the next step, scaled by their distance
+// from it.
+//
+// Everything is drawn from the seed: where the neurons are, which are
+// inhibitory, the synapses, the noise of every neuron at every step (by
+// the seed, the step and the neuron's number, so it replays the same). The
+// seed says which culture; the parameters which cell line.
+//
+// `fired` and `trace` are values, not tags (examples/snn.ent says why).
+
+import math
+
+// Of the parameters, the time constants are in steps (milliseconds);
+// lengths in units of the square's side.
+unique Dish {
+  seed: i64,
+  neurons: i32,
+  inhibitory: f32,   // the share of inhibitory neurons
+  tau: f32,          // the membrane's time constant
+  thr: f32,          // the threshold; the potential rests at 0, resets to 0
+  refractory: f32,   // steps after a spike the neuron does not integrate
+  density: f32,      // the chance of a synapse between two neurons at no distance
+  reach: f32,        // the distance over which that chance falls by e
+  w_exc: f32,        // an excitatory synapse's weight at the start
+  w_inh: f32,        // an inhibitory synapse's weight (fixed)
+  w_max: f32,        // an excitatory weight is kept in [0, w_max]
+  stdp: bool,        // whether the excitatory weights learn
+  a_plus: f32,       // a spike after a presynaptic one strengthens by a_plus * trace
+  a_minus: f32,      // one before it weakens by a_minus * trace
+  tau_plus: f32,     // the presynaptic trace's time constant
+  tau_minus: f32,    // the postsynaptic trace's
+  noise_rate: f32,   // the chance of a kick of noise, a neuron a step
+  noise_amp: f32,    // its size
+  stim_gain: f32,    // a stim's current into a neuron at its electrode, per unit of stim
+  stim_reach: f32,   // the distance over which that falls by e
+  tick: i32,         // the steps run
+  spikes: i64,       // the spikes so far
+  check: u64         // the checksum, after `checksum`
+}
+
+// Per step, worked out from Dish when the dish is made.
+unique Decay { v: f32, plus: f32, minus: f32 }
+
+component Neuron {
+  v: f32, input: f32, fired: f32,
+  sign: f32,         // 1 excitatory, -1 inhibitory
+  out: f32,          // what a synapse from it carries: fired times sign
+  trace: f32,        // the presynaptic trace (STDP)
+  post: f32,         // the postsynaptic trace (STDP)
+  rest: f32,         // steps of refractoriness left
+  gain: f32,         // how much of its electrode's stim it takes
+  number: i32, channel: i32, pad: entity
+}
+component Electrode { channel: i32, x: f32, y: f32, stim: f32 }
+archetype Cell { Neuron } capacity 4096
+archetype Pad { Electrode } capacity 64
+
+// plastic: 1 where the source is excitatory (the weight learns), else 0.
+relation (Neuron)-[Synapse { weight: f32, plastic: f32 }]->(Neuron) capacity 524288
+
+// The spikes of the last step: a row each.
+buffer Spikes { channel: i32, step: i32 } capacity 4096
+// Where each neuron is, while the dish is made.
+buffer Place { x: f32, y: f32, who: entity } capacity 4096
+buffer Pads { who: entity } capacity 64
+
+world {
+  Dish.seed = 1
+  Dish.neurons = 1024
+  Dish.inhibitory = 0.2
+  Dish.tau = 20.0
+  Dish.thr = 1.0
+  Dish.refractory = 2.0
+  Dish.density = 0.3
+  Dish.reach = 0.2
+  Dish.w_exc = 0.09
+  Dish.w_inh = 0.35
+  Dish.w_max = 0.2
+  Dish.stdp = true
+  Dish.a_plus = 0.005
+  Dish.a_minus = 0.006
+  Dish.tau_plus = 20.0
+  Dish.tau_minus = 20.0
+  Dish.noise_rate = 0.02
+  Dish.noise_amp = 0.5
+  Dish.stim_gain = 2.0
+  Dish.stim_reach = 0.05
+}
+
+// SplitMix64's mix: whole-number multiplies that keep the low bits, so a
+// loop that draws with it can work on several neurons at once (wyhash's
+// 128-bit multiply cannot; devices/wyhash.ent).
+fn mix(x: u64) -> u64 {
+  var z = x + 0x9e3779b97f4a7c15
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9
+  z = (z ^ (z >> 27)) * 0x94d049bb133111eb
+  z ^ (z >> 31)
+}
+
+// The n-th number of a key, from 0 to below 1.
+fn draw(key: u64, n: i64) -> f32 {
+  ((mix(key + (n as u64) * 0xd1342543de82ef95) >> 40) as f32) / 16777216.0
+}
+
+system make() {
+  let key = mix(Dish.seed as u64)
+  Decay.v = exp(-1.0 / Dish.tau)
+  Decay.plus = exp(-1.0 / Dish.tau_plus)
+  Decay.minus = exp(-1.0 / Dish.tau_minus)
+  Pads = []
+  for c in 0..64 {
+    let x = ((c % 8) as f32 + 0.5) / 8.0
+    let y = ((c / 8) as f32 + 0.5) / 8.0
+    let p = spawn { Electrode { channel: c, x: x, y: y, stim: 0.0 } }
+    Pads += { who: p }
+  }
+  Place = []
+  for i in 0..Dish.neurons {
+    let x = draw(key, (i * 3) as i64)
+    let y = draw(key, (i * 3 + 1) as i64)
+    let inhibitory = draw(key, (i * 3 + 2) as i64) < Dish.inhibitory
+    let col = min((x * 8.0) as i32, 7)
+    let row = min((y * 8.0) as i32, 7)
+    let c = row * 8 + col
+    let dx = x - ((col as f32) + 0.5) / 8.0
+    let dy = y - ((row as f32) + 0.5) / 8.0
+    let gain = exp(-sqrt(dx * dx + dy * dy) / Dish.stim_reach)
+    let n = spawn {
+      Neuron { v: 0.0, input: 0.0, fired: 0.0, sign: if inhibitory { -1.0 } else { 1.0 }, out: 0.0,
+               trace: 0.0, post: 0.0, rest: 0.0, gain: gain,
+               number: i, channel: c, pad: Pads[c].who }
+    }
+    Place += { x: x, y: y, who: n }
+  }
+  // Synapses: from i to j with the chance density * e^(-distance / reach).
+  let wiring = mix(key ^ 0x5157)
+  for i in 0..Dish.neurons {
+    let inhibitory = draw(key, (i * 3 + 2) as i64) < Dish.inhibitory
+    for j in 0..Dish.neurons {
+      if i != j {
+        let dx = Place[i].x - Place[j].x
+        let dy = Place[i].y - Place[j].y
+        let chance = Dish.density * exp(-sqrt(dx * dx + dy * dy) / Dish.reach)
+        if draw(wiring, (i as i64) * 65536 + (j as i64)) < chance {
+          if inhibitory {
+            connect (Place[i].who)-[Synapse { weight: Dish.w_inh, plastic: 0.0 }]->(Place[j].who)
+          } else {
+            connect (Place[i].who)-[Synapse { weight: Dish.w_exc, plastic: 1.0 }]->(Place[j].who)
+          }
+        }
+      }
+    }
+  }
+  Dish.tick = 0
+  Dish.spikes = 0
+}
+
+// What came in along the synapses (the spikes of the step before), the
+// noise of this step, and the stim of the neuron's electrode.
+system gather() {
+  let key = mix(mix(Dish.seed as u64) ^ (Dish.tick as u64))
+  for e, n: mut Neuron {
+    var sum = 0.0
+    for (pre)-[s: Synapse]->(e) {
+      if let o = Neuron(pre).out { sum += s.weight * o }
+    }
+    let kick = if draw(key, n.number as i64) < Dish.noise_rate { Dish.noise_amp } else { 0.0 }
+    var stim = 0.0
+    if let s = Electrode(n.pad).stim { stim = s }
+    n.input = sum + kick + stim * Dish.stim_gain * n.gain
+  }
+}
+
+system integrate() {
+  Spikes = []
+  for n: mut Neuron {
+    var v = Decay.v * n.v + n.input
+    var fired = 0.0
+    if n.rest > 0.0 {
+      n.rest -= 1.0
+      v = 0.0
+    } else if v >= Dish.thr {
+      fired = 1.0
+      v = 0.0
+      n.rest = Dish.refractory
+      Spikes += { channel: n.channel, step: Dish.tick }
+      Dish.spikes += 1
+    }
+    n.v = v
+    n.fired = fired
+    n.out = n.sign * fired
+    n.trace = Decay.plus * n.trace + fired
+    n.post = Decay.minus * n.post + fired
+  }
+}
+
+// Trace STDP, pull form: each neuron changes only the synapses into it.
+// A spike of the neuron strengthens each excitatory synapse by a_plus
+// times the source's trace; a spike of the source weakens it by a_minus
+// times the neuron's own trace. Kept in [0, w_max].
+system stdp() {
+  for e, n: Neuron {
+    for (pre)-[mut s: Synapse]->(e) {
+      if let t = Neuron(pre).trace, let f = Neuron(pre).fired {
+        let dw = Dish.a_plus * t * n.fired - Dish.a_minus * n.post * f
+        s.weight = min(max(s.weight + s.plastic * dw, 0.0), Dish.w_max)
+      }
+    }
+  }
+}
+
+system done() {
+  for p: mut Electrode { p.stim = 0.0 }
+  Dish.tick += 1
+}
+
+// A number of all potentials and weights: each neuron's v and its
+// synapses' weights mixed with its number, summed (so in any order).
+unique Hashes { sum: u64, synapses: i64 }
+
+system zero() {
+  Hashes.sum = 0
+  Hashes.synapses = 0
+}
+
+system sum_up() {
+  for e, n: Neuron {
+    var h = mix((n.number as u64) ^ (bits_of(n.v) as u64))
+    var count = 0
+    for (pre)-[s: Synapse]->(e) {
+      h = mix(h ^ (bits_of(s.weight) as u64))
+      count += 1
+    }
+    Hashes.synapses += count
+    Hashes.sum += h
+  }
+  Dish.check = Hashes.sum
+}
+
+schedule create() {
+  make()
+}
+
+schedule step() {
+  gather()
+  integrate()
+  stdp() run_if Dish.stdp
+  done()
+}
+
+schedule checksum() {
+  zero()
+  sum_up()
+}
