@@ -1,4 +1,4 @@
-// A simulated "dish": leaky integrate-and-fire neurons on a square, wired
+// A simulated "dish": adapting leaky integrate-and-fire neurons on a square, wired
 // at random by distance, about one in five inhibitory, with trace-based
 // STDP on the excitatory synapses, background noise, and 64 electrodes on
 // an 8 x 8 grid over the same square that record spikes and stimulate.
