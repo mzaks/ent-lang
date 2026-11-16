@@ -2,9 +2,9 @@
 // its toy task: A then B or B then A. It learns (the loss falls, the test
 // samples it never learned from come out right), and it says to the bit
 // what the same network trained in plain C says (check/toy.c, the same
-// numbers at random and the same order of every sum): every loss, every
-// count, and a checksum of the bits of every weight. On one thread and on
-// many alike.
+// numbers at random, the same order of every sum, the same Adam): every
+// loss, every count, and a checksum of the bits of every weight. On one
+// thread and on many alike.
 // RUN: %ent run %S/../../examples/snn_train/toy.ent > %t.one
 // RUN: env ENT_PARALLEL_MIN=1 OMP_NUM_THREADS=8 %ent run --parallel %S/../../examples/snn_train/toy.ent > %t.all
 // RUN: clang -O2 -ffp-contract=off %S/../../examples/snn_train/check/toy.c -lm -o %t.c
@@ -12,8 +12,29 @@
 // RUN: diff %t.ref %t.one
 // RUN: diff %t.ref %t.all
 // RUN: FileCheck %s < %t.one
+//
+// Backpropagation through time on the same task (toy_bptt.ent), on one
+// thread and on many alike.
+// RUN: %ent run %S/../../examples/snn_train/toy_bptt.ent > %t.bptt.one
+// RUN: env ENT_PARALLEL_MIN=1 OMP_NUM_THREADS=8 %ent run --parallel %S/../../examples/snn_train/toy_bptt.ent > %t.bptt.all
+// RUN: diff %t.bptt.one %t.bptt.all
+// RUN: FileCheck %s --check-prefix=BPTT < %t.bptt.one
+//
+// Its gradient with the recurrent term left out is e-prop's, added in
+// another order: within a millionth of the largest, for the synapses and
+// for the readouts' weights and biases. With the term in, the synapses'
+// differ (by a third); the readouts' are the same still.
+// RUN: %ent run -I %S/../../examples/snn_train %S/../../examples/snn_train/check/same_gradient.ent \
+// RUN:   | FileCheck %s --check-prefix=SAME
 
-// At chance before it learns (rate 0: 103 and 114 of 200), and then:
-// CHECK: epoch 1 loss {{.*}} train 148/200 test 200/200
-// CHECK: epoch 30 loss 0.000123 train 200/200 test 200/200
-// CHECK: weights 100859224272
+// CHECK: epoch 1 loss 0.362811 train 184/200 test 200/200
+// CHECK: epoch 3 loss 0.005185 train 200/200 test 200/200
+// CHECK: epoch 30 loss 0.000053 train 200/200 test 200/200
+// CHECK: weights 74942124909
+
+// BPTT: epoch 1 loss 0.34394 train 184/200 test 200/200
+// BPTT: epoch 30 loss 0.000016 train 200/200 test 200/200
+// BPTT: weights 77113250418
+
+// SAME-COUNT-4: through 0.0: synapses {{[0-9.]+}}, differ 0.{{[0-9]+}} millionths; readouts {{[0-9.]+}}, differ 0.{{[0-9]+}} millionths
+// SAME-COUNT-4: through 1.0: synapses {{[0-9.]+}}, differ {{[0-9][0-9][0-9][0-9][0-9]+}}.{{[0-9]+}} millionths; readouts {{[0-9.]+}}, differ 0.{{[0-9]+}} millionths

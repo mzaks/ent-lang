@@ -1,0 +1,145 @@
+// Backpropagation through time, by hand, for the network of network.ent:
+// what e-prop (learn.ent) approximates, as the ceiling to compare it with.
+//
+// A sample runs forward as for e-prop, and every step each hidden neuron
+// writes down what the way back needs of it, its spike z and its
+// surrogate slope psi, and each readout its error, in rows of its own of
+// a buffer (`Tape`, `ReadTape`: a window of `Run.steps` rows each). That
+// is the journal of the forward pass. Then the steps are gone through
+// backwards, from the last to the first, each neuron reading its rows
+// back, with the adjoints (how the loss depends on each value):
+//
+//   ybar_k(t) = err_k(t) + kappa * ybar_k(t+1)
+//   zbar_j(t) = sum_k w_out_kj * ybar_k(t)  +  through * sum_m w_mj * vbar_m(t+1)
+//   vbar_j(t) = psi_j(t) * zbar_j(t) + alpha * vbar_j(t+1)
+//
+// and the gradients
+//
+//   synapse i -> j:   vbar_j(t) * s_i(t)    (s_i: what i sent into j at t:
+//                                             an input's spike of step t,
+//                                             a hidden neuron's of t - 1)
+//   out j -> k:       ybar_k(t) * z_j(t)
+//   bias k:           ybar_k(t)
+//
+// The second sum of zbar is what e-prop leaves out: how a spike of j
+// changes the neurons m it goes to, at the next step and so on. With
+// `Back.through` at nought it is left out here too, and then the
+// gradients are e-prop's (learn.ent) to the rounding: the same sums,
+// added in another order (check/same_gradient.ent). The reset (v drops by
+// the threshold when the neuron fires) is not differentiated, in neither.
+import math
+import network
+import learn
+import train
+
+// What a hidden neuron keeps for the way back: where its rows of the
+// tape start, and its z, psi, zbar and vbar of the step now.
+component Back { tape: i32, z: f32, psi: f32, zbar: f32, vbar: f32 }
+// A readout's: its rows of ReadTape, its error of the step and ybar.
+component ReadBack { tape: i32, err: f32, ybar: f32 }
+
+buffer Tape { fired: f32, psi: f32 } capacity 1024
+buffer ReadTape { err: f32 } capacity 1024
+
+// through: 1 for the whole gradient, 0 for e-prop's.
+unique Backward { through: f32 }
+unique Taping { rows: i32, read_rows: i32 }
+
+// Every hidden neuron and readout given its rows of the tapes.
+system tape_up() {
+  Taping.rows = 0
+  Taping.read_rows = 0
+  for e with Neuron {
+    let at = Taping.rows += Run.steps
+    e.add(Back { tape: at, z: 0.0, psi: 0.0, zbar: 0.0, vbar: 0.0 })
+  }
+  for e with Readout {
+    let at = Taping.read_rows += Run.steps
+    e.add(ReadBack { tape: at, err: 0.0, ybar: 0.0 })
+  }
+  Tape = [{ fired: 0.0, psi: 0.0 }; Taping.rows]
+  ReadTape = [{ err: 0.0 }; Taping.read_rows]
+}
+
+// Forward, after error(): the step written down.
+system record() {
+  for n: Neuron, u: Unit, b: Back, w: mut Tape[b.tape, Run.steps] {
+    w[Clock.step].fired = u.fired
+    w[Clock.step].psi = n.psi
+  }
+  for r: Readout, rb: ReadBack, w: mut ReadTape[rb.tape, Run.steps] {
+    w[Clock.step].err = r.err
+  }
+}
+
+// Backward a step: Clock.step is the step gone back to (the data's
+// encode() reads it, as forward).
+system untick() {
+  Clock.step -= 1
+}
+
+// Before the way back: no adjoint from after the last step.
+system unwind() {
+  for b: mut Back {
+    b.zbar = 0.0
+    b.vbar = 0.0
+  }
+  for rb: mut ReadBack { rb.ybar = 0.0 }
+}
+
+// Backward, step t: each hidden neuron's z and psi of t read back, and
+// what it sent at t (its spike of t - 1) put where the synapses read it;
+// the inputs' spikes of t are encoded again by the data.
+system restore() {
+  let t = Clock.step
+  for u: mut Unit, b: mut Back, w: Tape[b.tape, Run.steps] {
+    b.z = w[t].fired
+    b.psi = w[t].psi
+    u.fired = if t > 0 { w[t - 1].fired } else { 0.0 }
+  }
+  for rb: mut ReadBack, w: ReadTape[rb.tape, Run.steps] {
+    rb.err = w[t].err
+  }
+}
+
+system back_out() {
+  for r: mut Readout, rb: mut ReadBack {
+    rb.ybar = rb.err + Net.kappa * rb.ybar
+    r.grad += rb.ybar
+  }
+}
+
+// zbar of t from ybar of t and vbar of t + 1 (vbar is not yet of t: that
+// is the next system).
+system back_z() {
+  for e, b: mut Back {
+    var sum = 0.0
+    for (e)-[o: Out]->(post) {
+      if let yb = ReadBack(post).ybar { sum += o.weight * yb }
+    }
+    var rec = 0.0
+    for (e)-[s: Synapse]->(post) {
+      if let vb = Back(post).vbar { rec += s.weight * vb }
+    }
+    b.zbar = sum + Backward.through * rec
+  }
+}
+
+system back_v() {
+  for b: mut Back {
+    b.vbar = b.psi * b.zbar + Net.alpha * b.vbar
+  }
+}
+
+system back_grad() {
+  for e, b: Back {
+    for (pre)-[mut s: Synapse]->(e) {
+      if let f = Unit(pre).fired { s.grad += b.vbar * f }
+    }
+  }
+  for e, rb: ReadBack {
+    for (pre)-[mut o: Out]->(e) {
+      if let z = Back(pre).z { o.grad += rb.ybar * z }
+    }
+  }
+}

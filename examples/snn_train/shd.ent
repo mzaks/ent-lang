@@ -1,0 +1,85 @@
+// e-prop on the Spiking Heidelberg Digits: spoken digits, 0 to 9 in
+// English and in German, 20 classes, through a model of the cochlea into
+// 700 channels of spikes (Cramer et al., 2020).
+//
+//   examples/snn_train/fetch.sh                   once: SHD, into build/snn_train/data
+//   build/snn_train/venv/bin/python examples/snn_train/prepare.py   (see there)
+//   cd build/snn_train/data
+//   ENT_PARALLEL_MIN=256 ../../../tools/ent build --parallel ../../../examples/snn_train/shd.ent -o shd
+//   ./shd [epochs [samples [tests]]]
+//
+// 700 input units, 256 hidden neurons, every input to every neuron, a
+// fifth of the hidden pairs connected, 20 readouts. Each epoch it learns
+// from the training samples (or `samples` of them, drawn anew each
+// epoch) in an order of the epoch's own, then says how many of the 2264
+// test samples (or the first `tests`), which it never learns from, come
+// out right; the answer is the readout that summed most over the sample,
+// and the error counts in every step of it. Then the checksum of the
+// weights, and the network is saved as shd.sav (devices/world.ent: a
+// program built from this source loads it with load_world).
+//
+// ENT_PARALLEL_MIN=256: with 256 neurons and some 750 synapses each, the
+// loops are far below the million entities from which tools/ent runs a
+// loop on many threads by default; from 256 on, an epoch takes 78 s
+// instead of 3.6 minutes (Ryzen AI 9 HX 370, 24 threads; bench/RESULTS.md).
+import console
+import network
+import learn
+import train
+import world
+import shd_data
+
+schedule start() {
+  load()
+  setup()
+  shuffle()
+}
+
+system name_saved() { Saved.file = "shd.sav" }
+
+schedule finish() {
+  checksum()
+  name_saved()
+  save_world()
+}
+
+schedule sample() {
+  label()
+  rest()
+}
+
+schedule step() {
+  window()
+  encode()
+  propagate()
+  traces()
+  integrate()
+  read_out()
+  soft_max()
+  error()
+  broadcast() run_if Clock.training
+  learn() run_if Clock.training
+  learn_out() run_if Clock.training
+  tick()
+}
+
+schedule boundary() run_if Clock.step == Run.steps {
+  score()
+  forget() run_if Clock.training
+  due()
+  apply()
+  next()
+  report() run_if Clock.reported
+  shuffle() run_if Clock.reported
+  sample()
+}
+
+main {
+  start()
+  sample()
+  loop {
+    step()
+    boundary()
+  } until Clock.epoch >= Run.epochs
+  finish()
+}

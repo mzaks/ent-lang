@@ -1,0 +1,74 @@
+// The toy task of examples/snn_train: two groups of input channels, and
+// in each sample one group fires first and the other after it, then both
+// are quiet. Class 0 is A then B, class 1 B then A; the network says
+// which in the quiet window at the end. Both classes have the same spikes
+// in all, so what tells them apart is when. The network's size, its
+// parameters, how a sample is labelled and how it is encoded: what
+// toy.ent (e-prop) and toy_bptt.ent (backpropagation through time) share.
+import math
+import wyhash
+import network
+import learn
+import train
+
+capacity Unit 128
+capacity Neuron 64
+capacity Readout 2
+capacity Input 64
+capacity Synapse 4096
+capacity Out 128
+
+unique Toy {
+  group: i32,    // channels in each group
+  phase: i32,    // steps each group fires for
+  quiet: i32,    // steps of the quiet window at the end
+  high: f64,     // a channel's chance to fire in a step while its group fires
+  low: f64       // else
+}
+
+world {
+  Toy.group = 10
+  Toy.phase = 10
+  Toy.quiet = 10
+  Toy.high = 0.4
+  Toy.low = 0.02
+
+  Net.alpha = 0.95
+  Net.kappa = 0.9
+  Net.thr = 1.0
+  Net.gamma = 0.3
+  Net.rate = 0.01
+
+  Run.seed = 1
+  Run.hidden = 32
+  Run.inputs = 2 * Toy.group
+  Run.classes = 2
+  Run.steps = 2 * Toy.phase + Toy.quiet
+  Run.batch = 10
+  Run.window = Toy.quiet
+  Run.train = 200
+  Run.test = 200
+  Run.epochs = 30
+  Run.w_in = 1.0
+  Run.w_rec = 0.5
+  Run.density = 0.5
+}
+
+// A sample's label, and its first group, from its number alone.
+system label() {
+  Target.label = wyrand_below(wyhash64(Run.seed as u64, Clock.id as u64), 0, 2) as i32
+}
+
+system encode() {
+  let first = Target.label
+  let phase = Clock.step / Toy.phase
+  let sample = wyhash64(Run.seed as u64 + 1, Clock.id as u64)
+  let at = wyhash64(sample, Clock.step as u64)
+  for u: mut Unit, i: Input {
+    let group = i.channel / Toy.group
+    var chance = Toy.low
+    if phase == 0 && group == first { chance = Toy.high }
+    if phase == 1 && group != first { chance = Toy.high }
+    u.fired = if wyrand_unit(at, i.channel as i64) < chance { 1.0 } else { 0.0 }
+  }
+}

@@ -57,22 +57,36 @@ static float logf_(float x) { return (float)log((double)x); }
 
 enum { GROUP = 10, PHASE = 10, QUIET = 10, INPUTS = 2 * GROUP, HIDDEN = 32,
        CLASSES = 2, STEPS = 2 * PHASE + QUIET, WINDOW = QUIET, TRAIN = 200,
-       TEST = 200, EPOCHS = 30, UNITS = HIDDEN + INPUTS };
+       TEST = 200, EPOCHS = 30, BATCH = 10, UNITS = HIDDEN + INPUTS };
 static const double HIGH = 0.4, LOW = 0.02;
 static const float ALPHA = 0.95f, KAPPA = 0.9f, THR = 1.0f, GAMMA = 0.3f,
                    RATE = 0.01f, W_IN = 1.0f, W_REC = 0.5f, DENSITY = 0.5f;
 static const int64_t SEED = 1;
+static const float SCALE = 1.0f / (float)WINDOW;
 
 // Units 0..HIDDEN-1 are the hidden neurons, HIDDEN.. the inputs.
 static float fired[UNITS], trace_[UNITS];
 static float v[HIDDEN], input[HIDDEN], psi[HIDDEN], learn_[HIDDEN], out_trace[HIDDEN];
-static float y[CLASSES], bias[CLASSES], rgrad[CLASSES], err[CLASSES], vote[CLASSES];
+static float y[CLASSES], bias[CLASSES], btrace[CLASSES], rgrad[CLASSES], err[CLASSES], vote[CLASSES];
 
 // Synapses into each neuron, in ent's order.
-typedef struct { int pre; float weight, elig, grad; } Syn;
+typedef struct { int pre; float weight, elig, grad, m, v; } Syn;
 static Syn syn[HIDDEN][UNITS];
 static int nsyn[HIDDEN];
-static float wout[HIDDEN][CLASSES], gout[HIDDEN][CLASSES];
+static float wout[HIDDEN][CLASSES], gout[HIDDEN][CLASSES], mout[HIDDEN][CLASSES],
+    vout[HIDDEN][CLASSES], bm[CLASSES], bv[CLASSES];
+
+// Adam (learn.ent's apply): its decays and eps, b1^t, b2^t.
+static const float B1 = 0.9f, B2 = 0.999f, EPS = 1.0e-8f;
+static float p1 = 1.0f, p2 = 1.0f;
+static float c1, c2, a1, a2;
+static float adam(float w, float *m, float *v, float g) {
+  float mm = B1 * *m + a1 * g;
+  float vv = B2 * *v + a2 * (g * g);
+  *m = mm;
+  *v = vv;
+  return w - RATE * (mm / c1) / (sqrtf(vv / c2) + EPS);
+}
 
 static void setup(void) {
   uint64_t key = wyhash64((uint64_t)SEED, 0x5eed);
@@ -84,14 +98,14 @@ static void setup(void) {
   float w_in = W_IN / sqrtf((float)INPUTS);
   for (int c = 0; c < INPUTS; c++)
     for (int j = 0; j < HIDDEN; j++) {
-      made[j][nmade[j]++] = (Syn){HIDDEN + c, w_in * normal(key, n), 0, 0};
+      made[j][nmade[j]++] = (Syn){HIDDEN + c, w_in * normal(key, n), 0, 0, 0, 0};
       n += 2;
     }
   float w_rec = W_REC / sqrtf(DENSITY * (float)HIDDEN);
   for (int i = 0; i < HIDDEN; i++)
     for (int j = 0; j < HIDDEN; j++) {
       if (i != j && (float)wyrand_unit(key, n) < DENSITY)
-        made[j][nmade[j]++] = (Syn){i, w_rec * normal(key, n + 1), 0, 0};
+        made[j][nmade[j]++] = (Syn){i, w_rec * normal(key, n + 1), 0, 0, 0, 0};
       n += 3;
     }
   float w_out = 1.0f / sqrtf((float)HIDDEN);
@@ -117,6 +131,7 @@ static void rest(void) {
   memset(learn_, 0, sizeof learn_);
   memset(out_trace, 0, sizeof out_trace);
   memset(y, 0, sizeof y);
+  memset(btrace, 0, sizeof btrace);
   memset(err, 0, sizeof err);
   memset(vote, 0, sizeof vote);
 }
@@ -183,10 +198,10 @@ int main(void) {
             if (on) {
               float p = expf_(y[k] - top) / total;
               if (k == label) {
-                err[k] = p - 1.0f;
+                err[k] = (p - 1.0f) * SCALE;
                 loss -= logf_(fmaxf(p, 1.0e-30f));
               } else {
-                err[k] = p;
+                err[k] = p * SCALE;
               }
               vote[k] += y[k];
             } else {
@@ -211,7 +226,8 @@ int main(void) {
             // learn_out
             for (int k = 0; k < CLASSES; k++) {
               for (int j = 0; j < HIDDEN; j++) gout[j][k] += err[k] * out_trace[j];
-              rgrad[k] += err[k];
+              btrace[k] = KAPPA * btrace[k] + 1.0f;
+              rgrad[k] += err[k] * btrace[k];
             }
           }
         }
@@ -223,20 +239,29 @@ int main(void) {
           if (vote[k] == best) pick = k;
         if (pick == label) correct++;
         seen++;
-        // apply
-        if (training) {
+        // forget, then apply after a batch
+        if (training)
+          for (int j = 0; j < HIDDEN; j++)
+            for (int s = 0; s < nsyn[j]; s++) syn[j][s].elig = 0.0f;
+        if (training && ((sample + 1) % BATCH == 0 || sample + 1 == TRAIN)) {
+          p1 *= B1;
+          p2 *= B2;
+          c1 = 1.0f - p1;
+          c2 = 1.0f - p2;
+          a1 = 1.0f - B1;
+          a2 = 1.0f - B2;
           for (int j = 0; j < HIDDEN; j++)
             for (int s = 0; s < nsyn[j]; s++) {
-              syn[j][s].weight -= RATE * syn[j][s].grad;
-              syn[j][s].grad = 0.0f;
-              syn[j][s].elig = 0.0f;
+              Syn *e = &syn[j][s];
+              e->weight = adam(e->weight, &e->m, &e->v, e->grad);
+              e->grad = 0.0f;
             }
           for (int k = 0; k < CLASSES; k++) {
             for (int j = 0; j < HIDDEN; j++) {
-              wout[j][k] -= RATE * gout[j][k];
+              wout[j][k] = adam(wout[j][k], &mout[j][k], &vout[j][k], gout[j][k]);
               gout[j][k] = 0.0f;
             }
-            bias[k] -= RATE * rgrad[k];
+            bias[k] = adam(bias[k], &bm[k], &bv[k], rgrad[k]);
             rgrad[k] = 0.0f;
           }
         }

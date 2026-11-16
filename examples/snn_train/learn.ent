@@ -14,11 +14,11 @@
 // slope.) Each neuron gets a learning signal, the readouts' errors sent
 // back along its own Out edges by their weights (symmetric e-prop):
 //
-//   learn_j = sum_k w_out_kj * err_k,   err_k = softmax(y)_k - target_k
+//   learn_j = sum_k w_out_kj * err_k,   err_k = (softmax(y)_k - target_k) / window
 //
 // and each synapse adds learn_j * elig_ji to its gradient. The readouts'
 // weights take err_k times the neuron's spikes filtered by kappa; their
-// biases err_k. The gradients are summed over a sample and the weights
+// biases err_k times 1 filtered by kappa (the bias goes into y every step). The gradients are summed over a sample and the weights
 // moved by them at its end (`apply`): plain gradient descent, one sample
 // a batch.
 //
@@ -29,12 +29,27 @@
 import math
 import network
 
-unique Target { label: i32, on: bool }
+// on: whether the error counts in this step; scale: what it is multiplied
+// by, one over the steps of the window, so that a sample's gradient is a
+// mean over its steps and the learning rate does not depend on how many.
+unique Target { label: i32, on: bool, scale: f32 }
 unique Soft { top: f32 }
 unique SoftSum { sum: f32 }
 unique Score { loss: f32, correct: i32, seen: i32 }
 unique Best { vote: f32 }
 unique Pick { class: i32 }
+// Adam's decays and eps, b1^t and b2^t, and 1 minus them (Net.rate is its
+// rate); whether it takes a step after this sample.
+unique Adam { b1: f32, b2: f32, eps: f32, p1: f32, p2: f32, c1: f32, c2: f32 }
+unique Batch { due: bool }
+
+world {
+  Adam.b1 = 0.9
+  Adam.b2 = 0.999
+  Adam.eps = 1.0e-8
+  Adam.p1 = 1.0
+  Adam.p2 = 1.0
+}
 
 system soft_max() {
   Soft.top = -1.0e30
@@ -48,10 +63,10 @@ system error() {
     if Target.on {
       let p = exp(r.y - Soft.top) / SoftSum.sum
       if r.class == Target.label {
-        r.err = p - 1.0
+        r.err = (p - 1.0) * Target.scale
         Score.loss -= log(max(p, 1.0e-30))
       } else {
-        r.err = p
+        r.err = p * Target.scale
       }
       r.vote += r.y
     } else {
@@ -87,27 +102,71 @@ system learn_out() {
     for (pre)-[mut o: Out]->(e) {
       if let z = Neuron(pre).out_trace { o.grad += r.err * z }
     }
-    r.grad += r.err
+    r.btrace = Net.kappa * r.btrace + 1.0
+    r.grad += r.err * r.btrace
   }
 }
 
-// At a sample's end: the weights moved against their gradients, which
-// start again from nought, and so do the eligibilities.
-system apply() {
+// At a sample's end the eligibilities start again from nought.
+system forget() {
   for e, n: Neuron {
-    for (pre)-[mut s: Synapse]->(e) {
-      s.weight -= Net.rate * s.grad
-      s.grad = 0.0
-      s.elig = 0.0
-    }
+    for (pre)-[mut s: Synapse]->(e) { s.elig = 0.0 }
   }
-  for e, r: mut Readout {
-    for (pre)-[mut o: Out]->(e) {
-      o.weight -= Net.rate * o.grad
-      o.grad = 0.0
+}
+
+// After a batch of samples (`Batch.due`, which the training run sets) the
+// weights take a step of Adam (Kingma and Ba, 2015) against the gradients
+// summed since the last, which start again from nought:
+//
+//   m = b1 * m + (1 - b1) * g        v = b2 * v + (1 - b2) * g * g
+//   w -= rate * (m / (1 - b1^t)) / (sqrt(v / (1 - b2^t)) + eps)
+//
+// (t: the steps taken so far). Each weight's step is scaled by its own
+// gradients' size, so the inputs, the recurrent weights and the biases,
+// whose gradients differ by orders of magnitude, all learn.
+system apply() {
+  if Batch.due {
+    Adam.p1 *= Adam.b1
+    Adam.p2 *= Adam.b2
+    Adam.c1 = 1.0 - Adam.p1
+    Adam.c2 = 1.0 - Adam.p2
+    let b1 = Adam.b1
+    let b2 = Adam.b2
+    let a1 = 1.0 - Adam.b1
+    let a2 = 1.0 - Adam.b2
+    let rate = Net.rate
+    let c1 = Adam.c1
+    let c2 = Adam.c2
+    let eps = Adam.eps
+    for e, n: Neuron {
+      for (pre)-[mut s: Synapse]->(e) {
+        let g = s.grad
+        let m = b1 * s.m + a1 * g
+        let v = b2 * s.v + a2 * (g * g)
+        s.m = m
+        s.v = v
+        s.weight -= rate * (m / c1) / (sqrt(v / c2) + eps)
+        s.grad = 0.0
+      }
     }
-    r.bias -= Net.rate * r.grad
-    r.grad = 0.0
+    for e, r: mut Readout {
+      for (pre)-[mut o: Out]->(e) {
+        let g = o.grad
+        let m = b1 * o.m + a1 * g
+        let v = b2 * o.v + a2 * (g * g)
+        o.m = m
+        o.v = v
+        o.weight -= rate * (m / c1) / (sqrt(v / c2) + eps)
+        o.grad = 0.0
+      }
+      let g = r.grad
+      let m = b1 * r.m + a1 * g
+      let v = b2 * r.v + a2 * (g * g)
+      r.m = m
+      r.v = v
+      r.bias -= rate * (m / c1) / (sqrt(v / c2) + eps)
+      r.grad = 0.0
+    }
   }
 }
 

@@ -1,0 +1,165 @@
+// e-prop's gradient and that of backpropagation through time with the
+// recurrent term left out (Backward.through = 0) are the same sums, added
+// in another order (bptt.ent says why). For each of the first samples of
+// the toy task, from the same weights: forward with e-prop's learning and
+// the steps written down, e-prop's gradient of each synapse kept aside
+// (in `elig`, which the way back does not use), then backwards; the two
+// compared, synapse by synapse, and the readouts' weights and biases: how
+// far the most apart is from the other, in millionths of the largest
+// gradient. Then with the recurrent term in, how far the whole gradient
+// is from e-prop's (the readouts' gradients are the same in both).
+//
+//   tools/ent run -I examples/snn_train examples/snn_train/check/same_gradient.ent
+import console
+import math
+import network
+import learn
+import train
+import bptt
+import toy_data
+
+unique Compare { most: f32, diff: f32, samples: i32 }
+unique OutCompare { most: f32, diff: f32 }
+
+schedule start() {
+  setup()
+  tape_up()
+}
+
+schedule sample() {
+  label()
+  rest()
+}
+
+schedule forward() {
+  window()
+  encode()
+  propagate()
+  traces()
+  integrate()
+  read_out()
+  soft_max()
+  error()
+  broadcast()
+  learn()
+  learn_out()
+  record()
+  tick()
+}
+
+// e-prop's gradient aside (a synapse's in `elig`, the readouts' in `m`,
+// which Adam is not here to use), and nought to add BPTT's to.
+system aside() {
+  for e, b: Back {
+    for (pre)-[mut s: Synapse]->(e) {
+      s.elig = s.grad
+      s.grad = 0.0
+    }
+  }
+  for e, r: mut Readout {
+    for (pre)-[mut o: Out]->(e) {
+      o.m = o.grad
+      o.grad = 0.0
+    }
+    r.m = r.grad
+    r.grad = 0.0
+  }
+}
+
+system compare() {
+  Compare.most = 0.0
+  Compare.diff = 0.0
+  for e, b: mut Back {
+    b.zbar = 0.0
+    b.psi = 0.0
+    for (pre)-[s: Synapse]->(e) {
+      b.zbar max= abs(s.elig)
+      b.psi max= abs(s.grad - s.elig)
+    }
+  }
+  for b: Back {
+    Compare.most max= b.zbar
+    Compare.diff max= b.psi
+  }
+  for e, r: mut Readout {
+    r.y = 0.0
+    r.vote = 0.0
+    for (pre)-[o: Out]->(e) {
+      r.y max= abs(o.m)
+      r.vote max= abs(o.grad - o.m)
+    }
+    r.y max= abs(r.m)
+    r.vote max= abs(r.grad - r.m)
+  }
+  OutCompare.most = 0.0
+  OutCompare.diff = 0.0
+  for r: Readout {
+    OutCompare.most max= r.y
+    OutCompare.diff max= r.vote
+  }
+  let relative = Compare.diff / Compare.most
+  let out_relative = OutCompare.diff / OutCompare.most
+  put("sample {Compare.samples} label {Target.label} through {Backward.through}: synapses {Compare.most}, differ {relative * 1000000.0} millionths; readouts {OutCompare.most}, differ {out_relative * 1000000.0} millionths")
+  Compare.samples += 1
+}
+
+// The weights left as they were; the gradients cleared.
+system clear_grads() {
+  for e, b: Back {
+    for (pre)-[mut s: Synapse]->(e) {
+      s.grad = 0.0
+      s.elig = 0.0
+    }
+  }
+  for e, r: mut Readout {
+    for (pre)-[mut o: Out]->(e) {
+      o.grad = 0.0
+      o.m = 0.0
+    }
+    r.grad = 0.0
+    r.m = 0.0
+  }
+}
+
+system next_sample() {
+  Clock.step = 0
+  Clock.id += 1
+}
+
+system recurrent() {
+  Backward.through = if Compare.samples >= 4 { 1.0 } else { 0.0 }
+}
+
+schedule unwinding() {
+  aside()
+  unwind()
+}
+
+schedule backward() {
+  untick()
+  restore()
+  encode()
+  back_out()
+  back_z()
+  back_v()
+  back_grad()
+}
+
+schedule after() {
+  compare()
+  clear_grads()
+  next_sample()
+  recurrent()
+  sample()
+}
+
+main {
+  start()
+  sample()
+  loop {
+    loop { forward() } until Clock.step == Run.steps
+    unwinding()
+    loop { backward() } until Clock.step == 0
+    after()
+  } until Compare.samples == 8
+}

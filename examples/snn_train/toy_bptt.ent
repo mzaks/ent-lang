@@ -1,0 +1,82 @@
+// Backpropagation through time (bptt.ent) on the toy task (toy_data.ent),
+// with the same network, numbers at random and samples as toy.ent's
+// e-prop: the ceiling e-prop is compared with.
+//
+//   tools/ent run examples/snn_train/toy_bptt.ent
+//
+// The same lines as toy.ent. Each training sample runs forward with its
+// steps written down, then backwards through them; the weights move at
+// its end.
+import console
+import network
+import learn
+import train
+import bptt
+import toy_data
+
+world {
+  Backward.through = 1.0
+}
+
+schedule start() {
+  setup()
+  tape_up()
+}
+
+schedule finish() {
+  checksum()
+}
+
+schedule sample() {
+  label()
+  rest()
+}
+
+schedule forward() {
+  window()
+  encode()
+  propagate()
+  traces()
+  integrate()
+  read_out()
+  soft_max()
+  error()
+  record() run_if Clock.training
+  tick()
+}
+
+schedule unwinding() run_if Clock.training {
+  unwind()
+}
+
+schedule backward() run_if Clock.training {
+  untick()
+  restore()
+  encode()
+  back_out()
+  back_z()
+  back_v()
+  back_grad()
+}
+
+schedule boundary() {
+  score()
+  forget() run_if Clock.training
+  due()
+  apply()
+  next()
+  report() run_if Clock.reported
+  sample()
+}
+
+main {
+  start()
+  sample()
+  loop {
+    loop { forward() } until Clock.step == Run.steps
+    unwinding()
+    loop { backward() } until Clock.step == 0 || !Clock.training
+    boundary()
+  } until Clock.epoch == Run.epochs
+  finish()
+}

@@ -4920,3 +4920,39 @@ keep their guards. Parse in `bench/devices` is slower native (3.9 ms)
 than for any x86-64 (3.1 ms); alone it is 3.0 native, so that is the
 program around it, not the loop. With `ENT_TBAA=1` on top nothing more
 was gained, so TBAA stays as it was: asked for.
+
+## 2026-11-16: training a spiking network, e-prop and BPTT (examples/snn_train)
+
+The Spiking Heidelberg Digits (examples/snn_train/README.md): 700 inputs,
+256 hidden LIF neurons, 192,253 synapses (179,200 from the inputs, 13,053
+recurrent), 20 readouts, 100 steps a sample. Ryzen AI 9 HX 370, on mains
+power, no clock clamp (build/clamp-test), built native
+(`ENT_CFLAGS=-march=native`), all threads with `ENT_PARALLEL_MIN=256`
+(24 threads; by default no loop here is big enough for many). Times are
+whole runs of 500 training or 1000 test samples, divided; the start
+(reading 92 MB, making the network) is under 0.12 s.
+
+| | a training sample | a step of it | a test sample (forward) | a step |
+|---|---:|---:|---:|---:|
+| e-prop, one thread | 23.5 ms | 235 µs | 11.7 ms | 117 µs |
+| e-prop, 24 threads | 8.8 ms | 88 µs | 2.4 ms | 24 µs |
+| BPTT, one thread | 48-67 ms | | 14.1 ms | |
+| BPTT, 24 threads | 19.3 ms | | 3.2 ms | |
+
+- e-prop's learning costs what the network's step costs: 118 µs a step on
+  one thread, **0.61 ns a synapse** for its eligibility and gradient
+  (read the source's trace, two multiply-adds, two stores), and
+  propagate's gather 0.61 ns a synapse too.
+- An epoch (8156 training, 2264 test samples) on all threads: e-prop 78 s,
+  BPTT 156 s (20 epochs: 26 and 52 minutes).
+- Many threads give 2.7x on training and 4.9x on testing: 100 steps a
+  sample, each a dozen loops over 256 neurons or 956 units, so each
+  parallel loop has 10-50 µs of work.
+- **Open:** BPTT on one thread is slower native than built for any
+  x86-64: 24-34 s against 17-20 s for 500 samples (the spread is wide
+  run to run). `perf stat` on 200 samples: native 110 G instructions in
+  54.8 G cycles, any x86-64 129 G in 38.1 G (IPC 2.0 against 3.4).
+  Without AVX-512 (`-mno-avx512f`) 21-29 s, as noisy. Not looked into:
+  the backward systems' edge loops (`back_z` walks a neuron's outgoing
+  synapses and reads the target's `vbar`) are the suspects. e-prop is
+  the same either way (11.7 s against 12.0).

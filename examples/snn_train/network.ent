@@ -29,10 +29,13 @@ import math
 component Unit { fired: f32, trace: f32 }
 component Input { channel: i32 }
 component Neuron { v: f32, input: f32, psi: f32, learn: f32, out_trace: f32 }
-component Readout { y: f32, bias: f32, grad: f32, err: f32, vote: f32, class: i32 }
+// btrace: the bias's eligibility (it goes into y every step, and y decays
+// by kappa: kappa * btrace + 1).
+component Readout { y: f32, bias: f32, btrace: f32, grad: f32, m: f32, v: f32, err: f32, vote: f32, class: i32 }
 
-relation (Unit)-[Synapse { weight: f32, elig: f32, grad: f32 }]->(Neuron) capacity 1024
-relation (Neuron)-[Out { weight: f32, grad: f32 }]->(Readout) capacity 1024
+// m, v: Adam's moments of the weight's gradient (learn.ent).
+relation (Unit)-[Synapse { weight: f32, elig: f32, grad: f32, m: f32, v: f32 }]->(Neuron) capacity 1024
+relation (Neuron)-[Out { weight: f32, grad: f32, m: f32, v: f32 }]->(Readout) capacity 1024
 
 // alpha: the membrane's decay per step, and that of the traces a
 // synapse's eligibility is made of; kappa: the readouts' decay; thr: the
@@ -99,6 +102,7 @@ system rest() {
   }
   for r: mut Readout {
     r.y = 0.0
+    r.btrace = 0.0
     r.err = 0.0
     r.vote = 0.0
   }

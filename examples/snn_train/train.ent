@@ -8,7 +8,7 @@
 // `fired`), and runs, a sample at a time:
 //
 //   step()      window, encode, the network, learning, tick
-//   boundary()  score, apply, next, report (run_if Clock.step == Run.steps)
+//   boundary()  score, forget, due, apply, next, report (run_if Clock.step == Run.steps)
 import console
 import math
 import wyhash
@@ -19,6 +19,7 @@ unique Run {
   seed: i64,
   inputs: i32, hidden: i32, classes: i32,
   steps: i32,       // steps in a sample
+  batch: i32,       // samples whose gradients are summed for a step of Adam
   window: i32,      // of them, at the end, where the error counts
   train: i32, test: i32, epochs: i32,
   w_in: f32,        // weights at the start: normal, times this over the
@@ -48,7 +49,7 @@ system setup() {
   Hidden = []
   Readouts = []
   for k in 0..Run.classes {
-    let r = spawn { Readout { y: 0.0, bias: 0.0, grad: 0.0, err: 0.0, vote: 0.0, class: k } }
+    let r = spawn { Readout { y: 0.0, bias: 0.0, btrace: 0.0, grad: 0.0, m: 0.0, v: 0.0, err: 0.0, vote: 0.0, class: k } }
     Readouts += { who: r }
   }
   for j in 0..Run.hidden {
@@ -64,7 +65,7 @@ system setup() {
   for c in 0..Run.inputs {
     let u = spawn { Unit { fired: 0.0, trace: 0.0 }, Input { channel: c } }
     for j in 0..Run.hidden {
-      connect (u)-[Synapse { weight: w_in * normal(key, n), elig: 0.0, grad: 0.0 }]->(Hidden[j].who)
+      connect (u)-[Synapse { weight: w_in * normal(key, n), elig: 0.0, grad: 0.0, m: 0.0, v: 0.0 }]->(Hidden[j].who)
       n += 2
     }
   }
@@ -73,7 +74,7 @@ system setup() {
   for i in 0..Run.hidden {
     for j in 0..Run.hidden {
       if i != j && (wyrand_unit(key, n) as f32) < Run.density {
-        connect (Hidden[i].who)-[Synapse { weight: w_rec * normal(key, n + 1), elig: 0.0, grad: 0.0 }]->(Hidden[j].who)
+        connect (Hidden[i].who)-[Synapse { weight: w_rec * normal(key, n + 1), elig: 0.0, grad: 0.0, m: 0.0, v: 0.0 }]->(Hidden[j].who)
       }
       n += 3
     }
@@ -82,7 +83,7 @@ system setup() {
   let w_out = 1.0 / sqrt(Run.hidden as f32)
   for j in 0..Run.hidden {
     for k in 0..Run.classes {
-      connect (Hidden[j].who)-[Out { weight: w_out * normal(key, n), grad: 0.0 }]->(Readouts[k].who)
+      connect (Hidden[j].who)-[Out { weight: w_out * normal(key, n), grad: 0.0, m: 0.0, v: 0.0 }]->(Readouts[k].who)
       n += 2
     }
   }
@@ -90,8 +91,15 @@ system setup() {
   Clock.id = 0
 }
 
+// Whether Adam takes a step after this sample: after each batch, and
+// after the last training sample of an epoch.
+system due() {
+  Batch.due = Clock.training && ((Clock.sample + 1) % Run.batch == 0 || Clock.sample + 1 == Run.train)
+}
+
 system window() {
   Target.on = Clock.step >= Run.steps - Run.window
+  Target.scale = 1.0 / Run.window as f32
 }
 
 system tick() {

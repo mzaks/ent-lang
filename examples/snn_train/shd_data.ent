@@ -1,0 +1,115 @@
+// The Spiking Heidelberg Digits for examples/snn_train: spoken digits, 0
+// to 9 in English and in German, 20 classes, through a model of the
+// cochlea into 700 channels of spikes (Cramer et al., 2020), as
+// prepare.py makes them flat (shd.bin, read whole at the start). The
+// network's size, its parameters, the arguments, the training samples'
+// order, how a sample is labelled and encoded: what shd.ent (e-prop) and
+// shd_bptt.ent (backpropagation through time) share.
+//
+// Arguments: [epochs [samples [tests]]]: how many epochs (10), how many
+// training samples each (all 8156, drawn anew each epoch), how many of
+// the 2264 test samples (the first ones).
+import console
+import files
+import text
+import math
+import wyhash
+import network
+import learn
+import train
+import world
+
+capacity Bytes 100000000
+capacity Unit 1024
+capacity Neuron 256
+capacity Readout 20
+capacity Input 768
+capacity Synapse 200000
+capacity Out 5120
+
+// Where in the file the samples are: the record of the sample now, and
+// where it starts.
+unique Data { train: i32, steps: i32, channels: i32, step_bytes: i32, record_bytes: i32, record: i32, base: i32 }
+buffer Order { record: i32 } capacity 16384
+
+// What is read from shd.bin is not part of the network saved.
+transient Bytes
+transient Order
+transient Data
+
+world {
+  Net.alpha = 0.9
+  Net.kappa = 0.9
+  Net.thr = 1.0
+  Net.gamma = 0.3
+  Net.rate = 0.001
+
+  Run.seed = 1
+  Run.hidden = 256
+  Run.classes = 20
+  Run.epochs = 10
+  Run.batch = 32
+  Run.w_in = 3.0
+  Run.w_rec = 0.5
+  Run.density = 0.2
+}
+
+fn u32_at(a: u8, b: u8, c: u8, d: u8) -> i32 {
+  (a as i32) | ((b as i32) << 8) | ((c as i32) << 16) | ((d as i32) << 24)
+}
+
+system load() {
+  let size = read_file("shd.bin", Bytes)
+  if size < 32 {
+    put_error("shd.bin is not where the program was started: see examples/snn_train/fetch.sh and prepare.py")
+    exit_status(1)
+    Run.epochs = 0
+  } else {
+    Run.train = u32_at(Bytes[4].value, Bytes[5].value, Bytes[6].value, Bytes[7].value)
+    Run.test = u32_at(Bytes[8].value, Bytes[9].value, Bytes[10].value, Bytes[11].value)
+    Data.steps = u32_at(Bytes[12].value, Bytes[13].value, Bytes[14].value, Bytes[15].value)
+    Data.channels = u32_at(Bytes[16].value, Bytes[17].value, Bytes[18].value, Bytes[19].value)
+    Data.step_bytes = u32_at(Bytes[20].value, Bytes[21].value, Bytes[22].value, Bytes[23].value)
+    Data.record_bytes = u32_at(Bytes[24].value, Bytes[25].value, Bytes[26].value, Bytes[27].value)
+    Data.train = Run.train
+    Run.inputs = Data.channels
+    Run.steps = Data.steps
+    Run.window = Data.steps
+    if argument_count() > 0 { Run.epochs = number(argument(0)) as i32 }
+    if argument_count() > 1 { Run.train = min(Run.train, number(argument(1)) as i32) }
+    if argument_count() > 2 { Run.test = min(Run.test, number(argument(2)) as i32) }
+    put("{Data.train} training samples (learning from {Run.train}), {Run.test} test samples, {Data.steps} steps, {Data.channels} channels")
+  }
+}
+
+// The training samples in an order of the epoch's own (Fisher and Yates),
+// drawn from all of them.
+system shuffle() {
+  let key = wyhash64(Run.seed as u64 + 2, Clock.epoch as u64)
+  Order = []
+  for i in 0..Data.train { Order += { record: i } }
+  for i in 0..Data.train - 1 {
+    let j = i + wyrand_below(key, i as i64, (Data.train - i) as u64) as i32
+    let a = Order[i].record
+    Order[i].record = Order[j].record
+    Order[j].record = a
+  }
+}
+
+system label() {
+  if Clock.training {
+    Data.record = Order[Clock.sample].record
+  } else {
+    Data.record = Data.train + Clock.sample
+  }
+  Data.base = 32 + Data.record * Data.record_bytes
+  Target.label = Bytes[Data.base].value as i32
+}
+
+system encode() {
+  let at = Data.base + 4 + Clock.step * Data.step_bytes
+  for u: mut Unit, i: Input {
+    let byte = Bytes[at + (i.channel >> 3)].value as i32
+    u.fired = ((byte >> (i.channel & 7)) & 1) as f32
+  }
+}

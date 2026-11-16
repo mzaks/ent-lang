@@ -1,0 +1,94 @@
+// Backpropagation through time (bptt.ent) on the Spiking Heidelberg
+// Digits (shd_data.ent), with the same network, numbers at random,
+// samples and Adam as shd.ent's e-prop: the ceiling e-prop is compared
+// with. Run as shd.ent is, in build/snn_train/data:
+//
+//   ENT_PARALLEL_MIN=256 ../../../tools/ent build --parallel ../../../examples/snn_train/shd_bptt.ent -o shd_bptt
+//   ./shd_bptt [epochs [samples [tests]]]
+//
+// The same lines as shd.ent; the network is saved as shd_bptt.sav.
+import console
+import network
+import learn
+import train
+import bptt
+import world
+import shd_data
+
+// A row for each step of each hidden neuron, and of each readout.
+capacity Tape 25600
+capacity ReadTape 2000
+
+world {
+  Backward.through = 1.0
+}
+
+schedule start() {
+  load()
+  setup()
+  tape_up()
+  shuffle()
+}
+
+system name_saved() { Saved.file = "shd_bptt.sav" }
+
+schedule finish() {
+  checksum()
+  name_saved()
+  save_world()
+}
+
+schedule sample() {
+  label()
+  rest()
+}
+
+schedule forward() {
+  window()
+  encode()
+  propagate()
+  traces()
+  integrate()
+  read_out()
+  soft_max()
+  error()
+  record() run_if Clock.training
+  tick()
+}
+
+schedule unwinding() run_if Clock.training {
+  unwind()
+}
+
+schedule backward() run_if Clock.training {
+  untick()
+  restore()
+  encode()
+  back_out()
+  back_z()
+  back_v()
+  back_grad()
+}
+
+schedule boundary() {
+  score()
+  forget() run_if Clock.training
+  due()
+  apply()
+  next()
+  report() run_if Clock.reported
+  shuffle() run_if Clock.reported
+  sample()
+}
+
+main {
+  start()
+  sample()
+  loop {
+    loop { forward() } until Clock.step == Run.steps
+    unwinding()
+    loop { backward() } until Clock.step == 0 || !Clock.training
+    boundary()
+  } until Clock.epoch >= Run.epochs
+  finish()
+}
