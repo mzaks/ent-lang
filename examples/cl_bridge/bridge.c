@@ -45,7 +45,7 @@ typedef struct {
   int32_t stdp;
   float a_plus, a_minus, tau_plus, tau_minus;
   float noise_rate, noise_amp, stim_gain, stim_reach;
-  float adapt_inc, tau_adapt;
+  float adapt_inc, tau_adapt, reach_cut;
 } dish_params;
 
 typedef struct {
@@ -82,12 +82,13 @@ void dish_defaults(dish_params *p) {
   p->stim_reach = *ent_Dish_stim_reach(w);
   p->adapt_inc = *ent_Dish_adapt_inc(w);
   p->tau_adapt = *ent_Dish_tau_adapt(w);
+  p->reach_cut = *ent_Dish_reach_cut(w);
   ent_world_destroy(w);
 }
 
 // The largest number of neurons a dish may have (network.ent's capacity
 // of Cell).
-int32_t dish_most_neurons(void) { return 4096; }
+int32_t dish_most_neurons(void) { return 65536; }
 
 dish *dish_create(const dish_params *p) {
   if (p->neurons < 1 || p->neurons > dish_most_neurons())
@@ -130,6 +131,7 @@ dish *dish_create(const dish_params *p) {
   *ent_Dish_stim_reach(w) = p->stim_reach;
   *ent_Dish_adapt_inc(w) = p->adapt_inc;
   *ent_Dish_tau_adapt(w) = p->tau_adapt;
+  *ent_Dish_reach_cut(w) = p->reach_cut;
   ent_create(w);
   return d;
 }

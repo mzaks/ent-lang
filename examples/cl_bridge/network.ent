@@ -36,6 +36,7 @@ unique Dish {
   tau_adapt: f32,    // the adaptation's time constant
   density: f32,      // the chance of a synapse between two neurons at no distance
   reach: f32,        // the distance over which that chance falls by e
+  reach_cut: f32,    // no synapse is longer than this many reaches
   w_exc: f32,        // an excitatory synapse's weight at the start
   w_inh: f32,        // an inhibitory synapse's weight (fixed)
   w_max: f32,        // an excitatory weight is kept in [0, w_max]
@@ -67,16 +68,25 @@ component Neuron {
   gain: f32,         // how much of its electrode's stim it takes
   number: i32, channel: i32, pad: entity
 }
+// Where a neuron is: x and y from 0 to 1.
+component Spot { x: f32, y: f32 } capacity 65536
+// Where a neuron's synapses are listed in Wires, while the dish is made.
+component Out { first: i32, count: i32 }
 component Electrode { channel: i32, x: f32, y: f32, stim: f32, count: i32 }
-archetype Cell { Neuron } capacity 4096
+archetype Cell { Neuron, Spot, Out } capacity 65536
 archetype Pad { Electrode } capacity 64
 
 // plastic: 1 where the source is excitatory (the weight learns), else 0.
-relation (Neuron)-[Synapse { weight: f32, plastic: f32 }]->(Neuron) capacity 524288
+relation (Neuron)-[Synapse { weight: f32, plastic: f32 }]->(Neuron) capacity 8388608
 
-// Where each neuron is, while the dish is made.
-buffer Place { x: f32, y: f32, who: entity } capacity 4096
 buffer Pads { who: entity } capacity 64
+buffer Wires { to: entity } capacity 8388608
+unique Wired { rows: i32 }
+
+// The neurons by where they are, for wiring each to those near it.
+index Near of Spot grid (x, y) cell Dish.reach * Dish.reach_cut {
+  number: Neuron.number
+}
 
 world {
   Dish.seed = 1
@@ -89,6 +99,7 @@ world {
   Dish.tau_adapt = 200.0
   Dish.density = 0.3
   Dish.reach = 0.2
+  Dish.reach_cut = 8.0
   Dish.w_exc = 0.09
   Dish.w_inh = 0.35
   Dish.w_max = 0.2
@@ -131,7 +142,6 @@ system make() {
     let p = spawn { Electrode { channel: c, x: x, y: y, stim: 0.0, count: 0 } }
     Pads += { who: p }
   }
-  Place = []
   for i in 0..Dish.neurons {
     let x = draw(key, (i * 3) as i64)
     let y = draw(key, (i * 3 + 1) as i64)
@@ -142,34 +152,79 @@ system make() {
     let dx = x - ((col as f32) + 0.5) / 8.0
     let dy = y - ((row as f32) + 0.5) / 8.0
     let gain = exp(-sqrt(dx * dx + dy * dy) / Dish.stim_reach)
-    let n = spawn {
+    spawn {
       Neuron { v: 0.0, input: 0.0, fired: 0.0, sign: if inhibitory { -1.0 } else { 1.0 }, out: 0.0,
                trace: 0.0, post: 0.0, rest: 0.0, adapt: 0.0, gain: gain,
-               number: i, channel: c, pad: Pads[c].who }
-    }
-    Place += { x: x, y: y, who: n }
-  }
-  // Synapses: from i to j with the chance density * e^(-distance / reach).
-  let wiring = mix(key ^ 0x5157)
-  for i in 0..Dish.neurons {
-    let inhibitory = draw(key, (i * 3 + 2) as i64) < Dish.inhibitory
-    for j in 0..Dish.neurons {
-      if i != j {
-        let dx = Place[i].x - Place[j].x
-        let dy = Place[i].y - Place[j].y
-        let chance = Dish.density * exp(-sqrt(dx * dx + dy * dy) / Dish.reach)
-        if draw(wiring, (i as i64) * 65536 + (j as i64)) < chance {
-          if inhibitory {
-            connect (Place[i].who)-[Synapse { weight: Dish.w_inh, plastic: 0.0 }]->(Place[j].who)
-          } else {
-            connect (Place[i].who)-[Synapse { weight: Dish.w_exc, plastic: 1.0 }]->(Place[j].who)
-          }
-        }
-      }
+               number: i, channel: c, pad: Pads[c].who },
+      Spot { x: x, y: y },
+      Out { first: 0, count: 0 }
     }
   }
   Dish.tick = 0
   Dish.spikes = 0
+}
+
+// Synapses: from i to j with the chance density * e^(-distance / reach),
+// none longer than reach_cut reaches; each neuron's found among those
+// near it (the grid Near), not among all. The draw of a pair is by the
+// numbers of both, so they are the synapses a loop over all pairs gives,
+// and a neuron reads its own in the order of their sources. (A `for`
+// through the grid only reads: each neuron counts its synapses, has its
+// part of Wires by a running sum, lists their targets there, and is
+// connected to them after.)
+fn wired(wiring: u64, density: f32, reach: f32, i: i32, j: i32, dx: f32, dy: f32) -> bool {
+  // (The chance is never more than density: a draw that is not below it
+  // needs no exp.)
+  let u = draw(wiring, (i as i64) * 65536 + (j as i64))
+  if u >= density { false } else { u < density * exp(-sqrt(dx * dx + dy * dy) / reach) }
+}
+
+system count_wires() {
+  let cut = Dish.reach * Dish.reach_cut
+  let wiring = mix(mix(Dish.seed as u64) ^ 0x5157)
+  for me, n: Neuron, p: Spot, w: mut Out {
+    var k: i32 = 0
+    for o, q: Spot, m: Neuron near (p.x, p.y) within cut in Near where o != me {
+      if wired(wiring, Dish.density, Dish.reach, n.number, m.number, p.x - q.x, p.y - q.y) { k += 1 }
+    }
+    w.count = k
+  }
+}
+
+system place_wires() {
+  Wired.rows = 0
+  for w: mut Out {
+    let first = Wired.rows += w.count
+    w.first = first
+  }
+  Wires = [{ to: none }; Wired.rows]
+}
+
+system fill_wires() {
+  let cut = Dish.reach * Dish.reach_cut
+  let wiring = mix(mix(Dish.seed as u64) ^ 0x5157)
+  for me, n: Neuron, p: Spot, w: Out, list: mut Wires[w.first, w.count] {
+    var k: i32 = 0
+    for o, q: Spot, m: Neuron near (p.x, p.y) within cut in Near where o != me {
+      if wired(wiring, Dish.density, Dish.reach, n.number, m.number, p.x - q.x, p.y - q.y) {
+        list[k].to = o
+        k += 1
+      }
+    }
+  }
+}
+
+system wire() {
+  for me, n: Neuron, w: Out, list: Wires[w.first, w.count] {
+    for k in 0..w.count {
+      if n.sign < 0.0 {
+        connect (me)-[Synapse { weight: Dish.w_inh, plastic: 0.0 }]->(list[k].to)
+      } else {
+        connect (me)-[Synapse { weight: Dish.w_exc, plastic: 1.0 }]->(list[k].to)
+      }
+    }
+  }
+  Wires = []
 }
 
 // What came in along the synapses (the spikes of the step before), the
@@ -261,6 +316,10 @@ system sum_up() {
 
 schedule create() {
   make()
+  count_wires()
+  place_wires()
+  fill_wires()
+  wire()
 }
 
 schedule step() {

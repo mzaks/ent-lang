@@ -74,6 +74,7 @@ class DishParams(ctypes.Structure):
         ("noise_rate", ctypes.c_float), ("noise_amp", ctypes.c_float),
         ("stim_gain", ctypes.c_float), ("stim_reach", ctypes.c_float),
         ("adapt_inc", ctypes.c_float), ("tau_adapt", ctypes.c_float),
+        ("reach_cut", ctypes.c_float),
     ]
 
 

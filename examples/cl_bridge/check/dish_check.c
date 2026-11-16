@@ -26,7 +26,7 @@ typedef struct {
   int32_t stdp;
   float a_plus, a_minus, tau_plus, tau_minus;
   float noise_rate, noise_amp, stim_gain, stim_reach;
-  float adapt_inc, tau_adapt;
+  float adapt_inc, tau_adapt, reach_cut;
 } dish_params;
 typedef struct dish dish;
 

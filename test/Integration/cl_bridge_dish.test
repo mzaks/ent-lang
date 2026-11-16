@@ -14,6 +14,12 @@
 // RUN: not diff %t.a %t.d
 // RUN: FileCheck %s < %t.a
 // RUN: FileCheck %s --check-prefix=OTHER < %t.d
+// A dish of 4096 neurons (wired through the grid of where they are):
+// the same on many threads.
+// RUN: %t.one 1 1 4096 > %t.e
+// RUN: env OMP_NUM_THREADS=8 %t.all 1 1 4096 > %t.f
+// RUN: diff %t.e %t.f
+// RUN: FileCheck %s --check-prefix=BIG < %t.e
 
 // CHECK: second 1: {{[0-4]}}.{{[0-9]+}} Hz a neuron
 // CHECK: second 3: {{[0-4]}}.{{[0-9]+}} Hz a neuron
@@ -21,3 +27,5 @@
 // CHECK: 44815 synapses, spikes heard [[HEARD:[0-9]+]], checksum [[SUM:[0-9]+]]
 // OTHER: seed 2: 1024 neurons, 3000 steps
 // OTHER: 44430 synapses
+// BIG: seed 1: 4096 neurons, 1000 steps
+// BIG: 243015 synapses

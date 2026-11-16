@@ -4,7 +4,11 @@
 // a hash of the spikes (how many each channel had at each step),
 // and the checksum of all potentials and weights.
 //
-//   tools/ent run examples/cl_bridge/run.ent [seconds [seed]]
+//   tools/ent run examples/cl_bridge/run.ent [seconds [seed [neurons]]]
+//
+// A dish of more neurons than 1024 is as dense a culture over a bigger
+// square: the square stays 1 wide, and the reach of the synapses shrinks
+// as the root of the number grows (0.2 at 1024), so a neuron has as many.
 import console
 import text
 import network
@@ -17,6 +21,10 @@ system arguments() {
   Run.seconds = 2
   if argument_count() > 0 { Run.seconds = number(argument(0)) as i32 }
   if argument_count() > 1 { Dish.seed = number(argument(1)) }
+  if argument_count() > 2 {
+    Dish.neurons = number(argument(2)) as i32
+    Dish.reach = 0.2 * sqrt(1024.0 / (Dish.neurons as f32))
+  }
   Run.steps = Run.seconds * 1000
 }
 

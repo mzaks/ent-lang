@@ -75,8 +75,13 @@ otherwise: 5 s of the dish take 1.7 s.
 
 1024 leaky integrate-and-fire neurons at random places on a unit square, a
 fifth of them inhibitory (the sign fixed per neuron). Each pair is wired
-with the chance `density * exp(-distance / reach)` (44,815 synapses for
-seed 1). Each step is a millisecond:
+with the chance `density * exp(-distance / reach)`, none longer than
+`reach_cut` reaches (44,815 synapses for seed 1). Each neuron's are found
+among those near it through a grid index of where they are (`index Near
+of Spot grid (x, y)`, a `near` loop), not among all: the draw of a pair is
+by the numbers of both, so the synapses are those a loop over every pair
+gives, and at the defaults the cut (1.6) is longer than the square's
+diagonal, so nothing is cut. Each step is a millisecond:
 
 - **input**: the pull sum of `weight * out` over a neuron's incoming
   synapses (`out` = fired times sign), a noise kick of `noise_amp` with the
@@ -103,7 +108,7 @@ cell line. Defaults (`Dish` in `network.ent`, `dish_defaults()` in C):
 | parameter | default | meaning |
 |---|---|---|
 | `seed` | 1 | everything random is drawn from it |
-| `neurons` | 1024 | at most 4096 (`dish_most_neurons`) |
+| `neurons` | 1024 | at most 65,536 (`dish_most_neurons`) |
 | `inhibitory` | 0.2 | the share of inhibitory neurons |
 | `tau` | 20 ms | membrane time constant |
 | `thr` | 1.0 | threshold (rest and reset are 0) |
@@ -112,6 +117,7 @@ cell line. Defaults (`Dish` in `network.ent`, `dish_defaults()` in C):
 | `tau_adapt` | 200 ms | the adaptation's time constant |
 | `density` | 0.3 | the chance of a synapse at no distance |
 | `reach` | 0.2 | the distance over which it falls by e (side = 1) |
+| `reach_cut` | 8 | no synapse is longer than this many reaches |
 | `w_exc` | 0.09 | excitatory weight at the start |
 | `w_inh` | 0.35 | inhibitory weight (fixed) |
 | `w_max` | 0.2 | excitatory weights are kept in [0, w_max] |
@@ -125,6 +131,43 @@ cell line. Defaults (`Dish` in `network.ent`, `dish_defaults()` in C):
 
 With these: 0.87 to 0.90 Hz a neuron over 20 s for seeds 1 to 8; 60 s of
 seed 1 in 8.2 s on one core (`tools/ent run`, a portable build).
+
+## Bigger dishes, threads and the GPU
+
+A dish of more neurons is as dense a culture over a bigger square: the
+square stays 1 wide and `reach` shrinks as the root of the number grows
+(`0.2 * sqrt(1024 / neurons)`; `run.ent [seconds [seed [neurons]]]` does
+so), so a neuron has as many synapses, about 70 away from the square's
+sides. Keep the default reach with many neurons and every neuron has
+thousands: the synapses outgrow the relation's capacity (8,388,608) and
+the program stops, saying so.
+
+Seed 1, native builds (`ENT_CFLAGS=-march=native`), on mains power;
+setup is making the dish (places and wiring), a step 1 ms of it, from a
+3 s run:
+
+| neurons | synapses | setup: 1 core | 24 threads | step: 1 core | 24 threads | GPU |
+|---|---|---|---|---|---|---|
+| 1,024 | 44,815 | 0.03 s | 0.01 s | 92 us | 24 us | 67 us |
+| 4,096 | 243,015 | 0.35 s | 0.04 s | 496 us | 78 us | 98 us |
+| 16,384 | 1,103,714 | 2.3 s | 0.26 s | 2.4 ms | 331 us | 406 us |
+| 65,536 | 4,726,319 | 11.6 s | 1.0 s | 12.2 ms | 1.8 ms | 2.0 ms |
+
+Every column gives the same spikes and checksum. 24 threads is `tools/ent
+build --parallel` with `ENT_PARALLEL_MIN=256` set when building (without
+it a loop of fewer than a million rows stays on one thread). The GPU is a
+laptop RTX 4050 (`--gpu`; the five systems of a step are `gpu system`s,
+which a build without it runs on the CPU as before). Its step is its
+kernels: going along the synapses (`stdp` 0.27 ns an edge, `gather`
+0.14), about what 24 threads take; from 4,096 neurons up neither is far
+ahead. Its clocks change during a run, so a GPU step's wall time varies
+by up to 2x from run to run; the kernels' own times (`ENT_GPU_TIMES=1`)
+do not. Wiring every pair, as at first, took 47 s for 65,536 neurons
+(2.9 M synapses, `density` scaled down instead of `reach`) on one core.
+
+Real time (a step in under a millisecond) is one core up to about 6,000
+neurons, 24 threads or the GPU up to about 35,000 (from the cost an edge,
+not measured at those sizes).
 
 ## Electrodes and channels
 
@@ -156,7 +199,10 @@ that channel's, and that electrode's stim reaches it scaled by
 `bridge.c`, built into the same library as the dish. It differs from the
 task's sketch in one way: every function takes the dish it is about
 (`dish *`), so a process may hold several (the plasticity check runs a dish
-with STDP and one without, side by side).
+with STDP and one without, side by side). Built for a GPU (`tools/ent
+build --gpu --shared`), a process has one dish (the GPU keeps one world;
+`dish_create` gives NULL for a second), which the CL SDK's source, a dish
+in a subprocess of its own, is.
 
 ```c
 void     dish_defaults(dish_params *p);
@@ -176,6 +222,15 @@ buffers, so a step's spikes are a count on each electrode
 (`Electrode.count`), which `dish_step` turns into a list of
 (channel, step). To build a shared library at all, `tools/ent` gained
 `--shared` (everything compiled `-fPIC`, linked `-shared`, no `main`).
+
+On a GPU build the world's columns are the GPU's between steps; the host
+asks for the bytes it touches (`ent_gpu_range_to_host` before it reads or
+writes them, `ent_gpu_range_wrote` after it wrote them, added to
+devices/gpu.c for this): the 64 counts after each step, a stim's cell
+around its write. 1,024 neurons through bridge.c: 64 us a step, where the
+whole world back each step (`ent_gpu_world_to_host`) took 232 (one core:
+103). `cl_bridge_gpu.test` holds the GPU library's spikes and checksum
+against the CPU's, to the bit.
 
 ## What was measured
 
@@ -239,6 +294,9 @@ that, which the reader should weigh.
   `demo_loop.py` does in accelerated time; a read that asks for a time
   before the last one gets no spikes from before it.
 - macOS and Windows: `--shared` and the ABI test were run on Linux only.
+- The GPU build behind the CL SDK (demo_loop.py): only through C
+  (`cl_bridge_gpu.test`). More than 65,536 neurons (a pair's draw is keyed
+  by `i * 65536 + j`).
 - The plasticity result for other channel pairs, longer training, other
   pairing intervals or parameters.
 
