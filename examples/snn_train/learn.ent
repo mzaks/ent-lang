@@ -1,0 +1,123 @@
+// e-prop (Bellec et al., "A solution to the learning dilemma for
+// recurrent networks of spiking neurons", Nature Communications 2020):
+// learning that runs forward with the network, a step at a time, with no
+// history kept and nothing run backwards.
+//
+// Each synapse from unit i to neuron j keeps an eligibility trace, a
+// fading memory of how much its weight moved j's potential while j was
+// near its threshold:
+//
+//   elig_ji = kappa * elig_ji + psi_j * trace_i
+//
+// (trace_i: i's spikes filtered by alpha, the potential's own decay, so
+// it is how j's potential depends on the weight; psi_j: the surrogate
+// slope.) Each neuron gets a learning signal, the readouts' errors sent
+// back along its own Out edges by their weights (symmetric e-prop):
+//
+//   learn_j = sum_k w_out_kj * err_k,   err_k = softmax(y)_k - target_k
+//
+// and each synapse adds learn_j * elig_ji to its gradient. The readouts'
+// weights take err_k times the neuron's spikes filtered by kappa; their
+// biases err_k. The gradients are summed over a sample and the weights
+// moved by them at its end (`apply`): plain gradient descent, one sample
+// a batch.
+//
+// The error is there only in the steps the data says count (`Target.on`):
+// for a classification, the window at the end of a sample. Its loss is
+// the cross entropy of those steps; the answer is the readout whose y
+// summed over them is the greatest.
+import math
+import network
+
+unique Target { label: i32, on: bool }
+unique Soft { top: f32 }
+unique SoftSum { sum: f32 }
+unique Score { loss: f32, correct: i32, seen: i32 }
+unique Best { vote: f32 }
+unique Pick { class: i32 }
+
+system soft_max() {
+  Soft.top = -1.0e30
+  for r: Readout { Soft.top max= r.y }
+  SoftSum.sum = 0.0
+  for r: Readout { SoftSum.sum += exp(r.y - Soft.top) }
+}
+
+system error() {
+  for r: mut Readout {
+    if Target.on {
+      let p = exp(r.y - Soft.top) / SoftSum.sum
+      if r.class == Target.label {
+        r.err = p - 1.0
+        Score.loss -= log(max(p, 1.0e-30))
+      } else {
+        r.err = p
+      }
+      r.vote += r.y
+    } else {
+      r.err = 0.0
+    }
+  }
+}
+
+system broadcast() {
+  for e, n: mut Neuron {
+    var sum = 0.0
+    for (e)-[o: Out]->(post) {
+      if let err = Readout(post).err { sum += o.weight * err }
+    }
+    n.learn = sum
+  }
+}
+
+system learn() {
+  for e, n: Neuron {
+    for (pre)-[mut s: Synapse]->(e) {
+      if let t = Unit(pre).trace {
+        let elig = Net.kappa * s.elig + n.psi * t
+        s.elig = elig
+        s.grad += n.learn * elig
+      }
+    }
+  }
+}
+
+system learn_out() {
+  for e, r: mut Readout {
+    for (pre)-[mut o: Out]->(e) {
+      if let z = Neuron(pre).out_trace { o.grad += r.err * z }
+    }
+    r.grad += r.err
+  }
+}
+
+// At a sample's end: the weights moved against their gradients, which
+// start again from nought, and so do the eligibilities.
+system apply() {
+  for e, n: Neuron {
+    for (pre)-[mut s: Synapse]->(e) {
+      s.weight -= Net.rate * s.grad
+      s.grad = 0.0
+      s.elig = 0.0
+    }
+  }
+  for e, r: mut Readout {
+    for (pre)-[mut o: Out]->(e) {
+      o.weight -= Net.rate * o.grad
+      o.grad = 0.0
+    }
+    r.bias -= Net.rate * r.grad
+    r.grad = 0.0
+  }
+}
+
+// The class whose readout summed the most over the window, against the
+// label.
+system score() {
+  Best.vote = -1.0e30
+  for r: Readout { Best.vote max= r.vote }
+  Pick.class = -1
+  for r: Readout where r.vote == Best.vote { Pick.class = r.class }
+  if Pick.class == Target.label { Score.correct += 1 }
+  Score.seen += 1
+}

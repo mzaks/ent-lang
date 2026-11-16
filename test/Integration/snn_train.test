@@ -1,0 +1,19 @@
+// e-prop training of a recurrent spiking network (examples/snn_train) on
+// its toy task: A then B or B then A. It learns (the loss falls, the test
+// samples it never learned from come out right), and it says to the bit
+// what the same network trained in plain C says (check/toy.c, the same
+// numbers at random and the same order of every sum): every loss, every
+// count, and a checksum of the bits of every weight. On one thread and on
+// many alike.
+// RUN: %ent run %S/../../examples/snn_train/toy.ent > %t.one
+// RUN: env ENT_PARALLEL_MIN=1 OMP_NUM_THREADS=8 %ent run --parallel %S/../../examples/snn_train/toy.ent > %t.all
+// RUN: clang -O2 -ffp-contract=off %S/../../examples/snn_train/check/toy.c -lm -o %t.c
+// RUN: %t.c > %t.ref
+// RUN: diff %t.ref %t.one
+// RUN: diff %t.ref %t.all
+// RUN: FileCheck %s < %t.one
+
+// At chance before it learns (rate 0: 103 and 114 of 200), and then:
+// CHECK: epoch 1 loss {{.*}} train 148/200 test 200/200
+// CHECK: epoch 30 loss 0.000123 train 200/200 test 200/200
+// CHECK: weights 100859224272

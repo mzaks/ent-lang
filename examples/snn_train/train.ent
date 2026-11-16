@@ -1,0 +1,153 @@
+// What a training run of examples/snn_train has whatever its data: the
+// network made (`setup`), the steps of a sample counted, samples counted
+// into epochs of training and of testing, a line for each epoch, and a
+// checksum of the weights at the end.
+//
+// The program that imports it sets `Run` and `Net` in its `world`, says
+// how a sample is labelled (`Target.label`) and encoded (the input units'
+// `fired`), and runs, a sample at a time:
+//
+//   step()      window, encode, the network, learning, tick
+//   boundary()  score, apply, next, report (run_if Clock.step == Run.steps)
+import console
+import math
+import wyhash
+import network
+import learn
+
+unique Run {
+  seed: i64,
+  inputs: i32, hidden: i32, classes: i32,
+  steps: i32,       // steps in a sample
+  window: i32,      // of them, at the end, where the error counts
+  train: i32, test: i32, epochs: i32,
+  w_in: f32,        // weights at the start: normal, times this over the
+  w_rec: f32,       // root of how many come into a neuron
+  density: f32      // the chance of a synapse between two hidden neurons
+}
+
+// id: the sample's number, of all there are: a training sample is a new
+// one in every epoch; the test samples are the same in every epoch.
+unique Clock { step: i32, sample: i32, epoch: i32, id: i64, training: bool, reported: bool }
+unique Trained { loss: f32, correct: i32, seen: i32 }
+unique Sum { bits: i64 }
+
+buffer Hidden { who: entity } capacity 4096
+buffer Readouts { who: entity } capacity 1024
+
+// A normal number of mean 0 and deviation 1, the n-th and n+1-th of a key
+// (Box and Muller).
+fn normal(key: u64, n: i64) -> f32 {
+  let a = wyrand_unit(key, n) + 1.0 / 9007199254740992.0
+  let b = wyrand_unit(key, n + 1)
+  (sqrt64(-2.0 * log64(a)) * cos64(tau64() * b)) as f32
+}
+
+system setup() {
+  let key = wyhash64(Run.seed as u64, 0x5eed)
+  Hidden = []
+  Readouts = []
+  for k in 0..Run.classes {
+    let r = spawn { Readout { y: 0.0, bias: 0.0, grad: 0.0, err: 0.0, vote: 0.0, class: k } }
+    Readouts += { who: r }
+  }
+  for j in 0..Run.hidden {
+    let h = spawn {
+      Unit { fired: 0.0, trace: 0.0 },
+      Neuron { v: 0.0, input: 0.0, psi: 0.0, learn: 0.0, out_trace: 0.0 }
+    }
+    Hidden += { who: h }
+  }
+  // Inputs to every hidden neuron.
+  var n: i64 = 0
+  let w_in = Run.w_in / sqrt(Run.inputs as f32)
+  for c in 0..Run.inputs {
+    let u = spawn { Unit { fired: 0.0, trace: 0.0 }, Input { channel: c } }
+    for j in 0..Run.hidden {
+      connect (u)-[Synapse { weight: w_in * normal(key, n), elig: 0.0, grad: 0.0 }]->(Hidden[j].who)
+      n += 2
+    }
+  }
+  // Hidden to hidden, some, none to itself.
+  let w_rec = Run.w_rec / sqrt(Run.density * Run.hidden as f32)
+  for i in 0..Run.hidden {
+    for j in 0..Run.hidden {
+      if i != j && (wyrand_unit(key, n) as f32) < Run.density {
+        connect (Hidden[i].who)-[Synapse { weight: w_rec * normal(key, n + 1), elig: 0.0, grad: 0.0 }]->(Hidden[j].who)
+      }
+      n += 3
+    }
+  }
+  // Hidden to every readout.
+  let w_out = 1.0 / sqrt(Run.hidden as f32)
+  for j in 0..Run.hidden {
+    for k in 0..Run.classes {
+      connect (Hidden[j].who)-[Out { weight: w_out * normal(key, n), grad: 0.0 }]->(Readouts[k].who)
+      n += 2
+    }
+  }
+  Clock.training = true
+  Clock.id = 0
+}
+
+system window() {
+  Target.on = Clock.step >= Run.steps - Run.window
+}
+
+system tick() {
+  Clock.step += 1
+}
+
+// The next sample: training ones, then the test, then the next epoch.
+system next() {
+  Clock.step = 0
+  Clock.sample += 1
+  Clock.reported = false
+  if Clock.training {
+    if Clock.sample == Run.train {
+      Trained.loss = Score.loss
+      Trained.correct = Score.correct
+      Trained.seen = Score.seen
+      Score.loss = 0.0
+      Score.correct = 0
+      Score.seen = 0
+      Clock.training = false
+      Clock.sample = 0
+    }
+  } else {
+    if Clock.sample == Run.test {
+      Clock.reported = true
+      Clock.training = true
+      Clock.sample = 0
+      Clock.epoch += 1
+    }
+  }
+  if Clock.training {
+    Clock.id = (Clock.epoch as i64) * (Run.train as i64) + (Clock.sample as i64)
+  } else {
+    Clock.id = 1000000000 + (Clock.sample as i64)
+  }
+}
+
+system report() {
+  let loss = Trained.loss / (Trained.seen * Run.window) as f32
+  put("epoch {Clock.epoch} loss {loss} train {Trained.correct}/{Trained.seen} test {Score.correct}/{Score.seen}")
+  Score.loss = 0.0
+  Score.correct = 0
+  Score.seen = 0
+}
+
+system checksum() {
+  for e, n: mut Neuron {
+    n.input = 0.0
+    for (pre)-[s: Synapse]->(e) { n.input += s.weight }
+  }
+  for e, r: mut Readout {
+    r.y = r.bias
+    for (pre)-[o: Out]->(e) { r.y += o.weight }
+  }
+  Sum.bits = 0
+  for n: Neuron { Sum.bits += bits_of(n.input) as i64 }
+  for r: Readout { Sum.bits += bits_of(r.y) as i64 }
+  put("weights {Sum.bits}")
+}

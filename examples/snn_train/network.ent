@@ -1,0 +1,105 @@
+// A recurrent network of leaky integrate-and-fire neurons with leaky
+// readouts, one step of it at a time: what examples/snn_train trains.
+//
+// A `Unit` is what a synapse reads at its source: whether it fired this
+// step, and a trace of that. Input units are given their spikes by the
+// data (an `Input` with a channel); hidden units are `Neuron`s too, and
+// fire by their potential. Synapses go from any unit to a hidden neuron;
+// `Out` edges from the hidden neurons to the readouts, which leak and
+// never fire: their values are the network's answer.
+//
+// One step, in the order `step` (train.ent) runs them:
+//
+//   encode       the data sets each input unit's `fired` (0 or 1)
+//   propagate    each neuron sums the weights of its synapses times
+//                their source's `fired`: the inputs of this step, the
+//                hidden neurons' spikes of the step before
+//   traces       each unit's trace takes in what it just sent:
+//                trace = alpha * trace + fired
+//   integrate    v = alpha * v + input; the surrogate slope psi from v;
+//                at the threshold the neuron fires and v drops by it
+//   read_out     y = kappa * y + (the Out weights of the neurons that
+//                fired) + bias
+//
+// `fired`, `trace` and `psi` are values, not tags: a tag written every
+// step costs the integrating loop half its vector width (examples/snn.ent).
+
+import math
+
+component Unit { fired: f32, trace: f32 }
+component Input { channel: i32 }
+component Neuron { v: f32, input: f32, psi: f32, learn: f32, out_trace: f32 }
+component Readout { y: f32, bias: f32, grad: f32, err: f32, vote: f32, class: i32 }
+
+relation (Unit)-[Synapse { weight: f32, elig: f32, grad: f32 }]->(Neuron) capacity 1024
+relation (Neuron)-[Out { weight: f32, grad: f32 }]->(Readout) capacity 1024
+
+// alpha: the membrane's decay per step, and that of the traces a
+// synapse's eligibility is made of; kappa: the readouts' decay; thr: the
+// threshold; gamma: the surrogate slope's height (the pseudo-derivative
+// of e-prop); rate: the learning rate.
+unique Net { alpha: f32, kappa: f32, thr: f32, gamma: f32, rate: f32 }
+
+system propagate() {
+  for e, n: mut Neuron {
+    var sum = 0.0
+    for (pre)-[s: Synapse]->(e) {
+      if let f = Unit(pre).fired { sum += s.weight * f }
+    }
+    n.input = sum
+  }
+}
+
+system traces() {
+  for u: mut Unit {
+    u.trace = Net.alpha * u.trace + u.fired
+  }
+}
+
+// The slope is taken from v before the reset: how near the threshold the
+// neuron came, gamma at it and nought a threshold away.
+system integrate() {
+  for n: mut Neuron, u: mut Unit {
+    var v = Net.alpha * n.v + n.input
+    let near = 1.0 - abs(v - Net.thr) / Net.thr
+    n.psi = Net.gamma * max(near, 0.0) / Net.thr
+    if v >= Net.thr {
+      u.fired = 1.0
+      v -= Net.thr
+    } else {
+      u.fired = 0.0
+    }
+    n.v = v
+    n.out_trace = Net.kappa * n.out_trace + u.fired
+  }
+}
+
+system read_out() {
+  for e, r: mut Readout {
+    var sum = 0.0
+    for (pre)-[o: Out]->(e) {
+      if let f = Unit(pre).fired { sum += o.weight * f }
+    }
+    r.y = Net.kappa * r.y + sum + r.bias
+  }
+}
+
+// What a sample leaves behind is cleared before the next.
+system rest() {
+  for u: mut Unit {
+    u.fired = 0.0
+    u.trace = 0.0
+  }
+  for n: mut Neuron {
+    n.v = 0.0
+    n.input = 0.0
+    n.psi = 0.0
+    n.learn = 0.0
+    n.out_trace = 0.0
+  }
+  for r: mut Readout {
+    r.y = 0.0
+    r.err = 0.0
+    r.vote = 0.0
+  }
+}
