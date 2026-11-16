@@ -559,9 +559,12 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
 
   // (A host of a program built for a GPU defines ENT_GPU: the GPU keeps
   // a copy of the world, which the host asks for before it reads or
-  // writes the world between schedule calls, see devices/gpu.c.)
+  // writes the world between schedule calls, see devices/gpu.c: all of
+  // it, or the bytes it touches, saying after which it wrote.)
   os << "#ifdef ENT_GPU\n"
         "void ent_gpu_world_to_host(void);\n"
+        "void ent_gpu_range_to_host(const void *at, int64_t size);\n"
+        "void ent_gpu_range_wrote(const void *at, int64_t size);\n"
         "#endif\n\n";
   os << "// Counts and resources start at zero, and so do the slots of "
         "trees, where\n// zero is no edge. Columns are left "

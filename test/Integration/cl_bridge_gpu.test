@@ -1,0 +1,18 @@
+// The dish of examples/cl_bridge as a shared library built for a GPU
+// (ent build --gpu --shared): the systems of a step run there, and
+// bridge.c asks for only what it touches between steps
+// (ent_gpu_range_to_host, ent_gpu_range_wrote: the electrodes' counts, a
+// stim's cell). A dish with stims gives the same spikes and checksum as
+// the library built for the CPU, to the bit.
+// REQUIRES: gpu, system-linux
+// RUN: mkdir -p %t.cpu %t.gpu
+// RUN: %ent build --shared %S/../../examples/cl_bridge/network.ent %S/../../examples/cl_bridge/bridge.c -o %t.cpu/libdish.so
+// RUN: %ent build --gpu --shared %S/../../examples/cl_bridge/network.ent %S/../../examples/cl_bridge/bridge.c -o %t.gpu/libdish.so
+// RUN: %host-cc -O2 %S/../../examples/cl_bridge/check/dish_check.c -L%t.cpu -ldish -Wl,-rpath,%t.cpu -o %t.cpu/check
+// RUN: %host-cc -O2 %S/../../examples/cl_bridge/check/dish_check.c -L%t.gpu -ldish -Wl,-rpath,%t.gpu -o %t.gpu/check
+// RUN: %t.cpu/check one > %t.a
+// RUN: %t.gpu/check one > %t.b
+// RUN: diff %t.a %t.b
+// RUN: FileCheck %s < %t.b
+
+// CHECK: one dish: {{[0-9]+}} spikes, {{[1-9][0-9]*}} on channel 27 in the 20 ms after a stim

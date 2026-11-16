@@ -234,7 +234,14 @@ that reads or writes the world between schedule calls calls
 `ent_gpu_world_to_host()` first (declared by the header with `ENT_GPU`):
 everything the GPU has newer comes back, and from then on all of it is
 the CPU's, copied to the GPU again where a GPU run needs it. (So H1
-holds with that call.)
+holds with that call.) A host that touches a few columns each frame
+asks for those alone: `ent_gpu_range_to_host(at, size)` before it reads
+or writes the bytes at `at` (a pointer the header's accessors give),
+`ent_gpu_range_wrote(at, size)` after it wrote them; the rest stays
+where it is. examples/cl_bridge/bridge.c, a dish of 1024 neurons
+stepped a millisecond at a time, the electrodes' 64 counts read after
+each step: 232 us a step with the whole world back, 64 with the range
+(one core: 103).
 
 What the GPU has newer comes back as the words that changed, where
 there is a lot of it (256 KB or more of a piece): the runtime keeps a
@@ -266,7 +273,8 @@ off what the GPU goes through (see "After step 4").
 The functions MLIR's lowering calls (`mgpuModuleLoadJIT`,
 `mgpuModuleGetFunction`, `mgpuLaunchKernel`, `mgpuStream*`, unload), and
 ent's own: `ent_gpu_arena`, `ent_gpu_to_device`, `ent_gpu_to_host`,
-`ent_gpu_wrote`, `ent_gpu_wait`, `ent_gpu_world_to_host`. One stream:
+`ent_gpu_wrote`, `ent_gpu_wait`, `ent_gpu_world_to_host`,
+`ent_gpu_range_to_host`, `ent_gpu_range_wrote`. One stream:
 `mgpuStreamCreate` gives it to every launch, and the synchronize and
 destroy the lowering calls after a launch do nothing, since waiting is the
 compiler's (above). One world. MLIR's ROCm wrappers have the same `mgpu*`

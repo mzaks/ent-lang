@@ -747,6 +747,69 @@ void ent_gpu_world_to_host(void) {
   ent_gpu_wait();
 }
 
+// For a C host that touches a few columns between schedule calls (a
+// stim written, the spikes of a step read), where the whole world back
+// and to the GPU again would cost more than the frame: the bytes
+// [at, at + size) of the world (the host's pointer into it, from the
+// header's accessors) as the GPU has them, where it has them newer.
+// Pieces it overlaps that have GPU-newer bytes after it give those back
+// too (a piece keeps one range of each side's newer bytes).
+void ent_gpu_range_to_host(const void *at, int64_t size) {
+  if (!host || size <= 0)
+    return;
+  int64_t lo = (const char *)at - host, hi = lo + size;
+  bool copied = false;
+  for (int64_t id = 0; id < pieceCount; ++id) {
+    ent_gpu_piece *held = &pieces[id];
+    if (!held->seen || held->offset >= hi || held->offset + held->bytes <= lo)
+      continue;
+    int64_t from = held->gpuFrom, to = least(held->gpuTo, held->bytes);
+    // (Of the piece's GPU-newer range, what the asked range overlaps,
+    // and what comes after it.)
+    int64_t a = most(from, lo - held->offset), b = least(to, hi - held->offset);
+    if (a >= b)
+      continue;
+    if (a == from && b < to) {
+      held->gpuFrom = b;
+    } else {
+      b = to;
+      if (a == from)
+        held->gpuFrom = held->gpuTo = 0;
+      else
+        held->gpuTo = a;
+    }
+    logged("range_to_host", id, held->offset, a, b, 0);
+    plainToHost(held, a, b);
+    shadowCopies(held, a, b);
+    copied = true;
+  }
+  if (copied)
+    ent_gpu_wait();
+}
+
+// After a C host wrote the bytes [at, at + size) of the world: the CPU
+// has them newer, and a GPU run that touches them gets them first. The
+// GPU must not have them newer (ent_gpu_range_to_host before the host
+// reads or writes them).
+void ent_gpu_range_wrote(const void *at, int64_t size) {
+  if (!host || size <= 0)
+    return;
+  int64_t lo = (const char *)at - host, hi = lo + size;
+  for (int64_t id = 0; id < pieceCount; ++id) {
+    ent_gpu_piece *held = &pieces[id];
+    if (!held->seen || held->offset >= hi || held->offset + held->bytes <= lo)
+      continue;
+    int64_t a = most(lo - held->offset, 0);
+    int64_t b = least(hi - held->offset, held->bytes);
+    if (most(a, held->gpuFrom) < least(b, held->gpuTo)) {
+      fprintf(stderr, "ent: the GPU: the host wrote bytes the GPU has newer "
+                      "(ent_gpu_range_to_host them first)\n");
+      exit(3);
+    }
+    ent_gpu_wrote(id, 0, held->offset, a, b);
+  }
+}
+
 // MLIR's launches. The kernels are PTX, compiled by the driver when the
 // program loads them.
 // (For ENT_GPU_PROTECT: which kernel is which.)

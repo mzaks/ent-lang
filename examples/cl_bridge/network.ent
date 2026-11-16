@@ -174,7 +174,7 @@ system make() {
 
 // What came in along the synapses (the spikes of the step before), the
 // noise of this step, and the stim of the neuron's electrode.
-system gather() {
+gpu system gather() {
   let key = mix(mix(Dish.seed as u64) ^ (Dish.tick as u64))
   for e, n: mut Neuron {
     var sum = 0.0
@@ -188,7 +188,7 @@ system gather() {
   }
 }
 
-system integrate() {
+gpu system integrate() {
   for n: mut Neuron {
     var v = Decay.v * n.v + n.input - n.adapt
     var fired = 0.0
@@ -215,7 +215,7 @@ system integrate() {
 // A spike of the neuron strengthens each excitatory synapse by a_plus
 // times the source's trace; a spike of the source weakens it by a_minus
 // times the neuron's own trace. Kept in [0, w_max].
-system stdp() {
+gpu system stdp() {
   for e, n: Neuron {
     for (pre)-[mut s: Synapse]->(e) {
       if let t = Neuron(pre).trace, let f = Neuron(pre).fired {
@@ -227,11 +227,11 @@ system stdp() {
 }
 
 // Each step starts with no spikes on the electrodes.
-system begin() {
+gpu system begin() {
   for p: mut Electrode { p.count = 0 }
 }
 
-system done() {
+gpu system done() {
   for p: mut Electrode { p.stim = 0.0 }
   Dish.tick += 1
 }

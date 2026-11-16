@@ -10,6 +10,10 @@
 //   tools/ent build --shared examples/cl_bridge/network.ent
 //       examples/cl_bridge/bridge.c -o libdish.so      (one line)
 //   cc -O2 dish_check.c -L. -ldish -Wl,-rpath,. -o dish_check && ./dish_check
+//
+// `dish_check one` runs a single dish (seed 1, a stim on channel 27 every
+// 100 ms) and says its spikes and checksum: what a library built for a
+// GPU, which has one dish a process, gives, to hold against the CPU's.
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,7 +64,34 @@ static uint64_t run(int64_t seed, int ms, int64_t *count, uint64_t *sum) {
   return h;
 }
 
+static int one(void) {
+  dish_params p;
+  dish_defaults(&p);
+  dish *d = dish_create(&p);
+  uint64_t h = 1469598103934665603ull;
+  int64_t count = 0, evoked = 0;
+  for (int t = 0; t < 3000; ++t) {
+    if (t >= 500 && (t - 500) % 100 == 0)
+      dish_stimulate(d, 27, 1.0f);
+    dish_step(d, 1);
+    int64_t n = dish_spikes(d, channels, steps, MOST);
+    for (int64_t i = 0; i < n; ++i) {
+      h = (h ^ (uint64_t)channels[i]) * 1099511628211ull;
+      h = (h ^ (uint64_t)steps[i]) * 1099511628211ull;
+      evoked += channels[i] == 27 && t >= 500 && (t - 500) % 100 < 20;
+    }
+    count += n;
+  }
+  printf("one dish: %lld spikes, %lld on channel 27 in the 20 ms after a stim, "
+         "hash %016llx, checksum %016llx\n", (long long)count, (long long)evoked,
+         (unsigned long long)h, (unsigned long long)dish_checksum(d));
+  dish_destroy(d);
+  return 0;
+}
+
 int main(int argc, char **argv) {
+  if (argc > 1 && argv[1][0] == 'o')
+    return one();
   int channel = argc > 1 ? atoi(argv[1]) : 27;
   float amount = argc > 2 ? (float)atof(argv[2]) : 1.0f;
 

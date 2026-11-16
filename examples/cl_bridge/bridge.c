@@ -17,7 +17,21 @@
 // Each spike is given as its channel and the step it happened in, those of
 // a step in the order of their channels; dish_spikes hands them out in the
 // order they happened and forgets those it handed out.
+//
+// Built for a GPU (tools/ent build --gpu --shared), the systems of a step
+// run there, and between steps only what the host touches comes back to
+// it: the electrodes' counts after a step, a stim's cell around its
+// write. Such a process may have one dish (the GPU keeps one world):
+// dish_create gives NULL for a second.
 #include "ent_world.h"
+
+#ifdef ENT_GPU
+#define BACK(at, size) ent_gpu_range_to_host((at), (size))
+#define WROTE(at, size) ent_gpu_range_wrote((at), (size))
+#else
+#define BACK(at, size) ((void)0)
+#define WROTE(at, size) ((void)0)
+#endif
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -78,6 +92,12 @@ int32_t dish_most_neurons(void) { return 4096; }
 dish *dish_create(const dish_params *p) {
   if (p->neurons < 1 || p->neurons > dish_most_neurons())
     return NULL;
+#ifdef ENT_GPU
+  static int made;
+  if (made)
+    return NULL;
+  made = 1;
+#endif
   dish *d = calloc(1, sizeof *d);
   if (!d)
     return NULL;
@@ -129,7 +149,10 @@ void dish_stimulate(dish *d, int32_t channel, float amount) {
   if (channel < 0 || channel >= 64)
     return;
   // (The electrodes were spawned first, by channel: electrode c is row c.)
-  ent_Pad_Electrode_stim(d->world)[channel] += amount;
+  float *stim = &ent_Pad_Electrode_stim(d->world)[channel];
+  BACK(stim, sizeof *stim);
+  *stim += amount;
+  WROTE(stim, sizeof *stim);
 }
 
 static int keep(dish *d, int32_t channel, int32_t step) {
@@ -164,9 +187,12 @@ int64_t dish_step(dish *d, int32_t n) {
   ent_world *w = d->world;
   int64_t total = 0;
   for (int32_t i = 0; i < n; ++i) {
-    int32_t step = *ent_Dish_tick(w);
+    int32_t *tick = ent_Dish_tick(w);
+    BACK(tick, sizeof *tick);
+    int32_t step = *tick;
     ent_step(w);
     const int32_t *count = ent_Pad_Electrode_count(w);
+    BACK(count, 64 * sizeof *count);
     for (int32_t c = 0; c < 64; ++c)
       for (int32_t k = 0; k < count[c]; ++k) {
         if (!keep(d, c, step))
@@ -191,13 +217,26 @@ int64_t dish_spikes(dish *d, int32_t *channel, int32_t *step, int64_t max) {
 }
 
 // Turns learning (STDP) on or off from the next step on.
-void dish_set_stdp(dish *d, int32_t on) { *ent_Dish_stdp(d->world) = on != 0; }
+void dish_set_stdp(dish *d, int32_t on) {
+  bool *stdp = ent_Dish_stdp(d->world);
+  BACK(stdp, sizeof *stdp);
+  *stdp = on != 0;
+  WROTE(stdp, sizeof *stdp);
+}
 
 // The steps run so far.
-int32_t dish_tick(dish *d) { return *ent_Dish_tick(d->world); }
+int32_t dish_tick(dish *d) {
+  int32_t *tick = ent_Dish_tick(d->world);
+  BACK(tick, sizeof *tick);
+  return *tick;
+}
 
 // All spikes so far.
-int64_t dish_spike_total(dish *d) { return *ent_Dish_spikes(d->world); }
+int64_t dish_spike_total(dish *d) {
+  int64_t *spikes = ent_Dish_spikes(d->world);
+  BACK(spikes, sizeof *spikes);
+  return *spikes;
+}
 
 // A number of all potentials and weights (network.ent's checksum).
 uint64_t dish_checksum(dish *d) {
