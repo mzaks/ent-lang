@@ -14,8 +14,14 @@
 // probe's count, the mean, its standard error, and Cohen's d of the
 // change (the difference of means over the pooled deviation).
 //
+// Unless they are given, B and C are chosen before any training, on a
+// dish of the seed: B the channel that answers A most 5 to 30 ms after a
+// stim (a stim's own channel and those its axons reach answer within the
+// first few ms: no synapse in between, nothing to learn), C the channel
+// other than A whose stims B answers most. A is 27.
+//
 //   cc -O2 plasticity.c -L. -ldish -Wl,-rpath,. -lm -o plasticity
-//   ./plasticity [minutes [seed [A B C]]]
+//   ./plasticity [minutes [seed [A [B C]]]]
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -30,6 +36,9 @@ typedef struct {
   float a_plus, a_minus, tau_plus, tau_minus;
   float noise_rate, noise_amp, stim_gain, stim_reach;
   float adapt_inc, tau_adapt, reach_cut;
+  float depress, tau_recover, hear_reach, tau_syn;
+  float home_rate, tau_home, home_gain;
+  float axon, fast, conduct;
 } dish_params;
 typedef struct dish dish;
 
@@ -44,9 +53,7 @@ uint64_t dish_checksum(dish *d);
 
 enum { MOST = 1 << 16, PROBES = 100 };
 static int32_t channels[MOST], steps[MOST];
-// A and C are B's neighbours on the grid, one each side: B is 28 (row 3,
-// column 4), A 27 (column 3), C 36 (row 4).
-static int A = 27, B = 28, C = 36;
+static int A = 27, B = -1, C = -1;
 static const float AMOUNT = 1.0f;
 
 // Steps n, counting the spikes on channel `on` from step `from` to below
@@ -94,6 +101,42 @@ static void train(dish *d, int stdp, int pairs) {
   }
 }
 
+// The spikes of each channel 5 to 30 ms after a stim on `from`, over
+// `probes` stims 300 ms apart, into `answers`.
+static void answers_to(dish *d, int from, int probes, int64_t *answers) {
+  for (int c = 0; c < 64; ++c) answers[c] = 0;
+  for (int k = 0; k < probes; ++k) {
+    dish_stimulate(d, from, AMOUNT);
+    for (int t = 0; t < 300; ++t) {
+      dish_step(d, 1);
+      int64_t got = dish_spikes(d, channels, steps, MOST);
+      if (t >= 5 && t < 30)
+        for (int64_t i = 0; i < got; ++i) answers[channels[i]] += 1;
+    }
+  }
+}
+
+static void choose(int64_t seed) {
+  dish_params p;
+  dish_defaults(&p);
+  p.seed = seed;
+  p.stdp = 0;
+  dish *d = dish_create(&p);
+  run(d, 1000, -1, 0, 0);
+  int64_t answers[64], best = -1;
+  answers_to(d, A, PROBES, answers);
+  for (int c = 0; c < 64; ++c)
+    if (c != A && answers[c] > best) best = answers[c], B = c;
+  best = -1;
+  for (int c = 0; c < 64; ++c) {
+    if (c == A || c == B) continue;
+    int64_t to[64];
+    answers_to(d, c, 20, to);
+    if (to[B] > best) best = to[B], C = c;
+  }
+  dish_destroy(d);
+}
+
 static double cohen(stats before, stats after) {
   double pooled = sqrt((before.sd * before.sd + after.sd * after.sd) / 2);
   return pooled > 0 ? (after.mean - before.mean) / pooled : 0;
@@ -102,10 +145,12 @@ static double cohen(stats before, stats after) {
 int main(int argc, char **argv) {
   double minutes = argc > 1 ? atof(argv[1]) : 3;
   int64_t seed = argc > 2 ? atoll(argv[2]) : 1;
+  if (argc > 3) A = atoi(argv[3]);
   if (argc > 5) {
-    A = atoi(argv[3]);
     B = atoi(argv[4]);
     C = atoi(argv[5]);
+  } else {
+    choose(seed);
   }
   int pairs = (int)(minutes * 60 * 1000 / 200);
   printf("seed %lld: A %d, B %d, C %d; %d pairings (A, B 10 ms later) in %g "
