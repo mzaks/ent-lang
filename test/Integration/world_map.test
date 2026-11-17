@@ -1,0 +1,56 @@
+// The world map (--ent-world-map, for `ent map`): what the world is made
+// of, what each system does to it, how schedules would be staged and why
+// a run waits, and the entities' lifecycle along `main`. A lamp is made,
+// lit, put out and done (`Done` is apart: a move to another archetype),
+// and the done go.
+// RUN: ent-translate --import-ent %S/Inputs/world_map/life.ent \
+// RUN:     -I %S/../../devices --mlir-print-debuginfo -o %t.mlir
+// RUN: ent-opt %t.mlir --ent-world-map=out=%t.map -o /dev/null
+// RUN: tr '\t' '|' < %t.map | FileCheck %s
+// Only the components named are told apart; queries' tests of the
+// others may hold or not.
+// RUN: ent-opt %t.mlir "--ent-world-map=lens=Done" -o /dev/null \
+// RUN:   | tr '\t' '|' | FileCheck %s --check-prefix=LENS
+
+// CHECK:      ent-map|1
+// CHECK:      component|Lamp|heat|life.ent:3|0
+// CHECK:      component|Done||life.ent:5|1
+// CHECK:      resource|Clock|n|life.ent:6
+// CHECK:      archetype|0|Lamp_archetype|64|1|Lamp|Lit|Lamp
+// CHECK-NEXT: archetype|1|Lamp_Done|64|1|Lamp,Done|Lit|Done
+// CHECK:      system|make|life.ent:9|0|
+// CHECK:      change|make|life.ent:9|spawn||Lamp_archetype||
+// CHECK:      change|dim|life.ent:20|add|Done|Lamp_archetype|move|Lamp_Done
+// CHECK-NEXT: change|dim|life.ent:20|add|Done|Lamp_Done|overwrite|
+// CHECK:      query|reap|life.ent:24|1
+// CHECK:      run|frame|0|light|0||
+// CHECK-NEXT: run|frame|1|dim|1|light|it writes Lamp_archetype.Lit?, which @light also writes
+// CHECK-NEXT: run|frame|2|reap|2|dim|it writes entities, which @dim also writes
+// CHECK-NEXT: run|frame|3|tick|0||
+// CHECK:      lens|Done,Lit
+// CHECK-NEXT: call|start|0
+// CHECK-NEXT: call|frame|1
+// CHECK-NEXT: state|0|0|
+// CHECK-NEXT: state|1|0|Lit
+// CHECK-NEXT: state|2|1|Lit
+// CHECK-NEXT: state|3|1|
+// CHECK-NEXT: flow|0|start|0|make|-1|0|spawn|life.ent:9
+// CHECK-NEXT: flow|1|frame|0|light|0|1|add Lit|life.ent:13
+// CHECK-NEXT: flow|1|frame|0|light|3|2|add Lit|life.ent:13
+// CHECK-NEXT: flow|2|frame|1|dim|1|0|remove Lit|life.ent:19
+// CHECK-NEXT: flow|2|frame|1|dim|1|2|add Done|life.ent:20
+// CHECK-NEXT: flow|2|frame|1|dim|1|3|remove Lit, add Done|life.ent:19, life.ent:20
+// CHECK-NEXT: flow|2|frame|1|dim|2|3|remove Lit|life.ent:19
+// CHECK-NEXT: flow|3|frame|2|reap|2|-2|despawn|life.ent:24
+// CHECK-NEXT: flow|3|frame|2|reap|3|-2|despawn|life.ent:24
+// CHECK-NOT:  flow
+
+// LENS:      lens|Done
+// LENS:      state|0|0|
+// LENS-NEXT: state|1|1|
+// LENS-NEXT: flow|0|start|0|make|-1|0|spawn|life.ent:9
+// (Steps are numbered among the runs that change a state: `light` does
+// none here.)
+// LENS-NEXT: flow|1|frame|1|dim|0|1|add Done|life.ent:20
+// LENS-NEXT: flow|2|frame|2|reap|1|-2|despawn|life.ent:24
+// LENS-NOT:  flow

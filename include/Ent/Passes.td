@@ -334,6 +334,33 @@ def EntPrintAccess : Pass<"ent-print-access", "ModuleOp"> {
   }];
 }
 
+def EntWorldMap : Pass<"ent-world-map", "ModuleOp"> {
+  let summary = "Write the program's world map: its world, its systems, "
+                "and its entities' lifecycle";
+  let description = [{
+    Writes, as lines of tab-separated fields (lib/Ent/Transforms/
+    WorldMap.cpp says each record), the program's components, resources
+    and archetypes; each system's reads and writes, queries and the
+    changes it makes to entities (spawns, adds, removes, despawns, and
+    what each does in each archetype); each schedule's runs with the stage
+    ent-schedule would give them and why a run waits; and the entities'
+    lifecycle along `main`: states (an archetype with the optional
+    components of the lens present) and the flows between them, run by
+    run. For `ent map`. Changes nothing.
+  }];
+  let options = [
+    Option<"out", "out", "std::string", /*default=*/"\"\"",
+           "The file to write the map to (standard output where none)">,
+    Option<"lens", "lens", "std::string", /*default=*/"\"\"",
+           "The components whose presence the entities' states tell, "
+           "joined with commas (\"*\": all); where none, those the program "
+           "declares itself (not in `library`) and adds or removes">,
+    Option<"library", "library", "std::string", /*default=*/"\"\"",
+           "Folders, joined with commas, of modules that are not the "
+           "program's own (the compiler's lib and devices)">,
+  ];
+}
+
 def EntSchedule : Pass<"ent-schedule", "ModuleOp"> {
   let summary = "Group the runs of each schedule into parallel stages";
   let description = [{

@@ -1,0 +1,583 @@
+// ent map: a program's world map in a window (tools/ent map program.ent
+// makes the map, with the compiler's --ent-world-map, and opens it here).
+//
+//   ent_map program.map
+//
+// At the top, what the program's world is made of. At the left, its
+// archetypes, those whose entities change state first. In the middle, the
+// entities' lifecycle as a MatrixWave (Zhao et al., CHI 2015): a matrix for
+// each run of `main`'s schedules that changes an entity's state, in the
+// order they run; a cell is a change from the state of its row to that of
+// its column (or, in every other matrix, which is turned, of its column to
+// its row): each matrix's states that come out are the next one's that go
+// in, along the axis they share, so the wave goes down and to the right as
+// the schedules do. A state is an archetype with which of its optional
+// components of the lens are present; "born" and "gone" are before a spawn
+// and after a despawn.
+//
+// Click an archetype to see its entities (All: every one); the wheel
+// zooms, dragging moves the wave; the pointer on a cell says which run,
+// from what to what, and where in the program.
+//
+// With ENT_MAP_SHOT=picture.png it draws the wave once (of the archetype
+// whose label ENT_MAP_ARCH is, where set), saves its picture there and
+// ends: for checks and pictures of it. ENT_MAP_POINT=x,y puts the pointer
+// there in it (in the window's points).
+import window
+import console
+import files
+import text
+
+// What the map says of the program as a whole.
+unique Map {
+  loaded: bool, program: text, lens: text, labels: text,
+  archetypes: i32, systems: i32, components: i32, tags: i32, resources: i32,
+  schedules: i32, queries: i32, states: i32, flows: i32, steps: i32,
+  gpu: i32, opaque: i32, error: text
+}
+// An archetype: its number in the map, how it is told from the others,
+// how many states its entities have; its row in the list (-1: not in it).
+component Arch { index: i32, label: text, states: i32, row: i32 }
+// A state: its number, archetype, name; its place on the axes (-1: not
+// shown).
+component St { index: i32, arch: i32, name: text, slot: i32 }
+// A change of state: the step (the run) it is in, from and to which state
+// (-1 born, -2 gone) and their archetypes (-1 for those), what it is and
+// where; the matrix it is drawn in (-1: not shown).
+component Fl {
+  step: i32, from: i32, to: i32, from_arch: i32, to_arch: i32, kind: text,
+  place: text, col: i32
+}
+// A step: its number, the run's system and schedule, which archetypes'
+// entities it changes (",3,7,"); its matrix (-1: not shown).
+component Stp { step: i32, system: text, schedule: text, archs: text, col: i32 }
+
+// By number: a state's archetype and place, a step's matrix, how many
+// states an archetype has.
+buffer StateRow { arch: i32, slot: i32 } capacity 65536
+buffer StepRow { seen: i32, col: i32 } capacity 65536
+buffer ArchRow { states: i32 } capacity 65536
+
+// What is shown: the archetype (-1 all), how big a cell is, where the wave
+// is; how many states its axes have and how many matrices; and whether to
+// work that out again.
+unique View {
+  arch: i32, cell: f32, ox: f32, oy: f32, n: i32, shown: i32, dirty: bool,
+  listed: i32, dragging: bool
+}
+// What the pointer is on: a cell's words, or none.
+// The picture asked for (ENT_MAP_SHOT), and the frames before it is taken.
+unique Shot { file: text, arch: text, frames: i32, done: bool, px: f32, py: f32 }
+unique Hover {
+  words: text, x: f32, y: f32, k: i32, from: i32, to: i32, from_name: text, to_name: text,
+  step_words: text
+}
+
+default_capacity 65536
+capacity Arch 4096
+capacity Stp 16384
+
+world {
+  Window.width = 1400
+  Window.height = 900
+  Window.min_width = 640
+  Window.min_height = 420
+  Window.title = "ent map"
+  Window.background = 0x101418
+  Window.fps = 60
+  Window.resizable = true
+  View.arch = -1
+  View.cell = 14.0
+  View.ox = 420.0
+  View.oy = 150.0
+  View.dirty = true
+  Hover.k = -1
+}
+
+fn top() -> f32 { 96.0 }
+fn panel() -> f32 { 260.0 }
+fn row_height() -> f32 { 22.0 }
+fn born() -> i32 { -1 }
+fn gone() -> i32 { -2 }
+
+// The n-th tab-separated field of a line (from 0); none where it has fewer.
+fn part(line: text, n: i32) -> text {
+  var at = 0
+  var k = 0
+  while k < n && at >= 0 {
+    let tab = find(line, "\t", at)
+    at = if tab < 0 { -1 } else { tab + 1 }
+    k += 1
+  }
+  var out = ""
+  if at >= 0 {
+    let end = find(line, "\t", at)
+    out = slice(line, at, if end < 0 { len(line) } else { end })
+  }
+  out
+}
+fn int(t: text) -> i32 { number(t) as i32 }
+// The n-th line of a text (from 0).
+fn line_at(t: text, n: i32) -> text {
+  var at = 0
+  var k = 0
+  while k < n && at >= 0 {
+    let nl = find(t, "\n", at)
+    at = if nl < 0 { -1 } else { nl + 1 }
+    k += 1
+  }
+  var out = ""
+  if at >= 0 {
+    let end = find(t, "\n", at)
+    out = slice(t, at, if end < 0 { len(t) } else { end })
+  }
+  out
+}
+// A module's name taken off ("field.Focused": "Focused").
+fn short(name: text) -> text {
+  var at = len(name) - 1
+  while at >= 0 && name[at] != '.' { at -= 1 }
+  slice(name, at + 1, len(name))
+}
+// "field.Focused,field.Edited": " +Focused +Edited".
+fn present_words(list: text) -> text {
+  var out = ""
+  var from = 0
+  var i = 0
+  while i <= len(list) {
+    if i == len(list) || list[i] == ',' {
+      if i > from { out = out + " +" + short(slice(list, from, i)) }
+      from = i + 1
+    }
+    i += 1
+  }
+  out
+}
+fn in_view(arch: i32, chosen: i32) -> bool { chosen == -1 || arch == chosen }
+// (Several changes in one run, one after the other: violet.)
+fn kind_colour(kind: text) -> i32 {
+  if find(kind, ", ", 0) >= 0 { 0xa77be0 }
+  else if kind == "spawn" { 0x4f9de0 }
+  else if kind == "despawn" { 0xe0564f }
+  else if slice(kind, 0, 4) == "add " { 0x56c26a }
+  else { 0xe0a03a }
+}
+// The axis place of a state: born and gone after the states.
+fn axis(state: i32, slot: i32, n: i32) -> i32 {
+  if state == -1 { n } else if state == -2 { n + 1 } else { slot }
+}
+// Where matrix k is (its top left), of m pixels a side: the even ones
+// have the states that go in down their left, the odd ones (turned)
+// along their top; each shares the axis of what comes out with the next.
+fn matrix_x(k: i32, m: f32, gap: f32) -> f32 { (k / 2) as f32 * (m + gap) }
+fn matrix_y(k: i32, m: f32, gap: f32) -> f32 { ((k + 1) / 2) as f32 * (m + gap) }
+fn gap() -> f32 { 0.0 }
+
+// The map read: every line a record (lib/Ent/Transforms/WorldMap.cpp).
+system load_map() {
+  if !Map.loaded {
+    Map.loaded = true
+    let path = argument(0)
+    let all = read_text(path)
+    if len(all) == 0 {
+      Map.error = "no map in '" + path + "' (ent map program.ent makes one)"
+    }
+    // (Its name: the map's file's, without its folder and ".map".)
+    var cut = len(path) - 1
+    while cut >= 0 && path[cut] != '/' { cut -= 1 }
+    let file = slice(path, cut + 1, len(path))
+    Map.program = if len(file) > 4 && slice(file, len(file) - 4, len(file)) == ".map" {
+      slice(file, 0, len(file) - 4) + ".ent"
+    } else { file }
+    var labels = ""
+    var at = 0
+    var step = -1
+    var system_name = ""
+    var schedule_name = ""
+    var archs = ","
+    while at < len(all) {
+      var end = find(all, "\n", at)
+      if end < 0 { end = len(all) }
+      let line = slice(all, at, end)
+      at = end + 1
+      let kind = part(line, 0)
+      if kind == "component" {
+        if len(part(line, 2)) == 0 { Map.tags += 1 } else { Map.components += 1 }
+      } else if kind == "resource" {
+        Map.resources += 1
+      } else if kind == "archetype" {
+        let label = part(line, 7)
+        labels = labels + label + "\n"
+        spawn { Arch { index: int(part(line, 1)), label: label, states: 0, row: -1 } }
+        ArchRow += { states: 0 }
+        Map.archetypes += 1
+      } else if kind == "system" {
+        Map.systems += 1
+        if part(line, 3) == "1" { Map.gpu += 1 }
+        if len(part(line, 4)) > 0 { Map.opaque += 1 }
+      } else if kind == "query" {
+        Map.queries += 1
+      } else if kind == "schedule" {
+        Map.schedules += 1
+      } else if kind == "lens" {
+        Map.lens = part(line, 1)
+      } else if kind == "state" {
+        let arch = int(part(line, 2))
+        spawn {
+          St { index: int(part(line, 1)), arch: arch,
+               name: line_at(labels, arch) + present_words(part(line, 3)), slot: -1 }
+        }
+        StateRow += { arch: arch, slot: -1 }
+        ArchRow[arch].states += 1
+        Map.states += 1
+      } else if kind == "flow" {
+        let s = int(part(line, 1))
+        if s != step {
+          if step >= 0 {
+            spawn { Stp { step: step, system: system_name, schedule: schedule_name, archs: archs, col: -1 } }
+          }
+          step = s
+          system_name = part(line, 4)
+          schedule_name = part(line, 2)
+          archs = ","
+        }
+        let from = int(part(line, 5))
+        let to = int(part(line, 6))
+        let from_arch = if from >= 0 { StateRow[from].arch } else { -1 }
+        let to_arch = if to >= 0 { StateRow[to].arch } else { -1 }
+        if from_arch >= 0 && find(archs, ",{from_arch},", 0) < 0 { archs = archs + "{from_arch}," }
+        if to_arch >= 0 && find(archs, ",{to_arch},", 0) < 0 { archs = archs + "{to_arch}," }
+        spawn {
+          Fl { step: s, from: from, to: to, from_arch: from_arch, to_arch: to_arch,
+               kind: part(line, 7), place: part(line, 8), col: -1 }
+        }
+        Map.flows += 1
+      }
+    }
+    if step >= 0 {
+      spawn { Stp { step: step, system: system_name, schedule: schedule_name, archs: archs, col: -1 } }
+    }
+    Map.steps = step + 1
+    Map.labels = labels
+    Shot.file = environment_variable("ENT_MAP_SHOT")
+    Shot.arch = environment_variable("ENT_MAP_ARCH")
+    // (And where the pointer is in the picture: ENT_MAP_POINT=x,y.)
+    let point = environment_variable("ENT_MAP_POINT")
+    let comma = find(point, ",", 0)
+    Shot.px = if comma > 0 { number(slice(point, 0, comma)) as f32 } else { -1.0 }
+    Shot.py = if comma > 0 { number(slice(point, comma + 1, len(point))) as f32 } else { -1.0 }
+    StepRow = [{ seen: 0, col: -1 }; step + 1]
+  }
+}
+
+// The archetypes in the list: those whose entities have states, in the
+// map's order; All above them.
+system list_archetypes() {
+  for a: mut Arch { a.states = ArchRow[a.index].states }
+  View.listed = 1
+  for a: mut Arch in turn by a.index {
+    if a.states > 0 {
+      a.row = View.listed
+      View.listed += 1
+    }
+  }
+}
+
+// What is shown worked out again: the states' places, the matrices.
+system arrange() {
+  if View.dirty {
+    View.dirty = false
+    View.n = 0
+    for s: mut St in turn by s.index {
+      if in_view(s.arch, View.arch) {
+        s.slot = View.n
+        View.n += 1
+      } else {
+        s.slot = -1
+      }
+      StateRow[s.index].slot = s.slot
+    }
+    View.shown = 0
+    let chosen = View.arch
+    for st: mut Stp in turn by st.step {
+      if chosen == -1 || find(st.archs, ",{chosen},", 0) >= 0 {
+        st.col = View.shown
+        View.shown += 1
+      } else {
+        st.col = -1
+      }
+      StepRow[st.step].col = st.col
+    }
+    for f: mut Fl {
+      let seen = in_view(f.from_arch, chosen) || in_view(f.to_arch, chosen)
+      f.col = if seen { StepRow[f.step].col } else { -1 }
+    }
+    // (Cells as big as let the wave start in the window, its states'
+    // names at its left; where they are few, no bigger than 28.)
+    // (So that the first matrices of the wave, two across and two down,
+    // are in the window.)
+    let tall = (Window.height as f32 - top() - 90.0) / (2 * (View.n + 2)) as f32
+    let wide = (Window.width as f32 - panel() - 320.0) / (2 * (View.n + 2)) as f32
+    View.cell = max(3.0, min(28.0, (min(tall, wide)) as i32 as f32))
+    View.ox = panel() + 280.0
+    View.oy = top() + 50.0
+  }
+}
+
+// Clicks in the list, the wheel, dragging.
+system steer() {
+  let mx = Mouse.x
+  let my = Mouse.y
+  if Mouse.clicks > 0 && mx < panel() && my > top() {
+    let row = ((my - top() - 30.0) / row_height()) as i32
+    if row == 0 {
+      View.arch = -1
+      View.dirty = true
+    }
+    for a: Arch where a.row == row && row > 0 {
+      View.arch = a.index
+      View.dirty = true
+    }
+  }
+  if mx > panel() && my > top() {
+    if Mouse.wheel_y != 0.0 {
+      let was = View.cell
+      let cell = min(48.0, max(3.0, if Mouse.wheel_y > 0.0 { was * 1.15 } else { was / 1.15 }))
+      View.ox = mx - (mx - View.ox) * cell / was
+      View.oy = my - (my - View.oy) * cell / was
+      View.cell = cell
+    }
+    if Mouse.clicks > 0 { View.dragging = true }
+  }
+  if !Mouse.left { View.dragging = false }
+  if View.dragging {
+    View.ox += Mouse.dx
+    View.oy += Mouse.dy
+  }
+}
+
+// What the pointer is on.
+system hover() {
+  Hover.words = ""
+  Hover.k = -1
+  let cell = View.cell
+  let n = View.n + 2
+  let m = n as f32 * cell
+  let px = if Shot.px >= 0.0 { Shot.px } else { Mouse.x }
+  let py = if Shot.px >= 0.0 { Shot.py } else { Mouse.y }
+  let mx = px - View.ox
+  let my = py - View.oy
+  if px > panel() && py > top() && !View.dragging {
+    var k = 0
+    var on = -1
+    var a = -1
+    var b = -1
+    while k < View.shown {
+      let x0 = matrix_x(k, m, gap())
+      let y0 = matrix_y(k, m, gap())
+      if mx >= x0 && mx < x0 + m && my >= y0 && my < y0 + m {
+        on = k
+        let cx = ((mx - x0) / cell) as i32
+        let cy = ((my - y0) / cell) as i32
+        // (Even: rows go in, columns come out; odd: the other way.)
+        a = if k % 2 == 0 { cy } else { cx }
+        b = if k % 2 == 0 { cx } else { cy }
+      }
+      k += 1
+    }
+    if on >= 0 {
+      Hover.k = on
+      Hover.from = a
+      Hover.to = b
+      Hover.x = px + 16.0
+      Hover.y = py + 14.0
+      let total = View.n
+      for f: Fl in turn by f.step where f.col == on {
+        if axis(f.from, StateRow[max(f.from, 0)].slot, total) == a &&
+           axis(f.to, StateRow[max(f.to, 0)].slot, total) == b {
+          Hover.words = Hover.words + f.kind + "  (" + f.place + ")\n"
+        }
+      }
+      Hover.from_name = if a == total { "born" } else if a == total + 1 { "gone" } else { "?" }
+      Hover.to_name = if b == total { "born" } else if b == total + 1 { "gone" } else { "?" }
+      for s: St in turn by s.index where s.slot >= 0 {
+        if s.slot == a { Hover.from_name = s.name }
+        if s.slot == b { Hover.to_name = s.name }
+      }
+      for st: Stp in turn by st.step where st.col == on {
+        Hover.step_words = "{st.step + 1}. " + st.system + " (in " + st.schedule + ")"
+      }
+    }
+  }
+}
+
+system draw() {
+  let cell = View.cell
+  let n = View.n + 2
+  let m = n as f32 * cell
+  let ox = View.ox
+  let oy = View.oy
+  let total = View.n
+  clip(panel(), top(), Window.width as f32 - panel(), Window.height as f32 - top())
+  // The matrices: their ground, a line every state, born and gone apart,
+  // the shared axes' states lit where the pointer is.
+  for st: Stp where st.col >= 0 {
+    let x0 = ox + matrix_x(st.col, m, gap())
+    let y0 = oy + matrix_y(st.col, m, gap())
+    rect(x0, y0, m, m, 0x171d24)
+    let edge = total as f32 * cell
+    rect(x0 + edge, y0, 2.0 * cell, m, 0x1c232b)
+    rect(x0, y0 + edge, m, 2.0 * cell, 0x1c232b)
+    if cell >= 7.0 {
+      var i = 1
+      while i < n {
+        rect(x0 + i as f32 * cell, y0, 1.0, m, 0x222a33)
+        rect(x0, y0 + i as f32 * cell, m, 1.0, 0x222a33)
+        i += 1
+      }
+    }
+    rect(x0, y0, m, 1.0, 0x3a4652)
+    rect(x0, y0 + m - 1.0, m, 1.0, 0x3a4652)
+    rect(x0, y0, 1.0, m, 0x3a4652)
+    rect(x0 + m - 1.0, y0, 1.0, m, 0x3a4652)
+    // (The run's name where the wave leaves room: above an even matrix,
+    // left of an odd one.)
+    let words = short(st.system)
+    let size = 14.0
+    if st.col % 2 == 0 {
+      window::write("{st.step + 1}. " + words, x0 + 4.0, y0 - 20.0, 600.0, 0, size, 0.0, 0.0, 2, 0, 0xc8d4e0)
+    } else {
+      let w = text_extent("{st.step + 1}. " + words, 0, size, 0.0, 2)
+      window::write("{st.step + 1}. " + words, x0 - w - 10.0, y0 + 4.0, w + 4.0, 0, size, 0.0, 0.0, 2, 0, 0xc8d4e0)
+    }
+  }
+  // Where the pointer is: its row and column, along the matrix.
+  if Hover.k >= 0 {
+    let x0 = ox + matrix_x(Hover.k, m, gap())
+    let y0 = oy + matrix_y(Hover.k, m, gap())
+    let r = if Hover.k % 2 == 0 { Hover.from } else { Hover.to }
+    let c = if Hover.k % 2 == 0 { Hover.to } else { Hover.from }
+    rect(x0, y0 + r as f32 * cell, m, cell, 0x30ffffff)
+    rect(x0 + c as f32 * cell, y0, cell, m, 0x30ffffff)
+  }
+  // The changes.
+  let pad = if cell >= 6.0 { 1.0 } else { 0.0 }
+  for f: Fl where f.col >= 0 {
+    let a = axis(f.from, StateRow[max(f.from, 0)].slot, total)
+    let b = axis(f.to, StateRow[max(f.to, 0)].slot, total)
+    if a >= 0 && b >= 0 {
+      let x0 = ox + matrix_x(f.col, m, gap())
+      let y0 = oy + matrix_y(f.col, m, gap())
+      let x = if f.col % 2 == 0 { x0 + b as f32 * cell } else { x0 + a as f32 * cell }
+      let y = if f.col % 2 == 0 { y0 + a as f32 * cell } else { y0 + b as f32 * cell }
+      rect(x + pad, y + pad, cell - 2.0 * pad, cell - 2.0 * pad, kind_colour(f.kind))
+    }
+  }
+  // The states, down the left of the first matrix.
+  if cell >= 9.0 {
+    let size = min(14.0, cell - 1.0)
+    for s: St where s.slot >= 0 {
+      let w = text_extent(s.name, 0, size, 0.0, 2)
+      window::write(s.name, ox - w - 8.0, oy + s.slot as f32 * cell + (cell - size) * 0.5, w + 4.0, 0, size,
+            0.0, 0.0, 2, 0, 0x9fb0c0)
+    }
+    let w = text_extent("born", 0, size, 0.0, 2)
+    window::write("born", ox - w - 8.0, oy + total as f32 * cell + (cell - size) * 0.5, w + 4.0, 0, size,
+          0.0, 0.0, 2, 0, 0x4f9de0)
+    let g = text_extent("gone", 0, size, 0.0, 2)
+    window::write("gone", ox - g - 8.0, oy + (total + 1) as f32 * cell + (cell - size) * 0.5, g + 4.0, 0,
+          size, 0.0, 0.0, 2, 0, 0xe0564f)
+  }
+  unclip()
+
+  // The list of archetypes.
+  rect(0.0, top(), panel(), Window.height as f32 - top(), 0x141a20)
+  rect(panel() - 1.0, top(), 1.0, Window.height as f32 - top(), 0x26303a)
+  window::write("Archetypes", 16.0, top() + 8.0, panel() - 24.0, 0, 13.0, 0.0, 0.0, 2, 0, 0x7d8a98)
+  let first = top() + 30.0
+  if View.arch == -1 { rect(0.0, first, panel() - 1.0, row_height(), 0x24405e) }
+  window::write("All ({Map.states} states)", 16.0, first + 3.0, panel() - 24.0, 0, 14.0, 0.0, 0.0, 2, 0, 0xd0d8e0)
+  for a: Arch where a.row > 0 {
+    let y = first + a.row as f32 * row_height()
+    if a.index == View.arch { rect(0.0, y, panel() - 1.0, row_height(), 0x24405e) }
+    window::write(a.label + "  ({a.states})", 16.0, y + 3.0, panel() - 24.0, 0, 14.0, 0.0, 0.0, 2, 0, 0xd0d8e0)
+  }
+
+  // The top: the program, what its world has, the lens, the colours.
+  rect(0.0, 0.0, Window.width as f32, top(), 0x0c1014)
+  rect(0.0, top() - 1.0, Window.width as f32, 1.0, 0x26303a)
+  window::write("World map of " + Map.program, 16.0, 12.0, Window.width as f32 - 32.0, 0, 18.0, 0.0, 0.0, 2, 0, 0xe2ecf5)
+  window::write("{Map.archetypes} archetypes · {Map.components} components, {Map.tags} tags · {Map.resources} uniques · " +
+        "{Map.systems} systems ({Map.queries} queries; {Map.opaque} with effects outside the world, {Map.gpu} on the GPU) · " +
+        "{Map.schedules} schedules", 16.0, 40.0, Window.width as f32 - 32.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+  window::write("Lifecycle: {Map.states} states, {Map.flows} changes in {Map.steps} runs · states tell " +
+        (if Map.lens == "*" { "every optional component" } else { Map.lens }), 16.0, 62.0,
+        Window.width as f32 - 480.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+  var x = Window.width as f32 - 540.0
+  rect(x, 64.0, 12.0, 12.0, 0x4f9de0)
+  window::write("spawn", x + 16.0, 62.0, 60.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+  x += 80.0
+  rect(x, 64.0, 12.0, 12.0, 0x56c26a)
+  window::write("add", x + 16.0, 62.0, 60.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+  x += 70.0
+  rect(x, 64.0, 12.0, 12.0, 0xe0a03a)
+  window::write("remove", x + 16.0, 62.0, 70.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+  x += 90.0
+  rect(x, 64.0, 12.0, 12.0, 0xe0564f)
+  window::write("despawn", x + 16.0, 62.0, 80.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+  x += 100.0
+  rect(x, 64.0, 12.0, 12.0, 0xa77be0)
+  window::write("several", x + 16.0, 62.0, 80.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+  if len(Map.error) > 0 {
+    window::write(Map.error, panel() + 24.0, top() + 24.0, 900.0, 0, 16.0, 0.0, 0.0, 2, 0, 0xe0564f)
+  }
+
+  // The words of the cell the pointer is on.
+  if Hover.k >= 0 {
+    let all = (Hover.step_words + "\n" + Hover.from_name + "  ->  " + Hover.to_name + "\n" +
+               (if len(Hover.words) > 0 { Hover.words } else { "no change\n" })) as text[4094]
+    // (Without the line break at its end.)
+    let words = slice(all, 0, len(all) - 1)
+    let w = max(text_extent(words, 0, 14.0, 0.0, 1), 120.0) + 20.0
+    let lines = text_lines(words, w, 0, 14.0, 0.0, 1)
+    let h = lines as f32 * 18.0 + 14.0
+    let x0 = min(Hover.x, Window.width as f32 - w - 8.0)
+    let y0 = min(Hover.y, Window.height as f32 - h - 8.0)
+    rounded(x0, y0, w, h, 6.0, 6.0, 6.0, 6.0, 0xf0222b35)
+    window::write(words, x0 + 10.0, y0 + 7.0, w - 16.0, 0, 14.0, 0.0, 18.0, 1, 0, 0xe2ecf5)
+  }
+}
+
+// The picture: the archetype asked for chosen, the wave drawn, saved.
+system shot() {
+  if len(Shot.file) > 0 && Map.loaded {
+    Shot.frames += 1
+    if Shot.frames == 2 && len(Shot.arch) > 0 {
+      let wanted = Shot.arch as text[1024]
+      for a: Arch where a.label == wanted {
+        View.arch = a.index
+        View.dirty = true
+      }
+    }
+    if Shot.frames == 6 {
+      screenshot(Shot.file as text[126])
+      Shot.done = true
+    }
+  }
+}
+
+schedule frame() {
+  begin()
+  load_map()
+  list_archetypes() run_if View.listed == 0 && Map.loaded
+  arrange()
+  steer()
+  hover()
+  draw()
+  present()
+  shot()
+}
+
+main {
+  loop { frame() } until Window.closed || Shot.done
+}

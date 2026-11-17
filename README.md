@@ -152,6 +152,19 @@ counts), a demo of Doom drawn tic by tic 289 ms where 354 (see
 `bench/RESULTS.md`); beecs's colony, whose time is in loops already
 inlined, as it did (`bench/beecs/RESULTS.md`).
 
+What a program's world is and what its systems do to it, `tools/ent
+map program.ent` shows (`--ent-world-map` writes it, `tools/map/ent_map.ent`
+opens it): its archetypes, components and uniques; each system's reads
+and writes, queries and changes; each schedule's runs with the stage
+`--ent-schedule` would give them and why a run waits; and its entities'
+lifecycle along `main`, as a MatrixWave (Zhao et al., CHI 2015): a
+matrix for each run that changes an entity's state (an archetype with
+which optional components of a lens are present), from the states the
+entities had to those they have after it, born and gone among them; the
+pointer on a cell says the run, the change and its line. The lens is the
+program's own components that it adds or removes, or those `--lens`
+names; `-o` keeps the map (`--no-window`: only that).
+
 Where a program's time goes, `--trace` says: built so, it times each
 system, schedule and sort of a relation, and each parallel loop with each
 thread's time in it (`devices/trace.c`, at two calls a thread for a loop).

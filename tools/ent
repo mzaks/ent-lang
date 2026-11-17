@@ -3,6 +3,7 @@
 
   ent build program.ent [-o program] [-I dir] [more.c ...]
   ent run   program.ent [-I dir] [more.c ...] [-- arguments]
+  ent map   program.ent [-I dir] [-o program.map] [--lens A,B] [--no-window]
 
 A program is a .ent file with `main` and the modules it imports. Modules
 are found next to the importing file, in the -I directories and in the
@@ -2274,11 +2275,43 @@ def launch(arguments, executable):
     return [mpirun, "-n", str(arguments.ranks), "--oversubscribe", executable]
 
 
+def world_map(arguments, path):
+    """`ent map`: the program's world map (its archetypes, systems,
+    schedules and its entities' lifecycle; --ent-world-map says what is in
+    it) written to `path`, and opened in tools/map/ent_map.ent: a window
+    with the lifecycle as a MatrixWave."""
+    own = [os.environ.get("ENT_BIN"), os.path.join(ROOT, "build/bin")]
+    own = [path for path in own if path]
+    translate = find_tool("ent-translate", own)
+    optimise = find_tool("ent-opt", own)
+    library = [os.path.join(ROOT, "devices"), os.path.join(ROOT, "lib")]
+    includes = [flag for folder in arguments.I + library for flag in ("-I", folder)]
+    stem = os.path.splitext(os.path.basename(arguments.program))[0]
+    with tempfile.TemporaryDirectory() as directory:
+        imported = os.path.join(directory, stem + ".mlir")
+        run([translate, "--import-ent", arguments.program,
+             "--mlir-print-debuginfo", "-o", imported] + includes)
+        options = ["out=" + os.path.abspath(path),
+                   "library=" + ",".join(os.path.realpath(f) for f in library)]
+        if arguments.lens:
+            options.append("lens=" + arguments.lens)
+        run([optimise, imported, "--ent-world-map=" + " ".join(options),
+             "--mlir-print-op-on-diagnostic=false", "-o", os.devnull])
+    print(f"ent: the world map of {arguments.program} is in {path}",
+          file=sys.stderr)
+    if arguments.no_window:
+        return 0
+    viewer = os.path.join(ROOT, "tools", "map", "ent_map.ent")
+    return subprocess.run([sys.executable, os.path.abspath(__file__), "run",
+                           viewer, "--no-index-remarks", "--",
+                           os.path.abspath(path)]).returncode
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="ent", description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("command", choices=["build", "run"])
+    parser.add_argument("command", choices=["build", "run", "map"])
     parser.add_argument("program", help="the .ent file with `main`")
     parser.add_argument("sources", nargs="*", metavar="more.c",
                         help="files (.c, .cpp, .o, .a) with the program's "
@@ -2308,6 +2341,12 @@ def main():
                         help="optimise by the counts of runs of the program "
                         "built with --instrument: their folder or a "
                         ".profraw or .profdata file")
+    parser.add_argument("--lens", metavar="A,B", default="",
+                        help="map: the components whose presence the "
+                        "entities' states tell (\"*\": every optional one; "
+                        "default: the program's own that it adds or removes)")
+    parser.add_argument("--no-window", action="store_true",
+                        help="map: write the map, do not open it")
     parser.add_argument("--trace", action="store_true",
                         help="time systems, sorts and parallel loops, said "
                         "on stderr and written to program.trace.json")
@@ -2367,6 +2406,8 @@ def main():
         sys.exit("ent: --touch-keys: for a web page (--web)")
 
     stem = os.path.splitext(os.path.basename(arguments.program))[0]
+    if arguments.command == "map":
+        return world_map(arguments, arguments.output or stem + ".map")
     if arguments.web:
         if (arguments.gpu or arguments.ranks or arguments.windows
                 or arguments.parallel or arguments.instrument

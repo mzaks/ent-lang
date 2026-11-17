@@ -11,6 +11,7 @@ add_mlir_library(MLIREntTransforms
   Schedule.cpp
   Stops.cpp
   Trace.cpp
+  WorldMap.cpp
 
   DEPENDS
   MLIREntPassIncGen

@@ -1,0 +1,37 @@
+// A small lifecycle for the world map (world_map.test): a lamp is made,
+// lit, put out and then, apart from the others, done; the done go.
+component Lamp { heat: f32 }
+tag Lit
+tag Done apart
+unique Clock { n: i32 }
+default_capacity 64
+
+system make() { spawn { Lamp { heat: 0.0 } } }
+system light() {
+  for e, l: mut Lamp without Lit {
+    l.heat += 1.0
+    e.add(Lit)
+  }
+}
+system dim() {
+  for e, l: Lamp with Lit {
+    if l.heat > 2.0 {
+      e.remove(Lit)
+      e.add(Done)
+    }
+  }
+}
+system reap() { for e with Done { e.destroy() } }
+system tick() { Clock.n += 1 }
+
+schedule start() { make() }
+schedule frame() {
+  light()
+  dim()
+  reap()
+  tick()
+}
+main {
+  start()
+  loop { frame() } until Clock.n > 5
+}
