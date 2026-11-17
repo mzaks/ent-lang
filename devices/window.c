@@ -647,19 +647,82 @@ static float ent_window_click_x, ent_window_click_y;
 
 static double ent_window_double_click(void);
 
+// A press and its release both between two frames (a quick tap on a
+// trackpad, a click while a frame takes long): raylib, which reads the
+// buttons as they are at a frame, would see neither. On a Mac each left
+// press is also counted as AppKit hands it to the window (a local
+// monitor of its events), with the system's count of clicks in a row; a
+// press seen so and gone by the frame is the left button down for that
+// frame (`ent_window_left_tapped`), let go at the next. And right
+// presses so: a secondary click all the same.
+static bool ent_window_left_tapped;
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+static int ent_window_presses, ent_window_right_presses;
+static long ent_window_press_count;
+static void ent_window_watch_presses(void) {
+  static id monitor;
+  if (monitor || !GetWindowHandle())
+    return;
+  id (^seen)(id) = ^id(id event) {
+    if (((id(*)(id, SEL))objc_msgSend)(event, sel_registerName("window")) ==
+        (id)GetWindowHandle()) {
+      // (NSEventTypeRightMouseDown is 3.)
+      if (((unsigned long (*)(id, SEL))objc_msgSend)(event, sel_registerName("type")) == 3)
+        ent_window_right_presses++;
+      else {
+        ent_window_presses++;
+        ent_window_press_count =
+            ((long (*)(id, SEL))objc_msgSend)(event, sel_registerName("clickCount"));
+      }
+    }
+    return event;
+  };
+  // (NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown.)
+  monitor = ((id(*)(id, SEL, unsigned long long, id))objc_msgSend)(
+      ent_window_class("NSEvent"),
+      ent_window_sel("addLocalMonitorForEventsMatchingMask:handler:"), (1ULL << 1) | (1ULL << 3),
+      (id)seen);
+  if (monitor)
+    ent_window_send(monitor, "retain");
+}
+#endif
+
 bool ent_window_mouse_down(int32_t button) {
   if (button == 0)
-    return ent_window_button(0) && !ent_window_control_press;
+    return (ent_window_button(0) || ent_window_left_tapped) && !ent_window_control_press;
   if (button == 1)
     return ent_window_button(1) ||
-           (ent_window_button(0) && ent_window_control_press);
+           ((ent_window_button(0) || ent_window_left_tapped) && ent_window_control_press);
   return ent_window_button(button);
 }
 
 int32_t ent_window_mouse_clicks(void) {
   bool left = ent_window_button(0), right = ent_window_button(1);
   bool left_new = left && !ent_window_left_was;
+  long system_count = 0;
+  ent_window_left_tapped = false;
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+  ent_window_watch_presses();
+  if (ent_window_presses > 0) {
+    // (A press since the last frame that raylib did not see begin: down
+    // and up between them, or up and down again.)
+    if (!left_new) {
+      left_new = true;
+      if (!left) {
+        ent_window_left_tapped = true;
+        left = true;
+      }
+    }
+    system_count = ent_window_press_count;
+    ent_window_presses = 0;
+  }
+#endif
   bool right_new = right && !ent_window_right_was;
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+  if (ent_window_right_presses > 0)
+    right_new = true;
+  ent_window_right_presses = 0;
+#endif
   ent_window_left_was = left;
   ent_window_right_was = right;
 #if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
@@ -673,7 +736,9 @@ int32_t ent_window_mouse_clicks(void) {
     return 0;
   double now = GetTime();
   float x = ent_window_mouse_x(), y = ent_window_mouse_y();
-  if (ent_window_click_run > 0 &&
+  if (system_count > 0)
+    ent_window_click_run = (int32_t)system_count;
+  else if (ent_window_click_run > 0 &&
       now - ent_window_click_at <= ent_window_double_click() &&
       fabsf(x - ent_window_click_x) <= 4 && fabsf(y - ent_window_click_y) <= 4)
     ent_window_click_run++;
@@ -2607,6 +2672,77 @@ const ent_text *ent_window_choose_folder(const ent_text *title, const ent_text *
   free(from);
   return ent_window_ent_text(chosen);
 }
+
+// The system's file browser opened where `path` is (a file or a
+// folder), with it selected: Finder on a Mac, Explorer on Windows; on
+// Linux the folder it is in, by xdg-open. False where it could not be.
+#if defined(_WIN32)
+#include <process.h>
+#elif !defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+#include <sys/stat.h>
+#endif
+bool ent_window_show_in_files(const ent_text *path) {
+  char *at = ent_window_c_text(path);
+  bool shown = false;
+  if (!at || !*at) {
+    free(at);
+    return false;
+  }
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+  void *pool = objc_autoreleasePoolPush();
+  id url = ((id(*)(id, SEL, id))objc_msgSend)(ent_window_class("NSURL"),
+                                              ent_window_sel("fileURLWithPath:"),
+                                              ent_window_ns_text(at));
+  id urls = ((id(*)(id, SEL, id))objc_msgSend)(ent_window_class("NSArray"),
+                                               ent_window_sel("arrayWithObject:"), url);
+  id workspace = ent_window_send(ent_window_class("NSWorkspace"), "sharedWorkspace");
+  ((void (*)(id, SEL, id))objc_msgSend)(
+      workspace, ent_window_sel("activateFileViewerSelectingURLs:"), urls);
+  shown = workspace != 0;
+  objc_autoreleasePoolPop(pool);
+#elif defined(_WIN32)
+  size_t room = strlen(at) + 16;
+  char *select = malloc(room);
+  if (select) {
+    snprintf(select, room, "/select,\"%s\"", at);
+    for (char *c = select; *c; ++c)
+      if (*c == '/' && c > select + 7)
+        *c = '\\';
+    shown = _spawnlp(_P_NOWAIT, "explorer.exe", "explorer.exe", select, NULL) != -1;
+    free(select);
+  }
+#elif !defined(__EMSCRIPTEN__)
+  // (A file's folder: xdg-open would open the file itself.)
+  char *folder = strdup(at);
+  struct stat st;
+  if (folder && stat(folder, &st) == 0 && !S_ISDIR(st.st_mode)) {
+    char *slash = strrchr(folder, '/');
+    if (slash && slash != folder)
+      *slash = 0;
+    else if (slash)
+      slash[1] = 0;
+    else
+      strcpy(folder, ".");
+  }
+  char *quoted = folder ? ent_window_quoted(folder) : 0;
+  if (quoted) {
+    size_t room = strlen(quoted) + 64;
+    char *command = malloc(room);
+    if (command) {
+      snprintf(command, room, "xdg-open %s >/dev/null 2>&1 &", quoted);
+      shown = system(command) == 0;
+      free(command);
+    }
+  }
+  free(quoted);
+  free(folder);
+#endif
+  free(at);
+  return shown;
+}
+
+// Whether the window is the one the user works in (the keys go to it).
+bool ent_window_window_focused(void) { return IsWindowReady() && IsWindowFocused(); }
 
 int32_t ent_window_alert(const ent_text *message, const ent_text *detail,
                          const ent_text *buttons) {

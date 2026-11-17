@@ -162,6 +162,13 @@ extern proc menu_chosen() -> text
 // (none: where it was last). The call waits for it, and gives the folder
 // chosen, or none (cancelled; no panel on this system).
 extern proc choose_folder(title: text, start: text) -> text
+// The system's file browser opened where `path` is, with it selected
+// (Finder on a Mac, Explorer on Windows; on Linux the folder it is in, by
+// xdg-open). False where it could not be.
+extern proc show_in_files(path: text) -> bool
+// Whether the window is the one the user works in (the keys go to it):
+// what changed elsewhere (in files, say) is looked at again once it is.
+extern proc window_focused() -> bool
 // The system's alert (a Mac's; elsewhere drawn by the window, at the
 // pointer): `message`, `detail` under it, and a button for each line of
 // `buttons`, the first the one Return presses ("Cancel" is Escape's). The
