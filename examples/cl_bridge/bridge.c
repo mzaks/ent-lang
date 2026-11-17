@@ -49,6 +49,9 @@ typedef struct {
   float depress, tau_recover, hear_reach, tau_syn;
   float home_rate, tau_home, home_gain;
   float axon, fast, conduct;
+  int32_t modulated;
+  float tau_elig, tau_reward, reward_gain;
+  int32_t reward_channel, punish_channel;
 } dish_params;
 
 typedef struct {
@@ -96,6 +99,12 @@ void dish_defaults(dish_params *p) {
   p->axon = *ent_Dish_axon(w);
   p->fast = *ent_Dish_fast(w);
   p->conduct = *ent_Dish_conduct(w);
+  p->modulated = *ent_Dish_modulated(w);
+  p->tau_elig = *ent_Dish_tau_elig(w);
+  p->tau_reward = *ent_Dish_tau_reward(w);
+  p->reward_gain = *ent_Dish_reward_gain(w);
+  p->reward_channel = *ent_Dish_reward_channel(w);
+  p->punish_channel = *ent_Dish_punish_channel(w);
   ent_world_destroy(w);
 }
 
@@ -155,6 +164,12 @@ dish *dish_create(const dish_params *p) {
   *ent_Dish_axon(w) = p->axon;
   *ent_Dish_fast(w) = p->fast;
   *ent_Dish_conduct(w) = p->conduct;
+  *ent_Dish_modulated(w) = p->modulated != 0;
+  *ent_Dish_tau_elig(w) = p->tau_elig;
+  *ent_Dish_tau_reward(w) = p->tau_reward;
+  *ent_Dish_reward_gain(w) = p->reward_gain;
+  *ent_Dish_reward_channel(w) = p->reward_channel;
+  *ent_Dish_punish_channel(w) = p->punish_channel;
   ent_create(w);
   return d;
 }
@@ -267,4 +282,10 @@ int64_t dish_spike_total(dish *d) {
 uint64_t dish_checksum(dish *d) {
   ent_checksum(d->world);
   return *ent_Dish_check(d->world);
+}
+
+// The mean excitatory weight (runs the checksum).
+float dish_mean_weight(dish *d) {
+  ent_checksum(d->world);
+  return *ent_Dish_w_mean(d->world);
 }

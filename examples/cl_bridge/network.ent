@@ -63,13 +63,23 @@ unique Dish {
   home_rate: f32,    // homeostasis: the rate (Hz) a neuron scales its excitatory synapses towards
   tau_home: f32,     // the time constant of the rate it holds against that
   home_gain: f32,    // how fast it scales them (0: not at all), with STDP
+  modulated: bool,   // reward-modulated STDP: what STDP would change goes into each synapse's
+                     // eligibility, and the weight changes by reward_gain times it times the dopamine
+  tau_elig: f32,     // the eligibility's time constant
+  tau_reward: f32,   // the dopamine's
+  reward_gain: f32,
+  reward_channel: i32,  // a stim on this channel is dopamine, not current (-1: none)
+  punish_channel: i32,  // and one on this, dopamine taken away (-1: none)
+  dopamine: f32,     // the dopamine now
   tick: i32,         // the steps run
   spikes: i64,       // the spikes so far
-  check: u64         // the checksum, after `checksum`
+  check: u64,        // the checksum, after `checksum`
+  w_mean: f32        // the mean excitatory weight, after `checksum`
 }
 
 // Per step, worked out from Dish when the dish is made.
-unique Decay { v: f32, plus: f32, minus: f32, adapt: f32, recover: f32, syn: f32, home: f32 }
+unique Decay { v: f32, plus: f32, minus: f32, adapt: f32, recover: f32, syn: f32, home: f32,
+               elig: f32, reward: f32 }
 
 component Neuron {
   v: f32, input: f32, fired: f32,
@@ -103,8 +113,9 @@ component Electrode { channel: i32, x: f32, y: f32, stim: f32, count: i32 }
 archetype Cell { Neuron, Spot, Out, Takes } capacity 65536
 archetype Pad { Electrode } capacity 64
 
-// plastic: 1 where the source is excitatory (the weight learns), else 0.
-relation (Neuron)-[Synapse { weight: f32, plastic: f32 }]->(Neuron) capacity 8388608
+// plastic: 1 where the source is excitatory (the weight learns), else 0;
+// elig: the eligibility (reward-modulated STDP).
+relation (Neuron)-[Synapse { weight: f32, plastic: f32, elig: f32 }]->(Neuron) capacity 8388608
 
 buffer Pads { who: entity } capacity 64
 buffer Wires { to: entity } capacity 8388608
@@ -149,6 +160,13 @@ world {
   Dish.home_rate = 1.33
   Dish.tau_home = 60000.0
   Dish.home_gain = 0.0859
+  Dish.modulated = false
+  Dish.tau_elig = 1000.0
+  Dish.tau_reward = 200.0
+  Dish.reward_gain = 1.0
+  Dish.reward_channel = -1
+  Dish.punish_channel = -1
+  Dish.dopamine = 0.0
 }
 
 // SplitMix64's mix: whole-number multiplies that keep the low bits, so a
@@ -176,6 +194,8 @@ system make() {
   Decay.recover = 1.0 - exp(-1.0 / Dish.tau_recover)
   Decay.home = exp(-1.0 / Dish.tau_home)
   Decay.syn = if Dish.tau_syn > 0.0 { exp(-1.0 / Dish.tau_syn) } else { 0.0 }
+  Decay.elig = exp(-1.0 / Dish.tau_elig)
+  Decay.reward = exp(-1.0 / Dish.tau_reward)
   Pads = []
   for c in 0..64 {
     let x = ((c % 8) as f32 + 0.5) / 8.0
@@ -326,9 +346,9 @@ system wire() {
   for me, n: Neuron, w: Out, list: Wires[w.first, w.count] {
     for k in 0..w.count {
       if n.sign < 0.0 {
-        connect (me)-[Synapse { weight: Dish.w_inh, plastic: 0.0 }]->(list[k].to)
+        connect (me)-[Synapse { weight: Dish.w_inh, plastic: 0.0, elig: 0.0 }]->(list[k].to)
       } else {
-        connect (me)-[Synapse { weight: Dish.w_exc, plastic: 1.0 }]->(list[k].to)
+        connect (me)-[Synapse { weight: Dish.w_exc, plastic: 1.0, elig: 0.0 }]->(list[k].to)
       }
     }
   }
@@ -428,17 +448,54 @@ gpu system integrate() {
 // home_gain times the neuron's rate short of home_rate, times its weight
 // (shrinks, where the rate is above): STDP alone, even with soft bounds,
 // set the calibrated dish alight or quiet (examples/cl_bridge/culture).
+//
+// Reward-modulated (Izhikevich 2007, Florian 2007), with `modulated`: what
+// STDP would change goes into the synapse's eligibility instead, which
+// fades with tau_elig, and the weight changes by reward_gain times the
+// eligibility times the dopamine (scaling as before). Dopamine comes from
+// stims on reward_channel (and goes with those on punish_channel) and
+// fades with tau_reward: a channel no CL1 has, the question being whether
+// this dish could learn a task at all were it told how it did.
 gpu system stdp() {
   for e, n: Neuron {
     let scale = Dish.home_gain * (Dish.home_rate / 1000.0 - n.rate)
     for (pre)-[mut s: Synapse]->(e) {
       if let t = Neuron(pre).trace, let f = Neuron(pre).fired {
-        let dw = Dish.a_plus * t * n.fired * (Dish.w_max - s.weight)
-            - Dish.a_minus * n.post * f * s.weight + scale * s.weight
-        s.weight = min(max(s.weight + s.plastic * dw, 0.0), Dish.w_max)
+        let pair = Dish.a_plus * t * n.fired * (Dish.w_max - s.weight)
+            - Dish.a_minus * n.post * f * s.weight
+        var dw = pair
+        if Dish.modulated {
+          s.elig = Decay.elig * s.elig + pair
+          dw = Dish.reward_gain * Dish.dopamine * s.elig
+        }
+        s.weight = min(max(s.weight + s.plastic * (dw + scale * s.weight), 0.0), Dish.w_max)
       }
     }
   }
+}
+
+// The stims on the reward and punish channels, taken off them (neither is a
+// current into the dish): one electrode each, so max= gives it as it is.
+unique Reward { got: f32, lost: f32 }
+
+gpu system mute() {
+  Reward.got = 0.0
+  Reward.lost = 0.0
+  for p: mut Electrode {
+    if p.channel == Dish.reward_channel {
+      Reward.got max= p.stim
+      p.stim = 0.0
+    } else if p.channel == Dish.punish_channel {
+      Reward.lost max= p.stim
+      p.stim = 0.0
+    }
+  }
+}
+
+// The dopamine fades; a stim on the reward channel adds to it, one on the
+// punish channel takes from it.
+gpu system modulate() {
+  Dish.dopamine = Decay.reward * Dish.dopamine + Reward.got - Reward.lost
 }
 
 // Each step starts with no spikes on the electrodes.
@@ -453,11 +510,13 @@ gpu system done() {
 
 // A number of all potentials and weights: each neuron's v and its
 // synapses' weights mixed with its number, summed (so in any order).
-unique Hashes { sum: u64, synapses: i64 }
+unique Hashes { sum: u64, synapses: i64, w: f64, plastic: i64 }
 
 system zero() {
   Hashes.sum = 0
   Hashes.synapses = 0
+  Hashes.w = 0.0
+  Hashes.plastic = 0
 }
 
 system sum_up() {
@@ -467,11 +526,16 @@ system sum_up() {
     for (pre)-[s: Synapse]->(e) {
       h = mix(h ^ (bits_of(s.weight) as u64))
       count += 1
+      if s.plastic > 0.0 {
+        Hashes.w += s.weight as f64
+        Hashes.plastic += 1
+      }
     }
     Hashes.synapses += count
     Hashes.sum += h
   }
   Dish.check = Hashes.sum
+  Dish.w_mean = (Hashes.w / (max(Hashes.plastic, 1) as f64)) as f32
 }
 
 schedule create() {
@@ -484,6 +548,8 @@ schedule create() {
 
 schedule step() {
   begin()
+  mute() run_if Dish.modulated
+  modulate() run_if Dish.modulated
   gather()
   integrate()
   stdp() run_if Dish.stdp

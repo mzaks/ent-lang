@@ -84,10 +84,15 @@ class DishParams(ctypes.Structure):
         ("home_gain", ctypes.c_float),
         ("axon", ctypes.c_float), ("fast", ctypes.c_float),
         ("conduct", ctypes.c_float),
+        ("modulated", ctypes.c_int32),
+        ("tau_elig", ctypes.c_float), ("tau_reward", ctypes.c_float),
+        ("reward_gain", ctypes.c_float),
+        ("reward_channel", ctypes.c_int32), ("punish_channel", ctypes.c_int32),
     ]
 
 
 PARAMETERS = [name for name, _ in DishParams._fields_]
+INTEGERS = {name for name, kind in DishParams._fields_ if kind in (ctypes.c_int32, ctypes.c_int64)}
 
 
 def library_path(library: str | None = None) -> Path:
@@ -119,7 +124,7 @@ def _resolve(lib, parameters: dict) -> DishParams:
     for name, value in parameters.items():
         if name not in PARAMETERS:
             raise ValueError(f"the dish has no parameter {name!r}")
-        setattr(params, name, int(value) if name in ("seed", "neurons", "stdp") else float(value))
+        setattr(params, name, int(value) if name in INTEGERS else float(value))
     if not 1 <= params.neurons <= lib.dish_most_neurons():
         raise ValueError(f"a dish has 1 to {lib.dish_most_neurons()} neurons, not {params.neurons}")
     return params
@@ -184,6 +189,12 @@ class Dish:
 
     def checksum(self) -> int:
         return self._lib.dish_checksum(self._dish)
+
+    def mean_weight(self) -> float:
+        """The mean excitatory weight."""
+        self._lib.dish_mean_weight.argtypes = [ctypes.c_void_p]
+        self._lib.dish_mean_weight.restype = ctypes.c_float
+        return self._lib.dish_mean_weight(self._dish)
 
 
 def attributes_of(parameters: dict) -> dict:
