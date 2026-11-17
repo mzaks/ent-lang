@@ -1,0 +1,18 @@
+// Pong in closed loop with the ent-lang dish of examples/cl_bridge, through
+// the CL API (pong.py): the ball's place stimulated into a sensory region,
+// the paddle moved by two motor regions, a miss answered with random
+// stims. Half a minute of seed 1 plays rallies, and plays the same ones
+// again: the stims are scheduled by the game, the dish replays its seed.
+// Only where a Python with the CL SDK is found (build/cl_bridge/venv or
+// CL_SDK_PYTHON).
+// REQUIRES: cl-sdk, system-linux
+// RUN: rm -rf %t.dir && mkdir -p %t.dir
+// RUN: %ent build --shared %S/../../examples/cl_bridge/network.ent %S/../../examples/cl_bridge/bridge.c -o %t.dir/libdish.so
+// RUN: cd %t.dir && env ENT_DISH_LIBRARY=%t.dir/libdish.so PYTHONPATH=%S/../../examples/cl_bridge CL_SDK_ACCELERATED_TIME=1 %cl-python %S/../../examples/cl_bridge/pong.py 0.5 1 stim > %t.dir/one.json
+// RUN: cd %t.dir && env ENT_DISH_LIBRARY=%t.dir/libdish.so PYTHONPATH=%S/../../examples/cl_bridge CL_SDK_ACCELERATED_TIME=1 %cl-python %S/../../examples/cl_bridge/pong.py 0.5 1 stim > %t.dir/two.json
+// RUN: cmp %t.dir/one.json %t.dir/two.json
+// RUN: FileCheck %s < %t.dir/one.json
+
+// CHECK: "seed": 1, "condition": "stim", "flip": false, "minutes": 0.5,
+// CHECK-SAME: "early": {"rallies": {{[1-9][0-9]*}}, "hits":
+// CHECK-SAME: "rallies": {{\[\[}}0.0, {{[0-9]+}}]

@@ -27,6 +27,8 @@ what this model does, not what a culture would.
 | `bridge.c` | a flat C interface over the dish; built with it into `libdish.so` |
 | `ent_dish.py` | the CL SDK data source over `libdish.so` (ctypes), and `use()`; `Dish` alone without the SDK |
 | `demo_loop.py` | a CL API program: 1000 ticks/s, a stim every 100 ms, spikes counted, HDF5 recorded |
+| `pong.py` | Pong in closed loop through the CL API, after DishBrain |
+| `pong_study.py` | Pong's conditions and controls on 10 seeds |
 | `check/dish_check.c` | determinism and stim response through the C interface |
 | `check/plasticity.c` | does pairing two channels change how one answers the other? |
 | `culture/fetch.sh` | downloads the cultures' recordings (29 spontaneous, 21 with stims) |
@@ -39,8 +41,9 @@ what this model does, not what a culture would.
 Tests: `test/Integration/cl_bridge_dish.test` (run.ent: same seed twice and
 on 8 threads gives the same spikes and checksum, seed 2 others),
 `cl_bridge_abi.test` (dish_check.c through `libdish.so`, Linux),
-`cl_bridge_gpu.test` (the GPU library against the CPU's) and
-`cl_bridge_demo.test` (demo_loop.py on the SDK; runs only where lit finds a
+`cl_bridge_gpu.test` (the GPU library against the CPU's),
+`cl_bridge_pong.test` (pong.py replays the same) and
+`cl_bridge_demo.test` (demo_loop.py on the SDK; these two run only where lit finds a
 Python that imports `cl`, in `build/cl_bridge/venv` or `CL_SDK_PYTHON`:
 the SDK is no dependency of the rest of the suite).
 
@@ -490,17 +493,104 @@ answers far away, so neighbours mean nothing to it any more.
   `i * 65536 + j`).
 - Bigger dishes against cultures (the calibration is of 1,024 neurons), and
   plasticity for other protocols, longer training or other parameters.
+- Pong with other layouts, feedback, game speeds or longer sessions, or
+  with learning rules other than STDP and scaling.
 
-## DishBrain's Pong, as it would plug in
+## Pong in closed loop
 
-Not built here. In DishBrain (Kagan et al., 2022) the ball's position is
-given to a sensory region by which electrodes are stimulated and how often,
-the paddle moves by comparing spike counts in two motor regions, and a miss
-is followed by unpredictable stimulation, a hit by none (or predictable).
-All of that is a CL API loop: `tick.analysis.spikes` read by channel into
-the motor regions, `neurons.stim` on the sensory channels each tick, a
-random burst on a miss. `ent_dish.use()` before `cl.open()` is all it would
-take to run such a loop against this dish. Whether this model would learn
-the game is another question: STDP and scaling as they are here are the
-only things in it that could, and the pairing above found them changing
-the dish as a whole, not one pathway.
+`pong.py` plays Pong with the dish through the CL API, after DishBrain
+(Kagan et al. 2022, *Neuron* 110:3952): `tick.analysis.spikes` in,
+`neurons.stim` out, 200 ticks a second, in accelerated time. The layout
+and the game are this example's, not DishBrain's:
+
+```
+rows 0-2   motor "up"     channels 0-23
+rows 3-4   sensory        26 27 28 29 / 34 35 36 37 (columns 2-5)
+rows 5-7   motor "down"   channels 40-63
+```
+
+- **Ball to dish**: the sensory electrode stimulated says the ball's
+  height (eighths of the court, in the order 26 27 28 29 37 36 35 34,
+  top to bottom); how often says how near it is, from 4 Hz at the far
+  wall to 40 Hz at the paddle. Each stim is a single pulse of the SDK's
+  default 1 uA, scheduled by the game.
+- **Dish to paddle**: the spikes on each motor region, averaged over
+  100 ms; the paddle (0.3 of the court high) moves at one court a second
+  towards the busier region, not at all within 10% of a tie.
+- **The ball** crosses the court in 2 s. A serve, and a ball off the
+  paddle, leave at a random angle up to 45 degrees. (With the ball only
+  reflected, a paddle parked at a wall could return some paths forever:
+  one 158-hit rally in a first study, now gone.)
+- **Feedback**, by condition:
+  - `stim`: a hit gets all 8 sensory electrodes at 100 Hz for 100 ms
+    (predictable); a miss gets 4 s of stims on random electrodes at 5 Hz
+    (unpredictable), then a new serve;
+  - `silent`: none, but 4 s without sensory input after a miss;
+  - `none`: none, and no pause;
+  - `rest`: no sensory input at all, so the paddle moves with the dish's
+    own activity.
+
+`pong_study.py` plays 20 minutes of each condition on seeds 1 to 10, plus
+three controls:
+- `stim/off`: `stim` with STDP off (and so no scaling), so the dish can
+  only do what its wiring does at the start;
+- `stim/off/flip`: the same with the sensory map upside down;
+- `still`: the game alone, its paddle in the middle all along.
+
+The means over seeds (± standard error), DishBrain's measures: hits a
+rally in the first 5 minutes and in the 15 after, and of the later
+rallies the share that were aces (no hit) and long (3 hits or more):
+
+| session | rallies | hits, first 5 min | hits, after | aces, after | long, after | paddle at a wall |
+|---|---|---|---|---|---|---|
+| stim | 107 | 1.49 ± 0.16 | 1.29 ± 0.11 | 0.45 | 0.18 | 65% |
+| silent | 111 | 1.30 ± 0.12 | 1.20 ± 0.10 | 0.46 | 0.17 | 67% |
+| none | 181 | 1.29 ± 0.09 | 1.19 ± 0.10 | 0.46 | 0.15 | 70% |
+| rest | 324 | 0.43 ± 0.02 | 0.43 ± 0.01 | 0.70 | 0.03 | 37% |
+| stim/off | 110 | 1.29 ± 0.19 | 1.28 ± 0.11 | 0.45 | 0.16 | 65% |
+| stim/off/flip | 187 | 0.10 ± 0.03 | 0.11 ± 0.03 | 0.91 | 0.00 | 71% |
+| still | 333 | 0.44 ± 0.02 | 0.39 ± 0.01 | 0.72 | 0.02 | — |
+
+The differences, seed by seed (the same dish in each), in hits a rally
+after the first 5 minutes:
+
+| | mean ± se | |
+|---|---|---|
+| stim less rest | +0.87 ± 0.11 | 7.8 se |
+| stim/off less rest | +0.86 ± 0.11 | 7.6 se |
+| stim/off less stim/off/flip | +1.17 ± 0.14 | 8.5 se |
+| stim less stim/off | +0.01 ± 0.08 | 0.1 se |
+| stim: after less first 5 minutes | −0.20 ± 0.14 | −1.4 se |
+| stim/off: after less first 5 minutes | −0.01 ± 0.18 | 0.0 se |
+
+So the dish plays about three times as well as chance (a still paddle,
+or its own activity at rest), from the first minutes, and that is its
+wiring, not learning:
+- with STDP off it plays as well;
+- it does not get better over 20 minutes;
+- feedback, silence and no feedback make no difference.
+
+That the wiring follows the ball, and not just any stim moving the
+paddle, the flipped map shows: upside down, the dish plays a quarter as
+well as chance. How the layout makes the sensory rows drive the motor
+region on their side (the axons, which channels a stim's answers land
+on) was not taken apart.
+
+DishBrain's cultures, by its report, improved over a session under
+`stim` feedback and not without it. This dish does not, which fits what
+the pairing check found: its STDP and scaling change the dish as a whole,
+not one pathway. Nothing here says anything about cultures; it says this
+model, at these defaults, has nothing that learns the game.
+
+```sh
+PYTHONPATH=examples/cl_bridge build/cl_bridge/venv/bin/python \
+    examples/cl_bridge/pong.py [minutes [seed [condition [flip] [name=value ...]]]]
+PYTHONPATH=examples/cl_bridge build/cl_bridge/venv/bin/python \
+    examples/cl_bridge/pong_study.py [minutes [seeds [out.json]]]
+```
+
+One session's line of JSON has its rallies (start, hits) and the summary;
+the study of 60 sessions took about 45 minutes on 22 processes (a session
+is the game's loop and the SDK's data producer, a core each).
+`cl_bridge_pong.test` plays half a minute of `stim` twice and checks it
+replays the same rallies.
