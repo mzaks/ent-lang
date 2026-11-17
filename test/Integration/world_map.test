@@ -23,6 +23,35 @@
 // CHECK:      change|dim|life.ent:20|add|Done|Lamp_archetype|move|Lamp_Done
 // CHECK-NEXT: change|dim|life.ent:20|add|Done|Lamp_Done|overwrite|
 // CHECK:      query|reap|life.ent:24|1
+// Where values come from: light's heat from heat and a constant, for
+// lamps without Lit; dim takes Lit away depending on heat and Lit; reap
+// despawns depending on Done; tick's Clock.n from itself.
+// CHECK:      value|0|component|Lamp|heat
+// CHECK-NEXT: value|1|constant||
+// CHECK-NEXT: value|2|world|entities|
+// CHECK-NEXT: value|3|component|Lit|?
+// CHECK-NEXT: value|4|component|Done|?
+// CHECK-NEXT: value|5|unique|Clock|n
+// CHECK-NEXT: write|0|make|life.ent:9|spawn|0
+// CHECK-NEXT: from|0|1|value
+// CHECK-NEXT: write|1|make|life.ent:9|spawn|2
+// CHECK-NEXT: write|2|light|life.ent:12|set|0
+// CHECK-NEXT: from|2|0|value
+// CHECK-NEXT: from|2|1|value
+// CHECK-NEXT: from|2|3|when
+// CHECK-NEXT: write|3|light|life.ent:13|add|3
+// CHECK-NEXT: from|3|3|when
+// CHECK-NEXT: write|4|dim|life.ent:19|remove|3
+// CHECK-NEXT: from|4|0|when
+// CHECK-NEXT: from|4|3|when
+// CHECK-NEXT: write|5|dim|life.ent:20|add|4
+// CHECK-NEXT: from|5|0|when
+// CHECK-NEXT: from|5|3|when
+// CHECK-NEXT: write|6|reap|life.ent:24|despawn|2
+// CHECK-NEXT: from|6|4|when
+// CHECK-NEXT: write|7|tick|life.ent:25|write|5
+// CHECK-NEXT: from|7|1|value
+// CHECK-NEXT: from|7|5|value
 // CHECK:      run|frame|0|light|0||
 // CHECK-NEXT: run|frame|1|dim|1|light|it writes Lamp_archetype.Lit?, which @light also writes
 // CHECK-NEXT: run|frame|2|reap|2|dim|it writes entities, which @dim also writes

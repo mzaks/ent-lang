@@ -16,6 +16,7 @@
 //   run        schedule  position  system  stage  waits-for  why
 //   call       schedule  loop-depth
 //   row, column, cell: systems by what they touch (see below)
+//   value, write, from: where values come from (see below)
 //   lens       components whose presence states tell ("*": all)
 //   state      index  archetype  present optional components
 //   flow       step  schedule  position  system  from  to  kind  file:line
@@ -42,6 +43,8 @@
 #include "Ent/Passes.h"
 #include "Ent/Structure.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "llvm/ADT/DenseMap.h"
@@ -472,6 +475,321 @@ struct EntWorldMap : public mlir::ent::impl::EntWorldMapBase<EntWorldMap> {
           }
         }
       });
+    }
+
+    // Where values come from. A value is a field of a component, unique,
+    // relation or buffer, an optional component's presence ("?"), or the
+    // entities themselves; a write is an op that gives one a value (a set,
+    // a write or sum of a unique, a spawn's or add's fields, a row of a
+    // buffer, an add or remove, a despawn; or a system of C, whatever its
+    // header says it writes); its sources the values its value is made
+    // from (followed back through the ops, `if`s, loops and calls of fns
+    // that make it: a proc called is "outside", what it gives comes from
+    // outside the world; a constant is "constant") and those that decide
+    // whether it is made at all, "when" (the conditions of the `if`s and
+    // loops it is in: a query's `where` among them). Within a system
+    // only: a value a system reads is any that was written before.
+    //   value  index  kind  name  field
+    //   write  index  system  file:line  how  value
+    //   from   write  value  value|when
+    std::map<std::tuple<std::string, std::string, std::string>, unsigned>
+        valueIndex;
+    std::vector<std::tuple<std::string, std::string, std::string>> values;
+    auto valueOf = [&](StringRef kind, StringRef name, StringRef part) {
+      auto key = std::make_tuple(kind.str(), name.str(), part.str());
+      auto [it, inserted] = valueIndex.try_emplace(key, values.size());
+      if (inserted)
+        values.push_back(key);
+      return it->second;
+    };
+    auto kindOf = [&](StringRef name) -> StringRef {
+      Operation *op = map.symbols.lookup(name);
+      if (isa_and_nonnull<ResourceOp>(op))
+        return "unique";
+      if (isa_and_nonnull<RelationOp>(op))
+        return "relation";
+      if (isa_and_nonnull<BufferOp>(op))
+        return "buffer";
+      return "component";
+    };
+    auto fieldsOf = [&](StringRef name) -> SmallVector<StringRef> {
+      SmallVector<StringRef> out;
+      if (Operation *op = map.symbols.lookup(name))
+        if (auto names = op->getAttrOfType<ArrayAttr>("field_names"))
+          for (Attribute a : names)
+            out.push_back(cast<StringAttr>(a).getValue());
+      return out;
+    };
+    struct Write {
+      std::string system, place, how;
+      unsigned value;
+      std::set<std::pair<unsigned, int>> from;
+    };
+    std::vector<Write> writesMade;
+    // What makes `root` (and, `when`, decides): followed back within the
+    // system.
+    auto slice = [&](Value root, bool rootWhen,
+                     std::set<std::pair<unsigned, int>> &from) {
+      SmallVector<std::pair<Value, bool>> work{{root, rootWhen}};
+      llvm::DenseSet<std::pair<Value, unsigned>> seen;
+      while (!work.empty()) {
+        auto [v, when] = work.pop_back_val();
+        if (!v || !seen.insert({v, when ? 1u : 0u}).second)
+          continue;
+        auto source = [&](StringRef kind, StringRef name, StringRef part) {
+          // (A constant a condition compares with tells nothing.)
+          if (when && kind == "constant")
+            return;
+          from.insert({valueOf(kind, name, part), when ? 1 : 0});
+        };
+        auto push = [&](ValueRange range, bool w) {
+          for (Value o : range)
+            work.push_back({o, w});
+        };
+        if (auto arg = dyn_cast<BlockArgument>(v)) {
+          Operation *owner = arg.getOwner()->getParentOp();
+          unsigned n = arg.getArgNumber();
+          if (isa<QueryOp, EachOp>(owner) || isa<SystemOp>(owner))
+            continue;
+          if (auto loop = dyn_cast<scf::ForOp>(owner)) {
+            if (n == 0) {
+              push({loop.getLowerBound(), loop.getUpperBound(), loop.getStep()}, when);
+            } else {
+              work.push_back({loop.getInitArgs()[n - 1], when});
+              work.push_back({loop.getBody()->getTerminator()->getOperand(n - 1), when});
+            }
+            continue;
+          }
+          if (auto loop = dyn_cast<scf::WhileOp>(owner)) {
+            if (arg.getOwner() == &loop.getBefore().front()) {
+              work.push_back({loop.getInits()[n], when});
+              work.push_back({loop.getYieldOp().getOperand(n), when});
+            } else {
+              work.push_back({loop.getConditionOp().getArgs()[n], when});
+            }
+            continue;
+          }
+          push(owner->getOperands(), when);
+          continue;
+        }
+        Operation *def = v.getDefiningOp();
+        if (auto get = dyn_cast<GetOp>(def)) {
+          StringRef name =
+              cast<RefType>(get.getRef().getType()).getComponent().getValue();
+          source(kindOf(name), name, get.getField());
+          continue;
+        }
+        if (auto lookup = dyn_cast<LookupOp>(def)) {
+          StringRef name = lookup.getComponent();
+          source(kindOf(name), name, lookup.getField());
+          continue;
+        }
+        if (auto has = dyn_cast<HasOp>(def)) {
+          if (auto c = has->getAttrOfType<FlatSymbolRefAttr>("component"))
+            source("component", c.getValue(), "?");
+          continue;
+        }
+        if (auto read = dyn_cast<ReadOp>(def)) {
+          source("unique", read.getResource(), read.getField());
+          continue;
+        }
+        if (auto running = dyn_cast<RunningOp>(def)) {
+          source("unique", running.getResource(), running.getField());
+          work.push_back({running.getValue(), when});
+          continue;
+        }
+        if (auto at = dyn_cast<BufferAtOp>(def)) {
+          source("buffer", at.getBuffer(), at.getField());
+          work.push_back({at.getIndex(), when});
+          continue;
+        }
+        if (auto length = dyn_cast<BufferLenOp>(def)) {
+          source("buffer", length.getBuffer(), "rows");
+          continue;
+        }
+        if (isa<EntityOp>(def) || isa<SpawnOp>(def)) {
+          source("world", "entities", "id");
+          continue;
+        }
+        if (isa<arith::ConstantOp>(def)) {
+          source("constant", "", "");
+          continue;
+        }
+        if (auto call = dyn_cast<InvokeOp>(def)) {
+          if (call.getProc())
+            source("outside", call.getCallee(), "");
+          push(call.getArgs(), when);
+          continue;
+        }
+        if (auto branch = dyn_cast<scf::IfOp>(def)) {
+          unsigned n = cast<OpResult>(v).getResultNumber();
+          work.push_back({branch.thenYield().getOperand(n), when});
+          if (!branch.getElseRegion().empty())
+            work.push_back({branch.elseYield().getOperand(n), when});
+          work.push_back({branch.getCondition(), true});
+          continue;
+        }
+        if (auto loop = dyn_cast<scf::ForOp>(def)) {
+          unsigned n = cast<OpResult>(v).getResultNumber();
+          work.push_back({loop.getInitArgs()[n], when});
+          work.push_back({loop.getBody()->getTerminator()->getOperand(n), when});
+          push({loop.getLowerBound(), loop.getUpperBound()}, true);
+          continue;
+        }
+        if (auto loop = dyn_cast<scf::WhileOp>(def)) {
+          unsigned n = cast<OpResult>(v).getResultNumber();
+          work.push_back({loop.getConditionOp().getArgs()[n], when});
+          work.push_back({loop.getConditionOp().getCondition(), true});
+          continue;
+        }
+        push(def->getOperands(), when);
+      }
+    };
+    // The conditions a write is under.
+    auto guards = [&](Operation *op, std::set<std::pair<unsigned, int>> &from) {
+      for (Operation *at = op->getParentOp(); at && !isa<SystemOp>(at);
+           at = at->getParentOp()) {
+        if (auto branch = dyn_cast<scf::IfOp>(at))
+          slice(branch.getCondition(), true, from);
+        else if (auto loop = dyn_cast<scf::WhileOp>(at))
+          slice(loop.getConditionOp().getCondition(), true, from);
+        else if (auto loop = dyn_cast<scf::ForOp>(at))
+          slice(loop.getUpperBound(), true, from);
+        // A query's `with`, `without` and `any`: whether its entities have
+        // those (the components its arguments are of, they have to have
+        // in any case: not a condition of the entities it visits).
+        else if (isa<QueryOp>(at))
+          for (StringRef attr : {QueryOp::kWithAttr, QueryOp::kWithoutAttr,
+                                 QueryOp::kAnyAttr})
+            if (auto list = at->getAttrOfType<ArrayAttr>(attr))
+              list.walk([&](FlatSymbolRefAttr c) {
+                from.insert({valueOf("component", c.getValue(), "?"), 1});
+              });
+      }
+    };
+    for (Operation &op : module.getOps()) {
+      StringRef systemName;
+      if (auto external = dyn_cast<ExternOp>(op)) {
+        // A system of C: what its header says it writes, from outside.
+        if (!external.hasContract() || !external.getWritesAttr())
+          continue;
+        systemName = external.getSymName();
+        for (Attribute attr : external.getWritesAttr()) {
+          StringRef name = cast<FlatSymbolRefAttr>(attr).getValue();
+          Operation *target = map.symbols.lookup(name);
+          if (isa_and_nonnull<ArchetypeOp>(target)) {
+            writesMade.push_back({systemName.str(), placeOf(op.getLoc()), "C",
+                                  valueOf("world", "entities", ""), {}});
+            writesMade.back().from.insert({valueOf("outside", systemName, ""), 0});
+            continue;
+          }
+          for (StringRef f : fieldsOf(name)) {
+            writesMade.push_back({systemName.str(), placeOf(op.getLoc()), "C",
+                                  valueOf(kindOf(name), name, f), {}});
+            writesMade.back().from.insert({valueOf("outside", systemName, ""), 0});
+          }
+        }
+        continue;
+      }
+      auto system = dyn_cast<SystemOp>(op);
+      if (!system)
+        continue;
+      systemName = system.getSymName();
+      system.getBody().walk([&](Operation *inner) {
+        // Each value it gives, from what; under what.
+        SmallVector<std::tuple<std::string, std::string, std::string, Value>> made;
+        std::string how;
+        if (auto set = dyn_cast<SetOp>(inner)) {
+          StringRef name =
+              cast<RefType>(set.getRef().getType()).getComponent().getValue();
+          made.push_back({kindOf(name).str(), name.str(), set.getField().str(),
+                          set.getValue()});
+          how = "set";
+        } else if (auto write = dyn_cast<WriteOp>(inner)) {
+          made.push_back({"unique", write.getResource().str(),
+                          write.getField().str(), write->getOperand(0)});
+          how = "write";
+        } else if (auto sum = dyn_cast<AccumulateOp>(inner)) {
+          made.push_back({"unique", sum.getResource().str(),
+                          sum.getField().str(), sum.getValue()});
+          how = "accumulate";
+        } else if (auto sum = dyn_cast<RunningOp>(inner)) {
+          made.push_back({"unique", sum.getResource().str(),
+                          sum.getField().str(), sum.getValue()});
+          how = "accumulate";
+        } else if (auto append = dyn_cast<AppendOp>(inner)) {
+          SmallVector<StringRef> fields = fieldsOf(append.getBuffer());
+          for (auto [i, v] : llvm::enumerate(append.getValues()))
+            if (i < fields.size())
+              made.push_back({"buffer", append.getBuffer().str(),
+                              fields[i].str(), v});
+          made.push_back({"buffer", append.getBuffer().str(), "rows", Value()});
+          how = "append";
+        } else if (auto set = dyn_cast<BufferSetOp>(inner)) {
+          made.push_back({"buffer", set.getBuffer().str(), set.getField().str(),
+                          set.getValue()});
+          how = "buffer set";
+        } else if (auto spawn = dyn_cast<SpawnOp>(inner)) {
+          SmallVector<StringRef> components;
+          if (ArrayAttr listed = spawn.getComponentsAttr()) {
+            for (Attribute a : listed)
+              components.push_back(cast<FlatSymbolRefAttr>(a).getValue());
+          } else if (auto archetype = map.symbols.lookup<ArchetypeOp>(
+                         spawn.getArchetypeAttr().getValue())) {
+            for (Attribute a : required(archetype))
+              components.push_back(cast<FlatSymbolRefAttr>(a).getValue());
+          }
+          unsigned at = 0;
+          for (StringRef c : components) {
+            for (StringRef f : fieldsOf(c))
+              if (at < spawn.getValues().size())
+                made.push_back({"component", c.str(), f.str(),
+                                spawn.getValues()[at++]});
+          }
+          made.push_back({"world", "entities", "", Value()});
+          how = "spawn";
+        } else if (auto add = dyn_cast<AddOp>(inner)) {
+          StringRef c = add.getComponent();
+          unsigned at = 0;
+          for (StringRef f : fieldsOf(c))
+            if (at < add.getValues().size())
+              made.push_back({"component", c.str(), f.str(), add.getValues()[at++]});
+          made.push_back({"component", c.str(), "?", Value()});
+          how = "add";
+        } else if (auto remove = dyn_cast<RemoveOp>(inner)) {
+          made.push_back({"component", remove.getComponent().str(), "?", Value()});
+          how = "remove";
+        } else if (isa<DespawnOp>(inner)) {
+          made.push_back({"world", "entities", "", Value()});
+          how = "despawn";
+        } else {
+          return;
+        }
+        std::set<std::pair<unsigned, int>> when;
+        guards(inner, when);
+        for (auto &[kind, name, part, v] : made) {
+          Write w{systemName.str(), placeOf(inner->getLoc()), how,
+                  valueOf(kind, name, part), when};
+          if (v)
+            slice(v, false, w.from);
+          // (A sum adds to what the field holds.)
+          if (how == "accumulate")
+            w.from.insert({w.value, 0});
+          writesMade.push_back(std::move(w));
+        }
+      });
+    }
+    for (auto [i, v] : llvm::enumerate(values))
+      os << "value\t" << i << "\t" << std::get<0>(v) << "\t"
+         << field(std::get<1>(v)) << "\t" << field(std::get<2>(v)) << "\n";
+    for (auto [i, w] : llvm::enumerate(writesMade)) {
+      os << "write\t" << i << "\t" << field(w.system) << "\t" << w.place
+         << "\t" << w.how << "\t" << w.value << "\n";
+      // (A source that is both: its value.)
+      for (auto [value, role] : w.from)
+        if (role == 0 || !w.from.count({value, 0}))
+          os << "from\t" << i << "\t" << value << "\t"
+             << (role ? "when" : "value") << "\n";
     }
 
     // The schedules, staged as ent-schedule would (barriers aside).

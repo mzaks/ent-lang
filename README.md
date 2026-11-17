@@ -167,7 +167,13 @@ schedules (with its stage, and a dot where it has effects outside the
 world), a column for each component, unique, relation and buffer and
 the entities themselves, a cell where the run reads or writes it; the
 pointer on a row says why it waits, on a cell which fields or presence.
-The lens is the
+A third is
+where values come from: a value (a field of a component or unique, a
+component's presence, the entities), each write that gives it one, with
+the values that make it (followed back through the system's `if`s, loops
+and calls; a proc's result is from outside) and those it depends on (the
+conditions it is under, a query's `where` and `with`), and the writes it
+goes into; a click on one goes to it, Backspace back. The lens is the
 program's own components that it adds or removes, or those `--lens`
 names; `-o` keeps the map (`--no-window`: only that).
 

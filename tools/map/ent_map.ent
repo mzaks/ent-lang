@@ -19,13 +19,17 @@
 // for each component, unique and the like, a cell where the run reads or
 // writes it; its stage and why it waits, at the pointer.
 //
+// And Provenance: a value (a component's field, a unique's...), the writes
+// that give it one, each with the values it is made from and those it
+// depends on, and the writes it goes into; a click on one shows that one.
+//
 // Click an archetype to see its entities (All: every one); the wheel
 // zooms, dragging moves the wave; the pointer on a cell says which run,
 // from what to what, and where in the program.
 //
 // With ENT_MAP_SHOT=picture.png it draws the wave once (of the archetype
-// whose label ENT_MAP_ARCH is, where set; ENT_MAP_VIEW=data: the other
-// view), saves its picture there and
+// whose label ENT_MAP_ARCH is, where set; ENT_MAP_VIEW=data or provenance:
+// those views, ENT_MAP_VALUE the value's words), saves its picture there and
 // ends: for checks and pictures of it. ENT_MAP_POINT=x,y puts the pointer
 // there in it (in the window's points).
 import window
@@ -227,6 +231,90 @@ fn kind_band(kind: text) -> i32 {
 fn label_room() -> f32 { 300.0 }
 fn header_room() -> f32 { 150.0 }
 
+
+// ---- Provenance -------------------------------------------------------
+// A value (a field of a component, unique, relation or buffer, a
+// component's presence, the entities; or where values come from that are
+// none of those: outside, a constant) and the writes that give it one,
+// each from which values and depending on which; and the writes it goes
+// into. A chip is a value: clicked, it is the one shown.
+
+// A value: its number, kind, name, field, short words; how many writes give
+// it one and use it; its row in the list (-1: not in it).
+component Val {
+  index: i32, kind: text, name: text, field: text, label: text, writes: i32, uses: i32,
+  row: i32
+}
+// A write: its number, system, where, how, the value it gives and that
+// value's words and kind.
+component Wr { index: i32, system: text, place: text, how: text, value: i32, label: text, kind: text }
+// A source of a write: the write, the value, 0 made from it 1 depending on
+// it, its number in the map; the value's words and kind; the chip, in its
+// card.
+component Fr {
+  write: i32, value: i32, role: i32, order: i32, label: text, kind: text, x: f32, y: f32,
+  w: f32, shown: bool
+}
+// By number: where a value's words are in Prov.names, its kind, how many
+// writes give it one and use it; a write's value, its chips' cursor and
+// lines, whether it has chips of what it depends on, whether it is made
+// from or depends on the value shown; its card in "comes from" (y, height)
+// and in "goes into" (-1: not there).
+buffer ValAt { start: i32, end: i32, kind: i32, writes: i32, uses: i32 } capacity 65536
+buffer WrAt {
+  value: i32, cx: f32, lines: i32, when: i32, from_it: i32, on_it: i32, y: f32, h: f32, gy: f32
+} capacity 65536
+// The values shown before, to go back to.
+buffer Back { value: i32 } capacity 4096
+
+// The value shown (-1 none), what the list is narrowed to, how far the
+// list and the cards are scrolled, the list's length; the words of every
+// value; the heights of the two columns; whether to lay them out again;
+// the value asked for by name (ENT_MAP_VALUE).
+unique Prov {
+  sel: i32, filter: text, list_top: f32, top: f32, listed: i32, names: text,
+  from_h: f32, to_h: f32, dirty: bool, list_dirty: bool, counted: bool, value: text, go: i32
+}
+
+fn chip_h() -> f32 { 26.0 }
+fn card_head() -> f32 { 30.0 }
+fn card_width() -> f32 { 520.0 }
+fn kind_number(kind: text) -> i32 {
+  if kind == "component" { 0 } else if kind == "unique" { 1 } else if kind == "buffer" { 2 }
+  else if kind == "relation" { 3 } else if kind == "world" { 4 } else if kind == "outside" { 5 }
+  else { 6 }
+}
+fn kind_word(n: i32) -> text {
+  if n == 0 { "component" } else if n == 1 { "unique" } else if n == 2 { "buffer" }
+  else if n == 3 { "relation" } else if n == 4 { "world" } else if n == 5 { "outside" }
+  else { "constant" }
+}
+fn value_colour(kind: text) -> i32 {
+  if kind == "unique" { 0xa77be0 }
+  else if kind == "world" { 0x3fb8a8 }
+  else if kind == "relation" { 0xd0c050 }
+  else if kind == "buffer" { 0xc07850 }
+  else if kind == "outside" { 0xe0564f }
+  else if kind == "constant" { 0x5a6878 }
+  else { 0x4f9de0 }
+}
+// A value's short words: "Box.x", "Lit?", "Trail.rows", "outside: clipboard".
+fn value_words(kind: text, name: text, field: text) -> text {
+  if kind == "constant" { "a constant" }
+  else if kind == "outside" { "outside: " + short(name) }
+  else if kind == "world" { if len(field) > 0 { "entities." + field } else { "entities" } }
+  else if field == "?" { short(name) + "?" }
+  else { short(name) + "." + field }
+}
+// Its words at length.
+fn value_title(kind: text, name: text, field: text) -> text {
+  if kind == "constant" { "a constant of the program" }
+  else if kind == "outside" { "what " + name + " gives: from outside the world" }
+  else if kind == "world" { "the entities" + (if len(field) > 0 { " (their " + field + ")" } else { "" }) }
+  else if field == "?" { "whether an entity has " + name }
+  else { kind + " " + name + "." + field }
+}
+
 // The map read: every line a record (lib/Ent/Transforms/WorldMap.cpp).
 system load_map() {
   if !Map.loaded {
@@ -249,6 +337,7 @@ system load_map() {
     var system_name = ""
     var schedule_name = ""
     var archs = ","
+    var froms = 0
     while at < len(all) {
       var end = find(all, "\n", at)
       if end < 0 { end = len(all) }
@@ -302,6 +391,34 @@ system load_map() {
                reads: part(line, 4), writes: part(line, 5) }
         }
         Map.cells += 1
+      } else if kind == "value" {
+        let vk = part(line, 2)
+        let words = value_words(vk, part(line, 3), part(line, 4))
+        ValAt += { start: len(Prov.names), end: len(Prov.names) + len(words), kind: kind_number(vk),
+                   writes: 0, uses: 0 }
+        Prov.names = Prov.names + words
+        spawn {
+          Val { index: int(part(line, 1)), kind: vk, name: part(line, 3), field: part(line, 4),
+                label: words, writes: 0, uses: 0, row: -1 }
+        }
+      } else if kind == "write" {
+        let v = int(part(line, 5))
+        spawn {
+          Wr { index: int(part(line, 1)), system: part(line, 2), place: part(line, 3),
+               how: part(line, 4), value: v, label: slice(Prov.names, ValAt[v].start, ValAt[v].end),
+               kind: kind_word(ValAt[v].kind) }
+        }
+        WrAt += { value: v, cx: 0.0, lines: 0, when: 0, from_it: 0, on_it: 0, y: -1.0, h: 0.0, gy: -1.0 }
+        ValAt[v].writes += 1
+      } else if kind == "from" {
+        let v = int(part(line, 2))
+        spawn {
+          Fr { write: int(part(line, 1)), value: v, role: if part(line, 3) == "when" { 1 } else { 0 },
+               order: froms, label: slice(Prov.names, ValAt[v].start, ValAt[v].end),
+               kind: kind_word(ValAt[v].kind), x: 0.0, y: 0.0, w: 0.0, shown: false }
+        }
+        ValAt[v].uses += 1
+        froms += 1
       } else if kind == "lens" {
         schedule_name = ""
         Map.lens = part(line, 1)
@@ -346,6 +463,10 @@ system load_map() {
     Shot.file = environment_variable("ENT_MAP_SHOT")
     Shot.arch = environment_variable("ENT_MAP_ARCH")
     if environment_variable("ENT_MAP_VIEW") == "data" { View.mode = 1 }
+    if environment_variable("ENT_MAP_VIEW") == "provenance" { View.mode = 2 }
+    Prov.value = environment_variable("ENT_MAP_VALUE")
+    Prov.sel = -1
+    Prov.list_dirty = true
     Grid.sched = -1
     Grid.dirty = true
     // (And where the pointer is in the picture: ENT_MAP_POINT=x,y.)
@@ -601,9 +722,10 @@ proc tab(name: text, x: f32, on: bool) {
 }
 system tabs() {
   if Mouse.clicks > 0 && Mouse.y >= 10.0 && Mouse.y < 38.0 {
-    let x = Mouse.x - (Window.width as f32 - 330.0)
+    let x = Mouse.x - (Window.width as f32 - 460.0)
     if x >= 0.0 && x < 122.0 { View.mode = 0 }
     if x >= 130.0 && x < 252.0 { View.mode = 1 }
+    if x >= 260.0 && x < 382.0 { View.mode = 2 }
   }
 }
 
@@ -813,6 +935,282 @@ system draw_grid() {
   }
 }
 
+
+fn to_card_h() -> f32 { card_head() + chip_h() + 12.0 }
+// Where the cards begin: of "comes from", of "goes into"; how far down.
+fn from_x() -> f32 { panel() + 24.0 }
+fn to_x() -> f32 { panel() + 48.0 + card_width() }
+fn cards_y() -> f32 { top() + 100.0 }
+fn list_y() -> f32 { top() + 56.0 }
+fn over_back(mx: f32, my: f32) -> bool {
+  mx > from_x() && mx < from_x() + 72.0 && my > top() + 14.0 && my < top() + 40.0
+}
+
+// ---- Provenance: what is shown --------------------------------------
+
+// How many writes give each value one, and use it.
+system count_values() {
+  for v: mut Val {
+    v.writes = ValAt[v.index].writes
+    v.uses = ValAt[v.index].uses
+  }
+  Prov.counted = true
+}
+
+// The list: the values whose words have what is typed.
+system list_values() {
+  if Prov.list_dirty {
+    Prov.list_dirty = false
+    Prov.listed = 0
+    let filter = lower(Prov.filter) as text[1024]
+    for v: mut Val in turn by v.index {
+      if (len(filter) == 0 || find(lower(v.label), filter, 0) >= 0) && v.kind != "constant" {
+        v.row = Prov.listed
+        Prov.listed += 1
+      } else {
+        v.row = -1
+      }
+    }
+    Prov.list_top = 0.0
+  }
+}
+
+// The cards laid out again: those of the writes that give the value shown
+// one, with their chips; those of the writes it goes into.
+system lay_out_cards() {
+  if Prov.dirty {
+    Prov.dirty = false
+    Prov.top = 0.0
+    let sel = Prov.sel
+    let width = card_width()
+    WrAt = [{ value: 0, cx: 0.0, lines: 0, when: 0, from_it: 0, on_it: 0, y: -1.0, h: 0.0, gy: -1.0 }; len(WrAt)]
+    for w: Wr in turn by w.index { WrAt[w.index].value = w.value }
+    // The chips: the values it is made from first, then those it depends on.
+    for f: mut Fr in turn by f.order {
+      f.shown = false
+      if f.value == sel && f.role == 0 { WrAt[f.write].from_it = 1 }
+      if f.value == sel && f.role == 1 { WrAt[f.write].on_it = 1 }
+    }
+    var role = 0
+    while role < 2 {
+      let r = role
+      for f: mut Fr in turn by f.order where WrAt[f.write].value == sel && f.role == r {
+        let w = text_extent(f.label, 0, 13.0, 0.0, 2) + 22.0
+        let at = f.write
+        // (Those it depends on on lines of their own, after "depending on".)
+        if r == 1 && WrAt[at].when == 0 {
+          WrAt[at].when = 1
+          WrAt[at].lines += 1
+          WrAt[at].cx = 104.0
+        } else if WrAt[at].lines == 0 {
+          WrAt[at].lines = 1
+        } else if WrAt[at].cx + w > width - 28.0 {
+          WrAt[at].lines += 1
+          WrAt[at].cx = if r == 1 { 104.0 } else { 0.0 }
+        }
+        f.x = WrAt[at].cx
+        f.y = (WrAt[at].lines - 1) as f32 * (chip_h() + 4.0)
+        f.w = w
+        f.shown = true
+        WrAt[at].cx += w + 6.0
+      }
+      role += 1
+    }
+    Prov.from_h = 0.0
+    Prov.to_h = 0.0
+    for w: Wr in turn by w.index {
+      if w.value == sel {
+        WrAt[w.index].y = Prov.from_h
+        WrAt[w.index].h = card_head() + max(WrAt[w.index].lines, 1) as f32 * (chip_h() + 4.0) + 10.0
+        Prov.from_h += WrAt[w.index].h + 10.0
+      }
+      if WrAt[w.index].from_it + WrAt[w.index].on_it > 0 {
+        WrAt[w.index].gy = Prov.to_h
+        Prov.to_h += to_card_h() + 10.0
+      }
+    }
+  }
+}
+
+
+// Typing narrows the list (Backspace takes a letter back, or with nothing
+// typed goes back); clicks in the list, on a chip, on "back"; the wheel.
+system steer_provenance() {
+  Prov.go = -1
+  var back = false
+  // (The value asked for by name, for a picture: ENT_MAP_VALUE.)
+  if len(Prov.value) > 0 && Prov.counted {
+    let wanted = Prov.value as text[1024]
+    for v: Val where v.label == wanted { Prov.go max= v.index }
+    Prov.value = ""
+  }
+  var typed = 0
+  while typed < Window.typed && typed < 256 {
+    Prov.filter = Prov.filter + character(Typed[typed].code)
+    Prov.list_dirty = true
+    typed += 1
+  }
+  if key_pressed(259) {
+    if len(Prov.filter) > 0 {
+      Prov.filter = slice(Prov.filter, 0, len(Prov.filter) - 1)
+      Prov.list_dirty = true
+    } else {
+      back = true
+    }
+  }
+  let mx = Mouse.x
+  let my = Mouse.y
+  if Mouse.wheel_y != 0.0 {
+    if mx < panel() {
+      let most = max(0.0, Prov.listed as f32 * row_height() - (Window.height as f32 - list_y()))
+      Prov.list_top = min(most, max(0.0, Prov.list_top - Mouse.wheel_y * 40.0))
+    } else {
+      let most = max(0.0, max(Prov.from_h, Prov.to_h) - (Window.height as f32 - cards_y() - 20.0))
+      Prov.top = min(most, max(0.0, Prov.top - Mouse.wheel_y * 40.0))
+    }
+  }
+  if Mouse.clicks > 0 && my > top() {
+    if mx < panel() && my > list_y() {
+      let row = ((my - list_y() + Prov.list_top) / row_height()) as i32
+      for v: Val where v.row == row { Prov.go max= v.index }
+    }
+    if over_back(mx, my) { back = true }
+    if my > cards_y() - 30.0 {
+      let y0 = cards_y() - Prov.top
+      // A chip of what a value comes from.
+      for f: Fr where f.shown && f.kind != "constant" {
+        let cx = from_x() + 14.0 + f.x
+        let cy = y0 + WrAt[f.write].y + card_head() + f.y
+        if mx >= cx && mx < cx + f.w && my >= cy && my < cy + chip_h() { Prov.go max= f.value }
+      }
+      // The value a write it goes into gives.
+      if mx >= to_x() && mx < to_x() + card_width() {
+        for w: Wr where WrAt[w.index].gy >= 0.0 {
+          let cy = y0 + WrAt[w.index].gy + card_head()
+          if my >= cy && my < cy + chip_h() { Prov.go max= w.value }
+        }
+      }
+    }
+  }
+  let target = Prov.go
+  if target >= 0 && target != Prov.sel {
+    if Prov.sel >= 0 { Back += { value: Prov.sel } }
+    Prov.sel = target
+    Prov.dirty = true
+  } else if back && len(Back) > 0 {
+    Prov.sel = Back[len(Back) - 1].value
+    Back = Back[..len(Back) - 1]
+    Prov.dirty = true
+  }
+}
+
+// A chip: a value's words, its kind's colour at the left.
+proc chip(words: text, kind: text, x: f32, y: f32, w: f32, over: bool) {
+  rounded(x, y, w, chip_h(), 5.0, 5.0, 5.0, 5.0, if over { 0x34495e } else { 0x232d38 })
+  rect(x, y + 3.0, 4.0, chip_h() - 6.0, value_colour(kind))
+  window::write(words, x + 12.0, y + 5.0, w - 14.0, 0, 13.0, 0.0, 0.0, 2, 0, 0xd8e2ec)
+}
+
+system draw_provenance() {
+  let mx = Mouse.x
+  let my = Mouse.y
+  let sel = Prov.sel
+  let x0 = from_x()
+  let tx = to_x()
+  let y0 = cards_y() - Prov.top
+  let width = card_width()
+  let bottom = Window.height as f32
+  clip(panel(), cards_y() - 30.0, Window.width as f32 - panel(), bottom - cards_y() + 30.0)
+  if sel >= 0 {
+    window::write("COMES FROM", x0, y0 - 26.0, 400.0, 0, 12.0, 0.0, 0.0, 2, 0, 0x7d8a98)
+    window::write("GOES INTO", tx, y0 - 26.0, 400.0, 0, 12.0, 0.0, 0.0, 2, 0, 0x7d8a98)
+  }
+  // "Comes from": a card for each write that gives it a value.
+  for w: Wr where WrAt[w.index].y >= 0.0 {
+    let y = y0 + WrAt[w.index].y
+    let h = WrAt[w.index].h
+    if y < bottom && y + h > top() {
+      rounded(x0, y, width, h, 8.0, 8.0, 8.0, 8.0, 0x171d24)
+      window::write(short(w.system) + "  ·  " + w.how, x0 + 14.0, y + 8.0, width - 200.0, 0, 14.0, 0.0, 0.0, 2, 0,
+                    0xe2ecf5)
+      window::write(w.place, x0 + width - 214.0, y + 9.0, 200.0, 0, 12.0, 0.0, 0.0, 2, 2, 0x7d8a98)
+      if WrAt[w.index].lines == 0 {
+        window::write("from nothing it reads", x0 + 14.0, y + card_head() + 5.0, width - 28.0, 0, 13.0, 0.0,
+                      0.0, 2, 0, 0x6a7886)
+      }
+    }
+  }
+  for f: Fr where f.shown {
+    let cx = x0 + 14.0 + f.x
+    let cy = y0 + WrAt[f.write].y + card_head() + f.y
+    if cy < bottom && cy + chip_h() > top() {
+      let over = mx >= cx && mx < cx + f.w && my >= cy && my < cy + chip_h() && f.kind != "constant"
+      chip(f.label, f.kind, cx, cy, f.w, over)
+      if f.role == 1 && f.x == 104.0 {
+        window::write("depending on", x0 + 14.0, cy + 6.0, 90.0, 0, 12.0, 0.0, 0.0, 2, 0, 0x7d8a98)
+      }
+    }
+  }
+  // "Goes into": a card for each write made from it or depending on it.
+  for w: Wr where WrAt[w.index].gy >= 0.0 {
+    let y = y0 + WrAt[w.index].gy
+    if y < bottom && y + to_card_h() > top() {
+      rounded(tx, y, width, to_card_h(), 8.0, 8.0, 8.0, 8.0, 0x171d24)
+      var head = short(w.system) + "  ·  " + w.how
+      if WrAt[w.index].on_it == 1 {
+        if WrAt[w.index].from_it == 1 { head = head + "  (from it, depending on it)" }
+        else { head = head + "  (depending on it)" }
+      }
+      window::write(head, tx + 14.0, y + 8.0, width - 200.0, 0, 14.0, 0.0, 0.0, 2, 0, 0xe2ecf5)
+      window::write(w.place, tx + width - 214.0, y + 9.0, 200.0, 0, 12.0, 0.0, 0.0, 2, 2, 0x7d8a98)
+      let cw = text_extent(w.label, 0, 13.0, 0.0, 2) + 22.0
+      let cy = y + card_head()
+      let over = mx >= tx && mx < tx + width && my >= cy && my < cy + chip_h()
+      window::write("gives", tx + 14.0, cy + 6.0, 50.0, 0, 12.0, 0.0, 0.0, 2, 0, 0x7d8a98)
+      chip(w.label, w.kind, tx + 60.0, cy, cw, over)
+    }
+  }
+  unclip()
+  // The value shown, at the top.
+  rect(panel(), top(), Window.width as f32 - panel(), 70.0, 0x101418)
+  if sel >= 0 {
+    var bx = x0
+    if len(Back) > 0 {
+      rounded(bx, top() + 14.0, 72.0, 26.0, 6.0, 6.0, 6.0, 6.0, if over_back(mx, my) { 0x34495e } else { 0x1a2129 })
+      window::write("< back", bx, top() + 19.0, 72.0, 0, 13.0, 0.0, 0.0, 2, 1, 0xc8d4e0)
+      bx += 88.0
+    }
+    let left = bx
+    for v: Val where v.index == sel {
+      rect(left, top() + 17.0, 5.0, 20.0, value_colour(v.kind))
+      window::write(value_title(v.kind, v.name, v.field), left + 16.0, top() + 14.0, 1000.0, 0, 18.0, 0.0, 0.0, 2, 0,
+                    0xe2ecf5)
+      window::write("{v.writes} writes give it a value · it goes into {v.uses}", left + 16.0, top() + 42.0, 900.0, 0,
+                    13.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+    }
+  } else {
+    window::write("Pick a value at the left (or type to find one): where it comes from, and where it goes.",
+                  x0, top() + 20.0, 1000.0, 0, 16.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+  }
+  // The list of values.
+  rect(0.0, top(), panel(), bottom - top(), 0x141a20)
+  rect(panel() - 1.0, top(), 1.0, bottom - top(), 0x26303a)
+  rounded(12.0, top() + 12.0, panel() - 24.0, 30.0, 6.0, 6.0, 6.0, 6.0, 0x0c1014)
+  window::write(if len(Prov.filter) > 0 { Prov.filter + "|" } else { "Type to find a value" }, 22.0, top() + 18.0,
+                panel() - 40.0, 0, 14.0, 0.0, 0.0, 2, 0, if len(Prov.filter) > 0 { 0xe2ecf5 } else { 0x6a7886 })
+  clip(0.0, list_y(), panel() - 1.0, bottom - list_y())
+  for v: Val where v.row >= 0 {
+    let y = list_y() + v.row as f32 * row_height() - Prov.list_top
+    if y > list_y() - row_height() && y < bottom {
+      if v.index == sel { rect(0.0, y, panel() - 1.0, row_height(), 0x24405e) }
+      rect(10.0, y + 6.0, 4.0, 10.0, value_colour(v.kind))
+      window::write(v.label, 22.0, y + 3.0, panel() - 90.0, 0, 14.0, 0.0, 0.0, 2, 0, 0xd0d8e0)
+      window::write("{v.writes} · {v.uses}", panel() - 74.0, y + 4.0, 60.0, 0, 12.0, 0.0, 0.0, 2, 2, 0x6a7886)
+    }
+  }
+  unclip()
+}
+
 // The top: the program, what its world has, the views, what the colours
 // say; and the words of what the pointer is on.
 system draw_top() {
@@ -823,8 +1221,9 @@ system draw_top() {
         "{Map.systems} systems ({Map.queries} queries; {Map.opaque} with effects outside the world, {Map.gpu} on the GPU) · " +
         "{Map.schedules} schedules", 16.0, 40.0, Window.width as f32 - 32.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
   // The views, as tabs.
-  tab("Lifecycle", Window.width as f32 - 330.0, View.mode == 0)
-  tab("Systems × data", Window.width as f32 - 200.0, View.mode == 1)
+  tab("Lifecycle", Window.width as f32 - 460.0, View.mode == 0)
+  tab("Systems × data", Window.width as f32 - 330.0, View.mode == 1)
+  tab("Provenance", Window.width as f32 - 200.0, View.mode == 2)
   if View.mode == 1 {
     window::write("Systems × data: {Map.main_rows} runs of systems, {Map.columns} components, uniques and the like they touch, " +
           "{Map.cells} cells · a row's stage: runs of one stage touch nothing another writes", 16.0, 62.0,
@@ -842,6 +1241,11 @@ system draw_top() {
     x += 70.0
     circle(x + 6.0, 70.0, 5.0, opaque_colour())
     window::write("effects outside the world", x + 16.0, 62.0, 220.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+  }
+  if View.mode == 2 {
+    window::write("Provenance: where each value comes from, within each system that writes it: " +
+          "the values it is made from, and those that decide whether it is made", 16.0, 62.0,
+          Window.width as f32 - 520.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
   }
   if View.mode == 0 {
   window::write("Lifecycle: {Map.states} states, {Map.flows} changes in {Map.steps} runs · states tell " +
@@ -923,8 +1327,13 @@ schedule frame() {
   hover() run_if View.mode == 0
   steer_grid() run_if View.mode == 1
   hover_grid() run_if View.mode == 1
+  count_values() run_if !Prov.counted && Map.loaded
+  list_values()
+  steer_provenance() run_if View.mode == 2
+  lay_out_cards()
   draw_wave() run_if View.mode == 0
   draw_grid() run_if View.mode == 1
+  draw_provenance() run_if View.mode == 2
   draw_top()
   present()
   shot()
