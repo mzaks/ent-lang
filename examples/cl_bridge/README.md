@@ -8,10 +8,15 @@ neurons that answer a stim and whose synapses learn, where the SDK's own
 simulator replays a recording that does neither.
 
 **This is a simplified LIF model and not a validated model of a biological
-culture.** Its parameters were picked so that it fires at about a spike a
-second a neuron and answers a stim; nothing in it was fitted to, or checked
-against, recordings of real neurons or of a CL1. Its spikes say what this
-model does, not what a culture would.
+culture.** Its defaults were fitted so that twelve summary statistics of its
+activity (firing rate, bursts, the answer to a stim; [below](#calibration))
+fall near those of public recordings of cortical cultures on
+multi-electrode arrays (Wagenaar, Pine and Potter 2006). Ten of the twelve
+land in the cultures' middle half. That is a fit, not a validation. The
+model has 16 fitted parameters for 12 statistics; beyond them, only that
+it holds on seeds it was not fitted on and over 45 minutes was checked;
+and no single recording is reproduced. It was never compared with a CL1. Its spikes say
+what this model does, not what a culture would.
 
 ## What is here
 
@@ -20,14 +25,21 @@ model does, not what a culture would.
 | `network.ent` | the dish: a module with no `main` (schedules `create`, `step`, `checksum`) |
 | `run.ent` | the dish on its own: rate a second, spike hash, checksum |
 | `bridge.c` | a flat C interface over the dish; built with it into `libdish.so` |
-| `ent_dish.py` | the CL SDK data source over `libdish.so` (ctypes), and `use()` |
+| `ent_dish.py` | the CL SDK data source over `libdish.so` (ctypes), and `use()`; `Dish` alone without the SDK |
 | `demo_loop.py` | a CL API program: 1000 ticks/s, a stim every 100 ms, spikes counted, HDF5 recorded |
 | `check/dish_check.c` | determinism and stim response through the C interface |
 | `check/plasticity.c` | does pairing two channels change how one answers the other? |
+| `culture/fetch.sh` | downloads the cultures' recordings (29 spontaneous, 21 with stims) |
+| `culture/stats.py` | spontaneous statistics (rate, Wagenaar's bursts), of a culture or the dish |
+| `culture/evoked.py` | the statistics of the answers to stims; the archive's stim protocol on a dish |
+| `culture/dish_stats.py` | `stats.py` on the dish, a few seeds |
+| `culture/calibrate.py` | the random search that gave the defaults |
+| `culture/validate.py` | the dish's statistics against the cultures', seed by seed (the tables below) |
 
 Tests: `test/Integration/cl_bridge_dish.test` (run.ent: same seed twice and
 on 8 threads gives the same spikes and checksum, seed 2 others),
-`cl_bridge_abi.test` (dish_check.c through `libdish.so`, Linux), and
+`cl_bridge_abi.test` (dish_check.c through `libdish.so`, Linux),
+`cl_bridge_gpu.test` (the GPU library against the CPU's) and
 `cl_bridge_demo.test` (demo_loop.py on the SDK; runs only where lit finds a
 Python that imports `cl`, in `build/cl_bridge/venv` or `CL_SDK_PYTHON`:
 the SDK is no dependency of the rest of the suite).
@@ -47,7 +59,7 @@ cd build/cl_bridge
 cc -O2 ../../examples/cl_bridge/check/dish_check.c -L. -ldish -Wl,-rpath,. -o dish_check
 ./dish_check [channel [amount]]
 cc -O2 ../../examples/cl_bridge/check/plasticity.c -L. -ldish -Wl,-rpath,. -lm -o plasticity
-./plasticity [minutes [seed [A B C]]]
+./plasticity [minutes [seed [A [B C]]]]
 
 # the CL SDK (tried with Python 3.14)
 python -m venv build/cl_bridge/venv
@@ -69,7 +81,7 @@ with cl.open() as neurons:
 ```
 
 `demo_loop.py` sets `CL_SDK_ACCELERATED_TIME=1` unless the environment says
-otherwise: 5 s of the dish take 1.7 s.
+otherwise.
 
 ## The model
 
@@ -81,56 +93,213 @@ among those near it through a grid index of where they are (`index Near
 of Spot grid (x, y)`, a `near` loop), not among all: the draw of a pair is
 by the numbers of both, so the synapses are those a loop over every pair
 gives, and at the defaults the cut (1.6) is longer than the square's
-diagonal, so nothing is cut. Each step is a millisecond:
+diagonal, so nothing is cut. Each neuron has an axon: a straight line of
+length `axon` from it, in a direction drawn from the seed. Each step is a
+millisecond:
 
-- **input**: the pull sum of `weight * out` over a neuron's incoming
-  synapses (`out` = fired times sign), a noise kick of `noise_amp` with the
-  chance `noise_rate`, and its electrode's stim times `stim_gain * gain`;
-- **membrane**: `v = exp(-1/tau) * v + input - adapt`; a spike at `v >= thr`,
-  then reset to 0 and `refractory` steps without integrating;
+- **synaptic input**: `sum`, the pull sum of `weight * out` over a
+  neuron's incoming synapses. It acts twice. `syn = exp(-1/tau_syn) * syn +
+  sum` is a slow current that holds what came in for about `tau_syn`
+  steps. `fast * sum` acts in this step alone, as fast synapses beside the
+  slow ones;
+- **short-term depression**: what a spike carries (`out = sign * ready`)
+  is the neuron's `ready` resources (0 to 1). A spike uses `depress` of
+  them, and they recover with `tau_recover`, so a burst wears itself out;
+- **stims**: an electrode's stim reaches the neurons whose axons pass near
+  it, the four electrodes nearest each axon. Each gets `stim_gain *
+  exp(-d / stim_reach)` times the stim, where `d` is the distance from the
+  axon. It arrives at the soma `l / conduct` steps later, where `l` is how
+  far along the axon that point is. One stim at a time is on its way; a
+  second before the first arrives joins it, at the second's time;
+- **noise**: a kick of `noise_amp` with the chance `noise_rate` a step;
+- **membrane**: `v = exp(-1/tau) * v + syn + fast * sum + kick + stim -
+  adapt`; a spike at `v >= thr`, then reset to 0 and `refractory` steps
+  without integrating;
 - **adaptation**: each spike adds `adapt_inc` to `adapt`, which fades with
-  `tau_adapt`. Without it a stim set some seeds alight (seed 3: about 95
-  spikes on a channel in 25 ms after a stim two electrodes away, against 2
-  on seed 1); with it none of seeds 1 to 10 does;
-- **STDP** (trace, pair-based, pull form: each neuron changes only the
-  synapses into it): `dw = a_plus * pre.trace * post.fired - a_minus *
-  post.trace * pre.fired`, on excitatory synapses only, kept in
-  `[0, w_max]`.
+  `tau_adapt`;
+- **STDP** (trace, pair-based, soft bounds as van Rossum, Bi and
+  Turrigiano 2000; pull form, so each neuron changes only the synapses
+  into it), on excitatory synapses only: `dw = a_plus * pre.trace *
+  post.fired * (w_max - w) - a_minus * post.trace * pre.fired * w`. The
+  weights settle where the two balance, not at 0 or `w_max`, where
+  additive STDP took them in a dish that bursts;
+- **synaptic scaling** (Turrigiano), with STDP: each excitatory synapse
+  into a neuron also changes by `home_gain * (home_rate - rate) * w`,
+  where `rate` is the neuron's rate averaged over `tau_home`. With STDP
+  alone, even soft-bounded, the calibrated dish went alight or quiet
+  within minutes.
 
 `fired` and `trace` are f32 values, not tags. The noise is SplitMix64's mix
 of the seed, the step and the neuron's number (wyrand's 128-bit multiply
 would keep the neuron loop from vectorising), so a dish replays the same on
 one thread and on many.
 
-The seed says which culture (places, wiring, noise); the parameters which
-cell line. Defaults (`Dish` in `network.ent`, `dish_defaults()` in C):
+The seed says which culture (places, axons, wiring, noise); the parameters
+which cell line. Defaults (`Dish` in `network.ent`, `dish_defaults()` in
+C); "fitted" are those the [calibration](#calibration) chose, the rest were
+set by hand:
 
-| parameter | default | meaning |
-|---|---|---|
-| `seed` | 1 | everything random is drawn from it |
-| `neurons` | 1024 | at most 65,536 (`dish_most_neurons`) |
-| `inhibitory` | 0.2 | the share of inhibitory neurons |
-| `tau` | 20 ms | membrane time constant |
-| `thr` | 1.0 | threshold (rest and reset are 0) |
-| `refractory` | 2 ms | |
-| `adapt_inc` | 0.1 | what a spike adds to the adaptation |
-| `tau_adapt` | 200 ms | the adaptation's time constant |
-| `density` | 0.3 | the chance of a synapse at no distance |
-| `reach` | 0.2 | the distance over which it falls by e (side = 1) |
-| `reach_cut` | 8 | no synapse is longer than this many reaches |
-| `w_exc` | 0.09 | excitatory weight at the start |
-| `w_inh` | 0.35 | inhibitory weight (fixed) |
-| `w_max` | 0.2 | excitatory weights are kept in [0, w_max] |
-| `stdp` | true | whether excitatory weights learn |
-| `a_plus`, `a_minus` | 0.005, 0.006 | STDP's potentiation and depression |
-| `tau_plus`, `tau_minus` | 20 ms | the pre- and postsynaptic traces |
-| `noise_rate` | 0.02 | the chance of a noise kick a step |
-| `noise_amp` | 0.5 | its size |
-| `stim_gain` | 2.0 | a stim of 1 on a neuron at its electrode |
-| `stim_reach` | 0.05 | the distance over which a stim falls by e |
+| parameter | default | | meaning |
+|---|---|---|---|
+| `seed` | 1 | | everything random is drawn from it |
+| `neurons` | 1024 | | at most 65,536 (`dish_most_neurons`) |
+| `inhibitory` | 0.2 | | the share of inhibitory neurons |
+| `tau` | 20 ms | | membrane time constant |
+| `thr` | 1.0 | | threshold (rest and reset are 0) |
+| `refractory` | 2 ms | | |
+| `adapt_inc` | 0.0682 | fitted | what a spike adds to the adaptation |
+| `tau_adapt` | 66.8 ms | fitted | the adaptation's time constant |
+| `density` | 0.3 | | the chance of a synapse at no distance |
+| `reach` | 0.2 | | the distance over which it falls by e (side = 1) |
+| `reach_cut` | 8 | | no synapse is longer than this many reaches |
+| `w_exc` | 0.00194 | 0.32 `w_max` | excitatory weight at the start |
+| `w_inh` | 0.0295 | fitted | inhibitory weight (fixed) |
+| `w_max` | 0.00605 | fitted | excitatory weights are kept in [0, w_max] |
+| `tau_syn` | 270 ms | fitted | the slow synaptic current's time constant |
+| `fast` | 47.8 | fitted | the fast part, times what came in this step |
+| `depress` | 0.231 | fitted | the share of its resources a spike uses |
+| `tau_recover` | 1070 ms | fitted | their recovery |
+| `stdp` | true | | whether excitatory weights learn |
+| `a_plus`, `a_minus` | 0.002, 0.002 | | STDP's potentiation and depression |
+| `tau_plus`, `tau_minus` | 20 ms | | the pre- and postsynaptic traces |
+| `home_rate` | 1.33 Hz | fitted | the rate scaling holds a neuron to |
+| `tau_home` | 60 s | | what that rate is averaged over |
+| `home_gain` | 0.0859 | fitted | how fast scaling works |
+| `noise_rate` | 0.00532 | fitted | the chance of a noise kick a step |
+| `noise_amp` | 0.51 | fitted | its size |
+| `stim_gain` | 8.16 | fitted | a stim of 1 on a neuron whose axon passes through the electrode |
+| `stim_reach` | 0.0646 | fitted | the distance (electrode to axon) over which it falls by e |
+| `axon` | 0.274 | fitted | the axon's length |
+| `conduct` | 0.0552 | fitted | how far a spike runs along an axon in a step (55 um/ms if the square is 1 mm) |
+| `hear_reach` | 0.03 | | an electrode hears the neurons this near it |
 
-With these: 0.87 to 0.90 Hz a neuron over 20 s for seeds 1 to 8; 60 s of
-seed 1 in 8.2 s on one core (`tools/ent run`, a portable build).
+With these, a dish is quiet between bursts. Seed 1's first 3 s have 184
+spikes (0.06 Hz a neuron); over minutes, the electrodes see about 4 bursts
+a minute (below).
+
+## Electrodes and channels
+
+64 electrodes on an 8 x 8 grid over the same square: channel `c` is row
+`c / 8`, column `c % 8`, at `((c % 8 + 0.5) / 8, (c / 8 + 0.5) / 8)`. Each
+neuron belongs to the electrode of the grid cell it is in (about 16 a
+channel). The electrode hears only those within `hear_reach` of it: about
+3 neurons, and none on a few channels (seed 1: 61 channels fire at 0.1 Hz
+or more),
+as a culture's electrode records a few cells near it. A stim reaches
+neurons by their axons (above), so its first answers are on whichever
+channels those neurons are, often far from the stimulated electrode.
+
+## Calibration
+
+**Data.** Wagenaar, Pine and Potter's recordings of dense cultures of rat
+cortex on 60-electrode arrays (Wagenaar DA, Pine J, Potter SM (2006). An
+extremely rich repertoire of bursting patterns during the development of
+cortical cultures. *BMC Neuroscience* 7:11,
+https://doi.org/10.1186/1471-2202-7-11; data at
+https://potterlab.bme.gatech.edu/development-data/, whose terms ask that
+work using it cite the article). Of each of 29 cultures, the spontaneous
+recording (half an hour) of the day nearest 28 days in vitro (25 to 31);
+of 21 of them, the stimulus-evoked recording of the same day, a stim on
+one electrode every 0.3 s, round the electrodes in turn. `culture/fetch.sh`
+downloads them into `build/culture` (130 MB). The data are not in the
+repository.
+
+**Statistics.** Each the same for a culture and the dish (`stats.py`,
+`evoked.py`). Spontaneous, of the channels firing at 0.1 Hz or more:
+- the median channel's rate;
+- its ISI CV;
+- network bursts as Wagenaar et al. find them (on 4 or more channels): how
+  many a minute, their median length, the share of spikes in them, the
+  median share of active channels in one;
+- the CV of the intervals between bursts.
+
+Evoked, on the channels other than the stimulated one:
+- spikes 3 to 20 ms after a stim (`early`; the first 3 ms are lost to the
+  stim's artefact on an array);
+- spikes 20 to 300 ms after (`late`);
+- channels with a spike in 3 to 100 ms (`channels`);
+- the share of stims answered by a burst (`big`);
+- the median latency.
+
+The cultures' quartiles of each are the target (`STATS_JSON=...
+stats.py`, `EVOKED_JSON=... evoked.py` over the recordings).
+
+**Search** (`calibrate.py`). Sixteen parameters, drawn log-uniformly
+within ranges: `w_max`, `w_inh`, `depress`, `tau_recover`, `noise_rate`,
+`noise_amp`, `adapt_inc`, `tau_adapt`, `tau_syn`, `home_rate`,
+`home_gain`, `axon`, `conduct`, `stim_gain`, `stim_reach` and `fast`.
+`w_exc` is 0.32 `w_max`: higher, and STDP sets the dish alight in its first
+second. Each candidate is a dish of seed 1 with STDP and scaling on. It
+runs 10 minutes to settle, then 5 minutes of which the spontaneous
+statistics are taken, then the archive's stim protocol, 5 rounds of the 64
+channels. Its score is the sum over the 12 statistics of `(log(dish /
+culture median) / log(q75 / q25))^2`. A statistic one interquartile spread
+(in logs) off the median adds 1. Rounds of 66 candidates, each round
+around the five best so far, in 22 processes. It ran twice: 6 rounds
+around an earlier fit of the spontaneous statistics alone (no axons, no
+fast synapses), then 5 rounds around that search's best, 726 dishes in
+all.
+
+The best of seed 1 (2.14) fired at 5.3 Hz with 5.9 bursts a minute on
+seeds 1 to 10, both above the cultures' 75th percentile. The defaults are
+the second best (2.25), whose spontaneous medians over the ten seeds
+fall in the cultures' middle half (the share of spikes in bursts at its
+edge), rounded to 3 digits.
+
+**Result** (`validate.py ... 10`). The defaults on seeds 1 to 10 (seed 1
+the only one the search saw): 10 minutes to settle, 10 minutes of
+spontaneous activity, then 10 rounds of the stim protocol:
+
+| statistic | dish, median of seeds | seeds' range | cultures 25% | median | 75% | |
+|---|---|---|---|---|---|---|
+| rate (Hz, median active channel) | 3.86 | 3.65–3.98 | 2.27 | 3.32 | 4.75 | in |
+| ISI CV | 3.95 | 3.83–4.12 | 1.36 | 2.26 | 4.63 | in |
+| bursts a minute | 4.05 | 3.5–4.3 | 1.71 | 2.79 | 4.08 | in |
+| burst length (ms) | 1590 | 1480–2000 | 434 | 1040 | 1700 | in |
+| share of spikes in bursts | 0.895 | 0.888–0.911 | 0.298 | 0.759 | 0.898 | in |
+| share of channels in a burst | 0.883 | 0.767–0.934 | 0.451 | 0.784 | 0.982 | in |
+| IBI CV | 0.700 | 0.615–0.768 | 0.571 | 0.784 | 0.979 | in |
+| early (spikes, 3–20 ms) | 25.5 | 23.4–26.8 | 17.6 | 62.4 | 77.2 | in |
+| late (spikes, 20–300 ms) | 37.1 | 33.7–43.6 | 53.3 | 76.9 | 138 | low |
+| channels (in 100 ms) | 16 | 14–18 | 21 | 30 | 47 | low |
+| big (share of stims) | 0.137 | 0.105–0.156 | 0.119 | 0.278 | 0.598 | in |
+| latency (ms) | 57 | 40–73 | 22.2 | 62.8 | 120 | in |
+
+Scores 2.16 to 2.94 a seed (the median dish 2.38).
+
+`early` and `latency` put the dish's first answer to a stim in the
+cultures' range, if in its lower half for `early`. The number of bursts
+a minute is near the cultures' 75th percentile. `late` and `channels`
+fall short: the answer reaches fewer channels than a culture's and dies
+sooner. The share of spikes in bursts is at the cultures' upper edge:
+almost every spike of the dish is in a burst, as in the burstiest
+cultures. The seeds differ much less than the cultures do. The dish's
+seeds span rate 3.65 to 3.98 Hz, where the cultures' middle half alone
+spans 2.3 to 4.8. A seed changes where the neurons are
+and their wiring, not the cell line; the cultures differ by more than
+that.
+
+**It keeps so** (`validate.py ... --long 10`, no stims). The medians over
+seeds 1 to 10 of minutes 0 to 10, 15 to 25 and 35 to 45:
+
+| minutes | rate | ISI CV | bursts a minute | burst ms | in bursts | channels in a burst | IBI CV | score |
+|---|---|---|---|---|---|---|---|---|
+| 0–10 | 3.86 | 4.08 | 3.95 | 1660 | 0.901 | 0.851 | 0.825 | 0.60 |
+| 15–25 | 3.83 | 3.95 | 4.05 | 1640 | 0.895 | 0.876 | 0.706 | 0.62 |
+| 35–45 | 3.90 | 3.94 | 3.95 | 1670 | 0.900 | 0.877 | 0.706 | 0.62 |
+
+(The score of the 7 spontaneous statistics alone.) Every median is in
+the cultures' middle half but the share of spikes in bursts, which is on
+its upper edge (0.895 to 0.901 against 0.898).
+
+No seed goes silent or alight, and none bursts like a clock: the IBI CV
+settles from 0.83 to 0.71 but stays a culture's.
+
+What a fit of summary statistics cannot say: whether the bursts have a
+culture's shape inside, whether a channel's answer is a culture's channel's
+answer, how the dish develops (the cultures were fitted at one age), and
+whether its plasticity is anything like a culture's (none of the
+statistics measures learning).
 
 ## Bigger dishes, threads and the GPU
 
@@ -140,34 +309,38 @@ square stays 1 wide and `reach` shrinks as the root of the number grows
 so), so a neuron has as many synapses, about 70 away from the square's
 sides. Keep the default reach with many neurons and every neuron has
 thousands: the synapses outgrow the relation's capacity (8,388,608) and
-the program stops, saying so.
+the program stops, saying so. The other lengths (`axon`, `stim_reach`,
+`hear_reach`) are not scaled, so a bigger dish has more neurons an
+electrode hears and a stim reaches; it was not calibrated.
 
-Seed 1, native builds (`ENT_CFLAGS=-march=native`), on mains power;
-setup is making the dish (places and wiring), a step 1 ms of it, from a
-3 s run:
+Seed 1, native builds (`ENT_CFLAGS=-march=native`), on mains power; a
+step is 1 ms of the dish, from the difference of an 11 s and a 1 s run:
 
-| neurons | synapses | setup: 1 core | 24 threads | step: 1 core | 24 threads | GPU |
-|---|---|---|---|---|---|---|
-| 1,024 | 44,815 | 0.03 s | 0.01 s | 92 us | 24 us | 67 us |
-| 4,096 | 243,015 | 0.35 s | 0.04 s | 496 us | 78 us | 98 us |
-| 16,384 | 1,103,714 | 2.3 s | 0.26 s | 2.4 ms | 331 us | 406 us |
-| 65,536 | 4,726,319 | 11.6 s | 1.0 s | 12.2 ms | 1.8 ms | 2.0 ms |
+| neurons | synapses | 1 core | 24 threads | GPU |
+|---|---|---|---|---|
+| 1,024 | 44,815 | 182 us | 30 us | 56 us |
+| 16,384 | 1,103,714 | 4.9 ms | 519 us | 303 us |
+| 65,536 | 4,726,319 | 20.0 ms | 2.6 ms | 2.0 ms |
 
 Every column gives the same spikes and checksum. 24 threads is `tools/ent
 build --parallel` with `ENT_PARALLEL_MIN=256` set when building (without
 it a loop of fewer than a million rows stays on one thread). The GPU is a
 laptop RTX 4050 (`--gpu`; the five systems of a step are `gpu system`s,
-which a build without it runs on the CPU as before). Its step is its
-kernels: going along the synapses (`stdp` 0.27 ns an edge, `gather`
-0.14), about what 24 threads take; from 4,096 neurons up neither is far
-ahead. Its clocks change during a run, so a GPU step's wall time varies
-by up to 2x from run to run; the kernels' own times (`ENT_GPU_TIMES=1`)
-do not. Wiring every pair, as at first, took 47 s for 65,536 neurons
-(2.9 M synapses, `density` scaled down instead of `reach`) on one core.
+which a build without it runs on the CPU as before). Its clocks change
+during a run, so a GPU step's wall time varies by up to 2x from run to
+run; the kernels' own times (`ENT_GPU_TIMES=1`) do not. A step costs
+about twice what it did before the calibration (1,024 neurons on one
+core: 92 us; 65,536: 12.2 ms), which was not broken down: the step
+has more per neuron now (two currents, depression, the axon's stims,
+scaling) and more per synapse (soft bounds and scaling). Making the dish was not measured again; before the calibration it
+was 11.6 s for 65,536 neurons on one core and 1.0 s on 24 threads (the
+axons add a pass over the 64 electrodes a neuron). Wiring every pair, as
+at first, took 47 s for 65,536 neurons (2.9 M synapses, `density` scaled
+down instead of `reach`) on one core.
 
 Through the CL SDK (`demo_loop.py`'s loop, 10 s of the dish in
-accelerated time, `ent_dish.use(neurons=.., reach=..)`), the same
-recording from every library:
+accelerated time, `ent_dish.use(neurons=.., reach=..)`), measured before
+the calibration, the same recording from every library:
 
 | neurons | 1 core | 24 threads | GPU |
 |---|---|---|---|
@@ -175,7 +348,7 @@ recording from every library:
 | 16,384 | 34 s | 9.0 s | 9.0 s |
 
 At 16,384 neurons the SDK and Python (168,181 spikes handed over one by
-one) take about as long as the dish does on 24 threads or the GPU.
+one) took about as long as the dish did on 24 threads or the GPU.
 Build the library for threads with `ENT_PARALLEL_MIN=256 tools/ent build
 --parallel --shared ..`. A library leaves its host's threads unbound: a
 program built with `--parallel` binds its threads, the first to the CPU it
@@ -184,17 +357,9 @@ pinned Python's own thread to one CPU, and the SDK's simulator, a process
 it starts, got that one CPU and the settings: 16,384 neurons took 39 s on
 24 threads. `cl_bridge_abi.test` holds a library's host to what it was.
 
-Real time (a step in under a millisecond) is one core up to about 6,000
-neurons, 24 threads or the GPU up to about 35,000 (from the cost an edge,
-not measured at those sizes).
-
-## Electrodes and channels
-
-64 electrodes on an 8 x 8 grid over the same square: channel `c` is row
-`c / 8`, column `c % 8`, at `((c % 8 + 0.5) / 8, (c / 8 + 0.5) / 8)`. Each
-neuron belongs to the electrode of the grid cell it is in; its spikes are
-that channel's, and that electrode's stim reaches it scaled by
-`exp(-distance / stim_reach)`. About 16 neurons a channel.
+Real time (a step in under a millisecond) is one core up to about 4,000
+neurons, 24 threads or the GPU up to about 30,000 (from the sizes
+measured, not at those sizes).
 
 ## Through the CL SDK
 
@@ -236,6 +401,10 @@ int64_t  dish_spike_total(dish *d);
 uint64_t dish_checksum(dish *d);                     // every potential and weight
 ```
 
+`dish_params` lists every parameter of the table above, in the order of
+`DishParams` in `ent_dish.py`; a host built against an older one reads the
+wrong fields.
+
 A C host reaches an ent world's columns (`ent_world.h`) but not its
 buffers, so a step's spikes are a count on each electrode
 (`Electrode.count`), which `dish_step` turns into a list of
@@ -246,66 +415,68 @@ On a GPU build the world's columns are the GPU's between steps; the host
 asks for the bytes it touches (`ent_gpu_range_to_host` before it reads or
 writes them, `ent_gpu_range_wrote` after it wrote them, added to
 devices/gpu.c for this): the 64 counts after each step, a stim's cell
-around its write. 1,024 neurons through bridge.c: 64 us a step, where the
-whole world back each step (`ent_gpu_world_to_host`) took 232 (one core:
-103). `cl_bridge_gpu.test` holds the GPU library's spikes and checksum
-against the CPU's, to the bit.
+around its write. `cl_bridge_gpu.test` holds the GPU library's spikes and
+checksum against the CPU's, to the bit.
 
 ## What was measured
 
 **Determinism.** The same seed gives the same spikes and checksum: run
-again, on 8 threads (`--parallel`), and through the C interface. Another
-seed gives others. (`cl_bridge_dish.test`, `cl_bridge_abi.test`.)
+again, on 8 threads (`--parallel`), on the GPU, and through the C
+interface. Another seed gives others. (`cl_bridge_dish.test`,
+`cl_bridge_abi.test`, `cl_bridge_gpu.test`.)
 
 **Stim response.** Through C (`dish_check`, seed 1): 20 stims of 1 on
-channel 27, every 100 ms: 63 spikes on it in the 20 ms after them, 9 in the
-same windows of the same dish without them; the other channels 328 against
-331. Through the CL SDK (`demo_loop.py 5`): channel 27 fires 0.138 spikes a
-ms in the 20 ms after a stim and 0.005 in the rest.
+channel 27, every 100 ms: 60 spikes on it in the 20 ms after them, none in
+the same windows of the same dish without them; the other channels 154
+against 4. Through the CL SDK (`demo_loop.py 5`): channel 27 fires 0.150
+spikes a ms in the 20 ms after a stim and none in the rest; 659 spikes in
+all, most on channels 27, 44, 20, 34 and 35. The calibration's `early`, `late` and `channels` say the rest.
 
 **Plasticity** (`check/plasticity.c`, 3 minutes of the dish's time). Two
 dishes of one seed. Probe (STDP off): a stim on A, B's spikes counted 5 to
-30 ms after it, 100 times; the same for C, a channel never paired. Train:
-A, then B 10 ms later, every 200 ms (900 pairings), STDP on in one dish and
-off in the other. Probe again. The effect is B's change in the dish that
-learned less its change in the one that did not. A = 27, B = 28, C = 36: A
-and C both next to B.
+30 ms after it, 100 times; the same for C, a channel never paired with A.
+Train: A, then B 10 ms later, every 200 ms (900 pairings), STDP on in one
+dish and off in the other. Probe again. The effect is B's change in the
+dish that learned less its change in the one that did not. A = 27; B and C
+are chosen before any training, on a dish of the seed with STDP off. B is
+the channel that answers A most in 5 to 30 ms. C is the channel other than
+A whose stims B answers most, so B's answers to both start from something.
 
-| seed | B's answer to A before | effect, paired A | effect, unpaired C |
-|---|---|---|---|
-| 1 | 0.33 | +0.19 | +0.02 |
-| 2 | 0.38 | +0.09 | −0.01 |
-| 3 | 0.41 | +0.08 | −0.05 |
-| 4 | 0.79 | +0.18 | +0.08 |
-| 5 | 0.16 | +0.05 | −0.03 |
-| 6 | 0.53 | +0.10 | −0.01 |
-| 7 | 0.35 | +0.12 | −0.03 |
-| 8 | 0.31 | +0.06 | +0.01 |
-| 9 | 0.31 | +0.07 | −0.01 |
-| 10 | 0.31 | +0.12 | +0.00 |
+| seed | B, C | B's answer to A before | effect, paired A | effect, unpaired C |
+|---|---|---|---|---|
+| 1 | 41, 56 | 0.05 | −0.03 | −0.05 |
+| 2 | 53, 60 | 0.02 | −0.03 | −0.07 |
+| 3 | 19, 11 | 0.39 | −0.31 | −0.09 |
+| 4 | 13, 16 | 0.05 | −0.01 | +0.00 |
+| 5 | 21, 28 | 0.09 | −0.06 | −0.11 |
+| 6 | 41, 24 | 0.03 | −0.04 | −0.24 |
+| 7 | 20, 10 | 0.22 | −0.09 | −0.15 |
+| 8 | 36, 49 | 0.12 | −0.11 | −0.01 |
+| 9 | 19, 4 | 0.20 | −0.17 | −0.18 |
+| 10 | 32, 5 | 0.02 | −0.04 | −0.04 |
 
-Spikes on B a probe. The paired effect is positive on all ten seeds, mean
-+0.11 (sd 0.05 over seeds, so about 7 standard errors from nought); the
-unpaired one is nought (mean −0.003). It is small: a tenth of a spike a
-probe, where B's answer to A before training is mostly B's own background
-(about 0.3 spikes in 25 ms), and within one seed it never reaches 2
-standard errors (100 probes). So pairing does make B answer A a little more
-in this model, and only A; it is not a large or a robust change of the
-dish's response, and nothing here says a culture would do the same.
+Spikes on B a probe. Pairing does not make B answer A more. With STDP on,
+B's answers fall to about nothing after training, to the paired channel and
+the unpaired one alike (means −0.09 and −0.09). Most likely the 3 minutes of two stims every
+200 ms raise the rates and scaling takes the weights down everywhere, but
+that was not separated from STDP's own depression. Either way, there is no
+pair-specific learning in this model at the defaults. That is no evidence about cultures one way or the
+other. Wagenaar, Pine and Potter did not find a stimulation protocol
+that reliably changed cultures' answers either ("Searching for plasticity
+in dissociated cortical cultures on multi-electrode arrays", *Journal of
+Negative Results in BioMedicine* 5:16, 2006).
 
-What came before, and is not the result: with A = 27, B = 29 (two
-electrodes apart) and no adaptation, seeds disagreed in sign (seed 1
-+0.64, seeds 2 and 4 −0.18 and −0.37), seed 3 and 5 ran away under
-stimulation, and STDP's main effect was a dish-wide depression
-(`a_minus > a_plus`). With adaptation and those channels the effect was
-nought (seeds 1 to 5: −0.05 to +0.07, all under 1 se): A two electrodes
-away does not reach B at all. The neighbouring channels were chosen after
-that, which the reader should weigh.
+Before the calibration, with hand-set parameters (electrodes hearing their
+whole cell, no axons, additive STDP), A = 27, B = 28, C = 36 gave a paired
+effect of +0.11 spikes a probe on all ten seeds and an unpaired one of
+nought. Those channels were chosen after a first pair showed nothing, and
+the dish answered a stim only on its own channel. The calibrated dish
+answers far away, so neighbours mean nothing to it any more.
 
 ## Not verified
 
-- Anything about agreement with real CL1 recordings or cultures: not
-  attempted (out of scope).
+- Agreement with real CL1 recordings: never compared. Agreement with
+  cultures: only the twelve summary statistics above, as a fit, at one age.
 - Voltage waveforms and frames: none are produced.
 - Stim pulse shape, polarity and timing within a millisecond: only the
   charge counts, at a millisecond's resolution.
@@ -313,12 +484,12 @@ that, which the reader should weigh.
   `demo_loop.py` does in accelerated time; a read that asks for a time
   before the last one gets no spikes from before it.
 - macOS and Windows: `--shared` and the ABI test were run on Linux only.
-- The GPU build behind the CL SDK: run by hand (the table above, the same
-  HDF5 recording as the CPU's, spike by spike), not in a test (the test
-  of the SDK builds the CPU library). More than 65,536 neurons (a pair's draw is keyed
-  by `i * 65536 + j`).
-- The plasticity result for other channel pairs, longer training, other
-  pairing intervals or parameters.
+- The GPU build behind the CL SDK: run by hand (the same HDF5 recording as
+  the CPU's, spike by spike), not in a test (the test of the SDK builds the
+  CPU library). More than 65,536 neurons (a pair's draw is keyed by
+  `i * 65536 + j`).
+- Bigger dishes against cultures (the calibration is of 1,024 neurons), and
+  plasticity for other protocols, longer training or other parameters.
 
 ## DishBrain's Pong, as it would plug in
 
@@ -329,6 +500,7 @@ is followed by unpredictable stimulation, a hit by none (or predictable).
 All of that is a CL API loop: `tick.analysis.spikes` read by channel into
 the motor regions, `neurons.stim` on the sensory channels each tick, a
 random burst on a miss. `ent_dish.use()` before `cl.open()` is all it would
-take to run such a loop against this dish; whether this model would learn
-the game is another question, and STDP as it is here is the only thing in
-it that could.
+take to run such a loop against this dish. Whether this model would learn
+the game is another question: STDP and scaling as they are here are the
+only things in it that could, and the pairing above found them changing
+the dish as a whole, not one pathway.
