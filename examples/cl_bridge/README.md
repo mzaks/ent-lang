@@ -29,6 +29,9 @@ what this model does, not what a culture would.
 | `demo_loop.py` | a CL API program: 1000 ticks/s, a stim every 100 ms, spikes counted, HDF5 recorded |
 | `pong.py` | Pong in closed loop through the CL API, after DishBrain |
 | `pong_study.py` | Pong's conditions and controls on 10 seeds |
+| `conditioning.py` | can reward-modulated STDP teach one answer to one stim (the dish alone)? |
+| `learn_study.py` | Pong with a reward condition, by gain, as is and flipped |
+| `reach.py` | how much of the motor regions' answer to a stim comes along the axons |
 | `check/dish_check.c` | determinism and stim response through the C interface |
 | `check/plasticity.c` | does pairing two channels change how one answers the other? |
 | `culture/fetch.sh` | downloads the cultures' recordings (29 spontaneous, 21 with stims) |
@@ -727,11 +730,70 @@ it where it was. Whether that wins more hits is not settled: above
 not by more than the noise of 8 seeds. A lean of 3 moves in 100 is small
 against a paddle that mostly follows the stims' direct answers.
 
+**Shorter axons.** A stim excites the neurons whose axons pass near the
+electrode, and the default axon is 0.274 of the dish long: longer than
+the 2 to 3 electrode pitches between the sensory columns and the motor
+ones. `reach.py` measures the motor regions' answer to a sensory stim
+(spikes in the 100 ms after it, above those without one), with the
+synapses and with all of them at 0, seeds 1 to 4, STDP off:
+
+| axon | with synapses | without | direct share | all channels |
+|---|---|---|---|---|
+| 0.274 (default) | 1.09 | 0.96 | 0.88 | 11.8 |
+| 0.2 | 0.64 | 0.65 | 1.01 | 11.5 |
+| 0.15 | 0.38 | 0.26 | 0.67 | 11.3 |
+| 0.11 | 0.27 | 0.09 | 0.33 | 11.6 |
+| 0.08 | 0.25 | 0.09 | 0.35 | 11.0 |
+
+From 0.11 down, the direct answer is gone and what is left reaches the
+motor regions through synapses, while the dish's whole answer to a stim
+stays about what it was. It costs some calibration: `validate.py ... 6
+axon=0.11` keeps the same 10 of 12 statistics in the cultures' middle
+half, but the early answer falls from 25.5 spikes to 18.1 (the middle
+half starts at 17.6), the channels answering from 16 to 11 (further below
+it) and the latency rises from 57 ms to 96; the score is 3.77 against
+2.38. The defaults stay as they were; `axon=0.11` is a parameter of the
+runs below.
+
+`conditioning.py rpe 20 0,1 8 axon=0.11` learns about as before: +0.225
+± 0.015 over gain 0, 8 of 8 seeds above. Pong, 20 minutes on seeds 1 to
+8, columns, `axon=0.11` (and `tau_elig=200` for `moves` and `shuffled`):
+
+| | 0-5 | 5-10 | 10-15 | 15-20 | moves towards the ball |
+|---|---|---|---|---|---|
+| gain 0 | 0.37 | 0.42 | 0.39 | 0.47 | 0.517 |
+| `moves`, gain 1 | 0.59 | 0.65 | 0.70 | 0.60 | 0.558 |
+| `shuffled`, gain 1 | 0.49 | 0.45 | 0.42 | 0.47 | 0.520 |
+| `reward`, gain 1 | 0.42 | 0.47 | 0.51 | 0.48 | |
+| flipped, gain 0 | 0.46 | 0.47 | 0.49 | 0.38 | 0.522 |
+| flipped, `moves`, gain 1 | 0.62 | 0.68 | 0.60 | 0.64 | 0.571 |
+| flipped, `shuffled`, gain 1 | 0.42 | 0.43 | 0.47 | 0.43 | 0.518 |
+| flipped, `reward`, gain 1 | 0.47 | 0.58 | 0.51 | 0.50 | |
+
+Seed by seed, the 16 pairs pooled over as is and flipped:
+
+| | moves towards the ball | hits, last 5 minutes |
+|---|---|---|
+| `moves` less gain 0 | +0.045 ± 0.003, 16 of 16 above | +0.20 ± 0.05, 14 of 16 |
+| `shuffled` less gain 0 | −0.000 ± 0.002, 10 of 16 | +0.03 ± 0.03, 8 of 16 |
+| `moves` less `shuffled` | +0.045 ± 0.004, 16 of 16 | +0.17 ± 0.05, 15 of 16 |
+| `reward` less gain 0 | | +0.07 ± 0.04, 11 of 16 |
+
+With the direct answers gone, the reward for each move wins hits: about
+0.62 a rally against 0.43 with nothing learnt (a still paddle: 0.39),
+above both gain 0 and the shuffled pulses, as is and flipped alike. The
+lean is larger too (4.5 moves in 100 against 3). Most of it is there in
+the first 5 minutes and grows no further, as in `conditioning.py`. The
+reward for hits and misses alone still shows nothing 8 seeds can tell
+from noise. This is the model's answer, on a channel no CL1 has, with
+axons shortened for it: not a claim about cultures.
+
 ```sh
 build/cl_bridge/venv/bin/python examples/cl_bridge/conditioning.py \
     bias|map|rpe [minutes [gains [seeds [name=value ...]]]]
 build/cl_bridge/venv/bin/python examples/cl_bridge/learn_study.py \
     [minutes [seeds [gains [out.json [columns] [moves|shuffled] [name=value ...]]]]]
+build/cl_bridge/venv/bin/python examples/cl_bridge/reach.py [axons [name=value ...]]
 ```
 
 A `conditioning.py` run of 3 gains on 8 seeds (20 minutes each) takes
