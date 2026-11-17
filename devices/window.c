@@ -2675,7 +2675,8 @@ const ent_text *ent_window_choose_folder(const ent_text *title, const ent_text *
 
 // The system's file browser opened where `path` is (a file or a
 // folder), with it selected: Finder on a Mac, Explorer on Windows; on
-// Linux the folder it is in, by xdg-open. False where it could not be.
+// Linux the folder it is in, by xdg-open. False where it could not be
+// (it is not there).
 #if defined(_WIN32)
 #include <process.h>
 #elif !defined(__APPLE__) && !defined(__EMSCRIPTEN__)
@@ -2688,6 +2689,19 @@ bool ent_window_show_in_files(const ent_text *path) {
     free(at);
     return false;
   }
+  // (A path from the working folder made whole: Finder takes a relative
+  // one for none, and opens the window it had last.)
+#if defined(_WIN32)
+  char *whole = _fullpath(NULL, at, 0);
+#else
+  char *whole = realpath(at, NULL);
+#endif
+  if (!whole) {
+    free(at);
+    return false;
+  }
+  free(at);
+  at = whole;
 #if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
   void *pool = objc_autoreleasePoolPush();
   id url = ((id(*)(id, SEL, id))objc_msgSend)(ent_window_class("NSURL"),
