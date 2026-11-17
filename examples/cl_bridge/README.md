@@ -130,7 +130,16 @@ millisecond:
   into a neuron also changes by `home_gain * (home_rate - rate) * w`,
   where `rate` is the neuron's rate averaged over `tau_home`. With STDP
   alone, even soft-bounded, the calibrated dish went alight or quiet
-  within minutes.
+  within minutes;
+- **reward-modulated STDP** (Izhikevich 2007, Florian 2007), with
+  `modulated` (off by default): the STDP term goes into the synapse's
+  eligibility, `elig = exp(-1/tau_elig) * elig + dw_stdp`, and the weight
+  changes by `reward_gain * dopamine * elig` (scaling as before). A stim
+  on `reward_channel` adds its size to `dopamine`, one on
+  `punish_channel` takes it away, and neither is a current into the dish;
+  `dopamine` fades with `tau_reward`. No CL1 has such a channel: it is
+  there to ask whether this model could learn a task at all were it told
+  how it did ([Learning rules](#learning-rules)).
 
 `fired` and `trace` are f32 values, not tags. The noise is SplitMix64's mix
 of the seed, the step and the neuron's number (wyrand's 128-bit multiply
@@ -175,6 +184,11 @@ set by hand:
 | `axon` | 0.274 | fitted | the axon's length |
 | `conduct` | 0.0552 | fitted | how far a spike runs along an axon in a step (55 um/ms if the square is 1 mm) |
 | `hear_reach` | 0.03 | | an electrode hears the neurons this near it |
+| `modulated` | false | | reward-modulated STDP instead of STDP |
+| `tau_elig` | 1000 ms | | the eligibility's time constant |
+| `tau_reward` | 200 ms | | the dopamine's |
+| `reward_gain` | 1 | | how much a unit of dopamine times the eligibility changes a weight |
+| `reward_channel`, `punish_channel` | -1, -1 | | the channels whose stims are dopamine (-1: none) |
 
 With these, a dish is quiet between bursts. Seed 1's first 3 s have 184
 spikes (0.06 Hz a neuron); over minutes, the electrodes see about 4 bursts
@@ -570,11 +584,17 @@ wiring, not learning:
 - it does not get better over 20 minutes;
 - feedback, silence and no feedback make no difference.
 
-That the wiring follows the ball, and not just any stim moving the
+That the dish follows the ball, and not just any stim moving the
 paddle, the flipped map shows: upside down, the dish plays a quarter as
-well as chance. How the layout makes the sensory rows drive the motor
-region on their side (the axons, which channels a stim's answers land
-on) was not taken apart.
+well as chance. And it is not the synapses: a stim excites the neurons
+whose axons pass the electrode, and those reach about two electrodes from
+it, so the sensory electrodes of row 3 fire neurons the up region hears
+and those of row 4 the down region's, directly. With every synapse at 0
+(`w_exc=0 w_inh=0`), the spikes the up and down regions answer a sensory
+stim with in 30 ms are the same as with them (for example, channel 26:
+4.6 up and 2.1 down with the synapses, 4.6 and 2.1 without; seeds 1 to
+4). No weight can change that, which is why the `columns` layout below
+is there.
 
 DishBrain's cultures, by its report, improved over a session under
 `stim` feedback and not without it. This dish does not, which fits what
@@ -584,7 +604,7 @@ model, at these defaults, has nothing that learns the game.
 
 ```sh
 PYTHONPATH=examples/cl_bridge build/cl_bridge/venv/bin/python \
-    examples/cl_bridge/pong.py [minutes [seed [condition [flip] [name=value ...]]]]
+    examples/cl_bridge/pong.py [minutes [seed [condition [flip] [columns] [name=value ...]]]]
 PYTHONPATH=examples/cl_bridge build/cl_bridge/venv/bin/python \
     examples/cl_bridge/pong_study.py [minutes [seeds [out.json]]]
 ```
@@ -594,3 +614,91 @@ the study of 60 sessions took about 45 minutes on 22 processes (a session
 is the game's loop and the SDK's data producer, a core each).
 `cl_bridge_pong.test` plays half a minute of `stim` twice and checks it
 replays the same rallies.
+
+## Learning rules
+
+Nothing in the default dish learns the game, so `modulated` swaps STDP
+for reward-modulated STDP: the same pairs, but kept in each synapse's
+eligibility (1 s), and turned into weight by dopamine (200 ms), which the
+host gives with stims on a reward and a punish channel. A real CL1 has no
+such channel, so this asks about the model, not about cultures: could
+this dish learn the game at all, were it told how it did?
+
+The rows layout cannot show it: there, the stims' direct answers along
+the axons play the game (above). pong.py's `columns` layout spreads them
+so that they do not:
+
+```
+columns 0-1   motor "up"       columns 6-7   motor "down"
+columns 3-4   sensory, a row each: 3 12 20 27 35 44 52 59 (top to bottom)
+              (the column alternates, so each half of the court has two
+              electrodes that lean up and two that lean down)
+28, 36        reward, punish
+```
+
+There a still paddle hits 0.39 a rally and the dish with nothing learnt
+(gain 0) about 0.45.
+
+**One stim, one answer, first.** `conditioning.py` asks the simplest
+thing on that layout, on the dish alone: after a minute to settle, a stim
+on a random sensory electrode every 0.5 s, the up and down regions'
+spikes in the 100 ms after it, then a reward or a punish pulse. `map` wants
+up for the top half's electrodes and down for the bottom's, as Pong
+does; its score is the top half's share of right answers plus the bottom
+half's less 1, so a bias towards one region scores 0. Plain reward (`map`,
+a pulse of 1 either way) mostly taught a bias: at gain 100 on seeds 1 to
+4, 0.65 right for the top half and 0.37 for the bottom, against 0.55 and
+0.44 with none (2-minute windows from 2 to 20 minutes). The pulse as the
+reward prediction error (`rpe`: 1 − p for a right answer, p for a wrong
+one, p the electrode's running share of right ones; Frémaux, Sprekeler
+and Gerstner 2010) works better. Scores over the session's second half,
+seeds 1 to 8:
+
+| | score | less gain 0, seed by seed | seeds above gain 0 |
+|---|---|---|---|
+| gain 0 | +0.00 ± 0.03 | | |
+| `map`, gain 3 | +0.12 ± 0.04 | +0.11 ± 0.01 | 8 of 8 |
+| `rpe`, gain 1 | +0.21 ± 0.03 | +0.20 ± 0.02 | 8 of 8 |
+| `rpe`, gain 3 | +0.18 ± 0.03 | +0.18 ± 0.01 | 8 of 8 |
+
+So the dish learns a mapping, a little: with `rpe` at gain 1, about 0.68
+right for the top half and 0.52 for the bottom, from 0.56 and 0.44.
+Most of it comes in the first two minutes, then nothing more.
+
+**Then the game.** pong.py's `reward` condition sends the same kind of
+pulse: 1 − p for a hit, p for a miss, p the running share of hits. 20
+minutes on seeds 1 to 8, the columns layout, hits a rally by 5-minute
+window:
+
+| | 0-5 | 5-10 | 10-15 | 15-20 | last less gain 0 |
+|---|---|---|---|---|---|
+| gain 0 | 0.42 | 0.48 | 0.45 | 0.48 | |
+| gain 1 | 0.45 | 0.56 | 0.50 | 0.52 | +0.04 ± 0.05 |
+| gain 3 | 0.45 | 0.47 | 0.45 | 0.44 | −0.04 ± 0.05 |
+| flipped, gain 0 | 0.40 | 0.41 | 0.38 | 0.39 | |
+| flipped, gain 1 | 0.44 | 0.45 | 0.53 | 0.42 | +0.02 ± 0.06 |
+| flipped, gain 3 | 0.43 | 0.45 | 0.43 | 0.43 | +0.04 ± 0.05 |
+
+No learning that 8 seeds can see. An earlier version, with pulses of 1
+for a hit and a miss alike, did no better: gains 0.3 to 100 on seeds 1 to
+4, rows and columns, as is and flipped. Why was not taken apart; likely:
+in `conditioning.py` the outcome comes 100 ms after the one stim that
+caused it, in Pong seconds after a stream of stims at up to 40 Hz and a
+paddle that answers to 100 ms of spikes, so the eligibility of the
+synapses that mattered is a small part of all there is when the pulse
+comes; and the stims' direct answers, which no weight changes, stay most
+of what the motor regions hear (about 1 spike against 0.1-0.2 through
+the synapses, 100 ms after a stim). A task with the reward right after
+the answer, a closer reward (each paddle move, say), or a dish whose
+stims reach less of it directly might do better; nothing here says.
+
+```sh
+build/cl_bridge/venv/bin/python examples/cl_bridge/conditioning.py \
+    bias|map|rpe [minutes [gains [seeds [name=value ...]]]]
+build/cl_bridge/venv/bin/python examples/cl_bridge/learn_study.py \
+    [minutes [seeds [gains [out.json [columns] [name=value ...]]]]]
+```
+
+A `conditioning.py` run of 3 gains on 8 seeds (20 minutes each) takes
+about 25 minutes on 22 processes, with the dish alone; a `learn_study.py`
+run of 48 sessions, through the SDK, about 85.
