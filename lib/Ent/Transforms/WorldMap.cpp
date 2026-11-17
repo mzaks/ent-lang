@@ -15,6 +15,7 @@
 //   schedule   name  file:line
 //   run        schedule  position  system  stage  waits-for  why
 //   call       schedule  loop-depth
+//   row, column, cell: systems by what they touch (see below)
 //   lens       components whose presence states tell ("*": all)
 //   state      index  archetype  present optional components
 //   flow       step  schedule  position  system  from  to  kind  file:line
@@ -474,6 +475,13 @@ struct EntWorldMap : public mlir::ent::impl::EntWorldMapBase<EntWorldMap> {
     }
 
     // The schedules, staged as ent-schedule would (barriers aside).
+    struct RunRow {
+      ScheduleOp schedule;
+      RunOp run;
+      unsigned position, stage;
+      std::string waits, why;
+    };
+    llvm::DenseMap<Operation *, SmallVector<RunRow>> scheduleRows;
     for (ScheduleOp schedule : module.getOps<ScheduleOp>()) {
       os << "schedule\t" << field(schedule.getSymName()) << "\t"
          << placeOf(schedule.getLoc()) << "\n";
@@ -502,8 +510,109 @@ struct EntWorldMap : public mlir::ent::impl::EntWorldMapBase<EntWorldMap> {
         os << "run\t" << field(schedule.getSymName()) << "\t" << j << "\t"
            << field(runs[j].getSystem()) << "\t" << level[j] << "\t"
            << field(waits) << "\t" << field(reason) << "\n";
+        scheduleRows[schedule].push_back(
+            {schedule, runs[j], j, level[j], waits, reason});
       }
     }
+
+    // Systems by what they touch: a row for each run, the schedules in the
+    // order `main` first calls them, then the others; a column for each
+    // component, unique, relation and buffer, and the entities themselves
+    // (their tables, counts and ids) and the ticks of reactive queries, in
+    // the order of the first row that touches it; a cell where a row reads
+    // (r), writes (w) or both (rw) one, with which parts: fields, "?"
+    // presence, "+" added, "-" removed, "f@" changed, "~" connected,
+    // "edges", "count", "id", "table", in any archetype.
+    //   row     index  schedule  position  system  stage  waits  why
+    //           file:line  opaque-at  gpu  main (1: a schedule `main`
+    //           calls; the others' runs are in those too, where they
+    //           are called from them, but stand here on their own)
+    //   column  index  kind  name
+    //   cell    row  column  r|w|rw  parts read  parts written
+    SmallVector<ScheduleOp> order;
+    for (MainOp main : module.getOps<MainOp>())
+      main.getBody().walk([&](CallOp call) {
+        if (auto schedule = map.symbols.lookup<ScheduleOp>(call.getSchedule()))
+          if (!llvm::is_contained(order, schedule))
+            order.push_back(schedule);
+      });
+    unsigned called = order.size();
+    for (ScheduleOp schedule : module.getOps<ScheduleOp>())
+      if (!llvm::is_contained(order, schedule))
+        order.push_back(schedule);
+    // (What a column is called, and of what kind; the part a column of
+    // the access analysis is of it.)
+    auto columnOf = [&](const Column &c) -> std::tuple<std::string, std::string, std::string> {
+      auto [archetype, component, part] = c;
+      StringRef name = component ? component.getValue() : StringRef();
+      if (name.empty()) {
+        if (!archetype && part && part.getValue() == "ticks")
+          return {"world", "ticks", "ticks"};
+        if (!archetype)
+          return {"world", "entities", "table"};
+        return {"world", "entities", part.getValue().empty() ? "count" : "id"};
+      }
+      std::string kind = "component";
+      Operation *op = map.symbols.lookup(name);
+      if (isa_and_nonnull<ResourceOp>(op))
+        kind = "unique";
+      else if (isa_and_nonnull<RelationOp>(op))
+        kind = "relation";
+      else if (isa_and_nonnull<BufferOp>(op))
+        kind = "buffer";
+      std::string what = part ? part.getValue().str() : "";
+      if (what.empty())
+        what = archetype ? "?" : "edges";
+      return {kind, name.str(), what};
+    };
+    std::vector<std::pair<std::string, std::string>> columns;
+    std::map<std::string, unsigned> columnIndex;
+    struct Cell {
+      std::set<std::string> reads, writes;
+    };
+    std::vector<std::map<unsigned, Cell>> cells;
+    unsigned row = 0;
+    for (auto [nth, schedule] : llvm::enumerate(order)) {
+      for (RunRow &r : scheduleRows[schedule]) {
+        Operation *system = map.symbols.lookup(r.run.getSystem());
+        SystemAccess access = accesses.lookup(system);
+        addConditionReads(r.run.getCondition(), access);
+        auto system_op = dyn_cast_or_null<SystemOp>(system);
+        os << "row\t" << row << "\t" << field(schedule.getSymName()) << "\t"
+           << r.position << "\t" << field(r.run.getSystem()) << "\t" << r.stage
+           << "\t" << field(r.waits) << "\t" << field(r.why) << "\t"
+           << (system ? placeOf(system->getLoc()) : "") << "\t"
+           << (access.isOpaque() ? placeOf(access.opaqueOp->getLoc()) : "")
+           << "\t" << (system_op && system_op.getGpu() ? 1 : 0) << "\t"
+           << (nth < called ? 1 : 0) << "\n";
+        cells.emplace_back();
+        auto note = [&](const Column &c, bool write) {
+          auto [kind, name, part] = columnOf(c);
+          auto [it, inserted] = columnIndex.try_emplace(name, columns.size());
+          if (inserted)
+            columns.push_back({kind, name});
+          Cell &cell = cells.back()[it->second];
+          (write ? cell.writes : cell.reads).insert(part);
+        };
+        for (const Column &c : access.reads)
+          note(c, false);
+        for (const Column &c : access.writes)
+          note(c, true);
+        ++row;
+      }
+    }
+    for (auto [i, column] : llvm::enumerate(columns))
+      os << "column\t" << i << "\t" << column.first << "\t"
+         << field(column.second) << "\n";
+    for (auto [i, rowCells] : llvm::enumerate(cells))
+      for (auto &[c, cell] : rowCells) {
+        SmallVector<std::string> reads(cell.reads.begin(), cell.reads.end());
+        SmallVector<std::string> writes(cell.writes.begin(), cell.writes.end());
+        os << "cell\t" << i << "\t" << c << "\t"
+           << (cell.writes.empty() ? "r" : cell.reads.empty() ? "w" : "rw")
+           << "\t" << field(joined(reads)) << "\t" << field(joined(writes))
+           << "\n";
+      }
 
     // The lens: the components named, or all ("*"); where none are, those
     // the program declares itself (not in the `library` folders) that a

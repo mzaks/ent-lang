@@ -27,6 +27,24 @@
 // CHECK-NEXT: run|frame|1|dim|1|light|it writes Lamp_archetype.Lit?, which @light also writes
 // CHECK-NEXT: run|frame|2|reap|2|dim|it writes entities, which @dim also writes
 // CHECK-NEXT: run|frame|3|tick|0||
+// Systems by what they touch: `main` calls start, then frame.
+// CHECK:      row|0|start|0|make|0|||{{.*}}life.ent:9||0|1
+// CHECK-NEXT: row|1|frame|0|light|0|||{{.*}}life.ent:10||0|1
+// CHECK-NEXT: row|2|frame|1|dim|1|light|{{.*}}
+// CHECK-NEXT: row|3|frame|2|reap|2|dim|{{.*}}
+// CHECK-NEXT: row|4|frame|3|tick|0|||{{.*}}life.ent:25||0|1
+// CHECK-NEXT: column|0|world|entities
+// CHECK-NEXT: column|1|component|Lamp
+// CHECK-NEXT: column|2|component|Lit
+// CHECK-NEXT: column|3|unique|Clock
+// CHECK-NEXT: cell|0|0|w||count,id,table
+// CHECK-NEXT: cell|0|1|w||heat
+// CHECK-NEXT: cell|0|2|w||?
+// CHECK-NEXT: cell|1|0|r|count|
+// CHECK-NEXT: cell|1|1|rw|heat|heat
+// CHECK-NEXT: cell|1|2|rw|?|?
+// CHECK:      cell|3|0|rw|count|count,id,table
+// CHECK:      cell|4|3|rw|n|n
 // CHECK:      lens|Done,Lit
 // CHECK-NEXT: call|start|0
 // CHECK-NEXT: call|frame|1

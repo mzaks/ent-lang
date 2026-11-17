@@ -1114,6 +1114,15 @@ void ent_window_label(const ent_text126 *text, float x, float y, float size,
   ent_window_plain_draw(line, x, y, size, ent_window_color(color));
 }
 
+void ent_window_label_turned(const ent_text126 *text, float x, float y,
+                             float size, float degrees, int32_t color) {
+  ENT_WINDOW_TEXT(line, text);
+  size = (float)(int)size;
+  DrawTextPro(ent_window_plain(size), line, (Vector2){x, y}, (Vector2){0, 0},
+              degrees, size, ent_window_plain_apart(size),
+              ent_window_color(color));
+}
+
 float ent_window_text_width(const ent_text126 *text, float size) {
   ENT_WINDOW_TEXT(line, text);
   return (float)ent_window_plain_width(line, size);

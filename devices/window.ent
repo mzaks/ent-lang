@@ -233,6 +233,10 @@ extern proc quad(x0: f32, y0: f32, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32,
 // letters of a few pixels. A text that is to look the same everywhere is
 // written with `write` in a font the program brings.)
 extern proc label(text: text[126], x: f32, y: f32, size: f32, color: i32)
+// `label` turned about its top left corner (x, y) by so many degrees,
+// clockwise: -90 goes up, -45 up to the right, as names over the columns
+// of a table are.
+extern proc label_turned(text: text[126], x: f32, y: f32, size: f32, degrees: f32, color: i32)
 // How wide `label` draws a text of that size, in pixels. The window must
 // be open (after the first `begin`).
 // (This and the other measures of texts, and `picture_ratio`, are procs,

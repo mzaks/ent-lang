@@ -161,7 +161,13 @@ lifecycle along `main`, as a MatrixWave (Zhao et al., CHI 2015): a
 matrix for each run that changes an entity's state (an archetype with
 which optional components of a lens are present), from the states the
 entities had to those they have after it, born and gone among them; the
-pointer on a cell says the run, the change and its line. The lens is the
+pointer on a cell says the run, the change and its line. Its other view
+is the systems by what they touch: a row for each run of `main`'s
+schedules (with its stage, and a dot where it has effects outside the
+world), a column for each component, unique, relation and buffer and
+the entities themselves, a cell where the run reads or writes it; the
+pointer on a row says why it waits, on a cell which fields or presence.
+The lens is the
 program's own components that it adds or removes, or those `--lens`
 names; `-o` keeps the map (`--no-window`: only that).
 

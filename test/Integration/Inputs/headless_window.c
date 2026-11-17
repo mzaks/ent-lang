@@ -84,6 +84,12 @@ void ent_window_label(const ent_text126 *text, float x, float y, float size,
   printf("label %g %g \"%s\"\n", x, y, said);
 }
 
+void ent_window_label_turned(const ent_text126 *text, float x, float y,
+                             float size, float degrees, int32_t color) {
+  TEXT(said, text);
+  printf("label %g %g turned %g \"%s\"\n", x, y, degrees, said);
+}
+
 void ent_window_write(const ent_text *text, float x, float y, float width,
                       int32_t font, float size, float spacing, float line,
                       int32_t breaks, int32_t along, int32_t color) {

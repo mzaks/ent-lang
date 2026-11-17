@@ -15,12 +15,17 @@
 // components of the lens are present; "born" and "gone" are before a spawn
 // and after a despawn.
 //
+// The other view, Systems × data: a row for each run of a system, a column
+// for each component, unique and the like, a cell where the run reads or
+// writes it; its stage and why it waits, at the pointer.
+//
 // Click an archetype to see its entities (All: every one); the wheel
 // zooms, dragging moves the wave; the pointer on a cell says which run,
 // from what to what, and where in the program.
 //
 // With ENT_MAP_SHOT=picture.png it draws the wave once (of the archetype
-// whose label ENT_MAP_ARCH is, where set), saves its picture there and
+// whose label ENT_MAP_ARCH is, where set; ENT_MAP_VIEW=data: the other
+// view), saves its picture there and
 // ends: for checks and pictures of it. ENT_MAP_POINT=x,y puts the pointer
 // there in it (in the window's points).
 import window
@@ -33,6 +38,7 @@ unique Map {
   loaded: bool, program: text, lens: text, labels: text,
   archetypes: i32, systems: i32, components: i32, tags: i32, resources: i32,
   schedules: i32, queries: i32, states: i32, flows: i32, steps: i32,
+  rows: i32, columns: i32, cells: i32, main_rows: i32,
   gpu: i32, opaque: i32, error: text
 }
 // An archetype: its number in the map, how it is told from the others,
@@ -62,7 +68,7 @@ buffer ArchRow { states: i32 } capacity 65536
 // is; how many states its axes have and how many matrices; and whether to
 // work that out again.
 unique View {
-  arch: i32, cell: f32, ox: f32, oy: f32, n: i32, shown: i32, dirty: bool,
+  mode: i32, arch: i32, cell: f32, ox: f32, oy: f32, n: i32, shown: i32, dirty: bool,
   listed: i32, dragging: bool
 }
 // What the pointer is on: a cell's words, or none.
@@ -173,6 +179,54 @@ fn matrix_x(k: i32, m: f32, gap: f32) -> f32 { (k / 2) as f32 * (m + gap) }
 fn matrix_y(k: i32, m: f32, gap: f32) -> f32 { ((k + 1) / 2) as f32 * (m + gap) }
 fn gap() -> f32 { 0.0 }
 
+// ---- Systems × data -------------------------------------------------
+// A row for each run of a system, in the order `main` runs the schedules;
+// a column for each component, unique, relation, buffer, and the
+// entities and ticks themselves, in the order of the first row that
+// touches it; a cell where the row reads it (blue), writes it (orange) or
+// both. At the left of a row its stage (runs of one stage commute) and a
+// red dot where the system has effects outside the world, which keep it
+// in its place among all others.
+
+// A run: its row, schedule, place in it, system, stage, what it waits
+// for and why, where it is, where it calls out, whether on the GPU, the
+// first of its schedule; where it is shown (-1: not).
+component Rw {
+  index: i32, schedule: text, position: i32, system: text, stage: i32, waits: text,
+  why: text, place: text, opaque: text, gpu: bool, first: bool, shown: i32, main: bool
+}
+// A column: its number, kind, name; where it is shown (-1: not).
+component Cn { index: i32, kind: text, name: text, shown: i32 }
+// A cell: row, column, 0 reads 1 writes 2 both, the parts read and written.
+component Ce { row: i32, col: i32, how: i32, reads: text, writes: text }
+// A schedule in the list: its name, how many runs, its row in the list.
+component Sch { name: text, runs: i32, row: i32 }
+buffer RowAt { shown: i32 } capacity 65536
+buffer SchRuns { runs: i32 } capacity 4096
+buffer ColAt { used: i32, shown: i32 } capacity 65536
+
+// The grid: the schedule shown (-1 all), how big a cell is, where the grid
+// is; how many rows and columns are shown; what the pointer is on and the
+// words of it, where.
+unique Grid {
+  sched: i32, cell: f32, ox: f32, oy: f32, rows: i32, cols: i32, dirty: bool,
+  dragging: bool, r: i32, c: i32, words: text, tx: f32, ty: f32, scheds: i32,
+  name: text, at: i32
+}
+
+fn read_colour() -> i32 { 0x4f9de0 }
+fn write_colour() -> i32 { 0xe0a03a }
+fn opaque_colour() -> i32 { 0xe0564f }
+fn kind_band(kind: text) -> i32 {
+  if kind == "unique" { 0xa77be0 }
+  else if kind == "world" { 0x3fb8a8 }
+  else if kind == "relation" { 0xd0c050 }
+  else if kind == "buffer" { 0xc07850 }
+  else { 0x5a6878 }
+}
+fn label_room() -> f32 { 300.0 }
+fn header_room() -> f32 { 150.0 }
+
 // The map read: every line a record (lib/Ent/Transforms/WorldMap.cpp).
 system load_map() {
   if !Map.loaded {
@@ -219,7 +273,37 @@ system load_map() {
         Map.queries += 1
       } else if kind == "schedule" {
         Map.schedules += 1
+      } else if kind == "row" {
+        let schedule = part(line, 2)
+        let first = schedule != schedule_name
+        if first {
+          schedule_name = schedule
+          SchRuns += { runs: 0 }
+          spawn { Sch { name: schedule, runs: 0, row: len(SchRuns) } }
+        }
+        SchRuns[len(SchRuns) - 1].runs += 1
+        spawn {
+          Rw { index: int(part(line, 1)), schedule: schedule, position: int(part(line, 3)),
+               system: part(line, 4), stage: int(part(line, 5)), waits: part(line, 6),
+               why: part(line, 7), place: part(line, 8), opaque: part(line, 9),
+               gpu: part(line, 10) == "1", first: first, shown: -1, main: part(line, 11) == "1" }
+        }
+        RowAt += { shown: -1 }
+        Map.rows += 1
+        if part(line, 11) == "1" { Map.main_rows += 1 }
+      } else if kind == "column" {
+        spawn { Cn { index: int(part(line, 1)), kind: part(line, 2), name: part(line, 3), shown: -1 } }
+        Map.columns += 1
+      } else if kind == "cell" {
+        let how = part(line, 3)
+        spawn {
+          Ce { row: int(part(line, 1)), col: int(part(line, 2)),
+               how: if how == "r" { 0 } else if how == "w" { 1 } else { 2 },
+               reads: part(line, 4), writes: part(line, 5) }
+        }
+        Map.cells += 1
       } else if kind == "lens" {
+        schedule_name = ""
         Map.lens = part(line, 1)
       } else if kind == "state" {
         let arch = int(part(line, 2))
@@ -261,6 +345,9 @@ system load_map() {
     Map.labels = labels
     Shot.file = environment_variable("ENT_MAP_SHOT")
     Shot.arch = environment_variable("ENT_MAP_ARCH")
+    if environment_variable("ENT_MAP_VIEW") == "data" { View.mode = 1 }
+    Grid.sched = -1
+    Grid.dirty = true
     // (And where the pointer is in the picture: ENT_MAP_POINT=x,y.)
     let point = environment_variable("ENT_MAP_POINT")
     let comma = find(point, ",", 0)
@@ -411,7 +498,8 @@ system hover() {
   }
 }
 
-system draw() {
+// The lifecycle: the wave, and the archetypes at the left.
+system draw_wave() {
   let cell = View.cell
   let n = View.n + 2
   let m = n as f32 * cell
@@ -503,13 +591,259 @@ system draw() {
     window::write(a.label + "  ({a.states})", 16.0, y + 3.0, panel() - 24.0, 0, 14.0, 0.0, 0.0, 2, 0, 0xd0d8e0)
   }
 
-  // The top: the program, what its world has, the lens, the colours.
+}
+
+
+// A tab of the views.
+proc tab(name: text, x: f32, on: bool) {
+  rounded(x, 10.0, 122.0, 28.0, 6.0, 6.0, 6.0, 6.0, if on { 0x24405e } else { 0x1a2129 })
+  window::write(name, x, 15.0, 122.0, 0, 14.0, 0.0, 0.0, 2, 1, if on { 0xe2ecf5 } else { 0x9fb0c0 })
+}
+system tabs() {
+  if Mouse.clicks > 0 && Mouse.y >= 10.0 && Mouse.y < 38.0 {
+    let x = Mouse.x - (Window.width as f32 - 330.0)
+    if x >= 0.0 && x < 122.0 { View.mode = 0 }
+    if x >= 130.0 && x < 252.0 { View.mode = 1 }
+  }
+}
+
+// The schedules in the list, in the rows' order (their row is from 1);
+// All above them; how many runs each has.
+system list_schedules() {
+  for c: mut Sch { c.runs = SchRuns[c.row - 1].runs }
+  Grid.scheds = len(SchRuns) + 1
+}
+
+// What is shown worked out again: rows of the schedule, the columns they
+// touch.
+system arrange_grid() {
+  if Grid.dirty {
+    Grid.dirty = false
+    Grid.rows = 0
+    let chosen = Grid.sched
+    let name = Grid.name as text[1024]
+    for r: mut Rw in turn by r.index {
+      if (chosen == -1 && r.main) || (chosen != -1 && r.schedule == name) {
+        r.shown = Grid.rows
+        Grid.rows += 1
+      } else {
+        r.shown = -1
+      }
+      RowAt[r.index].shown = r.shown
+    }
+    ColAt = [{ used: 0, shown: -1 }; Map.columns]
+    for c: Ce in turn by c.row {
+      if RowAt[c.row].shown >= 0 { ColAt[c.col].used = 1 }
+    }
+    Grid.cols = 0
+    for n: mut Cn in turn by n.index {
+      if ColAt[n.index].used == 1 {
+        n.shown = Grid.cols
+        Grid.cols += 1
+      } else {
+        n.shown = -1
+      }
+      ColAt[n.index].shown = n.shown
+    }
+    // (All rows in the window where that leaves them big enough for their
+    // names; else as big as that, and the rest a drag or the wheel away.)
+    let tall = (Window.height as f32 - top() - header_room() - 40.0) / max(Grid.rows, 1) as f32
+    Grid.cell = max(12.0, min(22.0, tall as i32 as f32))
+    Grid.ox = panel() + label_room()
+    Grid.oy = top() + header_room()
+  }
+}
+
+// Clicks in the list, the wheel, dragging.
+system steer_grid() {
+  let mx = Mouse.x
+  let my = Mouse.y
+  if Mouse.clicks > 0 && mx < panel() && my > top() {
+    let row = ((my - top() - 30.0) / row_height()) as i32
+    if row == 0 {
+      Grid.sched = -1
+      Grid.dirty = true
+    }
+    for c: Sch in turn by c.row where c.row == row && row > 0 {
+      Grid.sched = c.row
+      Grid.name = c.name
+      Grid.dirty = true
+    }
+  }
+  if mx > panel() && my > top() {
+    if Mouse.wheel_y != 0.0 {
+      let was = Grid.cell
+      let cell = min(40.0, max(3.0, if Mouse.wheel_y > 0.0 { was * 1.15 } else { was / 1.15 }))
+      Grid.ox = mx - (mx - Grid.ox) * cell / was
+      Grid.oy = my - (my - Grid.oy) * cell / was
+      Grid.cell = cell
+    }
+    if Mouse.clicks > 0 { Grid.dragging = true }
+  }
+  if !Mouse.left { Grid.dragging = false }
+  if Grid.dragging {
+    Grid.ox += Mouse.dx
+    Grid.oy += Mouse.dy
+  }
+}
+
+// What the pointer is on: a row (its run, stage and why it waits), and
+// where on a column, the cell (what of it is read and written).
+system hover_grid() {
+  Grid.words = ""
+  Grid.r = -1
+  Grid.c = -1
+  let px = if Shot.px >= 0.0 { Shot.px } else { Mouse.x }
+  let py = if Shot.px >= 0.0 { Shot.py } else { Mouse.y }
+  if px > panel() && py > top() && !Grid.dragging {
+    let cell = Grid.cell
+    let r = ((py - Grid.oy) / cell) as i32
+    let c = if px >= Grid.ox { ((px - Grid.ox) / cell) as i32 } else { -1 }
+    if py >= Grid.oy && r < Grid.rows {
+      Grid.r = r
+      Grid.c = if c < Grid.cols { c } else { -1 }
+      Grid.tx = px + 16.0
+      Grid.ty = py + 14.0
+      for w: Rw in turn by w.index where w.shown == r {
+        Grid.words = w.system + "  (" + w.schedule + ", run {w.position + 1}, stage {w.stage + 1})" +
+                     (if len(w.place) > 0 { "  " + w.place } else { "" }) + "\n"
+        if len(w.waits) > 0 { Grid.words = Grid.words + "waits for " + w.waits + ": " + w.why + "\n" }
+        if len(w.opaque) > 0 { Grid.words = Grid.words + "effects outside the world at " + w.opaque + "\n" }
+        if w.gpu { Grid.words = Grid.words + "on the GPU\n" }
+      }
+      let column = Grid.c
+      if column >= 0 {
+        Grid.at = -1
+        for n: Cn in turn by n.index where n.shown == column {
+          Grid.words = Grid.words + n.kind + " " + n.name + "\n"
+          Grid.at = n.index
+        }
+        let at = Grid.at
+        for e: Ce in turn by e.row where e.col == at && RowAt[e.row].shown == r {
+          if len(e.reads) > 0 { Grid.words = Grid.words + "reads " + e.reads + "\n" }
+          if len(e.writes) > 0 { Grid.words = Grid.words + "writes " + e.writes + "\n" }
+        }
+      }
+      Grid.words = slice(Grid.words, 0, len(Grid.words) - 1)
+    }
+  }
+}
+
+system draw_grid() {
+  let cell = Grid.cell
+  let ox = Grid.ox
+  let oy = Grid.oy
+  let w = Grid.cols as f32 * cell
+  let h = Grid.rows as f32 * cell
+  clip(panel(), top(), Window.width as f32 - panel(), Window.height as f32 - top())
+  rect(ox, oy, w, h, 0x171d24)
+  // (Lines between the schedules' rows; every row and column a line.)
+  if cell >= 6.0 {
+    var i = 1
+    while i < Grid.cols {
+      rect(ox + i as f32 * cell, oy, 1.0, h, 0x20272f)
+      i += 1
+    }
+    i = 1
+    while i < Grid.rows {
+      rect(ox, oy + i as f32 * cell, w, 1.0, 0x20272f)
+      i += 1
+    }
+  }
+  // Where the pointer is: its row and column.
+  if Grid.r >= 0 { rect(ox - label_room() + 8.0, oy + Grid.r as f32 * cell, w + label_room() - 8.0, cell, 0x26ffffff) }
+  if Grid.c >= 0 { rect(ox + Grid.c as f32 * cell, oy - header_room() + 10.0, cell, h + header_room() - 10.0, 0x26ffffff) }
+  // The cells.
+  let pad = if cell >= 6.0 { 1.0 } else { 0.0 }
+  for e: Ce {
+    let r = RowAt[e.row].shown
+    let c = ColAt[e.col].shown
+    if r >= 0 && c >= 0 {
+      let x = ox + c as f32 * cell + pad
+      let y = oy + r as f32 * cell + pad
+      let s = cell - 2.0 * pad
+      if e.how == 0 { rect(x, y, s, s, read_colour()) }
+      if e.how == 1 { rect(x, y, s, s, write_colour()) }
+      if e.how == 2 {
+        rect(x, y, s * 0.5, s, read_colour())
+        rect(x + s * 0.5, y, s * 0.5, s, write_colour())
+      }
+    }
+  }
+  // The rows: the system, its stage, a dot where it calls out; a line
+  // and the schedule's name where one begins.
+  let size = min(14.0, cell - 1.0)
+  for r: Rw where r.shown >= 0 {
+    let y = oy + r.shown as f32 * cell
+    if r.first {
+      rect(ox - label_room() + 8.0, y, w + label_room() - 8.0, 1.0, 0x55657a)
+      window::write(r.schedule, ox + w + 10.0, y + 1.0, 300.0, 0, 13.0, 0.0, 0.0, 2, 0, 0x7d8a98)
+    }
+    if cell >= 9.0 {
+      let name = short(r.system)
+      let tw = text_extent(name, 0, size, 0.0, 2)
+      window::write(name, ox - tw - 44.0, y + (cell - size) * 0.5, tw + 4.0, 0, size, 0.0, 0.0, 2, 0,
+                    0xc8d4e0)
+      window::write("{r.stage + 1}", ox - 34.0, y + (cell - size) * 0.5, 22.0, 0, size, 0.0, 0.0, 2, 2,
+                    0x7d8a98)
+    }
+    if len(r.opaque) > 0 { circle(ox - 6.0, y + cell * 0.5, max(2.0, cell * 0.22), opaque_colour()) }
+  }
+  // The columns: their names going up to the right, and their kind as a
+  // band over them.
+  for n: Cn where n.shown >= 0 {
+    let x = ox + n.shown as f32 * cell
+    rect(x + 1.0, oy - 6.0, cell - 2.0, 4.0, kind_band(n.kind))
+    if cell >= 9.0 {
+      label_turned(short(n.name), x + cell * 0.5 - size * 0.35, oy - 10.0, size, -45.0, 0xa8b6c4)
+    }
+  }
+  unclip()
+  // The list of schedules.
+  rect(0.0, top(), panel(), Window.height as f32 - top(), 0x141a20)
+  rect(panel() - 1.0, top(), 1.0, Window.height as f32 - top(), 0x26303a)
+  window::write("Schedules", 16.0, top() + 8.0, panel() - 24.0, 0, 13.0, 0.0, 0.0, 2, 0, 0x7d8a98)
+  let first = top() + 30.0
+  if Grid.sched == -1 { rect(0.0, first, panel() - 1.0, row_height(), 0x24405e) }
+  window::write("All main runs ({Map.main_rows})", 16.0, first + 3.0, panel() - 24.0, 0, 14.0, 0.0, 0.0, 2, 0, 0xd0d8e0)
+  for c: Sch where c.row > 0 {
+    let y = first + c.row as f32 * row_height()
+    if c.row == Grid.sched { rect(0.0, y, panel() - 1.0, row_height(), 0x24405e) }
+    window::write(short(c.name) + "  ({c.runs})", 16.0, y + 3.0, panel() - 24.0, 0, 14.0, 0.0, 0.0, 2, 0, 0xd0d8e0)
+  }
+}
+
+// The top: the program, what its world has, the views, what the colours
+// say; and the words of what the pointer is on.
+system draw_top() {
   rect(0.0, 0.0, Window.width as f32, top(), 0x0c1014)
   rect(0.0, top() - 1.0, Window.width as f32, 1.0, 0x26303a)
   window::write("World map of " + Map.program, 16.0, 12.0, Window.width as f32 - 32.0, 0, 18.0, 0.0, 0.0, 2, 0, 0xe2ecf5)
   window::write("{Map.archetypes} archetypes · {Map.components} components, {Map.tags} tags · {Map.resources} uniques · " +
         "{Map.systems} systems ({Map.queries} queries; {Map.opaque} with effects outside the world, {Map.gpu} on the GPU) · " +
         "{Map.schedules} schedules", 16.0, 40.0, Window.width as f32 - 32.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+  // The views, as tabs.
+  tab("Lifecycle", Window.width as f32 - 330.0, View.mode == 0)
+  tab("Systems × data", Window.width as f32 - 200.0, View.mode == 1)
+  if View.mode == 1 {
+    window::write("Systems × data: {Map.main_rows} runs of systems, {Map.columns} components, uniques and the like they touch, " +
+          "{Map.cells} cells · a row's stage: runs of one stage touch nothing another writes", 16.0, 62.0,
+          Window.width as f32 - 480.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+    var x = Window.width as f32 - 470.0
+    rect(x, 64.0, 12.0, 12.0, read_colour())
+    window::write("reads", x + 16.0, 62.0, 60.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+    x += 80.0
+    rect(x, 64.0, 12.0, 12.0, write_colour())
+    window::write("writes", x + 16.0, 62.0, 60.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+    x += 80.0
+    rect(x, 64.0, 6.0, 12.0, read_colour())
+    rect(x + 6.0, 64.0, 6.0, 12.0, write_colour())
+    window::write("both", x + 16.0, 62.0, 60.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+    x += 70.0
+    circle(x + 6.0, 70.0, 5.0, opaque_colour())
+    window::write("effects outside the world", x + 16.0, 62.0, 220.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+  }
+  if View.mode == 0 {
   window::write("Lifecycle: {Map.states} states, {Map.flows} changes in {Map.steps} runs · states tell " +
         (if Map.lens == "*" { "every optional component" } else { Map.lens }), 16.0, 62.0,
         Window.width as f32 - 480.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
@@ -528,12 +862,13 @@ system draw() {
   x += 100.0
   rect(x, 64.0, 12.0, 12.0, 0xa77be0)
   window::write("several", x + 16.0, 62.0, 80.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+  }
   if len(Map.error) > 0 {
     window::write(Map.error, panel() + 24.0, top() + 24.0, 900.0, 0, 16.0, 0.0, 0.0, 2, 0, 0xe0564f)
   }
 
   // The words of the cell the pointer is on.
-  if Hover.k >= 0 {
+  if Hover.k >= 0 && View.mode == 0 {
     let all = (Hover.step_words + "\n" + Hover.from_name + "  ->  " + Hover.to_name + "\n" +
                (if len(Hover.words) > 0 { Hover.words } else { "no change\n" })) as text[4094]
     // (Without the line break at its end.)
@@ -543,6 +878,16 @@ system draw() {
     let h = lines as f32 * 18.0 + 14.0
     let x0 = min(Hover.x, Window.width as f32 - w - 8.0)
     let y0 = min(Hover.y, Window.height as f32 - h - 8.0)
+    rounded(x0, y0, w, h, 6.0, 6.0, 6.0, 6.0, 0xf0222b35)
+    window::write(words, x0 + 10.0, y0 + 7.0, w - 16.0, 0, 14.0, 0.0, 18.0, 1, 0, 0xe2ecf5)
+  }
+  if len(Grid.words) > 0 && View.mode == 1 {
+    let words = Grid.words as text[4094]
+    let w = max(text_extent(words, 0, 14.0, 0.0, 1), 120.0) + 20.0
+    let lines = text_lines(words, w, 0, 14.0, 0.0, 1)
+    let h = lines as f32 * 18.0 + 14.0
+    let x0 = min(Grid.tx, Window.width as f32 - w - 8.0)
+    let y0 = min(Grid.ty, Window.height as f32 - h - 8.0)
     rounded(x0, y0, w, h, 6.0, 6.0, 6.0, 6.0, 0xf0222b35)
     window::write(words, x0 + 10.0, y0 + 7.0, w - 16.0, 0, 14.0, 0.0, 18.0, 1, 0, 0xe2ecf5)
   }
@@ -570,10 +915,17 @@ schedule frame() {
   begin()
   load_map()
   list_archetypes() run_if View.listed == 0 && Map.loaded
+  list_schedules() run_if Grid.scheds == 0 && Map.loaded
+  tabs()
   arrange()
-  steer()
-  hover()
-  draw()
+  arrange_grid()
+  steer() run_if View.mode == 0
+  hover() run_if View.mode == 0
+  steer_grid() run_if View.mode == 1
+  hover_grid() run_if View.mode == 1
+  draw_wave() run_if View.mode == 0
+  draw_grid() run_if View.mode == 1
+  draw_top()
   present()
   shot()
 }
