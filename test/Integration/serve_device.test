@@ -1,0 +1,20 @@
+// The serve device (devices/serve.ent) answering the http device in the
+// same program, over 127.0.0.1 on a port the system picks: methods, a
+// query, bodies (by length and chunked), HEAD, the program's headers and
+// the server's own Content-Length, keep-alive, a port taken, a second
+// server, a server closed (Inputs/serve/answers.ent).
+// RUN: %ent run %S/Inputs/serve/answers.ent | sort | FileCheck %s
+
+// (Sorted: a line "answered twice" would be first, and "many wrong"
+// between "left" and "missing".)
+// CHECK-NOT: answered twice
+// CHECK: chunked 200 [PUT /up abcdefghij] own=true length=true
+// CHECK-NEXT: closed 0 0
+// CHECK-NEXT: get 200 [GET /users?limit=3 ] own=true length=true
+// CHECK-NEXT: head 200 [] own=true length=true
+// CHECK-NEXT: left 0 asked 25
+// CHECK-NEXT: missing 404 [none] own=false length=true
+// CHECK-NEXT: open true port true
+// CHECK-NEXT: other true
+// CHECK-NEXT: post 200 [POST /orders {"item": 7}] own=true length=true
+// CHECK-NEXT: taken 0

@@ -1,0 +1,102 @@
+// The serve device answering the http device, in one program: GET with a
+// query, POST with a body, HEAD (no body), a chunked upload, an error
+// status, headers the program says (Content-Length the server's own),
+// keep-alive (many in a row on few connections), a port taken, a second
+// server, and a server closed.
+import console
+import text
+import http
+import serve
+
+default_capacity 64
+
+component Send { name: text, method: text, path: text, headers: text, body: text }
+component Sent { handle: i64 }
+tag Told
+unique Web { server: i64, session: i64, base: text, asked: i32, left: i32, polls: i32 }
+
+system setup() {
+  Web.server = serve_open("127.0.0.1", 0)
+  Web.session = http_session("serve-test/1", false, 2, 8, false, false, "", "")
+  let port = serve_port(Web.server)
+  Web.base = "http://127.0.0.1:{port}"
+  put("open {Web.server > 0} port {port > 0}")
+  let taken = serve_open("127.0.0.1", port)
+  put("taken {taken}")
+  let other = serve_open("", 0)
+  put("other {other > 0 && other != Web.server && serve_port(other) != port}")
+  serve_close(other)
+  spawn { Send { name: "get", method: "GET", path: "/users?limit=3", headers: "", body: "" } }
+  spawn { Send { name: "post", method: "POST", path: "/orders", headers: "Content-Type: application/json\n", body: "\{\"item\": 7\}" } }
+  spawn { Send { name: "head", method: "HEAD", path: "/users", headers: "", body: "" } }
+  spawn { Send { name: "chunked", method: "PUT", path: "/up", headers: "Transfer-Encoding: chunked\n", body: "abcdefghij" } }
+  spawn { Send { name: "missing", method: "DELETE", path: "/nothing", headers: "", body: "" } }
+  for i in 0..20 { spawn { Send { name: "many", method: "GET", path: "/n/{i}", headers: "", body: "" } } }
+  Web.left = 25
+}
+
+system send() {
+  for e, s: Send without Sent {
+    e.add(Sent { handle: http_start(Web.session, s.method, Web.base + s.path, s.headers, s.body, 5.0, 0, 0) })
+  }
+}
+
+system answer() {
+  var asked = serve_next(Web.server, 0.01)
+  var count = 0
+  while asked != 0 {
+    count += 1
+    let m = serve_method(asked)
+    let t = serve_target(asked)
+    let b = serve_body(asked)
+    if t == "/nothing" {
+      let sent = serve_answer(asked, 404, "Content-Type: text/plain\r\nContent-Length: 999\r\n", "none")
+    } else if find(t, "/n/", 0) == 0 {
+      let sent = serve_answer(asked, 200, "", t)
+    } else {
+      let sent = serve_answer(asked, 200, "X-Got: yes\nContent-Type: text/plain\n", m + " " + t + " " + b)
+    }
+    if serve_answer(asked, 200, "", "") { put("answered twice") }
+    asked = serve_next(Web.server, 0.0)
+  }
+  Web.asked += count
+}
+
+system receive() {
+  let n = http_poll(0.01, Done)
+  Web.polls += 1
+}
+
+system told() {
+  for e, s: Send, h: Sent without Told {
+    let status = http_status(h.handle)
+    if status >= 0 {
+      e.add(Told)
+      Web.left -= 1
+      if s.name != "many" {
+        let headers = http_headers(h.handle)
+        let own = find(headers, "X-Got: yes", 0) >= 0
+        let length = find(headers, "Content-Length: 999", 0) < 0
+        put("{s.name} {status} [{http_body(h.handle)}] own={own} length={length}")
+      } else if http_body(h.handle) != s.path {
+        put("many wrong {s.path}")
+      }
+    }
+  }
+}
+
+system finish_up() {
+  put("left {Web.left} asked {Web.asked}")
+  serve_close(Web.server)
+  put("closed {serve_next(Web.server, 0.0)} {serve_port(Web.server)}")
+}
+
+schedule start() { setup() }
+schedule frame() { send() answer() receive() told() }
+schedule finish() { finish_up() }
+
+main {
+  start()
+  loop { frame() } until Web.left <= 0 || Web.polls > 3000
+  finish()
+}

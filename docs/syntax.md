@@ -56,7 +56,8 @@ A module with an implementation next to its `m.ent` is a device: that
 defines its extern procs and fns (and extern systems), and `tools/ent`
 builds and links it with the program. The compiler's own are in `devices/`
 (`console`, `clock`, `window`, `sound`, `files`, `pictures`, `text`, `http`
-(requests on libcurl, any method: devices/http.ent), `secrets` (texts kept
+(requests on libcurl, any method: devices/http.ent), `serve` (an HTTP/1.1
+server answering requests: devices/serve.ent), `secrets` (texts kept
 in the system's keyring: devices/secrets.ent), `world` (see Saving a
 world below), and `math`, see Math below), found
 without `-I` by `tools/ent`; each says in its `.ent` file how it is used. The

@@ -1,0 +1,58 @@
+// Serve: a small HTTP/1.1 server, for programs that answer requests
+// (a mock of an API, a page of a program's state, a test's server).
+//
+//   import serve
+//   unique Server: i64
+//   world { Server = serve_open("127.0.0.1", 8080) }   // 0: could not
+//   system answer() {
+//     var asked = serve_next(Server, 0.05)   // waits at most 50 ms
+//     while asked != 0 {
+//       if serve_method(asked) == "GET" && serve_target(asked) == "/hello" {
+//         let sent = serve_answer(asked, 200, "Content-Type: text/plain\r\n", "hi\n")
+//       } else {
+//         let sent = serve_answer(asked, 404, "", "")
+//       }
+//       asked = serve_next(Server, 0.0)
+//     }
+//   }
+//
+// A request asked is handed to the program whole (its line, headers and
+// body read), by a handle, until the program answers it; a connection
+// asks its next request only after the last is answered (HTTP/1.1
+// keep-alive, as clients use it). Bodies come with a Content-Length, or
+// chunked; the answer's Content-Length is the server's to say. Procs, on
+// the program's thread: `serve_next` reads, accepts and writes while it
+// waits.
+//
+// Implemented in devices/serve.c (sockets and poll; not on Windows yet:
+// there `serve_open` gives 0).
+import text
+
+// Listens on `address` ("127.0.0.1": this machine alone; "0.0.0.0": all
+// of its addresses) at `port` (0: one the system picks: `serve_port`
+// says which). Gives the server's number, 0 where it could not (the port
+// taken, say).
+extern proc serve_open(address: text, port: i32) -> i64
+// The port a server listens on.
+extern proc serve_port(server: i64) -> i32
+// The next request asked of a server, waiting for one at most `wait`
+// seconds: its handle, 0 where none came.
+extern proc serve_next(server: i64, wait: f64) -> i64
+
+// Of a request asked, by its handle: its method ("GET", ...), its target
+// as sent ("/users?limit=3"), its headers ("Name: value" lines, each
+// ended by "\r\n") and its body.
+extern proc serve_method(asked: i64) -> text
+extern proc serve_target(asked: i64) -> text
+extern proc serve_headers(asked: i64) -> text
+extern proc serve_body(asked: i64) -> text
+
+// Answers a request: `status`, `headers` ("Name: value" lines, each
+// ended by "\r\n" or "\n"; Content-Length and Connection are the
+// server's own, left out of them), `body` (none to HEAD). False where the
+// request is not one waiting for an answer (answered already, or its
+// client gone).
+extern proc serve_answer(asked: i64, status: i32, headers: text, body: text) -> bool
+
+// Stops listening, and closes the server's connections.
+extern proc serve_close(server: i64)
