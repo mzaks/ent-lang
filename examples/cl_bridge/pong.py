@@ -23,6 +23,13 @@ conditions:
               (modulated=1, reward_channel=REWARD, punish_channel=PUNISH,
               unless given): channels no CL1 has, for whether the model
               could learn the game were it told how it did
+    moves     as `reward`, but the pulses are for the paddle's moves, not
+              hits and misses: every MOVE_S, towards the ball's height
+              (1) or away from it (0), less the running share of moves
+              towards it; none where the paddle did not move
+    shuffled  as `moves`, but each judged move's outcome a coin flip (its
+              own generator, so the ball's paths are those of `moves`): a
+              control for what the pulses do whatever they say
 
 columns: the second layout (below), where the stims' direct answers in
 the motor regions do not play the game.
@@ -94,6 +101,7 @@ HIT_HZ, HIT_S = 100, 0.1     # the predictable feedback
 MISS_HZ, MISS_S = 5, 4.0     # the unpredictable one, and the pause
 EARLY_S = 5 * 60             # DishBrain's first 5 minutes, against the rest
 RPE_RATE = 0.05              # how fast `reward`'s expected share of hits follows
+MOVE_S = 0.1                 # `moves`: how often a move is judged
 
 SENSORY = [26, 27, 28, 29, 37, 36, 35, 34]
 UP = list(range(0, 24))
@@ -106,7 +114,7 @@ LAYOUTS = {
                 [r * 8 + c for r in range(8) for c in (0, 1)],
                 [r * 8 + c for r in range(8) for c in (6, 7)], 28, 36),
 }
-CONDITIONS = ("stim", "silent", "none", "rest", "reward")
+CONDITIONS = ("stim", "silent", "none", "rest", "reward", "moves", "shuffled")
 
 
 class Pong:
@@ -138,6 +146,10 @@ class Pong:
         self.at_top = self.at_bottom = self.ticks = 0
         self.up_spikes = self.down_spikes = 0
         self.expect = 0.5                # `reward`: the share of hits expected
+        self.expect_move = 0.5           # `moves`: the share of moves towards the ball
+        self.judged_at, self.judged_paddle = 0.0, self.paddle
+        self.moves_towards = self.moves_judged = 0
+        self.coin = random.Random(seed * 104729 + 7)   # `shuffled`
         self.doses: dict[int, float] = {}   # this tick's stims not of 1 uA
         self.serve()
 
@@ -158,11 +170,16 @@ class Pong:
             pick = channels() if callable(channels) else channels
             self.feedback.append((self.t + k / hz, pick))
 
-    def outcome(self, got: float, out: list[int]) -> None:
-        """`reward`: the pulse of a hit (got 1) or a miss (0), the reward
-        less what was expected."""
-        err = got - self.expect
-        self.expect += RPE_RATE * err
+    def outcome(self, got: float, out: list[int], move: bool = False) -> None:
+        """`reward`: the pulse of a hit (got 1) or a miss (0); `moves`: of
+        a move towards the ball (1) or away (0); the reward less what was
+        expected."""
+        if move:
+            err = got - self.expect_move
+            self.expect_move += RPE_RATE * err
+        else:
+            err = got - self.expect
+            self.expect += RPE_RATE * err
         if err != 0.0:
             channel = self.reward if err > 0 else self.punish
             out.append(channel)
@@ -189,6 +206,18 @@ class Pong:
         if big > 0 and abs(self.up - self.down) > DEAD_ZONE * big:
             step = PADDLE_SPEED * dt * (1 if self.down > self.up else -1)
             self.paddle = min(max(self.paddle + step, PADDLE / 2), 1 - PADDLE / 2)
+        if self.condition in ("moves", "shuffled") and self.t >= self.judged_at + MOVE_S - 1e-9:
+            moved = self.paddle - self.judged_paddle
+            if abs(moved) > 1e-9:
+                towards = (moved > 0) == (self.y > self.judged_paddle)
+                self.moves_judged += 1
+                self.moves_towards += towards
+                if self.condition == "shuffled":
+                    towards_said = self.coin.random() < 0.5
+                else:
+                    towards_said = towards
+                self.outcome(1.0 if towards_said else 0.0, out, move=True)
+            self.judged_at, self.judged_paddle = self.t, self.paddle
         # The ball.
         self.x += self.vx * dt
         self.y += self.vy * dt
@@ -249,7 +278,7 @@ def play(minutes: float, seed: int, condition: str, flip: bool = False,
     game = Pong(condition, seed, flip, layout)
     up_set, down_set = set(game.up_channels), set(game.down_channels)
     dish = dict(parameters)
-    if condition == "reward":
+    if condition in ("reward", "moves", "shuffled"):
         dish = {"modulated": 1, "reward_channel": game.reward, "punish_channel": game.punish, **dish}
     ent_dish.use(seed=seed, **dish)
     with cl.open() as neurons:
@@ -270,7 +299,8 @@ def play(minutes: float, seed: int, condition: str, flip: bool = False,
             "parameters": parameters, **summary(game.rallies),
             "paddle_top": game.at_top / game.ticks, "paddle_bottom": game.at_bottom / game.ticks,
             "up_hz": game.up_spikes / (minutes * 60), "down_hz": game.down_spikes / (minutes * 60),
-            "rallies": game.rallies, "layout": layout}
+            "rallies": game.rallies, "layout": layout,
+            "moves_towards": game.moves_towards / max(1, game.moves_judged)}
 
 
 def main() -> int:

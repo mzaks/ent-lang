@@ -5,8 +5,11 @@ sensory map as it is and upside down, on seeds 1 to `seeds`, each a
 session of `minutes`, a process each.
 
     build/cl_bridge/venv/bin/python examples/cl_bridge/learn_study.py \\
-        [minutes [seeds [gains [out.json [columns] [name=value ...]]]]]
+        [minutes [seeds [gains [out.json [columns] [moves|shuffled] [name=value ...]]]]]
 
+moves: pong.py's `moves` condition (a pulse for each paddle move towards
+the ball or away) instead of `reward` (for hits and misses); shuffled:
+its control, each move's outcome a coin flip.
 columns: pong.py's second layout, where the stims' direct answers do not
 play the game. gains: comma-separated, e.g. 0,0.3,3 (0: the same game and dish, nothing
 learnt: the control). name=value: more of the dish's parameters, for all.
@@ -31,10 +34,10 @@ WINDOW = 5 * 60   # s
 
 
 def run(job):
-    minutes, seed, gain, flip, layout, extra = job
+    minutes, seed, gain, flip, layout, condition, extra = job
     os.environ["OMP_NUM_THREADS"] = "1"
     import pong
-    out = pong.play(minutes, seed, "reward", flip, layout, reward_gain=gain, **extra)
+    out = pong.play(minutes, seed, condition, flip, layout, reward_gain=gain, **extra)
     out["gain"], out["seed"] = gain, seed
     return out
 
@@ -59,8 +62,9 @@ def main() -> int:
     gains = [float(g) for g in (sys.argv[3] if len(sys.argv) > 3 else "0,0.3,3,30").split(",")]
     out = sys.argv[4] if len(sys.argv) > 4 else None
     layout = "columns" if "columns" in sys.argv[5:] else "rows"
+    condition = next((c for c in ("moves", "shuffled") if c in sys.argv[5:]), "reward")
     extra = {k: float(v) for k, v in (a.split("=", 1) for a in sys.argv[5:] if "=" in a)}
-    jobs = [(minutes, s, g, f, layout, extra) for f in (False, True) for g in gains
+    jobs = [(minutes, s, g, f, layout, condition, extra) for f in (False, True) for g in gains
             for s in range(1, seeds + 1)]
     with ProcessPoolExecutor(min(len(jobs), 22)) as pool:
         results = list(pool.map(run, jobs))
@@ -68,7 +72,7 @@ def main() -> int:
         with open(out, "w") as f:
             json.dump(results, f)
     by = {(r["flip"], r["gain"], r["seed"]): r for r in results}
-    print(f"{minutes:g} minutes, seeds 1 to {seeds}, layout {layout}, {extra or 'defaults'}; "
+    print(f"{minutes:g} minutes, seeds 1 to {seeds}, {condition}, layout {layout}, {extra or 'defaults'}; "
           f"hits a rally by {WINDOW // 60}-minute window, mean over seeds")
     for flip in (False, True):
         for g in gains:
@@ -78,9 +82,11 @@ def main() -> int:
             base = [windows(by[(flip, gains[0], s)]["rallies"], minutes)[-1] for s in range(1, seeds + 1)]
             m, se = mean_se([w[-1] - b for w, b in zip(ws, base)])
             hz = sum(r["up_hz"] + r["down_hz"] for r in rs) / len(rs)
+            towards = sum(r["moves_towards"] for r in rs) / len(rs)
             print(f"  {'flip' if flip else 'as is':>5} gain {g:<6g} "
                   + " ".join(f"{c:5.2f}" for c in cols)
-                  + f"   last less gain {gains[0]:g}: {m:+.2f} ± {se:.2f}   motor {hz:6.0f} Hz")
+                  + f"   last less gain {gains[0]:g}: {m:+.2f} ± {se:.2f}   motor {hz:6.0f} Hz"
+                  + (f"   moves towards {towards:.3f}" if condition != "reward" else ""))
     return 0
 
 

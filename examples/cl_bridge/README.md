@@ -689,14 +689,49 @@ synapses that mattered is a small part of all there is when the pulse
 comes; and the stims' direct answers, which no weight changes, stay most
 of what the motor regions hear (about 1 spike against 0.1-0.2 through
 the synapses, 100 ms after a stim). A task with the reward right after
-the answer, a closer reward (each paddle move, say), or a dish whose
-stims reach less of it directly might do better; nothing here says.
+the answer, a closer reward, or a dish whose stims reach less of it
+directly might do better.
+
+**A reward for each move.** pong.py's `moves` condition brings the
+reward closer: every 100 ms in which the paddle moved, a move towards
+the ball's height counts 1 and one away 0, and the pulse is that less
+the running share of moves towards it (the same prediction error, on
+the same reward and punish channels); hits and misses get nothing.
+`shuffled` is its control: the same pulses at the same times, but each
+move's outcome a coin flip, so the reward says nothing about the move.
+A screen on seeds 1 to 4 (as is and flipped) put eligibility at 200 ms
+and gain 1 ahead of 1 s and of gain 3. Then 20 minutes on seeds 1 to 8,
+the columns layout, `tau_elig=200`, hits a rally by 5-minute window:
+
+| | 0-5 | 5-10 | 10-15 | 15-20 | moves towards the ball |
+|---|---|---|---|---|---|
+| gain 0 | 0.42 | 0.48 | 0.45 | 0.48 | 0.516 |
+| `moves`, gain 1 | 0.52 | 0.58 | 0.58 | 0.50 | 0.548 |
+| `shuffled`, gain 1 | 0.42 | 0.47 | 0.37 | 0.39 | 0.520 |
+| flipped, gain 0 | 0.40 | 0.41 | 0.38 | 0.39 | 0.516 |
+| flipped, `moves`, gain 1 | 0.46 | 0.45 | 0.58 | 0.54 | 0.547 |
+| flipped, `shuffled`, gain 1 | 0.42 | 0.37 | 0.43 | 0.39 | 0.515 |
+
+Seed by seed, the 16 pairs pooled over as is and flipped:
+
+| | moves towards the ball | hits, last 5 minutes |
+|---|---|---|
+| `moves` less gain 0 | +0.032 ± 0.005, 16 of 16 above | +0.08 ± 0.05, 10 of 16 |
+| `shuffled` less gain 0 | +0.001 ± 0.002, 11 of 16 | −0.05 ± 0.03, 5 of 16 |
+| `moves` less `shuffled` | +0.030 ± 0.005, 16 of 16 | +0.13 ± 0.04, 12 of 16 |
+
+So the dish learns what it is told: a small lean towards the ball, in
+every pair, and not from the pulses alone, since the shuffled ones leave
+it where it was. Whether that wins more hits is not settled: above
+`shuffled`, yes (but `shuffled` itself may cost a little), above gain 0
+not by more than the noise of 8 seeds. A lean of 3 moves in 100 is small
+against a paddle that mostly follows the stims' direct answers.
 
 ```sh
 build/cl_bridge/venv/bin/python examples/cl_bridge/conditioning.py \
     bias|map|rpe [minutes [gains [seeds [name=value ...]]]]
 build/cl_bridge/venv/bin/python examples/cl_bridge/learn_study.py \
-    [minutes [seeds [gains [out.json [columns] [name=value ...]]]]]
+    [minutes [seeds [gains [out.json [columns] [moves|shuffled] [name=value ...]]]]]
 ```
 
 A `conditioning.py` run of 3 gains on 8 seeds (20 minutes each) takes
