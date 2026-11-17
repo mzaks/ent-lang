@@ -32,6 +32,9 @@ typedef struct {
   float a_plus, a_minus, tau_plus, tau_minus;
   float noise_rate, noise_amp, stim_gain, stim_reach;
   float adapt_inc, tau_adapt, reach_cut;
+  float depress, tau_recover, hear_reach, tau_syn;
+  float home_rate, tau_home, home_gain;
+  float axon, fast, conduct;
 } dish_params;
 typedef struct dish dish;
 

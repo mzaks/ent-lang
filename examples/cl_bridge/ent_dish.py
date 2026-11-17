@@ -42,12 +42,15 @@ from pathlib import Path
 
 import numpy as np
 
-from cl.sim import (
-    DataSourceBatch,
-    DataSourceSpike,
-    SimulatorDataSource,
-    SimulatorDataSourceMetadata,
-)
+try:
+    from cl.sim import (
+        DataSourceBatch,
+        DataSourceSpike,
+        SimulatorDataSource,
+        SimulatorDataSourceMetadata,
+    )
+except ImportError:          # (no CL SDK: Dish alone, without use())
+    SimulatorDataSource = None
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
@@ -75,6 +78,12 @@ class DishParams(ctypes.Structure):
         ("stim_gain", ctypes.c_float), ("stim_reach", ctypes.c_float),
         ("adapt_inc", ctypes.c_float), ("tau_adapt", ctypes.c_float),
         ("reach_cut", ctypes.c_float),
+        ("depress", ctypes.c_float), ("tau_recover", ctypes.c_float),
+        ("hear_reach", ctypes.c_float), ("tau_syn", ctypes.c_float),
+        ("home_rate", ctypes.c_float), ("tau_home", ctypes.c_float),
+        ("home_gain", ctypes.c_float),
+        ("axon", ctypes.c_float), ("fast", ctypes.c_float),
+        ("conduct", ctypes.c_float),
     ]
 
 
@@ -201,69 +210,70 @@ def use(library: str | None = None, **parameters) -> dict:
     return attributes_of(resolved)
 
 
-METADATA = SimulatorDataSourceMetadata(
-    channel_count=CHANNELS,
-    duration_frames=None,
-    seekable=False,
-    supports_accelerated=True,
-)
+if SimulatorDataSource is not None:
+    METADATA = SimulatorDataSourceMetadata(
+        channel_count=CHANNELS,
+        duration_frames=None,
+        seekable=False,
+        supports_accelerated=True,
+    )
 
 
-class DishSource(SimulatorDataSource):
-    def __init__(self, library: str | None = None, stim_unit_nC: float = STIM_UNIT_NC,
-                 **parameters):
-        self._library = library
-        self._stim_unit = stim_unit_nC
-        self._parameters = parameters
-        self._dish: Dish | None = None
+    class DishSource(SimulatorDataSource):
+        def __init__(self, library: str | None = None, stim_unit_nC: float = STIM_UNIT_NC,
+                     **parameters):
+            self._library = library
+            self._stim_unit = stim_unit_nC
+            self._parameters = parameters
+            self._dish: Dish | None = None
 
-    @property
-    def metadata(self) -> SimulatorDataSourceMetadata:
-        return METADATA
+        @property
+        def metadata(self) -> SimulatorDataSourceMetadata:
+            return METADATA
 
-    def open(self) -> None:
-        self._dish = Dish(self._library, **self._parameters)
-        self._stims: list[tuple[int, int, float]] = []   # (step, channel, amount)
-        self._pending: list[DataSourceSpike] = []
+        def open(self) -> None:
+            self._dish = Dish(self._library, **self._parameters)
+            self._stims: list[tuple[int, int, float]] = []   # (step, channel, amount)
+            self._pending: list[DataSourceSpike] = []
 
-    def close(self) -> None:
-        if self._dish is not None:
-            self._dish.close()
-            self._dish = None
+        def close(self) -> None:
+            if self._dish is not None:
+                self._dish.close()
+                self._dish = None
 
-    def on_stim(self, stim) -> None:
-        charge = sum(abs(current) * width for current, width
-                     in zip(stim.phase_currents_uA, stim.phase_durations_us)) / 1000.0
-        if charge <= 0.0:
-            return
-        # The first step that starts at or after it, not one run already.
-        step = max(-(-stim.timestamp // FRAMES_PER_STEP), self._dish.tick)
-        self._stims.append((step, stim.channel, charge / self._stim_unit))
+        def on_stim(self, stim) -> None:
+            charge = sum(abs(current) * width for current, width
+                         in zip(stim.phase_currents_uA, stim.phase_durations_us)) / 1000.0
+            if charge <= 0.0:
+                return
+            # The first step that starts at or after it, not one run already.
+            step = max(-(-stim.timestamp // FRAMES_PER_STEP), self._dish.tick)
+            self._stims.append((step, stim.channel, charge / self._stim_unit))
 
-    def read(self, from_timestamp: int, frame_count: int) -> DataSourceBatch:
-        dish = self._dish
-        to = from_timestamp + frame_count
-        # Every step whose spikes may fall before `to`.
-        last = (to - 1 - SPIKE_OFFSET) // FRAMES_PER_STEP
-        self._stims.sort()
-        while dish.tick <= last:
-            # Up to the next stim, then it.
-            while self._stims and self._stims[0][0] <= dish.tick:
-                _, channel, amount = self._stims.pop(0)
-                dish.stimulate(channel, amount)
-            until = last + 1
-            if self._stims:
-                until = min(until, self._stims[0][0])
-            for step, channel in dish.step(until - dish.tick):
-                self._pending.append(DataSourceSpike(
-                    timestamp=step * FRAMES_PER_STEP + SPIKE_OFFSET, channel=channel))
-        out = [s for s in self._pending if s.timestamp < to]
-        self._pending = [s for s in self._pending if s.timestamp >= to]
-        # (A spike from before this read: there is none when reads follow
-        # one another, as for a source that is not seekable.)
-        out = [s for s in out if s.timestamp >= from_timestamp]
-        return DataSourceBatch(frames=None, spikes=out)
+        def read(self, from_timestamp: int, frame_count: int) -> DataSourceBatch:
+            dish = self._dish
+            to = from_timestamp + frame_count
+            # Every step whose spikes may fall before `to`.
+            last = (to - 1 - SPIKE_OFFSET) // FRAMES_PER_STEP
+            self._stims.sort()
+            while dish.tick <= last:
+                # Up to the next stim, then it.
+                while self._stims and self._stims[0][0] <= dish.tick:
+                    _, channel, amount = self._stims.pop(0)
+                    dish.stimulate(channel, amount)
+                until = last + 1
+                if self._stims:
+                    until = min(until, self._stims[0][0])
+                for step, channel in dish.step(until - dish.tick):
+                    self._pending.append(DataSourceSpike(
+                        timestamp=step * FRAMES_PER_STEP + SPIKE_OFFSET, channel=channel))
+            out = [s for s in self._pending if s.timestamp < to]
+            self._pending = [s for s in self._pending if s.timestamp >= to]
+            # (A spike from before this read: there is none when reads follow
+            # one another, as for a source that is not seekable.)
+            out = [s for s in out if s.timestamp >= from_timestamp]
+            return DataSourceBatch(frames=None, spikes=out)
 
 
-def make_source(**config) -> DishSource:
-    return DishSource(**config)
+    def make_source(**config) -> DishSource:
+        return DishSource(**config)

@@ -46,6 +46,9 @@ typedef struct {
   float a_plus, a_minus, tau_plus, tau_minus;
   float noise_rate, noise_amp, stim_gain, stim_reach;
   float adapt_inc, tau_adapt, reach_cut;
+  float depress, tau_recover, hear_reach, tau_syn;
+  float home_rate, tau_home, home_gain;
+  float axon, fast, conduct;
 } dish_params;
 
 typedef struct {
@@ -83,6 +86,16 @@ void dish_defaults(dish_params *p) {
   p->adapt_inc = *ent_Dish_adapt_inc(w);
   p->tau_adapt = *ent_Dish_tau_adapt(w);
   p->reach_cut = *ent_Dish_reach_cut(w);
+  p->depress = *ent_Dish_depress(w);
+  p->tau_recover = *ent_Dish_tau_recover(w);
+  p->hear_reach = *ent_Dish_hear_reach(w);
+  p->tau_syn = *ent_Dish_tau_syn(w);
+  p->home_rate = *ent_Dish_home_rate(w);
+  p->tau_home = *ent_Dish_tau_home(w);
+  p->home_gain = *ent_Dish_home_gain(w);
+  p->axon = *ent_Dish_axon(w);
+  p->fast = *ent_Dish_fast(w);
+  p->conduct = *ent_Dish_conduct(w);
   ent_world_destroy(w);
 }
 
@@ -132,6 +145,16 @@ dish *dish_create(const dish_params *p) {
   *ent_Dish_adapt_inc(w) = p->adapt_inc;
   *ent_Dish_tau_adapt(w) = p->tau_adapt;
   *ent_Dish_reach_cut(w) = p->reach_cut;
+  *ent_Dish_depress(w) = p->depress;
+  *ent_Dish_tau_recover(w) = p->tau_recover;
+  *ent_Dish_hear_reach(w) = p->hear_reach;
+  *ent_Dish_tau_syn(w) = p->tau_syn;
+  *ent_Dish_home_rate(w) = p->home_rate;
+  *ent_Dish_tau_home(w) = p->tau_home;
+  *ent_Dish_home_gain(w) = p->home_gain;
+  *ent_Dish_axon(w) = p->axon;
+  *ent_Dish_fast(w) = p->fast;
+  *ent_Dish_conduct(w) = p->conduct;
   ent_create(w);
   return d;
 }

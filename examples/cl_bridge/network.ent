@@ -1,18 +1,22 @@
 // A simulated "dish": adapting leaky integrate-and-fire neurons on a square, wired
-// at random by distance, about one in five inhibitory, with trace-based
-// STDP on the excitatory synapses, background noise, and 64 electrodes on
-// an 8 x 8 grid over the same square that record spikes and stimulate.
-// A simplified model, not a validated model of a biological culture.
+// at random by distance, about one in five inhibitory, with fast and slow
+// synaptic currents, short-term depression, trace-based STDP with soft
+// bounds and synaptic scaling on the excitatory synapses, background noise,
+// and 64 electrodes on an 8 x 8 grid over the same square that record
+// spikes and stimulate; a stim excites the neurons whose axons pass near
+// the electrode. A simplified model, not a validated model of a biological
+// culture: its defaults are fitted to a dozen statistics of recordings of
+// cortical cultures (culture/, README.md), nothing more.
 //
 // The host (bridge.c, or run.ent for the program on its own) sets the
 // parameters in `Dish` and runs `create`, then `step` once a millisecond
 // of the dish's time: 25 frames at 25 kHz. Each step leaves its spikes on
-// the electrodes: an electrode's `count` is how many of the neurons
-// nearest it fired in that step (a C host reads the column; a buffer it
-// could only be handed through an extern proc). A stim adds to an
-// electrode's `stim`, which the
-// neurons nearest it take in at the next step, scaled by their distance
-// from it.
+// the electrodes: an electrode's `count` is how many of the neurons it
+// hears (within `hear_reach` of it) fired in that step (a C host reads the
+// column; a buffer it could only be handed through an extern proc). A stim
+// adds to an electrode's `stim`, which each neuron whose axon passes near
+// it takes in, scaled by the distance from the axon, as many steps later
+// as a spike takes from there along the axon to the neuron.
 //
 // Everything is drawn from the seed: where the neurons are, which are
 // inhibitory, the synapses, the noise of every neuron at every step (by
@@ -41,21 +45,31 @@ unique Dish {
   w_inh: f32,        // an inhibitory synapse's weight (fixed)
   w_max: f32,        // an excitatory weight is kept in [0, w_max]
   stdp: bool,        // whether the excitatory weights learn
-  a_plus: f32,       // a spike after a presynaptic one strengthens by a_plus * trace
-  a_minus: f32,      // one before it weakens by a_minus * trace
+  a_plus: f32,       // a spike after a presynaptic one strengthens by a_plus * trace * (w_max - w)
+  a_minus: f32,      // one before it weakens by a_minus * trace * w
   tau_plus: f32,     // the presynaptic trace's time constant
   tau_minus: f32,    // the postsynaptic trace's
   noise_rate: f32,   // the chance of a kick of noise, a neuron a step
   noise_amp: f32,    // its size
-  stim_gain: f32,    // a stim's current into a neuron at its electrode, per unit of stim
-  stim_reach: f32,   // the distance over which that falls by e
+  stim_gain: f32,    // a stim's current into a neuron its axon passes through the electrode, per unit of stim
+  stim_reach: f32,   // the distance (electrode to axon) over which that falls by e
+  axon: f32,         // the length of a neuron's axon, straight from it in a direction drawn
+  conduct: f32,      // how fast a spike runs along an axon (lengths a step): a stim reaches the soma that much later
+  depress: f32,      // short-term depression: the share of a neuron's synaptic resources a spike uses (0: none)
+  tau_recover: f32,  // the time constant of their recovery
+  hear_reach: f32,   // an electrode hears the neurons this near it (of those whose electrode it is)
+  tau_syn: f32,      // what came in along the synapses fades with this time constant (0: at once)
+  fast: f32,         // and as much again times this acts at once (fast synapses beside the slow)
+  home_rate: f32,    // homeostasis: the rate (Hz) a neuron scales its excitatory synapses towards
+  tau_home: f32,     // the time constant of the rate it holds against that
+  home_gain: f32,    // how fast it scales them (0: not at all), with STDP
   tick: i32,         // the steps run
   spikes: i64,       // the spikes so far
   check: u64         // the checksum, after `checksum`
 }
 
 // Per step, worked out from Dish when the dish is made.
-unique Decay { v: f32, plus: f32, minus: f32, adapt: f32 }
+unique Decay { v: f32, plus: f32, minus: f32, adapt: f32, recover: f32, syn: f32, home: f32 }
 
 component Neuron {
   v: f32, input: f32, fired: f32,
@@ -65,15 +79,28 @@ component Neuron {
   post: f32,         // the postsynaptic trace (STDP)
   rest: f32,         // steps of refractoriness left
   adapt: f32,        // the adaptation: what each spike leaves, fading
-  gain: f32,         // how much of its electrode's stim it takes
+  rate: f32,         // its firing rate (spikes a step), averaged over tau_home
+  syn: f32,          // the synaptic current: what came in, fading with tau_syn
+  ready: f32,        // its synaptic resources, from 0 to 1: what a spike of it carries
+  heard: f32,        // 1 where its electrode hears it, else 0
   number: i32, channel: i32, pad: entity
 }
 // Where a neuron is: x and y from 0 to 1.
 component Spot { x: f32, y: f32 } capacity 65536
 // Where a neuron's synapses are listed in Wires, while the dish is made.
 component Out { first: i32, count: i32 }
+// The four electrodes nearest a neuron's axon and how much of their stims
+// it takes (a stim excites the neurons whose axons pass near it, not only
+// those beside it).
+component Takes {
+  a: entity, b: entity, c: entity, d: entity,
+  ga: f32, gb: f32, gc: f32, gd: f32,
+  da: f32, db: f32, dc: f32, dd: f32,  // the steps from each to the soma
+  pending: f32,                        // what is on its way to the soma
+  due: f32                             // the steps until it is there
+}
 component Electrode { channel: i32, x: f32, y: f32, stim: f32, count: i32 }
-archetype Cell { Neuron, Spot, Out } capacity 65536
+archetype Cell { Neuron, Spot, Out, Takes } capacity 65536
 archetype Pad { Electrode } capacity 64
 
 // plastic: 1 where the source is excitatory (the weight learns), else 0.
@@ -95,23 +122,33 @@ world {
   Dish.tau = 20.0
   Dish.thr = 1.0
   Dish.refractory = 2.0
-  Dish.adapt_inc = 0.1
-  Dish.tau_adapt = 200.0
+  Dish.adapt_inc = 0.0682
+  Dish.tau_adapt = 66.8
   Dish.density = 0.3
   Dish.reach = 0.2
   Dish.reach_cut = 8.0
-  Dish.w_exc = 0.09
-  Dish.w_inh = 0.35
-  Dish.w_max = 0.2
+  Dish.w_exc = 0.00194
+  Dish.w_inh = 0.0295
+  Dish.w_max = 0.00605
   Dish.stdp = true
-  Dish.a_plus = 0.005
-  Dish.a_minus = 0.006
+  Dish.a_plus = 0.002
+  Dish.a_minus = 0.002
   Dish.tau_plus = 20.0
   Dish.tau_minus = 20.0
-  Dish.noise_rate = 0.02
-  Dish.noise_amp = 0.5
-  Dish.stim_gain = 2.0
-  Dish.stim_reach = 0.05
+  Dish.noise_rate = 0.00532
+  Dish.noise_amp = 0.51
+  Dish.stim_gain = 8.16
+  Dish.stim_reach = 0.0646
+  Dish.axon = 0.274
+  Dish.conduct = 0.0552
+  Dish.depress = 0.231
+  Dish.tau_recover = 1070.0
+  Dish.hear_reach = 0.03
+  Dish.tau_syn = 270.0
+  Dish.fast = 47.8
+  Dish.home_rate = 1.33
+  Dish.tau_home = 60000.0
+  Dish.home_gain = 0.0859
 }
 
 // SplitMix64's mix: whole-number multiplies that keep the low bits, so a
@@ -131,10 +168,14 @@ fn draw(key: u64, n: i64) -> f32 {
 
 system make() {
   let key = mix(Dish.seed as u64)
+  let axons = mix(key ^ 0xa705)
   Decay.v = exp(-1.0 / Dish.tau)
   Decay.plus = exp(-1.0 / Dish.tau_plus)
   Decay.minus = exp(-1.0 / Dish.tau_minus)
   Decay.adapt = exp(-1.0 / Dish.tau_adapt)
+  Decay.recover = 1.0 - exp(-1.0 / Dish.tau_recover)
+  Decay.home = exp(-1.0 / Dish.tau_home)
+  Decay.syn = if Dish.tau_syn > 0.0 { exp(-1.0 / Dish.tau_syn) } else { 0.0 }
   Pads = []
   for c in 0..64 {
     let x = ((c % 8) as f32 + 0.5) / 8.0
@@ -151,13 +192,80 @@ system make() {
     let c = row * 8 + col
     let dx = x - ((col as f32) + 0.5) / 8.0
     let dy = y - ((row as f32) + 0.5) / 8.0
-    let gain = exp(-sqrt(dx * dx + dy * dy) / Dish.stim_reach)
+    let d = sqrt(dx * dx + dy * dy)
+    // The axon, and the four electrodes nearest it, nearest first.
+    let angle = 6.2831855 * draw(axons, i as i64)
+    let ax = Dish.axon * cos(angle)
+    let ay = Dish.axon * sin(angle)
+    var d0 = 9.0
+    var d1 = 9.0
+    var d2 = 9.0
+    var d3 = 9.0
+    var c0 = 0
+    var l0 = 0.0
+    var c1 = 0
+    var l1 = 0.0
+    var c2 = 0
+    var l2 = 0.0
+    var c3 = 0
+    var l3 = 0.0
+    for e in 0..64 {
+      let ex = ((e % 8) as f32 + 0.5) / 8.0 - x
+      let ey = ((e / 8) as f32 + 0.5) / 8.0 - y
+      let along = if Dish.axon > 0.0 { clamp((ex * ax + ey * ay) / (Dish.axon * Dish.axon), 0.0, 1.0) } else { 0.0 }
+      let fx = ex - along * ax
+      let fy = ey - along * ay
+      let de = sqrt(fx * fx + fy * fy)
+      let le = along * Dish.axon
+      if de < d0 {
+        d3 = d2
+        c3 = c2
+        l3 = l2
+        d2 = d1
+        c2 = c1
+        l2 = l1
+        d1 = d0
+        c1 = c0
+        l1 = l0
+        d0 = de
+        c0 = e
+        l0 = le
+      } else if de < d1 {
+        d3 = d2
+        c3 = c2
+        l3 = l2
+        d2 = d1
+        c2 = c1
+        l2 = l1
+        d1 = de
+        c1 = e
+        l1 = le
+      } else if de < d2 {
+        d3 = d2
+        c3 = c2
+        l3 = l2
+        d2 = de
+        c2 = e
+        l2 = le
+      } else if de < d3 {
+        d3 = de
+        c3 = e
+        l3 = le
+      }
+    }
     spawn {
       Neuron { v: 0.0, input: 0.0, fired: 0.0, sign: if inhibitory { -1.0 } else { 1.0 }, out: 0.0,
-               trace: 0.0, post: 0.0, rest: 0.0, adapt: 0.0, gain: gain,
+               trace: 0.0, post: 0.0, rest: 0.0, adapt: 0.0, rate: Dish.home_rate / 1000.0, syn: 0.0, ready: 1.0,
+               heard: if d <= Dish.hear_reach { 1.0 } else { 0.0 },
                number: i, channel: c, pad: Pads[c].who },
       Spot { x: x, y: y },
-      Out { first: 0, count: 0 }
+      Out { first: 0, count: 0 },
+      Takes { a: Pads[c0].who, b: Pads[c1].who, c: Pads[c2].who, d: Pads[c3].who,
+              ga: exp(-d0 / Dish.stim_reach), gb: exp(-d1 / Dish.stim_reach),
+              gc: exp(-d2 / Dish.stim_reach), gd: exp(-d3 / Dish.stim_reach),
+              da: floor(l0 / Dish.conduct), db: floor(l1 / Dish.conduct),
+              dc: floor(l2 / Dish.conduct), dd: floor(l3 / Dish.conduct),
+              pending: 0.0, due: 0.0 }
     }
   }
   Dish.tick = 0
@@ -231,15 +339,53 @@ system wire() {
 // noise of this step, and the stim of the neuron's electrode.
 gpu system gather() {
   let key = mix(mix(Dish.seed as u64) ^ (Dish.tick as u64))
-  for e, n: mut Neuron {
+  for e, n: mut Neuron, t: mut Takes {
     var sum = 0.0
     for (pre)-[s: Synapse]->(e) {
       if let o = Neuron(pre).out { sum += s.weight * o }
     }
     let kick = if draw(key, n.number as i64) < Dish.noise_rate { Dish.noise_amp } else { 0.0 }
+    // A stim runs along the axon to the soma: what is there by now, and
+    // what a stim of this step sends (the last stim's delay for all of it).
     var stim = 0.0
-    if let s = Electrode(n.pad).stim { stim = s }
-    n.input = sum + kick + stim * Dish.stim_gain * n.gain
+    if t.due > 0.0 {
+      t.due -= 1.0
+      if t.due <= 0.0 {
+        stim = t.pending
+        t.pending = 0.0
+      }
+    }
+    if let s = Electrode(t.a).stim {
+      if s != 0.0 {
+        t.pending += s * t.ga
+        t.due = t.da
+      }
+    }
+    if let s = Electrode(t.b).stim {
+      if s != 0.0 {
+        t.pending += s * t.gb
+        t.due = t.db
+      }
+    }
+    if let s = Electrode(t.c).stim {
+      if s != 0.0 {
+        t.pending += s * t.gc
+        t.due = t.dc
+      }
+    }
+    if let s = Electrode(t.d).stim {
+      if s != 0.0 {
+        t.pending += s * t.gd
+        t.due = t.dd
+      }
+    }
+    if t.due <= 0.0 {
+      stim += t.pending
+      t.pending = 0.0
+    }
+    // (With tau_syn 0, what came in this step alone.)
+    n.syn = Decay.syn * n.syn + sum
+    n.input = n.syn + Dish.fast * sum + kick + stim * Dish.stim_gain
   }
 }
 
@@ -254,27 +400,41 @@ gpu system integrate() {
       fired = 1.0
       v = 0.0
       n.rest = Dish.refractory
-      Electrode(n.pad).count += 1
+      if n.heard > 0.0 { Electrode(n.pad).count += 1 }
       Dish.spikes += 1
     }
     n.v = v
     n.fired = fired
     n.adapt = Decay.adapt * n.adapt + Dish.adapt_inc * fired
-    n.out = n.sign * fired
+    // (What it carries is what is ready; a spike uses `depress` of it,
+    // which recovers.)
+    n.out = n.sign * fired * n.ready
+    n.ready = n.ready + (1.0 - n.ready) * Decay.recover - Dish.depress * n.ready * fired
     n.trace = Decay.plus * n.trace + fired
+    n.rate = Decay.home * n.rate + (1.0 - Decay.home) * fired
     n.post = Decay.minus * n.post + fired
   }
 }
 
-// Trace STDP, pull form: each neuron changes only the synapses into it.
-// A spike of the neuron strengthens each excitatory synapse by a_plus
-// times the source's trace; a spike of the source weakens it by a_minus
-// times the neuron's own trace. Kept in [0, w_max].
+// Trace STDP with soft bounds (van Rossum, Bi and Turrigiano 2000), pull
+// form: each neuron changes only the synapses into it. A spike of the
+// neuron strengthens each excitatory synapse by a_plus times the source's
+// trace times what is left to w_max; a spike of the source weakens it by
+// a_minus times the neuron's own trace times the weight. So the weights
+// settle where the two balance (w_max / 2 where they are alike and as
+// often), not at 0 or w_max, which in a dish that bursts, where both come
+// about as often, additive STDP went to one or the other. And synaptic
+// scaling (Turrigiano): each excitatory synapse into a neuron grows by
+// home_gain times the neuron's rate short of home_rate, times its weight
+// (shrinks, where the rate is above): STDP alone, even with soft bounds,
+// set the calibrated dish alight or quiet (examples/cl_bridge/culture).
 gpu system stdp() {
   for e, n: Neuron {
+    let scale = Dish.home_gain * (Dish.home_rate / 1000.0 - n.rate)
     for (pre)-[mut s: Synapse]->(e) {
       if let t = Neuron(pre).trace, let f = Neuron(pre).fired {
-        let dw = Dish.a_plus * t * n.fired - Dish.a_minus * n.post * f
+        let dw = Dish.a_plus * t * n.fired * (Dish.w_max - s.weight)
+            - Dish.a_minus * n.post * f * s.weight + scale * s.weight
         s.weight = min(max(s.weight + s.plastic * dw, 0.0), Dish.w_max)
       }
     }
