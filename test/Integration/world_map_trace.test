@@ -3,7 +3,8 @@
 // schedule `main` runs, how many entities each archetype has (a counter
 // of the trace, kept where it changed and at the end); the map is given
 // the trace's time of each site, each run of those schedules, and the
-// counts by the map's archetypes.
+// counts by the map's archetypes; and a few runs of the schedule run most,
+// with each thread's slices of them.
 // RUN: env ENT_TRACE=%t.json %ent run %S/Inputs/world_map/life.ent --trace > /dev/null 2> %t.said
 // RUN: python3 -c "import json, sys; events = json.load(open(sys.argv[1]))['traceEvents']; [print(e['name'], sorted(e['args'].items())) for e in events if e['cat'] == 'entities']" %t.json | FileCheck %s --check-prefix=JSON
 // RUN: env ENT_TRACE=%t.json %ent map %S/Inputs/world_map/life.ent --trace --no-window -o %t.map 2> /dev/null
@@ -21,5 +22,11 @@
 // CHECK:      ran|start|{{[0-9.]+}}|{{[0-9.]+}}
 // CHECK-COUNT-6: ran|frame|{{[0-9.]+}}|{{[0-9.]+}}
 // CHECK:      entities|{{[0-9.]+}}|1,0
+// A few runs of frame, what each thread did in them (ent map's Cores
+// view): the loop of light and tick fused, at the place of what ends their
+// group, is of group 0.
+// CHECK:      frame|0|frame|{{[0-9.]+}}|{{[0-9.]+}}|the first (run 1 of 6)|1
+// CHECK:      slice|{{[0-9]+}}|0|{{[0-9]+}}|serial|{{[0-9.]+}}|{{[0-9.]+}}|0|loop life.ent:30 in frame (one thread) #1
+// CHECK:      share|{{[0-9]+}}|{{[0-9.]+}}|{{[0-9.]+}}|-1|loop life.ent:24 in reap (one thread)|{{[0-9]+}}
 
 // NONE: ent map --trace: no trace ({{.*}}none.json); run the program built with --trace first

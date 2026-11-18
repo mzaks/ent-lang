@@ -43,7 +43,7 @@
 // many changes come into that state there and go out of it.
 //
 // With ENT_MAP_SHOT=picture.png it draws the wave once (of the archetype
-// whose label ENT_MAP_ARCH is, where set; ENT_MAP_VIEW=data, provenance, time
+// whose label ENT_MAP_ARCH is, where set; ENT_MAP_VIEW=data, schedule, cores, provenance, time
 // or memory: those views, ENT_MAP_ZOOM the memory's node shown whole, ENT_MAP_VALUE the value's words), saves its picture there and
 // ends: for checks and pictures of it. ENT_MAP_POINT=x,y puts the pointer
 // there in it (in the window's points).
@@ -482,6 +482,185 @@ fn time_x(ms: f32, all_ms: f32, w: f32) -> f32 {
   chart_x() + (if all_ms > 0.0 { ms / all_ms } else { 0.0 }) * w
 }
 
+// The line of a text that is `name` (-1: none).
+fn line_index(t: text, name: text) -> i32 {
+  var at = 0
+  var k = 0
+  var found = -1
+  while at < len(t) && found < 0 {
+    var end = find(t, "\n", at)
+    if end < 0 { end = len(t) }
+    if slice(t, at, end) == name { found = k }
+    at = end + 1
+    k += 1
+  }
+  found
+}
+
+// ---- Schedule -----------------------------------------------------------
+// The runs of each schedule as the lowering fuses them (--ent-fusion-map,
+// as `ent build` always builds): the runs of a group are one loop over
+// each archetype their queries go over, each entity going through every
+// run's body in turn; a run that cannot be fused runs alone, and the map
+// says why, as it says why each group ends where it does.
+
+// A line: a schedule (0), something else the schedule does there, which
+// ends a group (1), a group's head (2), a run (3); its schedule, place
+// among its runs, group; its words (a system, the archetypes of a group, a
+// break's reason) and why (a run's not fused, a group's not joining the
+// one before); how many runs a head's group has (by its number in FHead,
+// `ref`); its order and where it is (-1: not shown).
+component FL {
+  kind: i32, sname: text, position: i32, group: i32, words: text, why: text, count: i32, ref: i32,
+  key: i32, y: f32, queries: i32, many: i32, one: text, most: i32, least: i32
+}
+buffer FHead { count: i32 } capacity 65536
+
+// The schedules' names in the list's order; whether to lay the lines out
+// again (and of which schedule); how high they are and how far they are
+// scrolled; the line under the pointer, its words and where.
+unique Fz {
+  names: text, dirty: bool, chosen: i32, height: f32, top: f32, over: i32, words: text, tx: f32,
+  ty: f32, groups: i32, alone: i32
+}
+
+fn group_colour(group: i32) -> i32 {
+  let k = group % 6
+  if k == 0 { 0x4f9de0 } else if k == 1 { 0x56c26a } else if k == 2 { 0xe0a03a }
+  else if k == 3 { 0xa77be0 } else if k == 4 { 0x3fb8a8 } else { 0xd0c050 }
+}
+fn fl_height(kind: i32, has_why: bool, count: i32, queries: i32) -> f32 {
+  if kind == 0 { 44.0 } else if kind == 1 { 26.0 }
+  else if kind == 2 { if count < 2 { 0.0 } else if has_why { 44.0 } else { 28.0 } }
+  else if queries > 0 { 42.0 } else { 24.0 }
+}
+// From how many entities on a loop runs on many threads, in a build with
+// --parallel: what its query says, else parallel-min-entities' default.
+fn threshold(least: i32) -> i32 { if least > 0 { least } else { 1000000 } }
+// "131072": "131,072".
+fn three(n: i32) -> text { if n < 10 { "00{n}" } else if n < 100 { "0{n}" } else { "{n}" } }
+fn grouped(n: i32) -> text {
+  if n < 1000 { "{n}" }
+  else if n < 1000000 { "{n / 1000}," + three(n % 1000) }
+  else { "{n / 1000000}," + three((n / 1000) % 1000) + "," + three(n % 1000) }
+}
+// What a run's loops do with cores, a line.
+fn cores_words(queries: i32, many: i32, one: text, most: i32, least: i32) -> text {
+  let loops = if queries == 1 { "its loop" } else { "its {queries} loops" }
+  if many == queries {
+    if most >= threshold(least) {
+      "many threads (--parallel): " + loops + ", from {grouped(threshold(least))} entities on (up to {grouped(most)} here)"
+    } else {
+      "one thread: at most {grouped(most)} entities, fewer than the {grouped(threshold(least))} from which " + loops +
+        " would run on many (--parallel)"
+    }
+  } else if many == 0 {
+    "one thread: " + one
+  } else {
+    "one thread for {queries - many} of its {queries} loops: " + one
+  }
+}
+fn cores_colour(queries: i32, many: i32, most: i32, least: i32) -> i32 {
+  if many == queries { if most >= threshold(least) { 0x56c26a } else { 0x7d8a98 } } else { 0xc98a8a }
+}
+fn fl_order(kind: i32) -> i32 { if kind == 1 { 0 } else if kind == 2 { 1 } else if kind == 3 { 2 } else { 0 } }
+// "field.Url,field.Body": "Url, Body", by the archetypes' labels.
+fn group_words(list: text, names: text, labels: text) -> text {
+  var out = ""
+  var from = 0
+  var i = 0
+  while i <= len(list) {
+    if i == len(list) || list[i] == ',' {
+      if i > from {
+        let at = line_index(names, slice(list, from, i))
+        if len(out) > 0 { out = out + ", " }
+        if at >= 0 { out = out + line_at(labels, at) } else { out = out + short(slice(list, from, i)) }
+      }
+      from = i + 1
+    }
+    i += 1
+  }
+  out
+}
+
+// ---- Cores --------------------------------------------------------------
+// What each thread did in a few runs of the schedule `main` runs most, of
+// a run with a trace (`ent map --trace` of a build with --parallel and
+// --trace): a lane for each thread, the time across; on the first, the
+// schedule, its systems, their loops and that thread's share of each
+// loop's work, one inside the other; on the others, their shares. A loop
+// of runs fused is in its group's colour (as the Schedule view has it).
+
+// A run of the schedule: its number, schedule, where it is in the run of
+// the program, how long (us), why it was chosen, on how many threads.
+component CFrame { index: i32, schedule: text, at: f32, us: f32, why: text, threads: i32 }
+// What a thread did in one: its frame, thread, depth (inside how many of
+// its thread's others), kind (0 a span: a schedule, system or sort; 1 a
+// loop on many threads, entered and left on the first; 2 a thread's work
+// in one; 3 a loop on one thread), from (us after the frame starts), how
+// long, group of fused runs (-1 none), name and the words drawn on it.
+component CSlice {
+  frame: i32, thread: i32, depth: i32, kind: i32, from: f32, us: f32, group: i32, name: text, label: text
+}
+// A loop over entities of a frame: how long it took, how long its threads
+// worked in it all told, its group, its name, the order it came in.
+component CShare { frame: i32, us: f32, work: f32, group: i32, name: text, label: text, order: i32, times: i32 }
+
+// How long each thread worked in the frame shown, by its number.
+buffer CBusy { us: f32 } capacity 1024
+
+// The frame shown; how many; the deepest of the first thread's slices in
+// it; how long its threads worked, and in loops on many; the slice under
+// the pointer, its words and where.
+unique Co {
+  frame: i32, frames: i32, dirty: bool, depth: i32, threads: i32, us: f32, work: f32, parallel: f32,
+  words: text, tx: f32, ty: f32, shares: i32, schedule: text, why: text, over_group: i32
+}
+
+fn starts(name: text, with: text) -> bool { len(name) >= len(with) && slice(name, 0, len(with)) == with }
+// "loop lanes.ent:187 in lanes.decide": "decide"; "system lanes.think
+// (lanes.ent:174)": "think"; "schedule lanes.step (..)": "step"; "loop
+// lanes.ent:285 in lanes.step" of fused runs: "fused".
+fn slice_label(name: text, schedule: text) -> text {
+  var who = name
+  let at = find(name, " in ", 0)
+  if starts(name, "loop ") && at >= 0 {
+    var end = find(name, " ", at + 4)
+    if end < 0 { end = len(name) }
+    who = slice(name, at + 4, end)
+    if who == schedule { who = "fused runs" }
+  } else {
+    let space = find(name, " ", 0)
+    var end = find(name, " (", space + 1)
+    if end < 0 { end = len(name) }
+    if space >= 0 { who = slice(name, space + 1, end) }
+  }
+  if starts(name, "sort ") { "sort" } else { short(who) }
+}
+fn slice_kind(kind: text) -> i32 {
+  if kind == "loop" { 1 } else if kind == "work" { 2 } else if kind == "serial" { 3 } else { 0 }
+}
+fn slice_colour(kind: i32, group: i32, name: text) -> i32 {
+  if group >= 0 { if kind == 2 || kind == 1 { group_colour(group) } else { 0x3a4756 } }
+  else if kind == 2 { 0x7d8ea2 }
+  else if kind == 1 { 0x56677a }
+  else if kind == 3 { 0xb07a5a }
+  else if starts(name, "schedule ") { 0x26303a }
+  else if starts(name, "sort ") { 0x8a7a5a }
+  else { 0x3a4756 }
+}
+fn lane_h() -> f32 { 18.0 }
+// Where a thread's row at `depth` is, below `y0`: the first thread's rows,
+// then a row each.
+fn lane_y(y0: f32, thread: i32, depth: i32, deepest: i32) -> f32 {
+  if thread == 0 { y0 + depth as f32 * lane_h() }
+  else { y0 + (deepest + 1) as f32 * lane_h() + 10.0 + (thread - 1) as f32 * lane_h() }
+}
+fn us_words(us: f32) -> text {
+  if us >= 1000.0 { "{(us / 10.0) as i32 as f32 / 100.0} ms" } else { "{us as i32} µs" }
+}
+fn cores_x0() -> f32 { panel() + 130.0 }
+
 // ---- Memory -------------------------------------------------------------
 // The world's memory, laid out once for all its life (--ent-memory-map):
 // a treemap of its bytes, as disk space analyzers draw a disk, each box as
@@ -538,20 +717,6 @@ fn size_text(bytes: f64) -> text {
 // Where the boxes are.
 fn mem_y() -> f32 { top() + 40.0 }
 fn mem_head() -> f32 { 17.0 }
-// The line of a text that is `name` (-1: none).
-fn line_index(t: text, name: text) -> i32 {
-  var at = 0
-  var k = 0
-  var found = -1
-  while at < len(t) && found < 0 {
-    var end = find(t, "\n", at)
-    if end < 0 { end = len(t) }
-    if slice(t, at, end) == name { found = k }
-    at = end + 1
-    k += 1
-  }
-  found
-}
 
 // The map read: every line a record (lib/Ent/Transforms/WorldMap.cpp).
 system load_map() {
@@ -578,6 +743,10 @@ system load_map() {
     var schedule_name = ""
     var archs = ","
     var froms = 0
+    var fuse_sched = ""
+    var fuse_group = -1
+    var share_frame = -1
+    var share_n = 0
     while at < len(all) {
       var end = find(all, "\n", at)
       if end < 0 { end = len(all) }
@@ -604,6 +773,73 @@ system load_map() {
         Map.queries += 1
       } else if kind == "schedule" {
         Map.schedules += 1
+        spawn {
+          FL { kind: 0, sname: part(line, 1), position: -1, group: -1, words: part(line, 1), why: "", count: 0,
+               ref: -1, key: 0, y: -1.0, queries: 0, many: 0, one: "", most: 0, least: 0 }
+        }
+      } else if kind == "fused" {
+        let sname = part(line, 1)
+        let group = int(part(line, 4))
+        let why = part(line, 5)
+        if group >= 0 && (sname != fuse_sched || group != fuse_group) {
+          spawn {
+            FL { kind: 2, sname: sname, position: int(part(line, 2)), group: group, words: "", why: why,
+                 count: 0, ref: len(FHead), key: 0, y: -1.0, queries: 0, many: 0, one: "", most: 0, least: 0 }
+          }
+          FHead += { count: 0 }
+        }
+        if group >= 0 { FHead[len(FHead) - 1].count += 1 }
+        fuse_sched = sname
+        fuse_group = group
+        spawn {
+          FL { kind: 3, sname: sname, position: int(part(line, 2)), group: group, words: part(line, 3),
+               why: why, count: 0, ref: if group >= 0 { len(FHead) - 1 } else { -1 }, key: 0, y: -1.0,
+               queries: int(part(line, 6)), many: int(part(line, 7)), one: part(line, 8),
+               most: int(part(line, 9)), least: int(part(line, 10)) }
+        }
+        Fz.dirty = true
+      } else if kind == "frame" {
+        let threads = int(part(line, 6))
+        spawn {
+          CFrame { index: int(part(line, 1)), schedule: part(line, 2), at: decimal(part(line, 3)) as f32,
+                   us: decimal(part(line, 4)) as f32, why: part(line, 5), threads: threads }
+        }
+        while len(CBusy) < threads && len(CBusy) < 1024 { CBusy += { us: 0.0 } }
+        Co.schedule = part(line, 2)
+        if starts(part(line, 5), "the median") { Co.frame = int(part(line, 1)) }
+        Co.frames += 1
+        Co.dirty = true
+      } else if kind == "slice" {
+        let name = part(line, 8)
+        spawn {
+          CSlice { frame: int(part(line, 1)), thread: int(part(line, 2)), depth: int(part(line, 3)),
+                   kind: slice_kind(part(line, 4)), from: decimal(part(line, 5)) as f32,
+                   us: decimal(part(line, 6)) as f32, group: int(part(line, 7)), name: name,
+                   label: slice_label(name, Co.schedule) }
+        }
+      } else if kind == "share" {
+        let frame = int(part(line, 1))
+        if frame != share_frame {
+          share_frame = frame
+          share_n = 0
+        }
+        let name = part(line, 5)
+        spawn {
+          CShare { frame: frame, us: decimal(part(line, 2)) as f32, work: decimal(part(line, 3)) as f32,
+                   group: int(part(line, 4)), name: name, label: slice_label(name, Co.schedule), order: share_n,
+                   times: max(int(part(line, 6)), 1) }
+        }
+        share_n += 1
+      } else if kind == "fusebreak" {
+        spawn {
+          FL { kind: 1, sname: part(line, 1), position: int(part(line, 2)), group: -1, words: part(line, 3),
+               why: "", count: 0, ref: -1, key: 0, y: -1.0, queries: 0, many: 0, one: "", most: 0, least: 0 }
+        }
+      } else if kind == "fusegroup" {
+        let sname = part(line, 1)
+        let group = int(part(line, 2))
+        let words = group_words(part(line, 3), Map.names, labels) as text[2048]
+        for h: mut FL where h.kind == 2 && h.sname == sname && h.group == group { h.words = words }
       } else if kind == "row" {
         let schedule = part(line, 2)
         let first = schedule != schedule_name
@@ -770,6 +1006,9 @@ system load_map() {
     if environment_variable("ENT_MAP_VIEW") == "provenance" { View.mode = 2 }
     if environment_variable("ENT_MAP_VIEW") == "time" { View.mode = 3 }
     if environment_variable("ENT_MAP_VIEW") == "memory" { View.mode = 4 }
+    if environment_variable("ENT_MAP_VIEW") == "schedule" { View.mode = 5 }
+    if environment_variable("ENT_MAP_VIEW") == "cores" { View.mode = 6 }
+    for h: mut FL where h.ref >= 0 { h.count = FHead[h.ref].count }
     Mem.dirty = true
     // (The archetypes with the most entities, a line each.)
     Tm.arch = -1
@@ -1328,12 +1567,14 @@ proc tab(name: text, x: f32, on: bool) {
 }
 system tabs() {
   if Mouse.clicks > 0 && Mouse.y >= 10.0 && Mouse.y < 38.0 {
-    let x = Mouse.x - (Window.width as f32 - 720.0)
-    if x >= 520.0 && x < 642.0 { View.mode = 4 }
+    let x = Mouse.x - (Window.width as f32 - 980.0)
     if x >= 0.0 && x < 122.0 { View.mode = 0 }
     if x >= 130.0 && x < 252.0 { View.mode = 1 }
-    if x >= 260.0 && x < 382.0 { View.mode = 2 }
-    if x >= 390.0 && x < 512.0 { View.mode = 3 }
+    if x >= 260.0 && x < 382.0 { View.mode = 5 }
+    if x >= 390.0 && x < 512.0 { View.mode = 6 }
+    if x >= 520.0 && x < 642.0 { View.mode = 2 }
+    if x >= 650.0 && x < 772.0 { View.mode = 3 }
+    if x >= 780.0 && x < 902.0 { View.mode = 4 }
   }
 }
 
@@ -1829,11 +2070,25 @@ system draw_top() {
         "{Map.systems} systems ({Map.queries} queries; {Map.opaque} with effects outside the world, {Map.gpu} on the GPU) · " +
         "{Map.schedules} schedules", 16.0, 40.0, Window.width as f32 - 32.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
   // The views, as tabs.
-  tab("Lifecycle", Window.width as f32 - 720.0, View.mode == 0)
-  tab("Systems × data", Window.width as f32 - 590.0, View.mode == 1)
+  tab("Lifecycle", Window.width as f32 - 980.0, View.mode == 0)
+  tab("Systems × data", Window.width as f32 - 850.0, View.mode == 1)
+  tab("Schedule", Window.width as f32 - 720.0, View.mode == 5)
+  tab("Cores", Window.width as f32 - 590.0, View.mode == 6)
+  if View.mode == 6 && Co.frames > 0 {
+    let busy = Co.work / max(Co.us * Co.threads as f32, 1.0)
+    window::write("Cores: a frame of " + Co.schedule + ", " + us_words(Co.us) + " on {Co.threads} threads · " +
+          "in loops on many threads " + us_words(Co.parallel) + " ({(Co.parallel * 100.0 / max(Co.us, 1.0)) as i32}%) · " +
+          "the threads busy {(busy * 100.0) as i32}% of it · a fused loop in its group's colour",
+          16.0, 62.0, Window.width as f32 - 32.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+  }
   tab("Provenance", Window.width as f32 - 460.0, View.mode == 2)
   tab("Time", Window.width as f32 - 330.0, View.mode == 3)
   tab("Memory", Window.width as f32 - 200.0, View.mode == 4)
+  if View.mode == 5 {
+    window::write("Schedule: each schedule's runs as `ent build` fuses them · a group is one loop over each archetype, " +
+          "every run's body in turn for an entity · {Fz.groups} groups of several runs, {Fz.alone} runs alone",
+          16.0, 62.0, Window.width as f32 - 32.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+  }
   if View.mode == 4 {
     window::write("Memory: the world's bytes, laid out when it is made, as boxes as big as what they hold · " +
           "a click goes in, the secondary button or Backspace out", 16.0, 62.0, Window.width as f32 - 32.0, 0,
@@ -1927,6 +2182,24 @@ system draw_top() {
     let y0 = min(Tm.ty, Window.height as f32 - h - 8.0)
     rounded(x0, y0, w, h, 6.0, 6.0, 6.0, 6.0, 0xf0222b35)
     window::write(words, x0 + 10.0, y0 + 7.0, w - 16.0, 0, 14.0, 0.0, 18.0, 1, 0, 0xe2ecf5)
+  }  if len(Co.words) > 0 && View.mode == 6 {
+    let words = Co.words as text[4094]
+    let w = min(max(text_extent(words, 0, 14.0, 0.0, 1), 120.0) + 20.0, 720.0)
+    let lines = text_lines(words, w - 16.0, 0, 14.0, 0.0, 0)
+    let h = lines as f32 * 18.0 + 14.0
+    let x0 = min(Co.tx, Window.width as f32 - w - 8.0)
+    let y0 = min(Co.ty, Window.height as f32 - h - 8.0)
+    rounded(x0, y0, w, h, 6.0, 6.0, 6.0, 6.0, 0xf0222b35)
+    window::write(words, x0 + 10.0, y0 + 7.0, w - 16.0, 0, 14.0, 0.0, 18.0, 0, 0, 0xe2ecf5)
+  }  if len(Fz.words) > 0 && View.mode == 5 {
+    let words = Fz.words as text[4094]
+    let w = min(max(text_extent(words, 0, 14.0, 0.0, 1), 120.0) + 20.0, 640.0)
+    let lines = text_lines(words, w - 16.0, 0, 14.0, 0.0, 0)
+    let h = lines as f32 * 18.0 + 14.0
+    let x0 = min(Fz.tx, Window.width as f32 - w - 8.0)
+    let y0 = min(Fz.ty, Window.height as f32 - h - 8.0)
+    rounded(x0, y0, w, h, 6.0, 6.0, 6.0, 6.0, 0xf0222b35)
+    window::write(words, x0 + 10.0, y0 + 7.0, w - 16.0, 0, 14.0, 0.0, 18.0, 0, 0, 0xe2ecf5)
   }  if len(Mem.words) > 0 && View.mode == 4 {
     let words = Mem.words as text[4094]
     let w = max(text_extent(words, 0, 14.0, 0.0, 1), 120.0) + 20.0
@@ -2498,6 +2771,309 @@ system list_memory() {
 }
 
 // The picture: the archetype asked for chosen, the wave drawn, saved.
+// The lines of the schedule shown (All: every one), in order, one under
+// the other.
+system lay_out_schedule() {
+  if Fz.dirty || Fz.chosen != Grid.sched {
+    Fz.dirty = false
+    Fz.chosen = Grid.sched
+    Fz.names = ""
+    for c: Sch in turn by c.row { Fz.names += c.name + "\n" }
+    let chosen = Grid.sched
+    for f: mut FL {
+      let order = line_index(Fz.names, f.sname)
+      f.key = (order + 1) * 1048576 + (f.position + 1) * 4 + fl_order(f.kind)
+      let shown = order >= 0 && (chosen == -1 || order + 1 == chosen)
+      f.y = if shown { 0.0 } else { -1.0 }
+    }
+    Fz.height = 0.0
+    Fz.groups = 0
+    Fz.alone = 0
+    for f: mut FL in turn by f.key where f.y >= 0.0 {
+      f.y = Fz.height
+      Fz.height += fl_height(f.kind, len(f.why) > 0, f.count, f.queries)
+      if f.kind == 2 && f.count > 1 { Fz.groups += 1 }
+      if f.kind == 3 && (f.group < 0 || f.count < 2) { Fz.alone += 1 }
+    }
+    Fz.top = 0.0
+  }
+}
+
+// Clicks in the list, the wheel; what the pointer is on.
+system steer_schedule() {
+  let mx = Mouse.x
+  let my = Mouse.y
+  if Mouse.clicks > 0 && mx < panel() && my > top() {
+    let row = ((my - top() - 30.0) / row_height()) as i32
+    if row == 0 { Grid.sched = -1 }
+    for c: Sch in turn by c.row where c.row == row && row > 0 { Grid.sched = c.row }
+  }
+  let room = Window.height as f32 - top() - 32.0
+  if mx > panel() && my > top() && Mouse.wheel_y != 0.0 {
+    Fz.top = max(0.0, min(Fz.top - Mouse.wheel_y * 40.0, Fz.height - room))
+  }
+  Fz.words = ""
+  let px = if Shot.px >= 0.0 { Shot.px } else { mx }
+  let py = if Shot.px >= 0.0 { Shot.py } else { my }
+  if px > panel() && py > top() {
+    let at = py - top() - 16.0 + Fz.top
+    for f: FL in turn by f.key where f.y >= 0.0 && at >= f.y && at < f.y + fl_height(f.kind, len(f.why) > 0, f.count, f.queries) {
+      if f.kind == 3 && f.group >= 0 && f.count > 1 {
+        Fz.words = "{f.position + 1}. " + f.words + " (in " + f.sname + ")\nfused in group {f.group + 1}, with " + if f.count == 2 { "the run beside it" } else { "the {f.count - 1} runs beside it" }
+      }
+      if f.kind == 3 && f.group >= 0 && f.count < 2 {
+        Fz.words = "{f.position + 1}. " + f.words + " (in " + f.sname + ")\ncould be fused, but runs alone"
+        if len(f.why) > 0 { Fz.words = Fz.words + ": it would not join the run before, since " + f.why }
+        else { Fz.words = Fz.words + ": neither run beside it can be fused" }
+      }
+      if f.kind == 3 && f.group < 0 {
+        Fz.words = "{f.position + 1}. " + f.words + " (in " + f.sname + ")\nnot fused: " + f.why
+      }
+      if f.kind == 2 && f.count > 1 {
+        Fz.words = "group {f.group + 1}: {f.count} runs, one loop over each of\n" + f.words
+        if len(f.why) > 0 { Fz.words = Fz.words + "\na new group here, since the run would not join the one before:\n" + f.why }
+      }
+      if f.kind == 1 { Fz.words = "no group goes past this: " + f.words }
+    }
+    Fz.tx = px + 16.0
+    Fz.ty = py + 14.0
+  }
+}
+
+system draw_schedule() {
+  let x0 = panel() + 28.0
+  let w = Window.width as f32 - x0 - 28.0
+  let y0 = top() + 16.0 - Fz.top
+  let bottom = Window.height as f32
+  clip(panel(), top(), Window.width as f32 - panel(), bottom - top())
+  if Fz.height == 0.0 {
+    window::write("No fusion in this map: make it again with this ent (ent map program.ent).", x0, top() + 24.0,
+          w, 0, 15.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+  }
+  for f: FL where f.y >= 0.0 {
+    let y = y0 + f.y
+    let h = fl_height(f.kind, len(f.why) > 0, f.count, f.queries)
+    if y + h > top() && y < bottom {
+      if f.kind == 0 {
+        window::write(f.sname, x0, y + 14.0, w, 0, 17.0, 0.0, 0.0, 2, 0, 0xe2ecf5)
+        rect(x0, y + 40.0, w, 1.0, 0x26303a)
+      } else if f.kind == 1 {
+        rect(x0 + 18.0, y + 13.0, 26.0, 1.0, 0x7a8896)
+        window::write(f.words, x0 + 52.0, y + 5.0, w - 60.0, 0, 13.0, 0.0, 0.0, 2, 0, 0x8a98a6)
+      } else if f.kind == 2 && f.count > 1 {
+        let colour = group_colour(f.group)
+        rect(x0, y + 4.0, 6.0, h - 4.0, colour)
+        rounded(x0 + 14.0, y + 4.0, w - 14.0, 22.0, 4.0, 4.0, 4.0, 4.0, 0x1a222b)
+        var head = "fused: {f.count} runs, one loop over each of " + f.words
+        if f.count == 1 { head = "nothing to fuse with: its own loop over " + f.words }
+        if len(f.words) == 0 {
+          head = if f.count == 1 { "nothing to fuse with, and no loop over entities" }
+                 else { "fused: {f.count} runs, with no loop over entities" }
+        }
+        window::write(head, x0 + 24.0, y + 7.0, w - 34.0, 0, 13.0, 0.0, 0.0, 2, 0, colour)
+        if len(f.why) > 0 {
+          window::write("a new group, since " + f.why, x0 + 24.0, y + 28.0, w - 34.0, 0, 12.0, 0.0, 0.0, 2, 0,
+                0xd9a05b)
+        }
+      } else if f.kind == 3 {
+        let fused = f.group >= 0 && f.count > 1
+        rect(x0, y, 6.0, h, if fused { group_colour(f.group) } else { 0x2a323b })
+        let words = "{f.position + 1}. " + short(f.words)
+        window::write(words, x0 + 24.0, y + 4.0, 360.0, 0, 14.0, 0.0, 0.0, 2, 0,
+              if fused { 0xd0d8e0 } else { 0x9aa6b2 })
+        if f.group >= 0 && !fused {
+          window::write("could be fused; alone here" + if len(f.why) > 0 { ", since " + f.why } else { "" },
+                x0 + 390.0, y + 5.0, w - 400.0, 0, 13.0, 0.0, 0.0, 2, 0, 0x7d8a98)
+        }
+        if f.queries > 0 {
+          window::write(cores_words(f.queries, f.many, f.one, f.most, f.least), x0 + 44.0, y + 23.0, w - 54.0, 0,
+                12.0, 0.0, 0.0, 2, 0, cores_colour(f.queries, f.many, f.most, f.least))
+        }
+        if f.group < 0 {
+          window::write("not fused: " + f.why, x0 + 390.0, y + 5.0, w - 400.0, 0, 13.0, 0.0, 0.0, 2, 0, 0xd9a05b)
+        }
+      }
+    }
+  }
+  unclip()
+  // The list of schedules.
+  rect(0.0, top(), panel(), Window.height as f32 - top(), 0x141a20)
+  rect(panel() - 1.0, top(), 1.0, Window.height as f32 - top(), 0x26303a)
+  window::write("Schedules", 16.0, top() + 8.0, panel() - 24.0, 0, 13.0, 0.0, 0.0, 2, 0, 0x7d8a98)
+  let first = top() + 30.0
+  if Grid.sched == -1 { rect(0.0, first, panel() - 1.0, row_height(), 0x24405e) }
+  window::write("All", 16.0, first + 3.0, panel() - 24.0, 0, 14.0, 0.0, 0.0, 2, 0, 0xd0d8e0)
+  for c: Sch where c.row > 0 {
+    let y = first + c.row as f32 * row_height()
+    if c.row == Grid.sched { rect(0.0, y, panel() - 1.0, row_height(), 0x24405e) }
+    window::write(short(c.name) + "  ({c.runs})", 16.0, y + 3.0, panel() - 24.0, 0, 14.0, 0.0, 0.0, 2, 0, 0xd0d8e0)
+  }
+}
+
+// The frame chosen: its sums, how deep its first thread goes.
+system lay_out_cores() {
+  if Co.dirty {
+    Co.dirty = false
+    let chosen = Co.frame
+    Co.depth = 0
+    Co.work = 0.0
+    Co.parallel = 0.0
+    Co.shares = 0
+    for f: CFrame where f.index == chosen {
+      Co.us = f.us
+      Co.threads = f.threads
+    }
+    var t = 0
+    while t < len(CBusy) {
+      CBusy[t].us = 0.0
+      t += 1
+    }
+    for s: CSlice in turn by s.from where s.frame == chosen && s.kind == 2 && s.thread < len(CBusy) {
+      CBusy[s.thread].us += s.us
+    }
+    for s: CSlice where s.frame == chosen {
+      if s.thread == 0 { Co.depth max= s.depth }
+      if s.kind == 2 { Co.work += s.us }
+      if s.kind == 1 { Co.parallel += s.us }
+    }
+    for h: CShare where h.frame == chosen { Co.shares += 1 }
+  }
+}
+
+// Clicks in the list of frames; the slice under the pointer.
+system steer_cores() {
+  if Mouse.clicks > 0 && Mouse.x < panel() && Mouse.y > top() + 30.0 {
+    let row = ((Mouse.y - top() - 30.0) / (row_height() * 2.0)) as i32
+    if row >= 0 && row < Co.frames {
+      Co.frame = row
+      Co.dirty = true
+    }
+  }
+  Co.words = ""
+  Co.over_group = -1
+  let px = if Shot.px >= 0.0 { Shot.px } else { Mouse.x }
+  let py = if Shot.px >= 0.0 { Shot.py } else { Mouse.y }
+  let x0 = cores_x0()
+  let w = Window.width as f32 - x0 - 28.0
+  let y0 = top() + 56.0
+  let chosen = Co.frame
+  let scale = w / max(Co.us, 1.0)
+  let deepest = Co.depth
+  if px > x0 && py > y0 && Co.us > 0.0 {
+    let at = (px - x0) / scale
+    for s: CSlice in turn by s.depth where s.frame == chosen && at >= s.from && at < s.from + s.us {
+      let y = lane_y(y0, s.thread, s.depth, deepest)
+      if py >= y && py < y + lane_h() {
+        var what = if s.kind == 2 { "its share of the work of " } else if s.kind == 1 { "on {Co.threads} threads: " }
+                   else if s.kind == 3 { "on one thread: " } else { "" }
+        Co.words = what + s.name + "\nthread {s.thread} · " + us_words(s.us) + " · from " + us_words(s.from) +
+                   " to " + us_words(s.from + s.us)
+        Co.over_group = s.group
+      }
+    }
+    Co.tx = px + 16.0
+    Co.ty = py + 14.0
+  }
+  // (Of fused runs: which they are.)
+  if Co.over_group >= 0 {
+    let group = Co.over_group
+    let schedule = Co.schedule as text[512]
+    Co.words = Co.words + "\nfused group {group + 1}, one loop for the runs of"
+    for f: FL in turn by f.position where f.kind == 3 && f.sname == schedule && f.group == group {
+      Co.words += "\n  " + f.words
+    }
+  }
+}
+
+system draw_cores() {
+  let x0 = cores_x0()
+  let right = Window.width as f32 - 28.0
+  let w = right - x0
+  let y0 = top() + 56.0
+  let chosen = Co.frame
+  let deepest = Co.depth
+  let scale = w / max(Co.us, 1.0)
+  let bottom = Window.height as f32
+  clip(panel(), top(), Window.width as f32 - panel(), bottom - top())
+  if Co.frames == 0 {
+    window::write("No threads in this map. Build the program with --parallel --trace, run it, then make the map " +
+          "with ent map --trace: what each thread did in a few of its frames is shown here.", panel() + 28.0,
+          top() + 24.0, w, 0, 15.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+  }
+  if Co.frames > 0 {
+    // The time across, every tenth of the frame.
+    var k = 0
+    while k <= 10 {
+      let x = x0 + w * k as f32 / 10.0
+      rect(x, y0 - 6.0, 1.0, lane_y(y0, Co.threads, 0, deepest) - y0 + 6.0, 0x1c242d)
+      window::write(us_words(Co.us * k as f32 / 10.0), x - 40.0, y0 - 26.0, 80.0, 0, 11.0, 0.0, 0.0, 2, 1, 0x6a7886)
+      k += 1
+    }
+    // The lanes: their ground and names; a thread's share of the time it
+    // worked.
+    var t = 0
+    while t < Co.threads {
+      let y = lane_y(y0, t, 0, deepest)
+      let h = if t == 0 { (deepest + 1) as f32 * lane_h() } else { lane_h() }
+      rect(x0, y, w, h - 2.0, if t % 2 == 0 { 0x121820 } else { 0x151c24 })
+      let busy = if t < len(CBusy) { CBusy[t].us / max(Co.us, 1.0) } else { 0.0 }
+      window::write("thread {t}", panel() + 16.0, y + 2.0, 70.0, 0, 12.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+      window::write(if busy > 0.0 { "{(busy * 100.0) as i32}%" } else { "idle" }, panel() + 76.0, y + 2.0, 44.0, 0,
+            12.0, 0.0, 0.0, 2, 2, if busy > 0.0 { 0x56c26a } else { 0xd9a05b })
+      t += 1
+    }
+    for s: CSlice where s.frame == chosen && s.kind == 2 {
+      let y = lane_y(y0, s.thread, s.depth, deepest)
+      rect(x0 + s.from * scale, y + 1.0, max(s.us * scale, 1.0), lane_h() - 4.0,
+           slice_colour(s.kind, s.group, s.name))
+    }
+    for s: CSlice where s.frame == chosen && s.kind != 2 {
+      let y = lane_y(y0, s.thread, s.depth, deepest)
+      let sw = max(s.us * scale, 1.0)
+      rect(x0 + s.from * scale, y + 1.0, sw, lane_h() - 4.0, slice_colour(s.kind, s.group, s.name))
+      if sw > 46.0 {
+        window::write(s.label, x0 + s.from * scale + 4.0, y + 2.0, sw - 8.0, 0, 11.0, 0.0, 0.0, 2, 0,
+              if s.kind == 0 && s.group < 0 { 0xc0ccd8 } else { 0x0c1014 })
+      }
+    }
+    // The loops over entities of the frame: how long each took, and how
+    // much of its threads' time they worked in it.
+    let ty = lane_y(y0, Co.threads, 0, deepest) + 28.0
+    window::write("Loops over entities in this frame", panel() + 16.0, ty, 400.0, 0, 13.0, 0.0, 0.0, 2, 0, 0x7d8a98)
+    window::write("took", x0 + 330.0, ty, 80.0, 0, 12.0, 0.0, 0.0, 2, 2, 0x6a7886)
+    window::write("threads busy", x0 + 420.0, ty, 200.0, 0, 12.0, 0.0, 0.0, 2, 0, 0x6a7886)
+    for h: CShare where h.frame == chosen {
+      let y = ty + 22.0 + h.order as f32 * 20.0
+      if y < bottom {
+        let parallel = !(find(h.name, "(one thread)", 0) >= 0)
+        let share = if parallel { h.work / max(h.us * Co.threads as f32, 1.0) } else { 1.0 / Co.threads as f32 }
+        rect(panel() + 16.0, y + 4.0, 8.0, 10.0, if h.group >= 0 { group_colour(h.group) } else { 0x56677a })
+        window::write(h.label + (if h.times > 1 { " ×{h.times}" } else { "" }) +
+              (if h.group >= 0 { " (fused group {h.group + 1})" } else { "" }), panel() + 32.0, y,
+              x0 + 220.0 - panel() - 32.0, 0, 13.0, 0.0, 0.0, 2, 0, 0xd0d8e0)
+        window::write(us_words(h.us), x0 + 330.0, y, 80.0, 0, 13.0, 0.0, 0.0, 2, 2, 0xd0d8e0)
+        rect(x0 + 420.0, y + 4.0, 200.0, 10.0, 0x1c242d)
+        rect(x0 + 420.0, y + 4.0, 200.0 * min(share, 1.0), 10.0, if parallel { 0x56c26a } else { 0xb07a5a })
+        window::write(if parallel { "{(share * 100.0) as i32}% of {Co.threads} threads" } else { "one thread" },
+              x0 + 630.0, y, 260.0, 0, 13.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+        window::write(h.name, x0 + 780.0, y + 1.0, right - x0 - 780.0, 0, 12.0, 0.0, 0.0, 2, 0, 0x6a7886)
+      }
+    }
+  }
+  unclip()
+  // The frames.
+  rect(0.0, top(), panel(), bottom - top(), 0x141a20)
+  rect(panel() - 1.0, top(), 1.0, bottom - top(), 0x26303a)
+  window::write("Frames of " + short(Co.schedule), 16.0, top() + 8.0, panel() - 24.0, 0, 13.0, 0.0, 0.0, 2, 0,
+        0x7d8a98)
+  for f: CFrame {
+    let y = top() + 30.0 + f.index as f32 * row_height() * 2.0
+    if f.index == Co.frame { rect(0.0, y, panel() - 1.0, row_height() * 2.0, 0x24405e) }
+    window::write(us_words(f.us), 16.0, y + 3.0, panel() - 24.0, 0, 14.0, 0.0, 0.0, 2, 0, 0xd0d8e0)
+    window::write(f.why, 16.0, y + 22.0, panel() - 24.0, 0, 12.0, 0.0, 0.0, 2, 0, 0x7d8a98)
+  }
+}
+
 system shot() {
   if len(Shot.file) > 0 && Map.loaded {
     Shot.frames += 1
@@ -2541,6 +3117,12 @@ schedule frame() {
   mem_layout() run_if View.mode == 4
   steer_memory() run_if View.mode == 4
   draw_memory() run_if View.mode == 4
+  lay_out_schedule() run_if View.mode == 5 && Map.loaded
+  steer_schedule() run_if View.mode == 5
+  draw_schedule() run_if View.mode == 5
+  lay_out_cores() run_if View.mode == 6 && Map.loaded
+  steer_cores() run_if View.mode == 6
+  draw_cores() run_if View.mode == 6
   draw_top()
   present()
   shot()

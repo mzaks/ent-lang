@@ -200,6 +200,7 @@ builds anew and keeps nothing.
 """
 
 import argparse
+import bisect
 import hashlib
 import json
 import os
@@ -2385,8 +2386,132 @@ def trace_into_map(trace, path):
                 counts[where[name]] = n
         lines.append("entities\t%.3f\t%s" % (
             (e["ts"] - start) / 1e3, ",".join(str(n) for n in counts)))
+    lines += frames_of(timed, start, path, mains)
     with open(path, "a") as out:
         out.write("".join(line + "\n" for line in lines))
+
+
+def frames_of(timed, start, path, mains):
+    """Of the runs of the schedule `main` runs most (of those it runs),
+    a few, each with what every thread did in it, for ent map's Cores
+    view:
+
+      frame   k  schedule  at-ms  us  why  threads
+      slice   k  thread  depth  kind  from-us  us  group  name
+      share   k  us  work-us  group  name  times
+
+    the first run, the shortest, the median, the longest and two between;
+    a slice for each span, loop and thread's work in it (from its start;
+    depth, how far inside others on its thread), a share for each loop
+    over entities of it: how long it took, and how long its threads
+    worked in it all told (of a loop on one thread, as long as it took),
+    of all the times it ran in it.
+    `group` is the group of fused runs (ent-fusion-map) a slice is of,
+    from 0 in the schedule; -1 none."""
+    with open(path) as source:
+        records = [line.rstrip("\n").split("\t") for line in source]
+    fused = [r for r in records if r[0] == "fused" and len(r) >= 6]
+    counts = {}
+    for r in fused:
+        if int(r[4]) >= 0:
+            counts[(r[1], int(r[4]))] = counts.get((r[1], int(r[4])), 0) + 1
+    places = {(r[1], r[4]): int(r[2]) for r in records
+              if r[0] == "fusegroup" and len(r) >= 5 and r[4]}
+
+    def group_of(schedule, name):
+        # (A loop's function: the system it is of, or, of runs fused, the
+        # schedule, where the loop has the place of what ends the group.)
+        loop = re.match(r"loop (\S+) in (\S+)", name)
+        span = re.match(r"system (\S+)", name)
+        who = loop.group(2) if loop else span.group(1) if span else None
+        if who is None:
+            return -1
+        if loop and who == schedule:
+            group = places.get((schedule, loop.group(1)))
+            if group is None:
+                many = [g for (s, g), n in counts.items()
+                        if s == schedule and n > 1]
+                group = many[0] if len(many) == 1 else None
+            return group if group is not None else -1
+        for r in fused:
+            if r[1] == schedule and r[3] == who and int(r[4]) >= 0 and \
+                    counts.get((schedule, int(r[4])), 0) > 1:
+                return int(r[4])
+        return -1
+
+    runs = {}
+    for e in timed:
+        if e["cat"] != "span":
+            continue
+        named = re.match(r"schedule (\S+)", e["name"])
+        if named and named.group(1) in mains:
+            runs.setdefault(named.group(1), []).append(e)
+    if not runs:
+        return []
+    schedule, chosen = max(runs.items(), key=lambda item: len(item[1]))
+    chosen.sort(key=lambda e: e["ts"])
+    by_length = sorted(range(len(chosen)), key=lambda k: chosen[k]["dur"])
+    picks = {}
+    for k, why in ((0, "the first"), (by_length[0], "the shortest"),
+                   (by_length[len(by_length) // 2], "the median"),
+                   (len(chosen) // 3, "a third of the way"),
+                   (2 * len(chosen) // 3, "two thirds of the way"),
+                   (by_length[-1], "the longest")):
+        picks.setdefault(k, why)
+    threads = sorted({e["tid"] for e in timed})
+    ordered = sorted(timed, key=lambda e: e["ts"])
+    starts = [e["ts"] for e in ordered]
+    lines = []
+    for number, k in enumerate(sorted(picks)):
+        run = chosen[k]
+        begin, end = run["ts"], run["ts"] + run["dur"]
+        lines.append("frame\t%d\t%s\t%.3f\t%.3f\t%s (run %d of %d)\t%d" % (
+            number, schedule, (begin - start) / 1e3, run["dur"], picks[k],
+            k + 1, len(chosen), len(threads)))
+        inside = ordered[bisect.bisect_left(starts, begin):
+                         bisect.bisect_left(starts, end)]
+        # (Only what is wholly in it; and of a run as short as the clock
+        # ticks, not the next one's, which starts at the same time.)
+        inside = [e for e in inside if e["ts"] + e["dur"] <= end and
+                  not (e["name"] == run["name"] and e is not run)]
+        stacks = {}
+        kept = 0
+        # (Of those that start together, the longer outside; of as long,
+        # a schedule's span, a system's, a loop, its work.)
+        rank = {"span": 0, "loop": 1, "work": 2}
+        for e in sorted(inside, key=lambda e: (
+                e["tid"], e["ts"], -e["dur"],
+                0 if e["name"].startswith("schedule ") else 1,
+                rank.get(e["cat"], 1))):
+            stack = stacks.setdefault(e["tid"], [])
+            while stack and stack[-1] <= e["ts"]:
+                stack.pop()
+            depth = len(stack)
+            stack.append(e["ts"] + e["dur"])
+            name = e["args"]["loop"] if e["cat"] == "work" else e["name"]
+            kind = e["cat"] if e["cat"] != "span" or \
+                "(one thread)" not in e["name"] else "serial"
+            if kept < 20000:
+                lines.append("slice\t%d\t%d\t%d\t%s\t%.3f\t%.3f\t%d\t%s" % (
+                    number, e["tid"], depth, kind, e["ts"] - begin, e["dur"],
+                    group_of(schedule, name), name))
+                kept += 1
+        # (A loop that runs more than once in it, all its runs together.)
+        shares = {}
+        for e in inside:
+            if e["cat"] == "loop" or "(one thread)" in e["name"]:
+                work = sum(w["dur"] for w in inside if w["cat"] == "work" and
+                           w["args"]["loop"] == e["name"] and
+                           e["ts"] <= w["ts"] <= e["ts"] + e["dur"]) \
+                    if e["cat"] == "loop" else e["dur"]
+                kept = shares.setdefault(e["name"], [0.0, 0.0, 0])
+                kept[0] += e["dur"]
+                kept[1] += work
+                kept[2] += 1
+        for name, (took, work, times) in shares.items():
+            lines.append("share\t%d\t%.3f\t%.3f\t%d\t%s\t%d" % (
+                number, took, work, group_of(schedule, name), name, times))
+    return lines
 
 
 def world_map(arguments, path):
@@ -2413,9 +2538,11 @@ def world_map(arguments, path):
         run([optimise, imported, "--ent-world-map=" + " ".join(options),
              "--mlir-print-op-on-diagnostic=false", "-o", os.devnull])
         # (And how its world's memory is laid out: as the lowering lays
-        # it out, with the indexes it makes.)
+        # it out, with the indexes it makes; and which runs of each
+        # schedule the lowering fuses, and why the others are not.)
         run([optimise, imported, "--ent-indexes=remarks=0",
              "--ent-memory-map=out=" + os.path.abspath(path),
+             "--ent-fusion-map=out=" + os.path.abspath(path),
              "--mlir-print-op-on-diagnostic=false", "-o", os.devnull])
     # (With --trace: how the program ran, from the trace a build of it with
     # --trace wrote; ENT_TRACE, else program.trace.json or its name's.)

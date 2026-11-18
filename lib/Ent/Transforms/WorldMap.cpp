@@ -40,6 +40,7 @@
 // entity. A state is entities of one kind in one condition, whichever
 // those are at run time.
 #include "Ent/Access.h"
+#include "Ent/Fusion.h"
 #include "Ent/Passes.h"
 #include "Ent/Structure.h"
 #include "Ent/World.h"
@@ -60,6 +61,7 @@
 namespace mlir::ent {
 #define GEN_PASS_DEF_ENTWORLDMAP
 #define GEN_PASS_DEF_ENTMEMORYMAP
+#define GEN_PASS_DEF_ENTFUSIONMAP
 #include "Ent/Passes.h.inc"
 } // namespace mlir::ent
 
@@ -1197,3 +1199,157 @@ struct EntMemoryMap
 };
 
 } // namespace
+
+/// Which runs of each schedule are fused (--ent-fusion-map): as the
+/// lowering fuses them (see Ent/Fusion.h), written as
+///   fused      schedule  position  system  group  why  queries  many
+///              one-why  most  least
+///   fusebreak  schedule  position  why
+///   fusegroup  schedule  group  archetypes  place
+///   loops      system  query  place  least  archetype=capacity,..  why
+/// `position` is a run's among the schedule's runs, as the run records
+/// have it; `group` from 0 in the schedule (-1: in none, and `why` says why
+/// it cannot be fused); where a run starts a group and could not join the
+/// one before, `why` says why not. A fusebreak is something else the
+/// schedule does that ends a group, before the run at `position`. A
+/// group's archetypes are those its loops go over; its place, the one its
+/// loops are given (what ends the group: a trace names them by it).
+/// A run's `queries` are its system's, `many` of them may run on many
+/// threads, `one-why` why the first of the others may not; `most` is the
+/// most entities an archetype they go over may hold, `least` the fewest
+/// from which one of them says it runs on many (0: none says).
+/// A loops record is of each query of a system (its number in it, from 0;
+/// its place): `why` its loops run on one thread, also in a build with
+/// --parallel ("": they may run on many, each from so many entities on:
+/// `least` where the query says, 0 where it does not, parallel-min-entities
+/// then); the archetypes they go over and how many entities each may hold.
+struct EntFusionMap
+    : public mlir::ent::impl::EntFusionMapBase<EntFusionMap> {
+  using EntFusionMapBase::EntFusionMapBase;
+
+  void runOnOperation() override {
+    ModuleOp module = getOperation();
+    if (failed(inferArchetypes(module)))
+      return signalPassFailure();
+    std::error_code error;
+    std::string path = out.empty() ? std::string("-") : std::string(out);
+    llvm::raw_fd_ostream os(path, error,
+                            llvm::sys::fs::OF_Text | llvm::sys::fs::OF_Append);
+    if (error) {
+      module.emitError() << "cannot write the fusion map to '" << out
+                         << "': " << error.message();
+      return signalPassFailure();
+    }
+    auto clean = [](std::string text) {
+      for (char &c : text)
+        if (c == '\t' || c == '\n')
+          c = ' ';
+      return text;
+    };
+    // Each query's loops: whether they may run on many threads (as a
+    // build with --parallel makes them), and of each archetype, how many
+    // entities it may hold.
+    FailureOr<WorldLayout> layout = WorldLayout::compute(module);
+    if (failed(layout))
+      return signalPassFailure();
+    llvm::DenseMap<Operation *, int64_t> capacities;
+    for (const WorldArchetype &archetype : layout->archetypes)
+      capacities[archetype.op] = archetype.capacity;
+    for (SystemOp system : module.getOps<SystemOp>()) {
+      unsigned number = 0;
+      system.getBody().walk([&](QueryOp query) {
+        std::optional<std::string> why = whyOneThread(query);
+        int64_t least = 0;
+        if (auto given = query->getAttrOfType<IntegerAttr>(
+                "ent.parallel_min_entities"))
+          least = given.getInt();
+        os << "loops\t" << clean(system.getSymName().str()) << "\t"
+           << number++ << "\t" << clean(placeOf(query.getLoc())) << "\t"
+           << least << "\t";
+        bool first = true;
+        for (ArchetypeOp archetype : getMatchedArchetypes(query)) {
+          os << (first ? "" : ",") << clean(archetype.getSymName().str())
+             << "=" << capacities.lookup(archetype.getOperation());
+          first = false;
+        }
+        os << "\t" << clean(why.value_or("")) << "\n";
+      });
+    }
+    for (ScheduleOp schedule : module.getOps<ScheduleOp>()) {
+      std::string name = clean(schedule.getSymName().str());
+      std::vector<FusionStep> steps = planScheduleFusion(schedule);
+      llvm::DenseMap<Operation *, const FusionStep *> byOp;
+      for (const FusionStep &step : steps)
+        byOp[step.op] = &step;
+      // (The runs as the run records number them; a run in no step is in
+      // something else of the schedule, which is not fused.)
+      unsigned position = 0;
+      std::map<int, std::set<std::string>> archetypes;
+      std::map<int, std::vector<std::string>> order;
+      std::map<int, std::string> places;
+      schedule.getBody().walk<WalkOrder::PreOrder>([&](Operation *op) {
+        if (op == schedule.getOperation())
+          return;
+        if (auto run = dyn_cast<RunOp>(op)) {
+          const FusionStep *step = byOp.lookup(op);
+          int group = step ? step->group : -1;
+          std::string why =
+              step ? step->why
+                   : "it runs inside something else of the schedule (" +
+                         op->getParentOp()->getName().getStringRef().str() +
+                         "), which is not fused";
+          // (And its system's loops: how many, how many may run on many
+          // threads, why one may not, the most entities one goes over, from
+          // how many on the least that a query says.)
+          int queries = 0, many = 0;
+          int64_t most = 0, least = 0;
+          std::string alone;
+          if (auto system = SymbolTable::lookupNearestSymbolFrom<SystemOp>(
+                  run, run.getSystemAttr()))
+            system.getBody().walk([&](QueryOp query) {
+              ++queries;
+              std::optional<std::string> one = whyOneThread(query);
+              if (!one)
+                ++many;
+              else if (alone.empty())
+                alone = *one;
+              for (ArchetypeOp archetype : getMatchedArchetypes(query))
+                most = std::max(most,
+                                capacities.lookup(archetype.getOperation()));
+              if (auto given = query->getAttrOfType<IntegerAttr>(
+                      "ent.parallel_min_entities"))
+                least = least ? std::min(least, given.getInt())
+                              : given.getInt();
+            });
+          os << "fused\t" << name << "\t" << position << "\t"
+             << clean(run.getSystem().str()) << "\t" << group << "\t"
+             << clean(why) << "\t" << queries << "\t" << many << "\t"
+             << clean(alone) << "\t" << most << "\t" << least << "\n";
+          if (group >= 0 && step->at && !places.count(group))
+            places[group] = placeOf(step->at->getLoc());
+          if (group >= 0)
+            if (auto system =
+                    SymbolTable::lookupNearestSymbolFrom<SystemOp>(
+                        run, run.getSystemAttr()))
+              for (QueryOp query : system.getBody().getOps<QueryOp>())
+                for (ArchetypeOp archetype : getMatchedArchetypes(query))
+                  if (archetypes[group]
+                          .insert(archetype.getSymName().str())
+                          .second)
+                    order[group].push_back(archetype.getSymName().str());
+          ++position;
+          return;
+        }
+        if (const FusionStep *step = byOp.lookup(op))
+          os << "fusebreak\t" << name << "\t" << position << "\t"
+             << clean(step->why) << "\n";
+      });
+      for (auto &[group, names] : order) {
+        os << "fusegroup\t" << name << "\t" << group << "\t";
+        for (size_t i = 0; i < names.size(); ++i)
+          os << (i ? "," : "") << clean(names[i]);
+        os << "\t" << clean(places[group]) << "\n";
+      }
+    }
+  }
+};

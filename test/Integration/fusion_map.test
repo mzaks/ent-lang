@@ -1,0 +1,23 @@
+// Which runs of a schedule are fused (--ent-fusion-map, ent map's Schedule
+// view), as ent-lower-to-loops fuses them: move and damp in one loop over
+// the bodies; total in a group of its own, and why it would not join; halve
+// after it, since it reads what total sends; shout not fused, under a
+// condition; grow not fused, it makes entities.
+// RUN: ent-translate --import-ent %S/Inputs/world_map/fuse.ent \
+// RUN:     -I %S/../../devices --mlir-print-debuginfo -o %t.mlir
+// RUN: rm -f %t.map
+// RUN: ent-opt %t.mlir --ent-indexes --ent-fusion-map=out=%t.map -o /dev/null
+// RUN: tr '\t' '|' < %t.map | FileCheck %s
+
+// Each query's loops may run on many threads: none says why not; the
+// bodies' archetype holds 64.
+// CHECK:      loops|move|0|fuse.ent:9|0|Pos_Vel=64|
+// CHECK-NEXT: loops|damp|0|fuse.ent:10|0|Pos_Vel=64|
+// CHECK:      fused|frame|0|move|0||1|1||64|0
+// CHECK-NEXT: fused|frame|1|damp|0|
+// CHECK-NEXT: fused|frame|2|total|1|its loop has a branch
+// CHECK-NEXT: fused|frame|3|halve|2|its code outside its queries reads a field the group's queries send to
+// CHECK-NEXT: fused|frame|4|shout|-1|it runs under a condition
+// CHECK-NEXT: fused|frame|5|grow|-1|it spawns entities
+// CHECK-NEXT: fusegroup|frame|0|Pos_Vel|fuse.ent:19
+// CHECK-NEXT: fusegroup|frame|1|Pos_Vel|fuse.ent:20

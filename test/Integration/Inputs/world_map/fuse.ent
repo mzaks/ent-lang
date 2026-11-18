@@ -1,0 +1,26 @@
+// Runs for the fusion map (fusion_map.test): two that go together over
+// the bodies, one that sends what the one before it reads, one under a
+// condition, one that makes bodies.
+component Pos { x: f32 }
+component Vel { x: f32 }
+unique Sum { total: f32 }
+default_capacity 64
+
+system move() { for p: mut Pos, v: Vel { p.x += v.x } }
+system damp() { for v: mut Vel { v.x *= 0.5 } }
+system total() { for p: Pos { Sum.total += p.x } }
+system halve() { Sum.total *= 0.5 }
+system shout() { for p: mut Pos { p.x = 0.0 } }
+system grow() { spawn { Pos { x: 0.0 }, Vel { x: 1.0 } } }
+
+schedule frame() {
+  move()
+  damp()
+  total()
+  halve()
+  shout() run_if Sum.total > 10.0
+  grow()
+}
+main {
+  loop { frame() } until Sum.total > 100.0
+}

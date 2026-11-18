@@ -1,6 +1,7 @@
 #include <map>
 #include "Ent/Access.h"
 #include "Ent/EntOps.h"
+#include "Ent/Fusion.h"
 #include "Ent/Passes.h"
 #include "Ent/Structure.h"
 #include "Ent/World.h"
@@ -1266,13 +1267,15 @@ static bool changesOnlyRows(Operation *from, FlatSymbolRefAttr callee,
 /// finds the bodies still.)
 static llvm::StringMap<bool> onlyRowsChanged;
 
-static bool isEntityLocal(QueryOp query) {
+static std::optional<std::string> whyNotEntityLocal(QueryOp query) {
+  std::string why;
   // (A walk of the logs in the order of the rows: one thread.)
   if (query->hasAttr("ent.row_ordered"))
-    return false;
+    return std::string("it walks the event logs in the order of the rows");
   for (ArchetypeOp archetype : getMatchedArchetypes(query))
     if (isStructuralFor(query, archetype))
-      return false;
+      return std::string("it moves entities to another archetype (adds or "
+                         "removes components)");
   WalkResult result = query.getBody().walk([&](Operation *op) {
     // Memory the body allocates itself (`nearest k`'s list) is the
     // entity's own, made and let go of in its turn: written as it likes.
@@ -1285,23 +1288,33 @@ static bool isEntityLocal(QueryOp query) {
         return WalkResult::advance();
     }
     // (What is combined where it is sent, whatever the order: one thread.)
-    if (op->hasAttr("ent.order_free"))
+    if (op->hasAttr("ent.order_free")) {
+      why = "it sends what is combined in the order it is sent";
       return WalkResult::interrupt();
+    }
     // (Nor rows given a buffer where they are sent: see ent.any_order.)
-    if (isa<AppendOp, ConnectOp>(op) && op->hasAttr("ent.at_once"))
+    if (isa<AppendOp, ConnectOp>(op) && op->hasAttr("ent.at_once")) {
+      why = "it gives rows to a buffer (or edges) where they are sent, in "
+            "order";
       return WalkResult::interrupt();
+    }
     // (Nor a running sum of a query that reacts to changes: it goes by
     // the rows the query runs for, one after another.)
-    if (isa<RunningOp>(op) && query->hasAttr(QueryOp::kTriggersAttr))
+    if (isa<RunningOp>(op) && query->hasAttr(QueryOp::kTriggersAttr)) {
+      why = "it keeps a running sum and reacts to changes";
       return WalkResult::interrupt();
+    }
     // What a `for` inside the body became (see lowerEach): it reads the
     // columns of other entities, which the query does not write (what it
     // sets of its own is not read there, or read from a copy); but what
     // it sends or accumulates there is combined as it goes, in order.
     if (isa<memref::LoadOp>(op))
       return WalkResult::advance();
-    if (op->hasAttr("ent.in_each"))
+    if (op->hasAttr("ent.in_each")) {
+      why = "it sends or accumulates from a `for` over other entities, "
+            "combined in order";
       return WalkResult::interrupt();
+    }
     // Resource reads are fine: no query writes a resource. Adding and
     // removing components without moving (checked above) only writes the
     // entity's own row; its id is its own.
@@ -1343,9 +1356,28 @@ static bool isEntityLocal(QueryOp query) {
         invoke && (onlyRowsChanged.lookup(invoke.getCallee()) ||
                    changesOnlyRows(invoke, invoke.getCalleeAttr())))
       return WalkResult::advance();
+    why = "it does something only one thread may (" +
+          op->getName().getStringRef().str() + ")";
+    if (isa<BoundOp, OtherOp>(op))
+      why = "it goes through a ref to another entity";
+    else if (isa<WriteOp>(op))
+      why = "it gives a unique a value (not `+=`, `max=` ..: in order)";
+    else if (isa<DespawnOp>(op))
+      why = "it despawns entities";
+    else if (isa<SpawnOp>(op))
+      why = "it spawns entities";
+    if (auto invoke = dyn_cast<InvokeOp>(op))
+      why = "it calls " + invoke.getCallee().str() +
+            ", which changes more than the rows it is given";
     return WalkResult::interrupt();
   });
-  return !result.wasInterrupted();
+  if (result.wasInterrupted())
+    return why;
+  return std::nullopt;
+}
+
+static bool isEntityLocal(QueryOp query) {
+  return !whyNotEntityLocal(query);
 }
 
 /// Whether the loop over the entities of `archetype` is never a parallel
@@ -23552,7 +23584,23 @@ static bool fusableSends(SystemOp system) {
 ///
 /// And what its code outside the queries writes, or looks up, nothing
 /// before it in the sequence sees or changes (see below).
-static bool joins(SystemOp system, SmallVectorImpl<QueryOp> &queries) {
+static std::string targetName(const SendTarget &target) {
+  std::string owner;
+  if (auto symbol = dyn_cast<FlatSymbolRefAttr>(target.owner))
+    owner = symbol.getValue().str();
+  else if (auto name = dyn_cast<StringAttr>(target.owner))
+    owner = name.getValue().str();
+  return owner + "." + target.field.getValue().str();
+}
+
+/// (`why`, where it does not join: why not.)
+static bool joins(SystemOp system, SmallVectorImpl<QueryOp> &queries,
+                  std::string *why = nullptr) {
+  auto refuse = [&](std::string reason) {
+    if (why)
+      *why = std::move(reason);
+    return false;
+  };
   SmallVector<QueryOp> joined(queries.begin(), queries.end());
   auto sendsOf = [](QueryOp query) {
     SmallVector<SendTarget> targets;
@@ -23599,16 +23647,22 @@ static bool joins(SystemOp system, SmallVectorImpl<QueryOp> &queries) {
       // does not touch.
       for (const SendTarget &target : sendsOf(query))
         if (touches(before, target))
-          return false;
+          return refuse("it sends to " + targetName(target) +
+                        ", which a system before it in the group reads or "
+                        "writes");
       for (const SendTarget &target : sendsOf(before))
         if (touches(query, target))
-          return false;
+          return refuse("it reads or writes " + targetName(target) +
+                        ", which a system before it in the group sends to");
       for (const SendTarget &target : lookupsOf(query))
         if (changes(before, target))
-          return false;
+          return refuse("it looks up " + targetName(target) +
+                        " of other entities, which a system before it in the "
+                        "group changes");
       for (const SendTarget &target : lookupsOf(before))
         if (changes(query, target))
-          return false;
+          return refuse("it changes " + targetName(target) +
+                        ", which a system before it in the group looks up");
       // A loop of straight-line bodies goes several entities at a time; one
       // with a branch in it does not, and fused with it, neither would
       // they. So where two go through the same archetype (one loop), a
@@ -23617,7 +23671,13 @@ static bool joins(SystemOp system, SmallVectorImpl<QueryOp> &queries) {
           llvm::any_of(getMatchedArchetypes(query), [&](ArchetypeOp archetype) {
             return llvm::is_contained(getMatchedArchetypes(before), archetype);
           }))
-        return false;
+        return refuse(straightLine(query)
+                          ? "its loop has no branch and one before it over the "
+                            "same archetype has (a loop without goes several "
+                            "entities at a time)"
+                          : "its loop has a branch and one before it over the "
+                            "same archetype has none (a loop without goes "
+                            "several entities at a time)");
     }
     joined.push_back(query);
   }
@@ -23638,7 +23698,8 @@ static bool joins(SystemOp system, SmallVectorImpl<QueryOp> &queries) {
                    })
                      .wasInterrupted();
     if (reads)
-      return false;
+      return refuse("its code outside its queries reads a field the group's "
+                    "queries send to");
   }
   // Its code outside its queries runs ahead of every query of the
   // sequence (see fuseRuns), and in its place among the code of the
@@ -23674,7 +23735,9 @@ static bool joins(SystemOp system, SmallVectorImpl<QueryOp> &queries) {
       return WalkResult::advance();
     });
     if (result.wasInterrupted())
-      return false;
+      return refuse("its code outside its queries writes a unique or looks up "
+                    "an entity after a query, or what a system before it in "
+                    "the group touches");
   }
   queries.assign(joined.begin(), joined.end());
   return true;
@@ -24069,13 +24132,222 @@ static void fuseRuns(IRRewriter &rewriter, MutableArrayRef<RunOp> runs,
     rewriter.eraseOp(run);
 }
 
+/// Why a run cannot be fused with any other ("" where it can): the run
+/// of an extern or opaque system, one under a condition, one whose system
+/// changes which entities archetypes hold, writes buffers, goes to other
+/// entities, reacts to events or goes in an order of its own.
+static std::string unfusable(RunOp run, SystemOp system,
+                             ArrayRef<ArchetypeOp> archetypes,
+                             const WorldLayout *layout) {
+  if (!system)
+    return "it is an extern system, with no body to fuse";
+  // A run under a condition runs as a whole or not at all; it is not
+  // interleaved with others.
+  if (!run.getCondition().empty())
+    return "it runs under a condition";
+  // Resource writes, structural changes, lookups, applies and edges
+  // end a sequence: fusion interleaves systems per entity, and a lookup
+  // would then see some entities' updates from other systems and not
+  // others', as would a later system reading what an apply combines;
+  // edge loops reach other entities too, and connects sort the edges.
+  // So does a `for` over other entities in a body (an ent.each, which
+  // lowerQuery lowers before the body).
+  // Applies, accumulates and lookups do not end it where nothing else
+  // in the sequence touches what they send to or look up, nor resource
+  // writes where nothing before them sees what they write (see joins).
+  std::string why;
+  system.walk([&](Operation *op) {
+    // (A running sum has passes of its own. Rows handed to a fn or proc
+    // are a buffer read or written, as by its name: a window only read and
+    // only handed on is no other op of these.)
+    if (isa<SpawnOp>(op))
+      why = "it spawns entities";
+    else if (isa<DespawnOp>(op))
+      why = "it despawns entities";
+    else if (isa<EachOp>(op))
+      why = "a query of it goes over other entities (a `for` in its body)";
+    else if (isa<EdgesOp>(op))
+      why = "it goes along edges";
+    else if (isa<ConnectOp>(op))
+      why = "it connects edges";
+    else if (isa<RunningOp>(op))
+      why = "it keeps a running sum";
+    else if (isa<AppendOp, ClearOp, BufferLenOp, BufferAtOp, IndexGetOp,
+                 BufferOfOp, BufferSetOp, BufferFillOp, BufferKeepOp,
+                 BufferClaimOp, BufferCopyOp, BufferRowsOp>(op))
+      why = "it uses a buffer or an index (" +
+            op->getName().stripDialect().str() + ")";
+    else if (isa<SetAddOp, SetHasOp, SetCountOp>(op))
+      why = "it uses a set (" + op->getName().stripDialect().str() + ")";
+    return why.empty() ? WalkResult::advance() : WalkResult::interrupt();
+  });
+  if (!why.empty())
+    return why;
+  if (!fusableSends(system))
+    return "it sends to other entities from a loop of its body, a `for` in "
+           "it or along edges";
+  // A query in a counted loop runs so many times, in its place.
+  bool looped = false;
+  system.walk([&](QueryOp query) {
+    looped |= query->getParentOp() != system.getOperation();
+  });
+  if (looped)
+    return "a query of it is in a loop";
+  for (QueryOp query : system.getBody().getOps<QueryOp>()) {
+    for (ArchetypeOp archetype : getMatchedArchetypes(query))
+      if (isStructuralFor(query, archetype))
+        return "it adds or removes components, moving entities between "
+               "archetypes";
+    // A reactive query advances the tick counter when it starts, which
+    // fusion would move ahead of the systems before it.
+    if (!getTriggers(query).empty())
+      return "it reacts to events";
+    // A ref to an ancestor reads another entity, like a lookup, and a
+    // cascading query has an order of its own.
+    if (query.hasUpRefs())
+      return "it reads its entities' ancestors";
+    if (query.getCascade())
+      return "it cascades along a tree";
+    // So has one that goes by a field.
+    if (query.hasBy())
+      return "a query of it goes in an order (`by` a field)";
+  }
+  // (On many ranks: a sequence of systems over distributed entities, or
+  // over copied ones, not both, so that what is added up over the ranks is
+  // only what the ranks' own rows added (see fuseRuns); a system over both
+  // is not fused.)
+  if (ranksMode && layout) {
+    bool spread = false, copied = false;
+    for (QueryOp query : system.getBody().getOps<QueryOp>())
+      for (const WorldArchetype &archetype : layout->archetypes)
+        if (matches(archetype, query))
+          (spreads(archetype, query) ? spread : copied) = true;
+    if (spread && copied)
+      return "it goes over distributed entities and copied ones";
+  }
+  if (computeAccess(system, archetypes).isOpaque())
+    return "it has effects outside the world";
+  return "";
+}
+
+namespace {
+/// A sequence of runs to fuse, and where its loops go: what fuseRuns is
+/// given, in the order it is given them.
+struct FusionFlush {
+  SmallVector<RunOp> runs;
+  Operation *at;
+  bool gpu;
+};
+struct FusionPlan {
+  SmallVector<FusionFlush> flushes;
+  std::vector<FusionStep> steps;
+};
+} // namespace
+
+/// The plan of fusing every maximal sequence of runs of entity-local
+/// systems among `ops` (a schedule's, in order, its stages dissolved): the
+/// sequences, and for each run its group and why it starts one or is in
+/// none. A run of an opaque system, a run under a condition, or an op with
+/// effects in the schedule body, ends a sequence and stays where it is. A
+/// system that sends, looks up, or writes a resource outside its queries
+/// joins one where that changes nothing (see joins: fusion moves
+/// system-level code ahead of every query of the sequence); else it starts
+/// the next.
+static FusionPlan planFusion(ArrayRef<Operation *> ops, SymbolTable &symbols,
+                             ArrayRef<ArchetypeOp> archetypes,
+                             const WorldLayout *layout,
+                             const LoopOptions &options) {
+  FusionPlan plan;
+  SmallVector<RunOp> sequence;
+  // The sequence's queries.
+  SmallVector<QueryOp> fused;
+  // Whether the sequence's systems go to the GPU: those are fused only
+  // with each other.
+  bool sequenceOnGpu = false;
+  // Whether its systems go over distributed entities (on many ranks).
+  bool sequenceSpread = false;
+  int groups = 0;
+  auto flush = [&](Operation *at) {
+    plan.flushes.push_back({sequence, at, sequenceOnGpu});
+    sequence.clear();
+    fused.clear();
+  };
+  auto add = [&](RunOp run, std::string why) {
+    if (sequence.empty())
+      ++groups;
+    sequence.push_back(run);
+    plan.steps.push_back({run, groups - 1, std::move(why)});
+  };
+  for (Operation *op : ops) {
+    if (auto run = dyn_cast<RunOp>(op)) {
+      auto system = symbols.lookup<SystemOp>(run.getSystem());
+      std::string why = unfusable(run, system, archetypes, layout);
+      if (!why.empty()) {
+        flush(op);
+        plan.steps.push_back({run, -1, why});
+        continue;
+      }
+      bool gpu = onGpu(system, options);
+      bool spread = false;
+      if (ranksMode && layout)
+        for (QueryOp query : system.getBody().getOps<QueryOp>())
+          for (const WorldArchetype &archetype : layout->archetypes)
+            spread |= matches(archetype, query) && spreads(archetype, query);
+      std::string starts;
+      if (!sequence.empty() &&
+          (gpu != sequenceOnGpu || spread != sequenceSpread)) {
+        starts = gpu != sequenceOnGpu
+                     ? (gpu ? "it goes to the GPU, the group before it not"
+                            : "the group before it goes to the GPU, it not")
+                     : "it goes over distributed entities, the group before "
+                       "it not, or the other way";
+        flush(op);
+      }
+      sequenceOnGpu = gpu;
+      sequenceSpread = spread;
+      if (joins(system, fused, &starts)) {
+        add(run, sequence.empty() ? starts : "");
+        continue;
+      }
+      // It touches what the sequence sends or looks up, or the sequence
+      // what it does: the sequence ends before it, and it starts the next
+      // one, if its own queries allow.
+      flush(op);
+      std::string alone;
+      if (joins(system, fused, &alone))
+        add(run, starts);
+      else {
+        fused.clear();
+        // (Alone, what stands in its way is its own queries.)
+        for (StringRef said : {"a system before it in the group",
+                               "one before it over the same archetype"}) {
+          size_t at = alone.find(said.str());
+          if (at != std::string::npos)
+            alone.replace(at, said.size(),
+                          said.starts_with("a system")
+                              ? "a query of its own before it"
+                              : "a query of its own before it over the same "
+                                "archetype");
+        }
+        plan.steps.push_back({run, -1, alone});
+      }
+      continue;
+    }
+    if (!op->hasTrait<OpTrait::IsTerminator>() && isMemoryEffectFree(op))
+      continue;
+    flush(op);
+    if (!op->hasTrait<OpTrait::IsTerminator>())
+      plan.steps.push_back(
+          {op, -1,
+           "the schedule does something else here (" +
+               op->getName().getStringRef().str() + ")"});
+  }
+  return plan;
+}
+
 /// Fuse every maximal sequence of runs of entity-local systems in a
-/// schedule. Stages are dissolved first: fusion subsumes them. A run of an
-/// opaque system, a run under a condition, or an op with effects in the
-/// schedule body, ends a sequence and stays where it is. A system that
-/// sends, looks up, or writes a resource outside its queries joins one
-/// where that changes nothing (see joins: fusion moves system-level code
-/// ahead of every query of the sequence); else it starts the next.
+/// schedule, as planFusion plans it. Stages are dissolved first: fusion
+/// subsumes them.
 static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
                          SymbolTable &symbols, const WorldLayout &layout,
                          WorldAccess &world, const LoopOptions &options,
@@ -24090,122 +24362,42 @@ static void fuseSchedule(IRRewriter &rewriter, func::FuncOp func,
   SmallVector<ArchetypeOp> archetypes;
   for (const WorldArchetype &archetype : layout.archetypes)
     archetypes.push_back(archetype.op);
+  SmallVector<Operation *> ops;
+  for (Operation &op : func.getBody().front())
+    ops.push_back(&op);
+  FusionPlan plan = planFusion(ops, symbols, archetypes, &layout, options);
+  for (FusionFlush &flush : plan.flushes)
+    fuseRuns(rewriter, flush.runs, flush.at, symbols, layout,
+             flush.gpu ? *device : world,
+             flush.gpu ? forGpu(options) : options);
+}
 
-  SmallVector<RunOp> sequence;
-  // The sequence's queries.
-  SmallVector<QueryOp> fused;
-  // Whether the sequence's systems go to the GPU: those are fused only
-  // with each other.
-  bool sequenceOnGpu = false;
-  // Whether its systems go over distributed entities (on many ranks).
-  bool sequenceSpread = false;
-  auto flush = [&](Operation *at) {
-    fuseRuns(rewriter, sequence, at, symbols, layout,
-             sequenceOnGpu ? *device : world,
-             sequenceOnGpu ? forGpu(options) : options);
-  };
-  for (Operation &op : llvm::make_early_inc_range(func.getBody().front())) {
-    if (auto run = dyn_cast<RunOp>(op)) {
-      // An extern system has no body to fuse; it ends a sequence too.
-      auto system = symbols.lookup<SystemOp>(run.getSystem());
-      if (!system) {
-        flush(&op);
-        sequence.clear();
-        fused.clear();
-        continue;
-      }
-      // A run under a condition runs as a whole or not at all; it is not
-      // interleaved with others.
-      bool conditional = !run.getCondition().empty();
-      // Resource writes, structural changes, lookups, applies and edges
-      // end a sequence: fusion interleaves systems per entity, and a lookup
-      // would then see some entities' updates from other systems and not
-      // others', as would a later system reading what an apply combines;
-      // edge loops reach other entities too, and connects sort the edges.
-      // So does a `for` over other entities in a body (an ent.each, which
-      // lowerQuery lowers before the body).
-      // Applies, accumulates and lookups do not end it where nothing else
-      // in the sequence touches what they send to or look up, nor resource
-      // writes where nothing before them sees what they write (see joins).
-      bool writesResource =
-          system
-              .walk([](Operation *op) {
-                // (A running sum has passes of its own. Rows handed to
-                // a fn or proc are a buffer read or written, as by its
-                // name: a window only read and only handed on is no
-                // other op of these.)
-                return isa<SpawnOp, DespawnOp, EachOp, EdgesOp, ConnectOp,
-                           AppendOp, ClearOp, BufferLenOp, BufferAtOp,
-                           IndexGetOp, BufferOfOp, BufferSetOp, BufferFillOp,
-                           BufferKeepOp, RunningOp, BufferClaimOp, BufferCopyOp,
-                           BufferRowsOp, SetAddOp, SetHasOp, SetCountOp>(op)
-                           ? WalkResult::interrupt()
-                           : WalkResult::advance();
-              })
-              .wasInterrupted();
-      writesResource |= !fusableSends(system);
-      // A query in a counted loop runs so many times, in its place.
-      system.walk([&](QueryOp query) {
-        writesResource |= query->getParentOp() != system.getOperation();
-      });
-      for (QueryOp query : system.getBody().getOps<QueryOp>()) {
-        for (ArchetypeOp archetype : getMatchedArchetypes(query))
-          writesResource |= isStructuralFor(query, archetype);
-        // A reactive query advances the tick counter when it starts, which
-        // fusion would move ahead of the systems before it.
-        writesResource |= !getTriggers(query).empty();
-        // A ref to an ancestor reads another entity, like a lookup, and a
-        // cascading query has an order of its own.
-        writesResource |= query.hasUpRefs() || query.getCascade();
-        // So has one that goes by a field.
-        writesResource |= query.hasBy();
-      }
-      // (On many ranks: a sequence of systems over distributed entities,
-      // or over copied ones, not both, so that what is added up over the
-      // ranks is only what the ranks' own rows added (see fuseRuns); a
-      // system over both is not fused.)
-      bool spread = false, copied = false;
-      if (ranksMode)
-        for (QueryOp query : system.getBody().getOps<QueryOp>())
-          for (const WorldArchetype &archetype : layout.archetypes)
-            if (matches(archetype, query))
-              (spreads(archetype, query) ? spread : copied) = true;
-      writesResource |= spread && copied;
-      if (!conditional && !writesResource &&
-          !computeAccess(system, archetypes).isOpaque()) {
-        bool gpu = onGpu(system, options);
-        if (!sequence.empty() &&
-            (gpu != sequenceOnGpu || spread != sequenceSpread)) {
-          flush(&op);
-          sequence.clear();
-          fused.clear();
-        }
-        sequenceOnGpu = gpu;
-        sequenceSpread = spread;
-        if (joins(system, fused)) {
-          sequence.push_back(run);
-          continue;
-        }
-        // It touches what the sequence sends or looks up, or the sequence
-        // what it does: the sequence ends before it, and it starts the
-        // next one, if its own queries allow.
-        flush(&op);
-        sequence.clear();
-        fused.clear();
-        if (joins(system, fused))
-          sequence.push_back(run);
-        else
-          fused.clear();
-        continue;
-      }
-    } else if (!op.hasTrait<OpTrait::IsTerminator>() &&
-               isMemoryEffectFree(&op)) {
+std::optional<std::string> mlir::ent::whyOneThread(QueryOp query) {
+  return whyNotEntityLocal(query);
+}
+
+std::vector<FusionStep> mlir::ent::planScheduleFusion(ScheduleOp schedule) {
+  auto module = schedule->getParentOfType<ModuleOp>();
+  SymbolTable symbols(module);
+  SmallVector<ArchetypeOp> archetypes(module.getOps<ArchetypeOp>());
+  SmallVector<Operation *> ops;
+  for (Operation &op : schedule.getBody().front()) {
+    if (auto stage = dyn_cast<StageOp>(op)) {
+      for (Operation &inner : stage.getBody().front().without_terminator())
+        ops.push_back(&inner);
       continue;
     }
-    flush(&op);
-    sequence.clear();
-    fused.clear();
+    ops.push_back(&op);
   }
+  LoopOptions options{};
+  FusionPlan plan = planFusion(ops, symbols, archetypes, nullptr, options);
+  llvm::DenseMap<Operation *, Operation *> placed;
+  for (const FusionFlush &flush : plan.flushes)
+    for (RunOp run : flush.runs)
+      placed[run] = flush.at;
+  for (FusionStep &step : plan.steps)
+    step.at = placed.lookup(step.op);
+  return plan.steps;
 }
 
 /// The address of a memref as the pointer C code takes it (the world's

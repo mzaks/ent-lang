@@ -388,6 +388,24 @@ def EntMemoryMap : Pass<"ent-memory-map", "ModuleOp"> {
   ];
 }
 
+def EntFusionMap : Pass<"ent-fusion-map", "ModuleOp"> {
+  let summary = "Write which runs of each schedule are fused, for ent map";
+  let description = [{
+    Plans the fusion of each schedule's runs as `ent-lower-to-loops`
+    (`fuse-systems`) does, after `--ent-indexes` as `ent build` runs it,
+    and writes it as lines of tab-separated fields: each run's group of
+    fused runs (one loop per archetype for all of them), or why it is in
+    none; why each group could not take the run after it; what else in a
+    schedule ends a group; the archetypes each group's loops go over.
+    Appended to `out` (lib/Ent/Transforms/WorldMap.cpp says each record).
+    Changes nothing.
+  }];
+  let options = [
+    Option<"out", "out", "std::string", /*default=*/"\"\"",
+           "The file to add the records to (standard output where none)">,
+  ];
+}
+
 def EntSchedule : Pass<"ent-schedule", "ModuleOp"> {
   let summary = "Group the runs of each schedule into parallel stages";
   let description = [{
