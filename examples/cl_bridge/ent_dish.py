@@ -88,6 +88,7 @@ class DishParams(ctypes.Structure):
         ("tau_elig", ctypes.c_float), ("tau_reward", ctypes.c_float),
         ("reward_gain", ctypes.c_float),
         ("reward_channel", ctypes.c_int32), ("punish_channel", ctypes.c_int32),
+        ("hard", ctypes.c_int32),
     ]
 
 

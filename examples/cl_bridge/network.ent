@@ -70,6 +70,8 @@ unique Dish {
   reward_gain: f32,
   reward_channel: i32,  // a stim on this channel is dopamine, not current (-1: none)
   punish_channel: i32,  // and one on this, dopamine taken away (-1: none)
+  hard: bool,        // hard bounds: STDP's steps are a_plus and a_minus times w_max / 2 whatever
+                     // the weight (as soft bounds' at w_max / 2), the weight still kept in [0, w_max]
   dopamine: f32,     // the dopamine now
   tick: i32,         // the steps run
   spikes: i64,       // the spikes so far
@@ -166,6 +168,7 @@ world {
   Dish.reward_gain = 1.0
   Dish.reward_channel = -1
   Dish.punish_channel = -1
+  Dish.hard = false
   Dish.dopamine = 0.0
 }
 
@@ -456,13 +459,17 @@ gpu system integrate() {
 // stims on reward_channel (and goes with those on punish_channel) and
 // fades with tau_reward: a channel no CL1 has, the question being whether
 // this dish could learn a task at all were it told how it did.
+//
+// With `hard`, additive STDP: the steps do not shrink near the bounds, so
+// a reward bias can keep pulling paths apart until one meets 0 or w_max.
 gpu system stdp() {
   for e, n: Neuron {
     let scale = Dish.home_gain * (Dish.home_rate / 1000.0 - n.rate)
     for (pre)-[mut s: Synapse]->(e) {
       if let t = Neuron(pre).trace, let f = Neuron(pre).fired {
-        let pair = Dish.a_plus * t * n.fired * (Dish.w_max - s.weight)
-            - Dish.a_minus * n.post * f * s.weight
+        let room = if Dish.hard { 0.5 * Dish.w_max } else { Dish.w_max - s.weight }
+        let held = if Dish.hard { 0.5 * Dish.w_max } else { s.weight }
+        let pair = Dish.a_plus * t * n.fired * room - Dish.a_minus * n.post * f * held
         var dw = pair
         if Dish.modulated {
           s.elig = Decay.elig * s.elig + pair

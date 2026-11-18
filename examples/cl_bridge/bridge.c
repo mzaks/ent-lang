@@ -52,6 +52,7 @@ typedef struct {
   int32_t modulated;
   float tau_elig, tau_reward, reward_gain;
   int32_t reward_channel, punish_channel;
+  int32_t hard;
 } dish_params;
 
 typedef struct {
@@ -105,6 +106,7 @@ void dish_defaults(dish_params *p) {
   p->reward_gain = *ent_Dish_reward_gain(w);
   p->reward_channel = *ent_Dish_reward_channel(w);
   p->punish_channel = *ent_Dish_punish_channel(w);
+  p->hard = *ent_Dish_hard(w);
   ent_world_destroy(w);
 }
 
@@ -170,6 +172,7 @@ dish *dish_create(const dish_params *p) {
   *ent_Dish_reward_gain(w) = p->reward_gain;
   *ent_Dish_reward_channel(w) = p->reward_channel;
   *ent_Dish_punish_channel(w) = p->punish_channel;
+  *ent_Dish_hard(w) = p->hard != 0;
   ent_create(w);
   return d;
 }

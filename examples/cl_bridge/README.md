@@ -144,6 +144,10 @@ millisecond:
   `dopamine` fades with `tau_reward`. No CL1 has such a channel: it is
   there to ask whether this model could learn a task at all were it told
   how it did ([Learning rules](#learning-rules)).
+- **hard bounds**, with `hard` (off by default): STDP's steps no longer
+  depend on the weight, `(w_max - w)` and `w` both become `w_max / 2`
+  (the soft rule's steps at `w_max / 2`), and the weight is still kept in
+  `[0, w_max]`.
 
 `fired` and `trace` are f32 values, not tags. The noise is SplitMix64's mix
 of the seed, the step and the neuron's number (wyrand's 128-bit multiply
@@ -193,6 +197,7 @@ set by hand:
 | `tau_reward` | 200 ms | | the dopamine's |
 | `reward_gain` | 1 | | how much a unit of dopamine times the eligibility changes a weight |
 | `reward_channel`, `punish_channel` | -1, -1 | | the channels whose stims are dopamine (-1: none) |
+| `hard` | false | | hard-bounded (additive) STDP instead of soft bounds |
 
 With these, a dish is quiet between bursts. Seed 1's first 3 s have 184
 spikes (0.06 Hz a neuron); over minutes, the electrodes see about 4 bursts
@@ -881,8 +886,52 @@ start with 0 to 2 in the whole dish in the 100 ms before), so a small
 difference in weights tips only some of them; and the weights stop
 diverging at a small difference, likely where STDP's soft bounds (a
 strengthening by `w_max - w`, a weakening by `w`) balance the reward's
-pull, each path at a fixed point of its own. A rule with hard bounds
-would tell; not tried.
+pull, each path at a fixed point of its own.
+
+**Hard bounds.** With `hard=1` the steps no longer shrink near the
+bounds. The plateau is partly the soft bounds', not all theirs:
+
+| `conditioning.py rpe`, `axon=0.11`, seeds 1 to 8 | soft bounds | `hard=1` |
+|---|---|---|
+| 10 minutes, score less gain 0 | +0.255 ± 0.020 | +0.313 ± 0.016 (8 of 8 higher) |
+| 20 minutes, score less gain 0 (minutes 10 to 20) | +0.225 ± 0.015 | +0.365 ± 0.021 (8 of 8 higher) |
+| 10 minutes, `home_gain=0 w_exc=0.0027` | +0.255 ± 0.055 | +0.323 ± 0.039 |
+
+The right paths pull further ahead (`paths_probe.py 10 axon=0.11 hard=1`:
+0.513 against 0.455 of w_max at minute 10, against 0.564 and 0.529 with
+soft bounds), but the right share still rises mostly in the first 3
+minutes and then creeps (top half/bottom half right 0.70/0.57 in the
+first 2 minutes, 0.76/0.62 in the last 2 of 20; soft bounds 0.66/0.52
+and 0.65/0.56). No path meets 0 or w_max. Settled 5 minutes and then
+without scaling (`settle=5 freeze=1`) both paths first grow (0.73 and
+0.71 of w_max) and then sink together as the dish quiets (5.5 Hz a
+channel to 2.4), the right share staying near 0.69: additive STDP here
+weakens more than it strengthens, and without scaling nothing holds the
+dish. So scaling is not the brake with hard bounds either; what is left
+is the few spikes an answer comes from.
+
+Pong with the reward for each move (`learn_study.py 20 8 0,1 out.json
+columns moves tau_elig=200 axon=0.11 hard=1`, as is and flipped, 16
+pairs), minutes 10 to 20:
+
+| hits a rally | soft bounds | `hard=1` |
+|---|---|---|
+| gain 1, mean | 0.63 | 0.80 |
+| less gain 0 (0.43) | +0.20 ± 0.03 (16 of 16) | +0.37 ± 0.03 (16 of 16) |
+| hard less soft | | +0.17 ± 0.04 (14 of 16) |
+| moves towards the ball | 0.564 | 0.590 |
+
+Its control, `shuffled` with `hard=1`: 0.43 hits a rally, −0.00 ± 0.03
+over gain 0, and `moves` +0.37 ± 0.04 above it (16 of 16): what is
+learnt comes from what the pulses say, as with soft bounds.
+
+As every parameter here, `hard` is a choice of the model's, not a fact
+of a culture's: the dish was calibrated with soft bounds (and its
+calibration is not checked again here). With `modulated` at gain 0
+only scaling changes the weights, so `hard` changes nothing there (the
+gain 0 rows are the same with and without it); with plain STDP
+(`modulated` off, as the calibration ran) it would, and that dish was
+not tried.
 
 ```sh
 build/cl_bridge/venv/bin/python examples/cl_bridge/conditioning.py \

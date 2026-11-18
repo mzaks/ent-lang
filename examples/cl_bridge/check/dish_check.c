@@ -38,6 +38,7 @@ typedef struct {
   int32_t modulated;
   float tau_elig, tau_reward, reward_gain;
   int32_t reward_channel, punish_channel;
+  int32_t hard;
 } dish_params;
 typedef struct dish dish;
 
