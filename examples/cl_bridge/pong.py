@@ -30,6 +30,10 @@ conditions:
     shuffled  as `moves`, but each judged move's outcome a coin flip (its
               own generator, so the ball's paths are those of `moves`): a
               control for what the pulses do whatever they say
+    hits_shuffled  as `reward`, but at each hit or miss the outcome
+              said is a coin that comes up a hit with the running share
+              of real hits (so the pulses are alike in size and number):
+              `reward`'s control
 
 columns: the second layout (below), where the stims' direct answers in
 the motor regions do not play the game.
@@ -114,7 +118,8 @@ LAYOUTS = {
                 [r * 8 + c for r in range(8) for c in (0, 1)],
                 [r * 8 + c for r in range(8) for c in (6, 7)], 28, 36),
 }
-CONDITIONS = ("stim", "silent", "none", "rest", "reward", "moves", "shuffled")
+CONDITIONS = ("stim", "silent", "none", "rest", "reward", "moves", "shuffled",
+              "hits_shuffled")
 
 
 class Pong:
@@ -149,7 +154,8 @@ class Pong:
         self.expect_move = 0.5           # `moves`: the share of moves towards the ball
         self.judged_at, self.judged_paddle = 0.0, self.paddle
         self.moves_towards = self.moves_judged = 0
-        self.coin = random.Random(seed * 104729 + 7)   # `shuffled`
+        self.coin = random.Random(seed * 104729 + 7)   # `shuffled`, `hits_shuffled`
+        self.hit_share = 0.5             # `hits_shuffled`: the running share of real hits
         self.doses: dict[int, float] = {}   # this tick's stims not of 1 uA
         self.serve()
 
@@ -184,6 +190,15 @@ class Pong:
             channel = self.reward if err > 0 else self.punish
             out.append(channel)
             self.doses[channel] = abs(err)
+
+    def judge_hit(self, got: float, out: list[int]) -> None:
+        """A hit (1) or a miss (0): `reward` says so; `hits_shuffled` says
+        what a coin says, a hit with the running share of real hits."""
+        if self.condition == "hits_shuffled":
+            said = 1.0 if self.coin.random() < self.hit_share else 0.0
+            self.hit_share += RPE_RATE * (got - self.hit_share)
+            got = said
+        self.outcome(got, out)
 
     def tick(self, up: int, down: int) -> list[int]:
         dt, decay = self.dt, math.exp(-self.dt / MOTOR_TAU)
@@ -233,14 +248,14 @@ class Pong:
                 self.hits += 1
                 if self.condition == "stim":
                     self.schedule(HIT_HZ, HIT_S, self.hit_channels)
-                elif self.condition == "reward":
-                    self.outcome(1.0, out)
+                elif self.condition in ("reward", "hits_shuffled"):
+                    self.judge_hit(1.0, out)
             else:
                 self.rallies.append((round(self.start, 3), self.hits))
                 if self.condition == "stim":
                     self.schedule(MISS_HZ, MISS_S, lambda: [self.rng.randrange(64)])
-                elif self.condition == "reward":
-                    self.outcome(0.0, out)
+                elif self.condition in ("reward", "hits_shuffled"):
+                    self.judge_hit(0.0, out)
                 if self.condition in ("stim", "silent"):
                     self.paused_until = self.t + MISS_S
                 self.t += dt
@@ -278,7 +293,7 @@ def play(minutes: float, seed: int, condition: str, flip: bool = False,
     game = Pong(condition, seed, flip, layout)
     up_set, down_set = set(game.up_channels), set(game.down_channels)
     dish = dict(parameters)
-    if condition in ("reward", "moves", "shuffled"):
+    if condition in ("reward", "moves", "shuffled", "hits_shuffled"):
         dish = {"modulated": 1, "reward_channel": game.reward, "punish_channel": game.punish, **dish}
     ent_dish.use(seed=seed, **dish)
     with cl.open() as neurons:

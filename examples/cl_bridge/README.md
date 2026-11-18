@@ -827,15 +827,30 @@ So the reward for hits and misses teaches something too, now that 48
 pairs can see it: +0.08 hits a rally (as is +0.09 ± 0.04, flipped +0.07
 ± 0.02), in place by minutes 5 to 10 and no more after. That is about a
 third of what the reward for each move gives in the same time (+0.20,
-above). No shuffled control was run for it; the one for `moves` showed
-pulses that say nothing leave the play where it was. 96 sessions took
-about 3 hours.
+above). 96 sessions took about 3 hours.
+
+Its control, `hits_shuffled`: the same pulses at the same hits and
+misses, but each outcome said is a coin that comes up a hit with the
+running share of real hits, so the pulses are alike in size and number
+and say nothing. Gain 1 on the same 24 seeds, as is and flipped, against
+the same gain 0 and `reward` sessions:
+
+| minutes | 0-5 | 5-10 | 10-15 | 15-20 | 10-20 |
+|---|---|---|---|---|---|
+| `hits_shuffled`, gain 1 | 0.42 | 0.41 | 0.46 | 0.42 | 0.44 |
+| `hits_shuffled` less gain 0 | −0.03 ± 0.02 | −0.02 ± 0.02 | +0.01 ± 0.02 | −0.01 ± 0.02 | +0.00 ± 0.02 |
+| `reward` less `hits_shuffled` | +0.06 ± 0.02 | +0.10 ± 0.02 | +0.07 ± 0.02 | +0.08 ± 0.03 | +0.07 ± 0.02 |
+| pairs above | 33 of 48 | 39 of 48 | 33 of 48 | 35 of 48 | 35 of 48 |
+
+The shuffled pulses play as gain 0 does; `reward` stays above them by
+what it is above gain 0. So what it learns comes from the pulses saying
+hit or miss, not from there being pulses.
 
 ```sh
 build/cl_bridge/venv/bin/python examples/cl_bridge/conditioning.py \
     bias|map|rpe [minutes [gains [seeds [name=value ...]]]]
 build/cl_bridge/venv/bin/python examples/cl_bridge/learn_study.py \
-    [minutes [seeds [gains [out.json [columns] [moves|shuffled] [name=value ...]]]]]
+    [minutes [seeds [gains [out.json [columns] [moves|shuffled|hits_shuffled] [name=value ...]]]]]
 build/cl_bridge/venv/bin/python examples/cl_bridge/reach.py [axons [name=value ...]]
 ```
 
