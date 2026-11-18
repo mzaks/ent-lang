@@ -811,6 +811,26 @@ the outcome less the running share of moves towards the ball, so as the
 lean grows, each pulse shrinks. The 48 sessions took about 4 hours on 22
 processes.
 
+**Hits and misses, 24 seeds.** The `reward` condition (a pulse for each
+hit and miss, none for moves) on the same dish, 20 minutes on seeds 1 to
+24 (seeds 1 to 8 give the same rallies as the run above), as is and
+flipped: 48 pairs.
+
+| minutes | 0-5 | 5-10 | 10-15 | 15-20 | 10-20 |
+|---|---|---|---|---|---|
+| gain 0 | 0.45 | 0.43 | 0.45 | 0.43 | 0.44 |
+| `reward`, gain 1 | 0.48 | 0.51 | 0.53 | 0.51 | 0.52 |
+| less gain 0, seed by seed | +0.03 ± 0.02 | +0.08 ± 0.02 | +0.08 ± 0.02 | +0.08 ± 0.02 | +0.08 ± 0.015 |
+| pairs above | 30 of 48 | 35 of 48 | 31 of 48 | 29 of 48 | 39 of 48 |
+
+So the reward for hits and misses teaches something too, now that 48
+pairs can see it: +0.08 hits a rally (as is +0.09 ± 0.04, flipped +0.07
+± 0.02), in place by minutes 5 to 10 and no more after. That is about a
+third of what the reward for each move gives in the same time (+0.20,
+above). No shuffled control was run for it; the one for `moves` showed
+pulses that say nothing leave the play where it was. 96 sessions took
+about 3 hours.
+
 ```sh
 build/cl_bridge/venv/bin/python examples/cl_bridge/conditioning.py \
     bias|map|rpe [minutes [gains [seeds [name=value ...]]]]
