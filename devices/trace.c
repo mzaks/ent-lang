@@ -1,7 +1,8 @@
 // What a program built with `ent build --trace` calls (the ent-trace pass):
 // the time of each system, schedule and sort of a relation, and of each
 // parallel loop, where it is entered and left, and each thread's own time
-// in it. Each thread keeps what it timed in a list of its own (a lock only
+// in it; and after each schedule `main` runs, how many entities each
+// archetype has (a counter in the trace). Each thread keeps what it timed in a list of its own (a lock only
 // where a thread times its first). When the program ends they are written
 // as a trace in Chrome's JSON (ENT_TRACE says where, `%p` the process's
 // number; else `program.trace.json` where it runs), which ui.perfetto.dev
@@ -22,7 +23,8 @@ enum {
   ENT_TRACE_LOOP,
   ENT_TRACE_WORK,
   ENT_TRACE_COUNT,
-  ENT_TRACE_TANGLE
+  ENT_TRACE_TANGLE,
+  ENT_TRACE_ENTITIES
 };
 
 typedef struct {
@@ -32,6 +34,8 @@ typedef struct {
   // (Of an index made again: how many rows were below the one before, of
   // how many.)
   int64_t below, rows;
+  // (Of entities counted: how many each archetype has, `rows` of them.)
+  int64_t *values;
 } ent_trace_event;
 
 // (What one thread timed; `open`: where what it is in began, and what.)
@@ -128,6 +132,90 @@ void ent_trace_count(int64_t site, int64_t count) {
                 now + count);
 }
 
+// The archetypes' names, a line each, in the order of their counts.
+static const char **ent_trace_archetype_names;
+static int64_t ent_trace_archetype_count;
+void ent_trace_archetypes(const char *names) {
+  int64_t many = 0;
+  for (const char *at = names; *at; ++at)
+    many += *at == '\n';
+  ent_trace_archetype_names = calloc(many + 1, sizeof(char *));
+  const char *from = names;
+  for (int64_t k = 0; k < many; ++k) {
+    const char *end = strchr(from, '\n');
+    char *name = malloc(end - from + 1);
+    memcpy(name, from, end - from);
+    name[end - from] = 0;
+    ent_trace_archetype_names[k] = name;
+    from = end + 1;
+  }
+  ent_trace_archetype_count = many;
+}
+
+// After a schedule that `main` runs: how many entities each archetype has
+// (`counts`, the address of `many` of them). Kept where they changed since
+// those kept last of that schedule; and once 10000 are kept of it, at most
+// once a millisecond (a program that runs it many times a frame would keep
+// too much), the last of those passed over kept as the program ends.
+typedef struct {
+  int64_t kept, at, seen_at;
+  int64_t *last, *seen;
+  int64_t many;
+  int thread;
+} ent_trace_counted_site;
+static ent_trace_counted_site *ent_trace_counted;
+static int64_t ent_trace_counted_room;
+static void ent_trace_keep_counts(ent_trace_thread *thread, int64_t site,
+                                  int64_t at, const int64_t *counts,
+                                  int64_t many) {
+  int64_t *values = malloc(many * sizeof(int64_t));
+  memcpy(values, counts, many * sizeof(int64_t));
+  ent_trace_add(thread, (int32_t)site, ENT_TRACE_ENTITIES, at, at);
+  thread->events[thread->count - 1].rows = many;
+  thread->events[thread->count - 1].values = values;
+  ent_trace_counted[site].last = values;
+  ent_trace_counted[site].kept += 1;
+  ent_trace_counted[site].at = at;
+}
+void ent_trace_entities(int64_t site, int64_t counts, int64_t many) {
+  int64_t now = ent_trace_now();
+  const int64_t *given = (const int64_t *)(intptr_t)counts;
+  if (site >= ent_trace_counted_room) {
+    int64_t room = site + 64;
+    ent_trace_counted =
+        realloc(ent_trace_counted, room * sizeof *ent_trace_counted);
+    memset(ent_trace_counted + ent_trace_counted_room, 0,
+           (room - ent_trace_counted_room) * sizeof *ent_trace_counted);
+    ent_trace_counted_room = room;
+  }
+  ent_trace_counted_site *counted = &ent_trace_counted[site];
+  ent_trace_thread *thread = ent_trace_this();
+  if (!counted->seen) {
+    counted->seen = malloc(many * sizeof(int64_t));
+    counted->many = many;
+  }
+  memcpy(counted->seen, given, many * sizeof(int64_t));
+  counted->seen_at = now;
+  counted->thread = thread->number;
+  if (counted->last &&
+      memcmp(counted->last, given, many * sizeof(int64_t)) == 0)
+    return;
+  if (counted->kept >= 10000 && now - counted->at < 1000000)
+    return;
+  ent_trace_keep_counts(thread, site, now, given, many);
+}
+// (As the program ends: of each schedule, the counts last passed over.)
+static void ent_trace_last_counts(void) {
+  for (int64_t site = 0; site < ent_trace_counted_room; ++site) {
+    ent_trace_counted_site *counted = &ent_trace_counted[site];
+    if (counted->seen && counted->last &&
+        memcmp(counted->last, counted->seen,
+               counted->many * sizeof(int64_t)) != 0)
+      ent_trace_keep_counts(ent_trace_threads[counted->thread], site,
+                            counted->seen_at, counted->seen, counted->many);
+  }
+}
+
 // A grid index made again (its Name_tangled, ent-trace): how many of its
 // rows were below the one before, of how many, and whether it was put in
 // order anew (`tangled`, else each moved down to its place). With
@@ -219,6 +307,27 @@ static void ent_trace_write(const char *path) {
         fprintf(out, "}}");
         continue;
       }
+      if (event->kind == ENT_TRACE_ENTITIES) {
+        // (A counter, a line of each archetype: named after the schedule.)
+        char name[4096];
+        snprintf(name, sizeof name, "entities after %s",
+                 ent_trace_name_of(event->site));
+        ent_trace_json_text(out, name);
+        fprintf(out,
+                ",\"cat\":\"entities\",\"ph\":\"C\",\"ts\":%.3f,"
+                "\"pid\":1,\"tid\":%d,\"args\":{",
+                (event->begin - ent_trace_started) / 1e3, thread->number);
+        for (int64_t a = 0; a < event->rows; ++a) {
+          if (a)
+            fputc(',', out);
+          ent_trace_json_text(out, a < ent_trace_archetype_count
+                                       ? ent_trace_archetype_names[a]
+                                       : "?");
+          fprintf(out, ":%lld", (long long)event->values[a]);
+        }
+        fprintf(out, "}}");
+        continue;
+      }
       if (event->kind == ENT_TRACE_COUNT) {
         const char *key = ent_trace_key_of(event->site);
         ent_trace_json_text(out, ent_trace_name_of(event->site));
@@ -300,7 +409,8 @@ static void ent_trace_say(int64_t ended) {
       int32_t site = event->site < ent_trace_name_count
                          ? event->site
                          : (int32_t)ent_trace_name_count;
-      if (event->kind == ENT_TRACE_COUNT || event->kind == ENT_TRACE_TANGLE)
+      if (event->kind == ENT_TRACE_COUNT || event->kind == ENT_TRACE_TANGLE ||
+          event->kind == ENT_TRACE_ENTITIES)
         continue;
       if (event->kind == ENT_TRACE_WORK) {
         sums[site].work += event->end - event->begin;
@@ -393,6 +503,7 @@ static void ent_trace_finish(void) {
     snprintf(path, sizeof path, "%s.trace.json", program);
   }
   pthread_mutex_lock(&ent_trace_lock);
+  ent_trace_last_counts();
   ent_trace_say(ended);
   ent_trace_write(path);
   fprintf(stderr, "ent: the trace is in %s (ui.perfetto.dev shows it)\n", path);

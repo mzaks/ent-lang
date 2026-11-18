@@ -237,12 +237,19 @@ def EntTrace : Pass<"ent-trace", "ModuleOp"> {
       (`ent_trace_now`, `ent_trace_work`): so how long the threads worked
       of the time the loop took, at two calls a thread.
     - `main` starts the trace and names each site (`ent_trace_name`): the
-      function, and the .ent file and line of the region.
+      function, and the .ent file and line of the region; and the
+      archetypes (`ent_trace_archetypes`, of `ent.archetypes` on the
+      module, which ent-lower-to-loops leaves).
+    - Where a schedule that `main` runs returns, how many entities each
+      archetype has (`ent_trace_entities`: the counts at the start of the
+      world).
 
     Run it after `--ent-omp-nowait`, before `--convert-scf-to-cf`.
   }];
   let dependentDialects = ["::mlir::LLVM::LLVMDialect",
-                           "::mlir::func::FuncDialect"];
+                           "::mlir::func::FuncDialect",
+                           "::mlir::memref::MemRefDialect",
+                           "::mlir::arith::ArithDialect"];
 }
 
 def EntLoopChecks : Pass<"ent-loop-checks", "ModuleOp"> {

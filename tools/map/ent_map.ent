@@ -19,6 +19,10 @@
 // for each component, unique and the like, a cell where the run reads or
 // writes it; its stage and why it waits, at the pointer.
 //
+// Time, of a trace of the program (ent map program.ent --trace): how many
+// entities each archetype had as it ran, how long each run of the
+// schedules took, and the systems, schedules and loops by their time.
+//
 // And Provenance: a value (a component's field, a unique's...), the writes
 // that give it one, each with the values it is made from and those it
 // depends on, and the writes it goes into; a click on one shows that one.
@@ -28,8 +32,8 @@
 // from what to what, and where in the program.
 //
 // With ENT_MAP_SHOT=picture.png it draws the wave once (of the archetype
-// whose label ENT_MAP_ARCH is, where set; ENT_MAP_VIEW=data or provenance:
-// those views, ENT_MAP_VALUE the value's words), saves its picture there and
+// whose label ENT_MAP_ARCH is, where set; ENT_MAP_VIEW=data, provenance or
+// time: those views, ENT_MAP_VALUE the value's words), saves its picture there and
 // ends: for checks and pictures of it. ENT_MAP_POINT=x,y puts the pointer
 // there in it (in the window's points).
 import window
@@ -315,6 +319,110 @@ fn value_title(kind: text, name: text, field: text) -> text {
   else { kind + " " + name + "." + field }
 }
 
+// ---- Time ---------------------------------------------------------------
+// How the program ran, of a trace of it (`ent map program.ent --trace`,
+// after a run of it built with --trace; tools/ent's trace_into_map): how
+// many entities each archetype had after each run of a schedule `main`
+// runs, and how long those runs took, over the run; and each system,
+// schedule, sort and loop over entities by its own time, the most first.
+
+// A site: its order (the most own time first), kind, whose (the system's,
+// or the function's a loop is in), where, how often, its own time and all
+// of it (microseconds), how much of a loop its threads worked, its words.
+component Tk {
+  order: i32, kind: text, who: text, place: text, times: i32, own: f32, all: f32,
+  busy: text, label: text
+}
+// The runs of the schedules (at, in ms of the run; how long); the counts
+// (at; where its archetypes' numbers begin in TVal); an archetype's most
+// entities, its line's colour and place among the lines (-1: none).
+buffer TRun { at: f32, ms: f32 } capacity 8192
+buffer TCnt { at: f32, start: i32 } capacity 8192
+buffer TVal { n: i32 } capacity 1048576
+buffer ArchPk { peak: i32, colour: i32, rank: i32 } capacity 65536
+
+// Whether there is a trace; how long it ran, on how many threads, its
+// file; how many sites, the most own time of one; the most entities and
+// the longest run; the schedules run; how many lines; the archetype
+// chosen (-1 none); how far the table is scrolled; where the pointer is in
+// the time (ms, -1 not) and what it is on; its words, where.
+unique Tm {
+  traced: bool, seconds: f32, threads: i32, file: text, took: i32, most: f32, peak: i32,
+  run_peak: f32, schedules: text, lines: i32, arch: i32, scroll: f32, at: f32, row: i32,
+  words: text, tx: f32, ty: f32
+}
+
+// "12.5": 12.5 (number gives whole numbers).
+fn decimal(t: text) -> f64 {
+  var whole = 0.0 as f64
+  var part = 0.0 as f64
+  var scale = 1.0 as f64
+  var after = false
+  var negative = false
+  var i = 0
+  while i < len(t) {
+    let c = t[i] as i32
+    if c == 45 { negative = true }
+    else if c == 46 { after = true }
+    else if c >= 48 && c <= 57 {
+      if after {
+        scale = scale / 10.0
+        part = part + (c - 48) as f64 * scale
+      } else {
+        whole = whole * 10.0 + (c - 48) as f64
+      }
+    }
+    i += 1
+  }
+  if negative { -(whole + part) } else { whole + part }
+}
+// x with `places` digits after the point ("1.50").
+fn fixed(x: f64, places: i32) -> text {
+  var scale = 1
+  var k = 0
+  while k < places {
+    scale = scale * 10
+    k += 1
+  }
+  let negative = x < 0.0
+  let all = ((if negative { -x } else { x }) * scale as f64 + 0.5) as i64
+  let whole = all / scale as i64
+  var rest = "{all - whole * scale as i64}"
+  while len(rest) < places { rest = "0" + rest }
+  var out = "{whole}"
+  if places > 0 { out = out + "." + rest }
+  if negative { out = "-" + out }
+  out
+}
+// A time in microseconds as it is best read: "820 µs", "12.40 ms", "3.21 s".
+fn duration(us: f64) -> text {
+  var out = fixed(us / 1000000.0, 2) + " s"
+  if us < 1000.0 { out = fixed(us, 0) + " µs" }
+  else if us < 1000000.0 { out = fixed(us / 1000.0, 2) + " ms" }
+  out
+}
+// The lines' colours, by their place.
+fn series_colour(rank: i32) -> i32 {
+  if rank == 0 { 0x4f9de0 } else if rank == 1 { 0xe0a03a } else if rank == 2 { 0x56c26a }
+  else if rank == 3 { 0xe0564f } else if rank == 4 { 0xa77be0 } else if rank == 5 { 0x3fb8a8 }
+  else if rank == 6 { 0xd0c050 } else if rank == 7 { 0xc07850 } else if rank == 8 { 0xe07bb0 }
+  else { 0x8fa0b0 }
+}
+fn most_lines() -> i32 { 10 }
+// Where the charts and the table are.
+fn chart_x() -> f32 { panel() + 64.0 }
+fn chart_w(width: f32) -> f32 { width - chart_x() - 32.0 }
+fn counts_y() -> f32 { top() + 40.0 }
+fn counts_h() -> f32 { 170.0 }
+fn runs_y() -> f32 { counts_y() + counts_h() + 34.0 }
+fn runs_h() -> f32 { 70.0 }
+fn table_y() -> f32 { runs_y() + runs_h() + 44.0 }
+fn took_h() -> f32 { 20.0 }
+// The x of a time (ms).
+fn time_x(ms: f32, all_ms: f32, w: f32) -> f32 {
+  chart_x() + (if all_ms > 0.0 { ms / all_ms } else { 0.0 }) * w
+}
+
 // The map read: every line a record (lib/Ent/Transforms/WorldMap.cpp).
 system load_map() {
   if !Map.loaded {
@@ -353,6 +461,7 @@ system load_map() {
         labels = labels + label + "\n"
         spawn { Arch { index: int(part(line, 1)), label: label, states: 0, row: -1 } }
         ArchRow += { states: 0 }
+        ArchPk += { peak: 0, colour: 0x8fa0b0, rank: -1 }
         Map.archetypes += 1
       } else if kind == "system" {
         Map.systems += 1
@@ -419,6 +528,46 @@ system load_map() {
         }
         ValAt[v].uses += 1
         froms += 1
+      } else if kind == "traced" {
+        Tm.traced = true
+        Tm.seconds = decimal(part(line, 1)) as f32
+        Tm.threads = int(part(line, 2))
+        Tm.file = part(line, 3)
+      } else if kind == "took" {
+        let own = decimal(part(line, 5)) as f32
+        if Tm.took == 0 { Tm.most = own }
+        spawn {
+          Tk { order: Tm.took, kind: part(line, 1), who: part(line, 2), place: part(line, 3),
+               times: int(part(line, 4)), own: own, all: decimal(part(line, 6)) as f32,
+               busy: part(line, 7), label: part(line, 8) }
+        }
+        Tm.took += 1
+      } else if kind == "ran" {
+        let ms = decimal(part(line, 3)) as f32
+        TRun += { at: decimal(part(line, 2)) as f32, ms: ms }
+        Tm.run_peak = max(Tm.run_peak, ms)
+        let ran = part(line, 1)
+        if find(", " + Tm.schedules + ", ", ", " + ran + ", ", 0) < 0 {
+          if len(Tm.schedules) > 0 { Tm.schedules = Tm.schedules + ", " }
+          Tm.schedules = Tm.schedules + ran
+        }
+      } else if kind == "entities" {
+        TCnt += { at: decimal(part(line, 1)) as f32, start: len(TVal) }
+        let list = part(line, 2)
+        var i = 0
+        var n = 0
+        var a = 0
+        while i <= len(list) {
+          if i == len(list) || list[i] == ',' {
+            TVal += { n: n }
+            if a < len(ArchPk) && n > ArchPk[a].peak { ArchPk[a].peak = n }
+            a += 1
+            n = 0
+          } else {
+            n = n * 10 + (list[i] as i32 - 48)
+          }
+          i += 1
+        }
       } else if kind == "lens" {
         schedule_name = ""
         Map.lens = part(line, 1)
@@ -464,6 +613,31 @@ system load_map() {
     Shot.arch = environment_variable("ENT_MAP_ARCH")
     if environment_variable("ENT_MAP_VIEW") == "data" { View.mode = 1 }
     if environment_variable("ENT_MAP_VIEW") == "provenance" { View.mode = 2 }
+    if environment_variable("ENT_MAP_VIEW") == "time" { View.mode = 3 }
+    // (The archetypes with the most entities, a line each.)
+    Tm.arch = -1
+    Tm.at = -1.0
+    Tm.row = -1
+    var rank = 0
+    while rank < most_lines() {
+      var best = -1
+      var most = 0
+      var a = 0
+      while a < len(ArchPk) {
+        if ArchPk[a].rank < 0 && ArchPk[a].peak > most {
+          best = a
+          most = ArchPk[a].peak
+        }
+        a += 1
+      }
+      if best >= 0 {
+        ArchPk[best].rank = rank
+        ArchPk[best].colour = series_colour(rank)
+        Tm.peak = max(Tm.peak, most)
+        Tm.lines += 1
+      }
+      rank += 1
+    }
     Prov.value = environment_variable("ENT_MAP_VALUE")
     Prov.sel = -1
     Prov.list_dirty = true
@@ -722,10 +896,11 @@ proc tab(name: text, x: f32, on: bool) {
 }
 system tabs() {
   if Mouse.clicks > 0 && Mouse.y >= 10.0 && Mouse.y < 38.0 {
-    let x = Mouse.x - (Window.width as f32 - 460.0)
+    let x = Mouse.x - (Window.width as f32 - 590.0)
     if x >= 0.0 && x < 122.0 { View.mode = 0 }
     if x >= 130.0 && x < 252.0 { View.mode = 1 }
     if x >= 260.0 && x < 382.0 { View.mode = 2 }
+    if x >= 390.0 && x < 512.0 { View.mode = 3 }
   }
 }
 
@@ -1221,9 +1396,20 @@ system draw_top() {
         "{Map.systems} systems ({Map.queries} queries; {Map.opaque} with effects outside the world, {Map.gpu} on the GPU) · " +
         "{Map.schedules} schedules", 16.0, 40.0, Window.width as f32 - 32.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
   // The views, as tabs.
-  tab("Lifecycle", Window.width as f32 - 460.0, View.mode == 0)
-  tab("Systems × data", Window.width as f32 - 330.0, View.mode == 1)
-  tab("Provenance", Window.width as f32 - 200.0, View.mode == 2)
+  tab("Lifecycle", Window.width as f32 - 590.0, View.mode == 0)
+  tab("Systems × data", Window.width as f32 - 460.0, View.mode == 1)
+  tab("Provenance", Window.width as f32 - 330.0, View.mode == 2)
+  tab("Time", Window.width as f32 - 200.0, View.mode == 3)
+  if View.mode == 3 {
+    if Tm.traced {
+      window::write("Time: how it ran (" + Tm.file + "): the entities of each archetype after each run of " +
+            Tm.schedules + ", how long each run took; each system, schedule and loop by its own time",
+            16.0, 62.0, Window.width as f32 - 32.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+    } else {
+      window::write("Time: how the program ran, of a trace of it", 16.0, 62.0, Window.width as f32 - 32.0, 0,
+            14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+    }
+  }
   if View.mode == 1 {
     window::write("Systems × data: {Map.main_rows} runs of systems, {Map.columns} components, uniques and the like they touch, " +
           "{Map.cells} cells · a row's stage: runs of one stage touch nothing another writes", 16.0, 62.0,
@@ -1294,6 +1480,266 @@ system draw_top() {
     let y0 = min(Grid.ty, Window.height as f32 - h - 8.0)
     rounded(x0, y0, w, h, 6.0, 6.0, 6.0, 6.0, 0xf0222b35)
     window::write(words, x0 + 10.0, y0 + 7.0, w - 16.0, 0, 14.0, 0.0, 18.0, 1, 0, 0xe2ecf5)
+  }  if len(Tm.words) > 0 && View.mode == 3 {
+    let words = Tm.words as text[4094]
+    let w = max(text_extent(words, 0, 14.0, 0.0, 1), 120.0) + 20.0
+    let lines = text_lines(words, w, 0, 14.0, 0.0, 1)
+    let h = lines as f32 * 18.0 + 14.0
+    let x0 = min(Tm.tx, Window.width as f32 - w - 8.0)
+    let y0 = min(Tm.ty, Window.height as f32 - h - 8.0)
+    rounded(x0, y0, w, h, 6.0, 6.0, 6.0, 6.0, 0xf0222b35)
+    window::write(words, x0 + 10.0, y0 + 7.0, w - 16.0, 0, 14.0, 0.0, 18.0, 1, 0, 0xe2ecf5)
+  }
+}
+
+// An even step for the time axis, of about `about` ms: 1, 2 or 5 of a
+// power of ten.
+fn even_step(about: f32) -> f32 {
+  var step = 0.001
+  while step * 10.0 <= about { step = step * 10.0 }
+  if step * 5.0 <= about { step = step * 5.0 }
+  else if step * 2.0 <= about { step = step * 2.0 }
+  step
+}
+fn kind_mark(kind: text) -> i32 {
+  if kind == "system" { 0x4f9de0 } else if kind == "schedule" { 0xa77be0 }
+  else if kind == "loop" { 0x56c26a } else if kind == "sort" { 0xd0c050 } else { 0x7d8a98 }
+}
+fn time_list_y() -> f32 { top() + 96.0 }
+
+// An archetype chosen in the list (its line stands out); the table
+// scrolled.
+system steer_time() {
+  let mx = Mouse.x
+  let my = Mouse.y
+  if Mouse.clicks > 0 && mx < panel() && my >= time_list_y() {
+    let row = ((my - time_list_y()) / row_height()) as i32
+    var a = 0
+    var chosen = -2
+    while a < len(ArchPk) {
+      if ArchPk[a].rank == row { chosen = a }
+      a += 1
+    }
+    if chosen >= 0 { Tm.arch = if Tm.arch == chosen { -1 } else { chosen } }
+  }
+  if mx > panel() && my > table_y() && Mouse.wheel_y != 0.0 {
+    let room = Window.height as f32 - table_y() - 30.0
+    let most = max(0.0, Tm.took as f32 * took_h() - room)
+    Tm.scroll = min(most, max(0.0, Tm.scroll - Mouse.wheel_y * 3.0 * took_h()))
+  }
+}
+
+// What the pointer is on: a time in the charts (that run, the entities
+// then) or a site in the table.
+system hover_time() {
+  Tm.words = ""
+  Tm.at = -1.0
+  Tm.row = -1
+  let px = if Shot.px >= 0.0 { Shot.px } else { Mouse.x }
+  let py = if Shot.px >= 0.0 { Shot.py } else { Mouse.y }
+  let all_ms = Tm.seconds * 1000.0
+  Tm.tx = px + 16.0
+  Tm.ty = py + 14.0
+  if Tm.traced && px >= chart_x() && px <= chart_x() + chart_w(Window.width as f32) && py >= counts_y() &&
+     py <= runs_y() + runs_h() {
+    let t = (px - chart_x()) / chart_w(Window.width as f32) * all_ms
+    Tm.at = t
+    var words = "at " + fixed(t as f64 / 1000.0, 3) + " s"
+    var k = 0
+    var ran = -1
+    while k < len(TRun) {
+      if TRun[k].at <= t { ran = k }
+      k += 1
+    }
+    if ran >= 0 {
+      words = words + "\nthat run took " + duration(TRun[ran].ms as f64 * 1000.0)
+    }
+    k = 0
+    var counted = -1
+    while k < len(TCnt) {
+      if TCnt[k].at <= t { counted = k }
+      k += 1
+    }
+    if counted >= 0 {
+      let start = TCnt[counted].start
+      var rank = 0
+      while rank < Tm.lines {
+        var a = 0
+        while a < len(ArchPk) {
+          if ArchPk[a].rank == rank {
+            words = words + "\n" + line_at(Map.labels, a) + ": {TVal[start + a].n}"
+          }
+          a += 1
+        }
+        rank += 1
+      }
+    }
+    Tm.words = words
+  }
+  if Tm.traced && px > panel() && py > table_y() + 24.0 {
+    let row = ((py - table_y() - 24.0 + Tm.scroll) / took_h()) as i32
+    if row < Tm.took {
+      Tm.row = row
+      for k: Tk in turn by k.order where k.order == row {
+        Tm.words = k.label + "\n{k.times} times: " + duration(k.own as f64) + " its own, " +
+                   duration(k.all as f64) + " in all, " + duration(k.all as f64 / k.times as f64) + " each" +
+                   (if len(k.busy) > 0 { "\nits threads worked " + k.busy + "% of it" } else { "" })
+      }
+    }
+  }
+}
+
+system draw_time() {
+  if !Tm.traced {
+    window::write("No trace of this program in the map.\n\nRun it built with --trace:  ent run program.ent --trace\n" +
+          "(it writes program.trace.json where it runs; ENT_TRACE says where instead),\nthen:  ent map program.ent " +
+          "--trace", panel() + 24.0, top() + 24.0, Window.width as f32 - panel() - 48.0, 0, 16.0, 0.0, 24.0, 1, 0,
+          0xc8d4e0)
+  } else {
+    let all_ms = Tm.seconds * 1000.0
+    let x0 = chart_x()
+    let w = chart_w(Window.width as f32)
+    // The entities: a line of each of the archetypes with the most.
+    window::write("Entities after each run", x0, counts_y() - 24.0, w, 0, 13.0, 0.0, 0.0, 2, 0, 0x7d8a98)
+    rect(x0, counts_y(), w, counts_h(), 0x171d24)
+    let peak = max(Tm.peak, 1)
+    rect(x0, counts_y(), w, 1.0, 0x20272f)
+    rect(x0, counts_y() + counts_h() * 0.5, w, 1.0, 0x20272f)
+    window::write("{peak}", x0 - 60.0, counts_y() - 7.0, 52.0, 0, 13.0, 0.0, 0.0, 2, 2, 0x7d8a98)
+    window::write("{peak / 2}", x0 - 60.0, counts_y() + counts_h() * 0.5 - 7.0, 52.0, 0, 13.0, 0.0, 0.0, 2, 2,
+                  0x7d8a98)
+    window::write("0", x0 - 60.0, counts_y() + counts_h() - 7.0, 52.0, 0, 13.0, 0.0, 0.0, 2, 2, 0x7d8a98)
+    let bottom = counts_y() + counts_h()
+    var a = 0
+    while a < len(ArchPk) {
+      if ArchPk[a].rank >= 0 && len(TCnt) > 0 {
+        var colour = ArchPk[a].colour
+        if Tm.arch >= 0 && Tm.arch != a { colour = colour + 0x50000000 }
+        let thick = Tm.arch == a
+        var k = 0
+        var lx = 0.0
+        var ly = 0.0
+        while k < len(TCnt) {
+          let x = time_x(TCnt[k].at, all_ms, w)
+          let y = bottom - TVal[TCnt[k].start + a].n as f32 / peak as f32 * (counts_h() - 4.0)
+          if k == 0 {
+            lx = x
+            ly = y
+          } else if y != ly {
+            line(lx, ly, x, ly, colour)
+            line(x, ly, x, y, colour)
+            if thick {
+              line(lx, ly - 1.0, x, ly - 1.0, colour)
+              line(x + 1.0, ly, x + 1.0, y, colour)
+            }
+            lx = x
+            ly = y
+          }
+          k += 1
+        }
+        line(lx, ly, x0 + w, ly, colour)
+        if thick { line(lx, ly - 1.0, x0 + w, ly - 1.0, colour) }
+      }
+      a += 1
+    }
+    // How long each run took.
+    window::write("How long each run of " + Tm.schedules + " took", x0, runs_y() - 24.0, w, 0, 13.0, 0.0, 0.0,
+                  2, 0, 0x7d8a98)
+    rect(x0, runs_y(), w, runs_h(), 0x171d24)
+    let longest = max(Tm.run_peak, 0.001)
+    window::write(duration(longest as f64 * 1000.0), x0 - 64.0, runs_y() - 7.0, 56.0, 0, 13.0, 0.0, 0.0, 2, 2,
+                  0x7d8a98)
+    window::write("0", x0 - 60.0, runs_y() + runs_h() - 7.0, 52.0, 0, 13.0, 0.0, 0.0, 2, 2, 0x7d8a98)
+    var k = 0
+    while k < len(TRun) {
+      let x = time_x(TRun[k].at, all_ms, w)
+      let bw = max(1.0, time_x(TRun[k].at + TRun[k].ms, all_ms, w) - x)
+      let h = max(1.0, TRun[k].ms / longest * runs_h())
+      rect(x, runs_y() + runs_h() - h, bw, h, 0x8fa0b0)
+      k += 1
+    }
+    // The time, along both.
+    let step = even_step(all_ms / 8.0)
+    var t = 0.0
+    while t <= all_ms && step > 0.0 {
+      let x = time_x(t, all_ms, w)
+      rect(x, runs_y() + runs_h(), 1.0, 5.0, 0x55657a)
+      var words = fixed(t as f64, if step >= 1.0 { 0 } else { 2 }) + " ms"
+      if all_ms >= 2000.0 { words = fixed(t as f64 / 1000.0, if step >= 1000.0 { 0 } else { 1 }) + " s" }
+      window::write(words, x - 40.0, runs_y() + runs_h() + 7.0, 80.0, 0, 12.0, 0.0, 0.0, 2, 1, 0x7d8a98)
+      t += step
+    }
+    if Tm.at >= 0.0 {
+      let x = time_x(Tm.at, all_ms, w)
+      rect(x, counts_y(), 1.0, runs_y() + runs_h() - counts_y(), 0x80ffffff)
+    }
+    // Each site by its own time, the most first.
+    let ty = table_y()
+    window::write("own", x0 - 60.0, ty, 100.0, 0, 13.0, 0.0, 0.0, 2, 2, 0x7d8a98)
+    window::write("all", x0 + 50.0, ty, 90.0, 0, 13.0, 0.0, 0.0, 2, 2, 0x7d8a98)
+    window::write("times", x0 + 150.0, ty, 70.0, 0, 13.0, 0.0, 0.0, 2, 2, 0x7d8a98)
+    window::write("each", x0 + 230.0, ty, 90.0, 0, 13.0, 0.0, 0.0, 2, 2, 0x7d8a98)
+    window::write("busy", x0 + 330.0, ty, 50.0, 0, 13.0, 0.0, 0.0, 2, 2, 0x7d8a98)
+    window::write("site", x0 + 560.0, ty, 200.0, 0, 13.0, 0.0, 0.0, 2, 0, 0x7d8a98)
+    rect(panel() + 16.0, ty + 20.0, Window.width as f32 - panel() - 32.0, 1.0, 0x26303a)
+    let first = ty + 24.0
+    clip(panel(), first, Window.width as f32 - panel(), Window.height as f32 - first)
+    let most = max(Tm.most, 0.001)
+    let scroll = Tm.scroll
+    let over = Tm.row
+    for k: Tk {
+      let y = first + k.order as f32 * took_h() - scroll
+      if y > first - took_h() && y < Window.height as f32 {
+        if k.order == over { rect(panel() + 16.0, y, Window.width as f32 - panel() - 32.0, took_h(), 0x26ffffff) }
+        let ty2 = y + 3.0
+        window::write(duration(k.own as f64), x0 - 60.0, ty2, 100.0, 0, 13.0, 0.0, 0.0, 2, 2, 0xe2ecf5)
+        window::write(duration(k.all as f64), x0 + 50.0, ty2, 90.0, 0, 13.0, 0.0, 0.0, 2, 2, 0x9fb0c0)
+        window::write("{k.times}", x0 + 150.0, ty2, 70.0, 0, 13.0, 0.0, 0.0, 2, 2, 0x9fb0c0)
+        window::write(duration(k.all as f64 / max(k.times, 1) as f64), x0 + 230.0, ty2, 90.0, 0, 13.0, 0.0, 0.0,
+                      2, 2, 0x9fb0c0)
+        if len(k.busy) > 0 {
+          window::write(k.busy + "%", x0 + 330.0, ty2, 50.0, 0, 13.0, 0.0, 0.0, 2, 2, 0x9fb0c0)
+        }
+        rect(x0 + 396.0, y + 5.0, max(1.0, k.own / most * 150.0), took_h() - 10.0, kind_mark(k.kind))
+        var where_words = ""
+        if len(k.place) > 0 { where_words = "  " + k.place }
+        // (A loop's: on one thread, which of those of one line.)
+        let one = find(k.label, " (one thread)", 0)
+        if one >= 0 { where_words = where_words + slice(k.label, one, len(k.label)) }
+        else {
+          let mark = find(k.label, " #", 0)
+          if mark >= 0 { where_words = where_words + slice(k.label, mark, len(k.label)) }
+        }
+        window::write(k.kind + " " + short(k.who) + where_words, x0 + 560.0, ty2, Window.width as f32 - x0 - 600.0,
+                      0, 13.0, 0.0, 0.0, 2, 0, 0xc8d4e0)
+      }
+    }
+    unclip()
+  }
+  // The list: what was traced, the archetypes with a line.
+  rect(0.0, top(), panel(), Window.height as f32 - top(), 0x141a20)
+  rect(panel() - 1.0, top(), 1.0, Window.height as f32 - top(), 0x26303a)
+  if Tm.traced {
+    var threads = " s on {Tm.threads} threads"
+    if Tm.threads == 1 { threads = " s on one thread" }
+    window::write("Traced " + fixed(Tm.seconds as f64, 2) + threads, 16.0, top() + 8.0,
+                  panel() - 24.0, 0, 13.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+    window::write("{Tm.took} sites timed, {len(TRun)} runs", 16.0, top() + 28.0, panel() - 24.0, 0, 13.0, 0.0,
+                  0.0, 2, 0, 0x7d8a98)
+    window::write("Archetypes, the most entities first", 16.0, time_list_y() - 24.0, panel() - 24.0, 0, 13.0, 0.0,
+                  0.0, 2, 0, 0x7d8a98)
+    var a = 0
+    while a < len(ArchPk) {
+      let rank = ArchPk[a].rank
+      if rank >= 0 {
+        let y = time_list_y() + rank as f32 * row_height()
+        if Tm.arch == a { rect(0.0, y, panel() - 1.0, row_height(), 0x24405e) }
+        rect(16.0, y + 7.0, 10.0, 10.0, ArchPk[a].colour)
+        window::write(line_at(Map.labels, a), 34.0, y + 3.0, panel() - 100.0, 0, 14.0, 0.0, 0.0, 2, 0, 0xd0d8e0)
+        window::write("{ArchPk[a].peak}", panel() - 70.0, y + 3.0, 54.0, 0, 14.0, 0.0, 0.0, 2, 2, 0x9fb0c0)
+      }
+      a += 1
+    }
   }
 }
 
@@ -1334,6 +1780,9 @@ schedule frame() {
   draw_wave() run_if View.mode == 0
   draw_grid() run_if View.mode == 1
   draw_provenance() run_if View.mode == 2
+  steer_time() run_if View.mode == 3
+  hover_time() run_if View.mode == 3
+  draw_time() run_if View.mode == 3
   draw_top()
   present()
   shot()

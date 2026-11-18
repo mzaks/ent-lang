@@ -4,6 +4,7 @@
   ent build program.ent [-o program] [-I dir] [more.c ...]
   ent run   program.ent [-I dir] [more.c ...] [-- arguments]
   ent map   program.ent [-I dir] [-o program.map] [--lens A,B] [--no-window]
+            [--trace]  (with --trace: how it ran, of its trace)
 
 A program is a .ent file with `main` and the modules it imports. Modules
 are found next to the importing file, in the -I directories and in the
@@ -126,7 +127,8 @@ Built with --trace, the program times each system, schedule and sort of a
 relation, and each parallel loop with each thread's time in it
 (devices/trace.c). When it ends it says on stderr where the time went
 (each one's own time, and how much of a loop's time the threads worked)
-and writes the timeline of every thread to `program.trace.json` where it
+and writes the timeline of every thread, with how many entities each
+archetype had after each schedule `main` runs, to `program.trace.json` where it
 runs (ENT_TRACE says where instead; `%p` in it, the process's number),
 for ui.perfetto.dev or chrome://tracing to show.
 
@@ -2275,6 +2277,118 @@ def launch(arguments, executable):
     return [mpirun, "-n", str(arguments.ranks), "--oversubscribe", executable]
 
 
+def trace_into_map(trace, path):
+    """Of the trace at `trace` (of a build with --trace), what the map at
+    `path` is given more, at its end, for ent map's Time view:
+
+      traced    seconds  threads  file
+      took      kind  who  place  times  own-us  all-us  busy%  label
+      ran       schedule  at-ms  ms
+      entities  at-ms  count,count,..  (by the map's archetypes)
+
+    a `took` for each site (a system, schedule, sort or loop over entities;
+    its own time without what it called that was timed too), the most
+    first; a `ran` for each run of a schedule `main` runs, and `entities`
+    of how many each archetype had after one, in the order they were
+    (each at most 4000 of, those between left out)."""
+    try:
+        with open(trace) as source:
+            events = json.load(source)["traceEvents"]
+    except (OSError, ValueError, KeyError) as error:
+        sys.exit(f"ent: cannot read the trace '{trace}': {error}")
+    with open(path) as source:
+        archetypes = [line.split("\t")[2] for line in source
+                      if line.startswith("archetype\t")]
+    where = {name: k for k, name in enumerate(archetypes)}
+    timed = [e for e in events if e.get("ph") == "X"]
+    threads = {e.get("tid") for e in events}
+    start = min((e["ts"] for e in timed), default=0.0)
+    end = max((e["ts"] + e["dur"] for e in timed), default=0.0)
+    # Each site: how often, all its time, its own (less what was timed
+    # inside it on its thread), and of a loop its threads' work.
+    sums = {}
+    workers = {e["tid"] for e in timed if e["cat"] == "work"}
+    for e in timed:
+        if e["cat"] == "work":
+            sums.setdefault(e["args"]["loop"], [0, 0.0, 0.0, 0.0])[3] += e["dur"]
+    by_thread = {}
+    for e in timed:
+        if e["cat"] != "work":
+            by_thread.setdefault(e["tid"], []).append(e)
+    for spans in by_thread.values():
+        spans.sort(key=lambda e: (e["ts"], -e["dur"]))
+        stack = []
+        for e in spans:
+            while stack and stack[-1]["ts"] + stack[-1]["dur"] <= e["ts"]:
+                stack.pop()
+            if stack:
+                sums[stack[-1]["name"]][2] -= e["dur"]
+            kept = sums.setdefault(e["name"], [0, 0.0, 0.0, 0.0])
+            kept[0] += 1
+            kept[1] += e["dur"]
+            kept[2] += e["dur"]
+            stack.append(e)
+    lines = ["traced\t%.6f\t%d\t%s" % ((end - start) / 1e6, len(threads),
+                                        os.path.basename(trace))]
+    for name, (times, total, own, work) in sorted(
+            sums.items(), key=lambda item: -item[1][2]):
+        if not times:
+            continue
+        loop = re.match(r"loop (\S+) in (\S+)", name)
+        span = re.match(r"(\w+) (\S+)(?: \((\S+)\))?", name)
+        if loop:
+            kind, who, place = "loop", loop.group(2), loop.group(1)
+        elif span:
+            kind, who, place = span.group(1), span.group(2), span.group(3) or ""
+        else:
+            kind, who, place = "", name, ""
+        busy = ("%.1f" % (100.0 * work / (total * len(workers)))
+                if kind == "loop" and total > 0 and workers and
+                "(one thread)" not in name else "")
+        lines.append("took\t%s\t%s\t%s\t%d\t%.3f\t%.3f\t%s\t%s"
+                     % (kind, who, place, times, max(own, 0.0), total, busy,
+                        name))
+    counted = sorted((e for e in events if e.get("cat") == "entities"),
+                     key=lambda e: e["ts"])
+    mains = set()
+    for e in counted:
+        named = re.match(r"entities after schedule (\S+)", e["name"])
+        if named:
+            mains.add(named.group(1))
+    runs = sorted((e for e in timed if e["cat"] == "span" and
+                   re.match(r"schedule (\S+)", e["name"]) and
+                   re.match(r"schedule (\S+)", e["name"]).group(1) in mains),
+                  key=lambda e: e["ts"])
+
+    def thinned(items, most=4000):
+        # (Of many, as many as `most`: the first of each stretch, and the
+        # last.)
+        if len(items) <= most:
+            return items
+        step = len(items) / most
+        kept = [items[int(k * step)] for k in range(most)]
+        return kept[:-1] + [items[-1]]
+    # (Of many runs, the longest of each stretch.)
+    if len(runs) > 4000:
+        step = len(runs) / 4000
+        runs = [max(runs[int(k * step):int((k + 1) * step)] or
+                    [runs[int(k * step)]], key=lambda e: e["dur"])
+                for k in range(4000)]
+    for e in runs:
+        lines.append("ran\t%s\t%.3f\t%.3f" % (
+            re.match(r"schedule (\S+)", e["name"]).group(1),
+            (e["ts"] - start) / 1e3, e["dur"] / 1e3))
+    for e in thinned(counted):
+        counts = [0] * len(archetypes)
+        for name, n in e["args"].items():
+            if name in where:
+                counts[where[name]] = n
+        lines.append("entities\t%.3f\t%s" % (
+            (e["ts"] - start) / 1e3, ",".join(str(n) for n in counts)))
+    with open(path, "a") as out:
+        out.write("".join(line + "\n" for line in lines))
+
+
 def world_map(arguments, path):
     """`ent map`: the program's world map (its archetypes, systems,
     schedules and its entities' lifecycle; --ent-world-map says what is in
@@ -2297,6 +2411,18 @@ def world_map(arguments, path):
             options.append("lens=" + arguments.lens)
         run([optimise, imported, "--ent-world-map=" + " ".join(options),
              "--mlir-print-op-on-diagnostic=false", "-o", os.devnull])
+    # (With --trace: how the program ran, from the trace a build of it with
+    # --trace wrote; ENT_TRACE, else program.trace.json or its name's.)
+    if arguments.trace:
+        asked = os.environ.get("ENT_TRACE")
+        found = [asked] if asked else [stem + ".trace.json",
+                                       "program.trace.json"]
+        trace = next((f for f in found if os.path.isfile(f)), None)
+        if not trace:
+            sys.exit("ent map --trace: no trace (%s); run the program built "
+                     "with --trace first" % " or ".join(found))
+        trace_into_map(trace, path)
+        print(f"ent: with how it ran, from {trace}", file=sys.stderr)
     print(f"ent: the world map of {arguments.program} is in {path}",
           file=sys.stderr)
     if arguments.no_window:
@@ -2349,7 +2475,9 @@ def main():
                         help="map: write the map, do not open it")
     parser.add_argument("--trace", action="store_true",
                         help="time systems, sorts and parallel loops, said "
-                        "on stderr and written to program.trace.json")
+                        "on stderr and written to program.trace.json; map: "
+                        "with how the program ran, of that trace (ENT_TRACE "
+                        "says where it is)")
     parser.add_argument("--tune", metavar="trace",
                         help="choose for each loop over entities whether it "
                         "runs on many threads, and how it shares its pieces "

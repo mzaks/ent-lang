@@ -1,8 +1,10 @@
 #include "Ent/Passes.h"
 
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/SymbolTable.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Support/Path.h"
 
 namespace mlir::ent {
@@ -78,6 +80,30 @@ struct EntTrace : public mlir::ent::impl::EntTraceBase<EntTrace> {
     declare("ent_trace_loop_end", {i64}, {});
     declare("ent_trace_now", {}, {i64});
     declare("ent_trace_work", {i64, i64}, {});
+    declare("ent_trace_entities", {i64, i64, i64}, {});
+    declare("ent_trace_archetypes", {pointer}, {});
+
+    // The schedules `main` runs: after each, how many entities each
+    // archetype has (the counts at the start of the world, by the names
+    // ent-lower-to-loops leaves of them).
+    auto archetypes = module->getAttrOfType<ArrayAttr>("ent.archetypes");
+    llvm::StringSet<> fromMain;
+    // (Through the functions between, `ent.main` say, that are not timed.)
+    SmallVector<func::FuncOp> between;
+    if (auto main = symbols.lookup<func::FuncOp>("main"))
+      between.push_back(main);
+    llvm::StringSet<> looked;
+    while (!between.empty()) {
+      func::FuncOp caller = between.pop_back_val();
+      caller.walk([&](func::CallOp called) {
+        StringRef name = called.getCallee();
+        fromMain.insert(name);
+        auto callee = symbols.lookup<func::FuncOp>(name);
+        if (callee && !callee.isExternal() && !callee->hasAttr("ent.trace") &&
+            looked.insert(name).second)
+          between.push_back(callee);
+      });
+    }
 
     // Each site a number, and what it is called; a loop over entities also
     // its site and how it ran ("site|parallel|dynamic", "site|serial"), for
@@ -109,9 +135,33 @@ struct EntTrace : public mlir::ent::impl::EntTraceBase<EntTrace> {
           name += " (" + place + ")";
         Value number = site(builder, loc, name);
         call(builder, loc, "ent_trace_begin", {number});
+        Value world = func.getNumArguments() ? func.getArgument(0) : Value();
+        auto worldType =
+            world ? dyn_cast<MemRefType>(world.getType()) : MemRefType();
+        bool counted = kind.getValue() == "schedule" && archetypes &&
+                       !archetypes.empty() &&
+                       fromMain.contains(func.getSymName()) && worldType &&
+                       worldType.getRank() == 1 &&
+                       worldType.getElementType().isInteger(8);
         func.walk([&](func::ReturnOp ret) {
           builder.setInsertionPoint(ret);
-          call(builder, ret.getLoc(), "ent_trace_end", {number});
+          Location at = ret.getLoc();
+          if (counted) {
+            auto countsType = MemRefType::get(
+                {static_cast<int64_t>(archetypes.size())}, i64);
+            Value zero = arith::ConstantIndexOp::create(builder, at, 0);
+            Value counts = memref::ViewOp::create(builder, at, countsType,
+                                                  world, zero, ValueRange{});
+            Value address =
+                memref::ExtractAlignedPointerAsIndexOp::create(builder, at,
+                                                               counts);
+            call(builder, at, "ent_trace_entities",
+                 {number,
+                  arith::IndexCastOp::create(builder, at, i64, address),
+                  arith::ConstantIntOp::create(builder, at, archetypes.size(),
+                                               64)});
+          }
+          call(builder, at, "ent_trace_end", {number});
         });
       }
       // A parallel loop's: where it is entered and left, and each
@@ -242,6 +292,15 @@ struct EntTrace : public mlir::ent::impl::EntTraceBase<EntTrace> {
     Location loc = main.getLoc();
     builder.setInsertionPointToStart(&main.getBody().front());
     call(builder, loc, "ent_trace_start", {});
+    if (archetypes && !archetypes.empty()) {
+      std::string all;
+      for (Attribute name : archetypes)
+        all += cast<StringAttr>(name).getValue().str() + "\n";
+      Value text = LLVM::createGlobalString(loc, builder, "ent_trace_archetype_names",
+                                            all + '\0',
+                                            LLVM::Linkage::Internal);
+      call(builder, loc, "ent_trace_archetypes", {text});
+    }
     for (auto [number, name] : llvm::enumerate(names)) {
       Value text = LLVM::createGlobalString(
           loc, builder, ("ent_trace_site_" + Twine(number)).str(), name + '\0',
@@ -260,3 +319,4 @@ struct EntTrace : public mlir::ent::impl::EntTraceBase<EntTrace> {
 };
 
 } // namespace
+

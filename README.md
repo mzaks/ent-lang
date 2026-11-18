@@ -173,7 +173,12 @@ component's presence, the entities), each write that gives it one, with
 the values that make it (followed back through the system's `if`s, loops
 and calls; a proc's result is from outside) and those it depends on (the
 conditions it is under, a query's `where` and `with`), and the writes it
-goes into; a click on one goes to it, Backspace back. The lens is the
+goes into; a click on one goes to it, Backspace back. A fourth, with
+`--trace` and a trace of a run of the program built with `--trace`
+(`ENT_TRACE`, else `program.trace.json`), is how it ran: how many
+entities each archetype had after each run of `main`'s schedules, how
+long each run took, and each system, schedule and loop by its own time.
+The lens is the
 program's own components that it adds or removes, or those `--lens`
 names; `-o` keeps the map (`--no-window`: only that).
 
@@ -183,7 +188,8 @@ thread's time in it (`devices/trace.c`, at two calls a thread for a loop).
 When it ends it says on stderr how long the thread that ran it spent in
 parallel loops and how long on its own, and of each site its own time
 (without what it called that was timed) and of a loop how much of it the
-threads worked; and it writes the timeline of every thread to
+threads worked; after each schedule `main` runs, how many entities each
+archetype has (where that changed); and it writes the timeline of every thread to
 `program.trace.json` (`ENT_TRACE` says where instead), for
 [ui.perfetto.dev](https://ui.perfetto.dev) to show. The city's epidemic
 at a million people with tracing, on 24 threads: 4.74 s, of which the

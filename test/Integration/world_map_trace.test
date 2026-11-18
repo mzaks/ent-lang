@@ -1,0 +1,25 @@
+// The world map with how the program ran (`ent map --trace`, ent map's
+// Time view): a lamp program built with --trace says, after each run of a
+// schedule `main` runs, how many entities each archetype has (a counter
+// of the trace, kept where it changed and at the end); the map is given
+// the trace's time of each site, each run of those schedules, and the
+// counts by the map's archetypes.
+// RUN: env ENT_TRACE=%t.json %ent run %S/Inputs/world_map/life.ent --trace > /dev/null 2> %t.said
+// RUN: python3 -c "import json, sys; events = json.load(open(sys.argv[1]))['traceEvents']; [print(e['name'], sorted(e['args'].items())) for e in events if e['cat'] == 'entities']" %t.json | FileCheck %s --check-prefix=JSON
+// RUN: env ENT_TRACE=%t.json %ent map %S/Inputs/world_map/life.ent --trace --no-window -o %t.map 2> /dev/null
+// RUN: tr '\t' '|' < %t.map | FileCheck %s
+// RUN: rm -f %t.none.json
+// RUN: env ENT_TRACE=%t.none.json not %ent map %S/Inputs/world_map/life.ent --trace --no-window -o %t.none.map 2>&1 | FileCheck %s --check-prefix=NONE
+
+// JSON: entities after schedule start (life.ent:27) [('Lamp_Done', 0), ('Lamp_archetype', 1)]
+
+// CHECK:      ent-map|1
+// CHECK:      traced|{{[0-9.]+}}|1|{{.*}}.json
+// CHECK-DAG:  took|schedule|frame|life.ent:28|6|{{[0-9.]+}}|{{[0-9.]+}}||schedule frame (life.ent:28)
+// CHECK-DAG:  took|system|dim|life.ent:16|6|
+// CHECK-DAG:  took|loop|reap|life.ent:24|6|{{.*}}|loop life.ent:24 in reap (one thread)
+// CHECK:      ran|start|{{[0-9.]+}}|{{[0-9.]+}}
+// CHECK-COUNT-6: ran|frame|{{[0-9.]+}}|{{[0-9.]+}}
+// CHECK:      entities|{{[0-9.]+}}|1,0
+
+// NONE: ent map --trace: no trace ({{.*}}none.json); run the program built with --trace first

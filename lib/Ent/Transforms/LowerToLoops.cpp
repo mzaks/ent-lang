@@ -28842,6 +28842,14 @@ struct EntLowerToLoops
       return signalPassFailure();
     if (getenv("ENT_LAYOUT_MAP"))
       printLayoutMap(*layout);
+    // (The archetypes' names in the order of their counts, at the start of
+    // the world: for ent-trace, which says how many entities each has.)
+    {
+      SmallVector<Attribute> names;
+      for (const WorldArchetype &archetype : layout->archetypes)
+        names.push_back(ArchetypeOp(archetype.op).getSymNameAttr());
+      module->setAttr("ent.archetypes", rewriter.getArrayAttr(names));
+    }
     if (ranks)
       distributeByRows(*layout, module);
     markSplitBuffers(module, *layout);
