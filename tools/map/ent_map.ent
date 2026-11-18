@@ -88,7 +88,8 @@ buffer ArchRow { states: i32 } capacity 65536
 // work that out again.
 unique View {
   mode: i32, arch: i32, cell: f32, gap: f32, ox: f32, oy: f32, n: i32, shown: i32, dirty: bool,
-  listed: i32, dragging: bool, most: i32, longest: f32, names: text, every: bool
+  listed: i32, dragging: bool, most: i32, longest: f32, names: text, every: bool, moved: f32,
+  clicked: bool
 }
 // How many changes come into each place of an axis (by the run before)
 // and go out of it (by the run after): axis by axis, place by place.
@@ -278,7 +279,7 @@ buffer ColAt { used: i32, shown: i32 } capacity 65536
 unique Grid {
   sched: i32, cell: f32, ox: f32, oy: f32, rows: i32, cols: i32, dirty: bool,
   dragging: bool, r: i32, c: i32, words: text, tx: f32, ty: f32, scheds: i32,
-  name: text, at: i32
+  name: text, at: i32, moved: f32, clicked: bool
 }
 
 fn read_colour() -> i32 { 0x4f9de0 }
@@ -685,6 +686,7 @@ unique Src {
 }
 
 fn source_x(width: f32) -> f32 { width * 0.42 }
+fn magnitude(x: f32) -> f32 { if x < 0.0 { -x } else { x } }
 fn code_size() -> f32 { 13.0 }
 fn code_h() -> f32 { 18.0 }
 // The place in a trace's name of a site: "system lanes.drive
@@ -1313,7 +1315,11 @@ system steer() {
       View.dirty = true
     }
   }
-  if mx > panel() && my > top() {
+  // (Not under the source, where it is open; a press let go of where it
+  // was is a click, which shows the source of what it is on.)
+  View.clicked = false
+  let free = !Src.open || mx < source_x(Window.width as f32)
+  if mx > panel() && my > top() && free {
     if Mouse.wheel_y != 0.0 {
       let was = View.cell
       let cell = min(64.0, max(1.0, if Mouse.wheel_y > 0.0 { was * 1.15 } else { was / 1.15 }))
@@ -1322,12 +1328,19 @@ system steer() {
       View.cell = cell
       View.gap = 3.0 * cell
     }
-    if Mouse.clicks > 0 { View.dragging = true }
+    if Mouse.clicks > 0 {
+      View.dragging = true
+      View.moved = 0.0
+    }
   }
-  if !Mouse.left { View.dragging = false }
+  if !Mouse.left {
+    if View.dragging && View.moved < 4.0 { View.clicked = true }
+    View.dragging = false
+  }
   if View.dragging {
     View.ox += Mouse.dx
     View.oy += Mouse.dy
+    View.moved += magnitude(Mouse.dx) + magnitude(Mouse.dy)
   }
 }
 
@@ -1389,6 +1402,7 @@ system hover() {
       for f: Fl in turn by f.step where f.col == on {
         if axis(f.from, StateRow[max(f.from, 0)].slot, total) == a &&
            axis(f.to, StateRow[max(f.to, 0)].slot, total) == b {
+          if View.clicked && len(Src.want) == 0 { Src.want = f.place }
           Hover.words = Hover.words + f.kind + "  (" + f.place + ")\n"
         }
       }
@@ -1752,7 +1766,9 @@ system steer_grid() {
       Grid.dirty = true
     }
   }
-  if mx > panel() && my > top() {
+  Grid.clicked = false
+  let free = !Src.open || mx < source_x(Window.width as f32)
+  if mx > panel() && my > top() && free {
     if Mouse.wheel_y != 0.0 {
       let was = Grid.cell
       let cell = min(40.0, max(3.0, if Mouse.wheel_y > 0.0 { was * 1.15 } else { was / 1.15 }))
@@ -1760,12 +1776,19 @@ system steer_grid() {
       Grid.oy = my - (my - Grid.oy) * cell / was
       Grid.cell = cell
     }
-    if Mouse.clicks > 0 { Grid.dragging = true }
+    if Mouse.clicks > 0 {
+      Grid.dragging = true
+      Grid.moved = 0.0
+    }
   }
-  if !Mouse.left { Grid.dragging = false }
+  if !Mouse.left {
+    if Grid.dragging && Grid.moved < 4.0 { Grid.clicked = true }
+    Grid.dragging = false
+  }
   if Grid.dragging {
     Grid.ox += Mouse.dx
     Grid.oy += Mouse.dy
+    Grid.moved += magnitude(Mouse.dx) + magnitude(Mouse.dy)
   }
 }
 
@@ -1787,8 +1810,9 @@ system hover_grid() {
       Grid.tx = px + 16.0
       Grid.ty = py + 14.0
       for w: Rw in turn by w.index where w.shown == r {
+        if Grid.clicked && len(w.place) > 0 { Src.want = w.place }
         Grid.words = w.system + "  (" + w.schedule + ", run {w.position + 1}, stage {w.stage + 1})" +
-                     (if len(w.place) > 0 { "  " + w.place } else { "" }) + "\n"
+                     (if len(w.place) > 0 { "  " + w.place + " (a click: its source)" } else { "" }) + "\n"
         if len(w.waits) > 0 { Grid.words = Grid.words + "waits for " + w.waits + ": " + w.why + "\n" }
         if len(w.opaque) > 0 { Grid.words = Grid.words + "effects outside the world at " + w.opaque + "\n" }
         if w.gpu { Grid.words = Grid.words + "on the GPU\n" }
@@ -2020,7 +2044,8 @@ system steer_provenance() {
   }
   let mx = Mouse.x
   let my = Mouse.y
-  if Mouse.wheel_y != 0.0 {
+  let free = !Src.open || mx < source_x(Window.width as f32)
+  if Mouse.wheel_y != 0.0 && free {
     if mx < panel() {
       let most = max(0.0, Prov.listed as f32 * row_height() - (Window.height as f32 - list_y()))
       Prov.list_top = min(most, max(0.0, Prov.list_top - Mouse.wheel_y * 40.0))
@@ -2029,7 +2054,7 @@ system steer_provenance() {
       Prov.top = min(most, max(0.0, Prov.top - Mouse.wheel_y * 40.0))
     }
   }
-  if Mouse.clicks > 0 && my > top() {
+  if Mouse.clicks > 0 && my > top() && free {
     if mx < panel() && my > list_y() {
       let row = ((my - list_y() + Prov.list_top) / row_height()) as i32
       for v: Val where v.row == row { Prov.go max= v.index }
@@ -2042,6 +2067,19 @@ system steer_provenance() {
         let cx = from_x() + 14.0 + f.x
         let cy = y0 + WrAt[f.write].y + card_head() + f.y
         if mx >= cx && mx < cx + f.w && my >= cy && my < cy + chip_h() { Prov.go max= f.value }
+      }
+      // The head of a card: the write's source.
+      for w: Wr in turn by w.index where WrAt[w.index].y >= 0.0 || WrAt[w.index].gy >= 0.0 {
+        let fy = y0 + WrAt[w.index].y
+        let gy = y0 + WrAt[w.index].gy
+        if WrAt[w.index].y >= 0.0 && mx >= from_x() && mx < from_x() + card_width() && my >= fy &&
+           my < fy + card_head() {
+          Src.want = w.place
+        }
+        if WrAt[w.index].gy >= 0.0 && mx >= to_x() && mx < to_x() + card_width() && my >= gy &&
+           my < gy + card_head() {
+          Src.want = w.place
+        }
       }
       // The value a write it goes into gives.
       if mx >= to_x() && mx < to_x() + card_width() {
@@ -2093,7 +2131,7 @@ system draw_provenance() {
       rounded(x0, y, width, h, 8.0, 8.0, 8.0, 8.0, 0x171d24)
       window::write(short(w.system) + "  ·  " + w.how, x0 + 14.0, y + 8.0, width - 200.0, 0, 14.0, 0.0, 0.0, 2, 0,
                     0xe2ecf5)
-      window::write(w.place, x0 + width - 214.0, y + 9.0, 200.0, 0, 12.0, 0.0, 0.0, 2, 2, 0x7d8a98)
+      window::write(w.place, x0 + width - 214.0, y + 9.0, 200.0, 0, 12.0, 0.0, 0.0, 2, 2, 0x6fa8dc)
       if WrAt[w.index].lines == 0 {
         window::write("from nothing it reads", x0 + 14.0, y + card_head() + 5.0, width - 28.0, 0, 13.0, 0.0,
                       0.0, 2, 0, 0x6a7886)
@@ -2122,7 +2160,7 @@ system draw_provenance() {
         else { head = head + "  (depending on it)" }
       }
       window::write(head, tx + 14.0, y + 8.0, width - 200.0, 0, 14.0, 0.0, 0.0, 2, 0, 0xe2ecf5)
-      window::write(w.place, tx + width - 214.0, y + 9.0, 200.0, 0, 12.0, 0.0, 0.0, 2, 2, 0x7d8a98)
+      window::write(w.place, tx + width - 214.0, y + 9.0, 200.0, 0, 12.0, 0.0, 0.0, 2, 2, 0x6fa8dc)
       let cw = text_extent(w.label, 0, 13.0, 0.0, 2) + 22.0
       let cy = y + card_head()
       let over = mx >= tx && mx < tx + width && my >= cy && my < cy + chip_h()
@@ -2235,12 +2273,14 @@ system draw_top() {
   }
   if View.mode == 2 {
     window::write("Provenance: where each value comes from, within each system that writes it: " +
-          "the values it is made from, and those that decide whether it is made", 16.0, 62.0,
+          "the values it is made from, and those that decide whether it is made · a card's place shows the source",
+          16.0, 62.0,
           Window.width as f32 - 520.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
   }
   if View.mode == 0 {
   window::write("Lifecycle: {Map.states} states, {Map.flows} changes in {Map.steps} runs · states tell " +
-        (if Map.lens == "*" { "every optional component" } else { Map.lens }), 16.0, 62.0,
+        (if Map.lens == "*" { "every optional component" } else { Map.lens }) + " · a click on a change shows the source",
+        16.0, 62.0,
         Window.width as f32 - 480.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
   var x = Window.width as f32 - 540.0
   rect(x, 64.0, 12.0, 12.0, 0x4f9de0)
@@ -3361,8 +3401,8 @@ schedule frame() {
   draw_cores() run_if View.mode == 6
   draw_top()
   want_source() run_if Map.loaded
-  steer_source() run_if Src.open && (View.mode == 3 || View.mode == 5 || View.mode == 6)
-  draw_source() run_if Src.open && (View.mode == 3 || View.mode == 5 || View.mode == 6)
+  steer_source() run_if Src.open && View.mode != 4
+  draw_source() run_if Src.open && View.mode != 4
   present()
   shot()
 }
