@@ -264,6 +264,15 @@ void dish_set_stdp(dish *d, int32_t on) {
   WROTE(stdp, sizeof *stdp);
 }
 
+// Sets how fast the neurons scale their excitatory synapses (home_gain;
+// 0: not at all) from the next step on.
+void dish_set_home_gain(dish *d, float gain) {
+  float *home_gain = ent_Dish_home_gain(d->world);
+  BACK(home_gain, sizeof *home_gain);
+  *home_gain = gain;
+  WROTE(home_gain, sizeof *home_gain);
+}
+
 // The steps run so far.
 int32_t dish_tick(dish *d) {
   int32_t *tick = ent_Dish_tick(d->world);
@@ -288,4 +297,21 @@ uint64_t dish_checksum(dish *d) {
 float dish_mean_weight(dish *d) {
   ent_checksum(d->world);
   return *ent_Dish_w_mean(d->world);
+}
+
+// The excitatory weights by electrode pair: w[a * 64 + b] the sum of the
+// weights of the plastic synapses from the neurons of channel a to those
+// of channel b, n[a * 64 + b] how many there are (network.ent's `paths`).
+void dish_paths(dish *d, float *w, float *n) {
+  ent_paths(d->world);
+  const int32_t *index = ent_Link_Path_index(d->world);
+  const float *pw = ent_Link_Path_w(d->world);
+  const float *pn = ent_Link_Path_n(d->world);
+  BACK(index, 4096 * sizeof *index);
+  BACK(pw, 4096 * sizeof *pw);
+  BACK(pn, 4096 * sizeof *pn);
+  for (int i = 0; i < 4096; i++) {
+    w[index[i]] = pw[i];
+    n[index[i]] = pn[i];
+  }
 }

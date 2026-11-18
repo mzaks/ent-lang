@@ -538,12 +538,52 @@ system sum_up() {
   Dish.w_mean = (Hashes.w / (max(Hashes.plastic, 1) as f64)) as f32
 }
 
+// The excitatory weights by electrode pair, for a host that asks how the
+// paths between regions learn: a Path for each pair (index = the
+// presynaptic neuron's channel * 64 + the postsynaptic one's), with the
+// sum of the weights of the plastic synapses between their neurons and
+// how many there are, after `paths`.
+component Path { index: i32, w: f32, n: f32 }
+archetype Link { Path } capacity 4096
+buffer Sums { w: f32, n: f32 } capacity 4096
+
+system make_paths() {
+  for i in 0..4096 {
+    spawn { Path { index: i, w: 0.0, n: 0.0 } }
+  }
+}
+
+system sum_paths() {
+  Sums = []
+  for i in 0..4096 {
+    Sums += { w: 0.0, n: 0.0 }
+  }
+  for e, n: Neuron in turn by n.number {
+    for (pre)-[s: Synapse]->(e) {
+      if s.plastic > 0.0 {
+        if let a = Neuron(pre).channel {
+          Sums[a * 64 + n.channel].w += s.weight
+          Sums[a * 64 + n.channel].n += 1.0
+        }
+      }
+    }
+  }
+}
+
+system copy_paths() {
+  for p: mut Path {
+    p.w = Sums[p.index].w
+    p.n = Sums[p.index].n
+  }
+}
+
 schedule create() {
   make()
   count_wires()
   place_wires()
   fill_wires()
   wire()
+  make_paths()
 }
 
 schedule step() {
@@ -559,4 +599,9 @@ schedule step() {
 schedule checksum() {
   zero()
   sum_up()
+}
+
+schedule paths() {
+  sum_paths()
+  copy_paths()
 }

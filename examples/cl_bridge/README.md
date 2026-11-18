@@ -32,6 +32,7 @@ what this model does, not what a culture would.
 | `conditioning.py` | can reward-modulated STDP teach one answer to one stim (the dish alone)? |
 | `learn_study.py` | Pong with a reward condition, by gain, as is and flipped |
 | `reach.py` | how much of the motor regions' answer to a stim comes along the axons |
+| `paths_probe.py` | conditioning's weights by path, minute by minute |
 | `check/dish_check.c` | determinism and stim response through the C interface |
 | `check/plasticity.c` | does pairing two channels change how one answers the other? |
 | `culture/fetch.sh` | downloads the cultures' recordings (29 spontaneous, 21 with stims) |
@@ -845,6 +846,43 @@ the same gain 0 and `reward` sessions:
 The shuffled pulses play as gain 0 does; `reward` stays above them by
 what it is above gain 0. So what it learns comes from the pulses saying
 hit or miss, not from there being pulses.
+
+**Why it stops.** In every run here most of the learning is in the first
+minutes. `conditioning.py rpe 10 0,1 8 axon=0.11` (score less gain 0,
+seeds 1 to 8) with one thing changed at a time:
+
+| changed | score less gain 0 |
+|---|---|
+| nothing | +0.255 ± 0.020 |
+| `w_max=0.012` (twice) | +0.266 ± 0.036 |
+| `w_max=0.024` | +0.149 ± 0.031 |
+| `home_gain=0` (no scaling) | +0.504 ± 0.061 |
+| `home_gain=0 w_max=0.024` | +0.031 ± 0.048 (a bias: up for nearly every stim) |
+| `home_gain=0 w_exc=0.0027` | +0.255 ± 0.055 |
+| `noise_rate=0.00266` (half) | +0.229 ± 0.039 |
+| `noise_rate=0.00133` (a quarter) | −0.05 ± 0.19 (weights run to 0 on some seeds) |
+
+Scaling off looks like the answer, but is not: without it the weights
+stay at w_exc (0.00194), where the dish is nearly silent (`validate.py`
+with `stdp=0`: 0.17 Hz, no bursts; Pong's motor regions 16 Hz against
+118), and a quiet dish's answers are its stims'. Started at what scaling
+settles to (`w_exc=0.0027`), or settled for 5 minutes with scaling and
+then without it (`paths_probe.py 10 axon=0.11 settle=5 freeze=1`), it
+learns as much as with scaling, and stops as soon. `paths_probe.py`
+follows the weights (`Dish.paths`, the sums by electrode pair): from
+each sensory electrode's neurons to the region it should drive and to
+the other, at gain 1 after 5 minutes of settling, 0.555 and 0.547 of
+w_max at the start, 0.645 and 0.621 after 3 minutes, and so to the end;
+nowhere near w_max, and the prediction error is still 0.2 a trial. Nor
+is it bursts: split by the dish's spikes in the 100 ms before the stim,
+the quietest quarter of the trials scores +0.28 over gain 0, the
+busiest +0.18. What is left: each answer is a few spikes (most trials
+start with 0 to 2 in the whole dish in the 100 ms before), so a small
+difference in weights tips only some of them; and the weights stop
+diverging at a small difference, likely where STDP's soft bounds (a
+strengthening by `w_max - w`, a weakening by `w`) balance the reward's
+pull, each path at a fixed point of its own. A rule with hard bounds
+would tell; not tried.
 
 ```sh
 build/cl_bridge/venv/bin/python examples/cl_bridge/conditioning.py \

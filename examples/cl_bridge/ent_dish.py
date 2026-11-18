@@ -190,11 +190,29 @@ class Dish:
     def checksum(self) -> int:
         return self._lib.dish_checksum(self._dish)
 
+    def set_home_gain(self, gain: float) -> None:
+        """How fast the neurons scale their excitatory synapses (0: not at
+        all), from the next step on."""
+        self._lib.dish_set_home_gain.argtypes = [ctypes.c_void_p, ctypes.c_float]
+        self._lib.dish_set_home_gain.restype = None
+        self._lib.dish_set_home_gain(self._dish, gain)
+
     def mean_weight(self) -> float:
         """The mean excitatory weight."""
         self._lib.dish_mean_weight.argtypes = [ctypes.c_void_p]
         self._lib.dish_mean_weight.restype = ctypes.c_float
         return self._lib.dish_mean_weight(self._dish)
+
+    def paths(self) -> tuple[np.ndarray, np.ndarray]:
+        """The excitatory weights by electrode pair: (w, n), each 64 x 64,
+        w[a, b] the sum of the weights of the plastic synapses from the
+        neurons of channel a to those of channel b, n[a, b] how many."""
+        w = np.zeros(4096, np.float32)
+        n = np.zeros(4096, np.float32)
+        self._lib.dish_paths.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+        self._lib.dish_paths.restype = None
+        self._lib.dish_paths(self._dish, w.ctypes.data, n.ctypes.data)
+        return w.reshape(64, 64), n.reshape(64, 64)
 
 
 def attributes_of(parameters: dict) -> dict:
