@@ -788,6 +788,29 @@ reward for hits and misses alone still shows nothing 8 seeds can tell
 from noise. This is the model's answer, on a channel no CL1 has, with
 axons shortened for it: not a claim about cultures.
 
+**An hour.** The same, 60 minutes a session (`learn_study.py 60 8 0,1
+... columns moves tau_elig=200 axon=0.11`, and `shuffled` at gain 1);
+hits a rally, mean over the 16 sessions of each (as is and flipped):
+
+| minutes | 0-5 | 5-20 | 20-40 | 40-60 | 50-60 |
+|---|---|---|---|---|---|
+| gain 0 | 0.41 | 0.43 | 0.41 | 0.42 | 0.41 |
+| `moves`, gain 1 | 0.61 | 0.64 | 0.67 | 0.68 | 0.70 |
+| `shuffled`, gain 1 | 0.46 | 0.44 | 0.45 | 0.43 | 0.41 |
+| `moves` less gain 0, seed by seed | +0.19 ± 0.03 | +0.21 ± 0.03 | +0.26 ± 0.03 | +0.26 ± 0.03 | +0.29 ± 0.04 |
+| pairs above | 14 of 16 | 16 of 16 | 16 of 16 | 16 of 16 | 16 of 16 |
+
+`moves` stays above `shuffled` the same way (+0.26 ± 0.03 over minutes
+40 to 60, 16 of 16), and leans towards the ball in 0.570 of its moves
+against 0.519. What was learnt keeps: nothing fades over the hour. It
+may grow a little after the first 5 minutes: the gap over gain 0 is
++0.05 ± 0.03 larger in minutes 40 to 60 than in 5 to 20, but up in only
+9 of 16 pairs, so that is not settled. Most of it is still learnt in the
+first 5 minutes. Part of the reason may be the rule itself: the pulse is
+the outcome less the running share of moves towards the ball, so as the
+lean grows, each pulse shrinks. The 48 sessions took about 4 hours on 22
+processes.
+
 ```sh
 build/cl_bridge/venv/bin/python examples/cl_bridge/conditioning.py \
     bias|map|rpe [minutes [gains [seeds [name=value ...]]]]
