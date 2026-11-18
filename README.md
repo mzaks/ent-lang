@@ -160,8 +160,12 @@ and writes, queries and changes; each schedule's runs with the stage
 lifecycle along `main`, as a MatrixWave (Zhao et al., CHI 2015): a
 matrix for each run that changes an entity's state (an archetype with
 which optional components of a lens are present), from the states the
-entities had to those they have after it, born and gone among them; the
-pointer on a cell says the run, the change and its line. Its other view
+entities had to those they have after it, born and gone among them,
+turned by 45 degrees and up and down by turns as the paper draws them,
+with a bar on each axis for how many changes come into a state and go
+out of it, and on an axis only the states something comes into or goes
+out of there, so the matrices grow and shrink along the wave (A shows
+every state on every axis); the pointer on a cell says the run, the change and its line. Its other view
 is the systems by what they touch: a row for each run of `main`'s
 schedules (with its stage, and a dot where it has effects outside the
 world), a column for each component, unique, relation and buffer and

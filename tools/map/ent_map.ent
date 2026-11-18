@@ -10,8 +10,15 @@
 // order they run; a cell is a change from the state of its row to that of
 // its column (or, in every other matrix, which is turned, of its column to
 // its row): each matrix's states that come out are the next one's that go
-// in, along the axis they share, so the wave goes down and to the right as
-// the schedules do. A state is an archetype with which of its optional
+// in, along the axis they share. As the paper draws it, the matrices are
+// turned by 45 degrees, up and down by turns, so the wave runs to the
+// right as the schedules do; on each axis a bar for each state, as long as
+// how many changes come into it and go out of it; the states' names on
+// each matrix's side across from the axis they go in by. An axis has only
+// the states that something comes into or goes out of there, so the
+// matrices grow and shrink along the wave; A, or the line at the foot of
+// the list, puts every state on every axis (the paper's proxy nodes). A
+// state is an archetype with which of its optional
 // components of the lens are present; "born" and "gone" are before a spawn
 // and after a despawn.
 //
@@ -32,7 +39,8 @@
 //
 // Click an archetype to see its entities (All: every one); the wheel
 // zooms, dragging moves the wave; the pointer on a cell says which run,
-// from what to what, and where in the program.
+// from what to what, and where in the program; on a bar of an axis, how
+// many changes come into that state there and go out of it.
 //
 // With ENT_MAP_SHOT=picture.png it draws the wave once (of the archetype
 // whose label ENT_MAP_ARCH is, where set; ENT_MAP_VIEW=data, provenance, time
@@ -79,15 +87,25 @@ buffer ArchRow { states: i32 } capacity 65536
 // is; how many states its axes have and how many matrices; and whether to
 // work that out again.
 unique View {
-  mode: i32, arch: i32, cell: f32, ox: f32, oy: f32, n: i32, shown: i32, dirty: bool,
-  listed: i32, dragging: bool
+  mode: i32, arch: i32, cell: f32, gap: f32, ox: f32, oy: f32, n: i32, shown: i32, dirty: bool,
+  listed: i32, dragging: bool, most: i32, longest: f32, names: text, every: bool
 }
+// How many changes come into each place of an axis (by the run before)
+// and go out of it (by the run after): axis by axis, place by place.
+buffer AxVol { inn: i32, out: i32 } capacity 1048576
+// Matrix k (and the axis that goes into it): its run, its top left on the
+// staircase in cells, how many places its axis has.
+buffer WaveCol { step: i32, x: f32, y: f32, count: i32 } capacity 16385
+// Where a state (or born, gone) is on an axis (-1: not on it), by axis
+// times places; and which is the p-th place of an axis.
+buffer WaveAt { pos: i32 } capacity 1048576
+buffer WaveNode { j: i32 } capacity 1048576
 // What the pointer is on: a cell's words, or none.
 // The picture asked for (ENT_MAP_SHOT), and the frames before it is taken.
 unique Shot { file: text, arch: text, frames: i32, done: bool, px: f32, py: f32 }
 unique Hover {
   words: text, x: f32, y: f32, k: i32, from: i32, to: i32, from_name: text, to_name: text,
-  step_words: text
+  step_words: text, tip: text, axis: i32, node: i32
 }
 
 default_capacity 65536
@@ -109,6 +127,7 @@ world {
   View.oy = 150.0
   View.dirty = true
   Hover.k = -1
+  Hover.axis = -1
 }
 
 fn top() -> f32 { 96.0 }
@@ -183,12 +202,49 @@ fn kind_colour(kind: text) -> i32 {
 fn axis(state: i32, slot: i32, n: i32) -> i32 {
   if state == -1 { n } else if state == -2 { n + 1 } else { slot }
 }
-// Where matrix k is (its top left), of m pixels a side: the even ones
-// have the states that go in down their left, the odd ones (turned)
-// along their top; each shares the axis of what comes out with the next.
-fn matrix_x(k: i32, m: f32, gap: f32) -> f32 { (k / 2) as f32 * (m + gap) }
-fn matrix_y(k: i32, m: f32, gap: f32) -> f32 { ((k + 1) / 2) as f32 * (m + gap) }
-fn gap() -> f32 { 0.0 }
+// The wave, as MatrixWave draws it (Zhao, Liu, Dontcheva, Hertzmann and
+// Wilson, CHI 2015): a transition matrix for each run, turned by 45
+// degrees, one beside the other up and down, each sharing the axis of
+// what comes out of it with the next, which takes it as what goes in.
+// Laid out first as a staircase (u to the right, v down), then turned:
+// the even matrices have what goes in down their left (rows), the odd
+// ones along their top (columns), with a strip of three cells between one
+// and the next for the axis they share. As in the paper, an axis has only
+// the states something comes into or goes out of there, so a matrix is
+// as big as the states before its run and after it, and the wave grows and
+// shrinks; with View.every (the paper's "proxy nodes") every state is on
+// every axis.
+fn strip() -> f32 { 3.0 }
+// Where a point (u, v) of the staircase is in the window: turned by 45
+// degrees about (ox, oy), so that the staircase runs to the right.
+fn wave_x(ox: f32, u: f32, v: f32) -> f32 { ox + (u + v) * 0.70710678 }
+fn wave_y(oy: f32, u: f32, v: f32) -> f32 { oy + (v - u) * 0.70710678 }
+// A box of the staircase, turned: a diamond.
+proc wave_box(ox: f32, oy: f32, u0: f32, v0: f32, u1: f32, v1: f32, colour: i32) {
+  quad(wave_x(ox, u0, v0), wave_y(oy, u0, v0), wave_x(ox, u1, v0), wave_y(oy, u1, v0),
+       wave_x(ox, u1, v1), wave_y(oy, u1, v1), wave_x(ox, u0, v1), wave_y(oy, u0, v1), colour)
+}
+proc wave_line(ox: f32, oy: f32, u0: f32, v0: f32, u1: f32, v1: f32, colour: i32) {
+  line(wave_x(ox, u0, v0), wave_y(oy, u0, v0), wave_x(ox, u1, v1), wave_y(oy, u1, v1), colour)
+}
+// A name written at a matrix (its top left x0, y0 and size w, h, all on
+// the staircase, in pixels) for the place p of the axis it goes in by, on
+// the side across from that axis, away from it.
+proc wave_name(name: text, odd: bool, p: i32, x0: f32, y0: f32, w: f32, h: f32, cell: f32, size: f32,
+               ox: f32, oy: f32, colour: i32) {
+  let c = (p as f32 + 0.5) * cell
+  if !odd {
+    let u = x0 + w + 5.0
+    let v = y0 + c - size * 0.5
+    label_turned(name as text[126], wave_x(ox, u, v), wave_y(oy, u, v), size, -45.0, colour)
+  } else {
+    let u = x0 + c + size * 0.5
+    let v = y0 + h + 5.0
+    label_turned(name as text[126], wave_x(ox, u, v), wave_y(oy, u, v), size, 45.0, colour)
+  }
+}
+// The name of the run of a matrix ("3. fill").
+fn run_name(step: i32, system: text) -> text { "{step + 1}. " + short(system) }
 
 // ---- Systems × data -------------------------------------------------
 // A row for each run of a system, in the order `main` runs the schedules;
@@ -795,23 +851,109 @@ system arrange() {
       let seen = in_view(f.from_arch, chosen) || in_view(f.to_arch, chosen)
       f.col = if seen { StepRow[f.step].col } else { -1 }
     }
-    // (Cells as big as let the wave start in the window, its states'
-    // names at its left; where they are few, no bigger than 28.)
-    // (So that the first matrices of the wave, two across and two down,
-    // are in the window.)
-    let tall = (Window.height as f32 - top() - 90.0) / (2 * (View.n + 2)) as f32
-    let wide = (Window.width as f32 - panel() - 320.0) / (2 * (View.n + 2)) as f32
-    View.cell = max(3.0, min(28.0, (min(tall, wide)) as i32 as f32))
-    View.ox = panel() + 280.0
-    View.oy = top() + 50.0
+    // What comes into each place of each axis and goes out of it.
+    let places = View.n + 2
+    let cells = min((View.shown + 1) * places, 1048576)
+    AxVol = [{ inn: 0, out: 0 }; cells]
+    WaveCol = [{ step: 0, x: 0.0, y: 0.0, count: 0 }; View.shown + 1]
+    for st: Stp in turn by st.step where st.col >= 0 { WaveCol[st.col].step = st.step }
+    let total = View.n
+    for f: Fl in turn by f.step where f.col >= 0 {
+      let a = axis(f.from, StateRow[max(f.from, 0)].slot, total)
+      let b = axis(f.to, StateRow[max(f.to, 0)].slot, total)
+      if a >= 0 && b >= 0 && (f.col + 1) * places + b < cells {
+        AxVol[f.col * places + a].out += 1
+        AxVol[(f.col + 1) * places + b].inn += 1
+      }
+    }
+    var most = 1
+    var i = 0
+    while i < cells {
+      most = max(most, max(AxVol[i].inn, AxVol[i].out))
+      i += 1
+    }
+    View.most = most
+    // The places of each axis: those something comes into or goes out of
+    // there (or all), in the states' order.
+    WaveAt = [{ pos: -1 }; cells]
+    WaveNode = [{ j: 0 }; cells]
+    var ax = 0
+    while ax <= View.shown {
+      var p = 0
+      var j = 0
+      while j < places {
+        let at = ax * places + j
+        if at < cells && (View.every || AxVol[at].inn + AxVol[at].out > 0) {
+          WaveAt[at].pos = p
+          WaveNode[ax * places + p].j = j
+          p += 1
+        }
+        j += 1
+      }
+      WaveCol[ax].count = p
+      ax += 1
+    }
+    // Where each matrix is, in cells: the next below an even one (it
+    // shares its columns), right of an odd one (its rows); and how high
+    // the wave is once turned (v - u from least to most).
+    var x = 0.0
+    var y = 0.0
+    var low = 0.0
+    var high = 0.0
+    var k = 0
+    while k <= View.shown {
+      WaveCol[k].x = x
+      WaveCol[k].y = y
+      let lin = WaveCol[k].count as f32
+      let lout = if k < View.shown { WaveCol[k + 1].count as f32 } else { 0.0 }
+      if k % 2 == 0 {
+        low = min(low, y - x - lout)
+        high = max(high, y + lin - x + strip())
+        y += lin + strip()
+      } else {
+        low = min(low, y - strip() - x - lin)
+        high = max(high, y + lout - x)
+        x += lin + strip()
+      }
+      k += 1
+    }
+    // (The names of the places in order, a line each, and how wide the
+    // widest is.)
+    View.names = ""
+    View.longest = text_extent("gone", 0, 12.0, 0.0, 2)
+    for s: St in turn by s.index where s.slot >= 0 {
+      View.names += s.name + "\n"
+      View.longest max= text_extent(s.name, 0, 12.0, 0.0, 2)
+    }
+    // (Cells as big as let the wave's height, and the names above and
+    // below it where cells are big enough to name, be in the window; no
+    // bigger than 40; the wave in the middle of the height.)
+    let span = max(1.0, high - low) * 0.70710678
+    let free = Window.height as f32 - top() - 40.0
+    var room = 0.0
+    var tall = free / span
+    if tall >= 8.0 {
+      room = (View.longest + 10.0) * 0.70710678
+      tall = max(8.0, (free - 2.0 * room) / span)
+    }
+    View.cell = max(1.0, min(40.0, if tall >= 4.0 { tall as i32 as f32 } else { tall }))
+    View.gap = strip() * View.cell
+    let used = span * View.cell + 2.0 * room
+    View.ox = panel() + 40.0 + View.gap * 0.70710678
+    View.oy = top() + 20.0 + max(0.0, (free - used) * 0.5) + room - low * 0.70710678 * View.cell
   }
 }
 
-// Clicks in the list, the wheel, dragging.
+// Clicks in the list, the wheel, dragging; A (or the line at the foot of
+// the list) puts every state on every axis, or only those used there.
 system steer() {
   let mx = Mouse.x
   let my = Mouse.y
-  if Mouse.clicks > 0 && mx < panel() && my > top() {
+  if key_pressed(65) || (Mouse.clicks > 0 && mx < panel() && my > Window.height as f32 - 36.0) {
+    View.every = !View.every
+    View.dirty = true
+  }
+  if Mouse.clicks > 0 && mx < panel() && my > top() && my <= Window.height as f32 - 36.0 {
     let row = ((my - top() - 30.0) / row_height()) as i32
     if row == 0 {
       View.arch = -1
@@ -825,10 +967,11 @@ system steer() {
   if mx > panel() && my > top() {
     if Mouse.wheel_y != 0.0 {
       let was = View.cell
-      let cell = min(48.0, max(3.0, if Mouse.wheel_y > 0.0 { was * 1.15 } else { was / 1.15 }))
+      let cell = min(64.0, max(1.0, if Mouse.wheel_y > 0.0 { was * 1.15 } else { was / 1.15 }))
       View.ox = mx - (mx - View.ox) * cell / was
       View.oy = my - (my - View.oy) * cell / was
       View.cell = cell
+      View.gap = 3.0 * cell
     }
     if Mouse.clicks > 0 { View.dragging = true }
   }
@@ -839,42 +982,61 @@ system steer() {
   }
 }
 
-// What the pointer is on.
+// What the pointer is on: a cell of a matrix, or a place on an axis.
 system hover() {
   Hover.words = ""
+  Hover.tip = ""
   Hover.k = -1
+  Hover.axis = -1
   let cell = View.cell
+  let g = strip()
   let n = View.n + 2
-  let m = n as f32 * cell
   let px = if Shot.px >= 0.0 { Shot.px } else { Mouse.x }
   let py = if Shot.px >= 0.0 { Shot.py } else { Mouse.y }
-  let mx = px - View.ox
-  let my = py - View.oy
-  if px > panel() && py > top() && !View.dragging {
+  // (Where it is on the staircase, turned back, in cells.)
+  let u = (px - View.ox - (py - View.oy)) * 0.70710678 / cell
+  let v = (px - View.ox + (py - View.oy)) * 0.70710678 / cell
+  if px > panel() && py > top() && !View.dragging && View.mode == 0 && len(WaveCol) > View.shown {
     var k = 0
     var on = -1
     var a = -1
     var b = -1
-    while k < View.shown {
-      let x0 = matrix_x(k, m, gap())
-      let y0 = matrix_y(k, m, gap())
-      if mx >= x0 && mx < x0 + m && my >= y0 && my < y0 + m {
+    var ax = -1
+    var node = -1
+    while k <= View.shown {
+      let x0 = WaveCol[k].x
+      let y0 = WaveCol[k].y
+      let lin = WaveCol[k].count
+      let lout = if k < View.shown { WaveCol[k + 1].count } else { 0 }
+      let w = (if k % 2 == 0 { lout } else { lin }) as f32
+      let h = (if k % 2 == 0 { lin } else { lout }) as f32
+      if k < View.shown && u >= x0 && u < x0 + w && v >= y0 && v < y0 + h {
         on = k
-        let cx = ((mx - x0) / cell) as i32
-        let cy = ((my - y0) / cell) as i32
+        let cx = (u - x0) as i32
+        let cy = (v - y0) as i32
         // (Even: rows go in, columns come out; odd: the other way.)
-        a = if k % 2 == 0 { cy } else { cx }
-        b = if k % 2 == 0 { cx } else { cy }
+        let pa = if k % 2 == 0 { cy } else { cx }
+        let pb = if k % 2 == 0 { cx } else { cy }
+        a = WaveNode[k * n + pa].j
+        b = WaveNode[(k + 1) * n + pb].j
+      }
+      // (The axis that goes into matrix k: left of an even one, above an
+      // odd one.)
+      if k % 2 == 0 && u >= x0 - g && u < x0 && v >= y0 && v < y0 + lin as f32 {
+        ax = k
+        node = WaveNode[k * n + (v - y0) as i32].j
+      }
+      if k % 2 == 1 && v >= y0 - g && v < y0 && u >= x0 && u < x0 + lin as f32 {
+        ax = k
+        node = WaveNode[k * n + (u - x0) as i32].j
       }
       k += 1
     }
+    let total = View.n
     if on >= 0 {
       Hover.k = on
       Hover.from = a
       Hover.to = b
-      Hover.x = px + 16.0
-      Hover.y = py + 14.0
-      let total = View.n
       for f: Fl in turn by f.step where f.col == on {
         if axis(f.from, StateRow[max(f.from, 0)].slot, total) == a &&
            axis(f.to, StateRow[max(f.to, 0)].slot, total) == b {
@@ -888,89 +1050,252 @@ system hover() {
         if s.slot == b { Hover.to_name = s.name }
       }
       for st: Stp in turn by st.step where st.col == on {
-        Hover.step_words = "{st.step + 1}. " + st.system + " (in " + st.schedule + ")"
+        Hover.step_words = run_name(st.step, st.system) + " (in " + st.schedule + ")"
       }
+      var words = Hover.words as text[4094]
+      if len(words) == 0 { words = "no change\n" }
+      Hover.tip = Hover.step_words + "\n" + Hover.from_name + "  ->  " + Hover.to_name + "\n" + words
+    } else if ax >= 0 {
+      Hover.axis = ax
+      Hover.node = node
+      var name = line_at(View.names, node) as text[512]
+      if node == total { name = "born" }
+      if node == total + 1 { name = "gone" }
+      Hover.from_name = "the start"
+      Hover.to_name = "the end"
+      if ax > 0 {
+        let step = WaveCol[ax - 1].step
+        for st: Stp in turn by st.step where st.step == step { Hover.from_name = run_name(st.step, st.system) }
+      }
+      if ax < View.shown {
+        let step = WaveCol[ax].step
+        for st: Stp in turn by st.step where st.step == step { Hover.to_name = run_name(st.step, st.system) }
+      }
+      let before = Hover.from_name as text[512]
+      let after = Hover.to_name as text[512]
+      let at = ax * n + node
+      let inn = if at < len(AxVol) { AxVol[at].inn } else { 0 }
+      let out = if at < len(AxVol) { AxVol[at].out } else { 0 }
+      var counts = "{inn} changes come in, "
+      if inn == 1 { counts = "1 change comes in, " }
+      if out == 1 { counts = counts + "1 goes out" } else { counts = counts + "{out} go out" }
+      Hover.tip = name + "\nbetween " + before + " and " + after + "\n" + counts + "\n"
     }
+    Hover.x = px + 16.0
+    Hover.y = py + 14.0
   }
 }
 
 // The lifecycle: the wave, and the archetypes at the left.
 system draw_wave() {
   let cell = View.cell
+  let g = View.gap
   let n = View.n + 2
-  let m = n as f32 * cell
   let ox = View.ox
   let oy = View.oy
   let total = View.n
+  let right = Window.width as f32
+  let ready = len(WaveCol) > View.shown
   clip(panel(), top(), Window.width as f32 - panel(), Window.height as f32 - top())
-  // The matrices: their ground, a line every state, born and gone apart,
-  // the shared axes' states lit where the pointer is.
-  for st: Stp where st.col >= 0 {
-    let x0 = ox + matrix_x(st.col, m, gap())
-    let y0 = oy + matrix_y(st.col, m, gap())
-    rect(x0, y0, m, m, 0x171d24)
-    let edge = total as f32 * cell
-    rect(x0 + edge, y0, 2.0 * cell, m, 0x1c232b)
-    rect(x0, y0 + edge, m, 2.0 * cell, 0x1c232b)
+  // (The matrices in the window: from first to before last.)
+  var first = 0
+  var last = 0
+  if ready {
+    while first < View.shown && wave_x(ox, WaveCol[first + 1].x * cell, WaveCol[first + 1].y * cell) < panel() {
+      first += 1
+    }
+    last = first
+    while last < View.shown && wave_x(ox, WaveCol[last].x * cell, WaveCol[last].y * cell) - g < right {
+      last += 1
+    }
+  }
+  // The matrices: their ground, born's row and gone's column apart, a
+  // line every place, the run's number faint in the middle.
+  var k = first
+  while k < last {
+    let x0 = WaveCol[k].x * cell
+    let y0 = WaveCol[k].y * cell
+    let lin = WaveCol[k].count
+    let lout = WaveCol[k + 1].count
+    let w = (if k % 2 == 0 { lout } else { lin }) as f32 * cell
+    let h = (if k % 2 == 0 { lin } else { lout }) as f32 * cell
+    wave_box(ox, oy, x0, y0, x0 + w, y0 + h, 0x18202a)
+    let born_at = WaveAt[k * n + total].pos
+    let gone_at = WaveAt[(k + 1) * n + total + 1].pos
+    if born_at >= 0 {
+      let d = born_at as f32 * cell
+      if k % 2 == 0 { wave_box(ox, oy, x0, y0 + d, x0 + w, y0 + d + cell, 0x1b2836) }
+      else { wave_box(ox, oy, x0 + d, y0, x0 + d + cell, y0 + h, 0x1b2836) }
+    }
+    if gone_at >= 0 {
+      let d = gone_at as f32 * cell
+      if k % 2 == 0 { wave_box(ox, oy, x0 + d, y0, x0 + d + cell, y0 + h, 0x2a1d22) }
+      else { wave_box(ox, oy, x0, y0 + d, x0 + w, y0 + d + cell, 0x2a1d22) }
+    }
     if cell >= 7.0 {
       var i = 1
-      while i < n {
-        rect(x0 + i as f32 * cell, y0, 1.0, m, 0x222a33)
-        rect(x0, y0 + i as f32 * cell, m, 1.0, 0x222a33)
+      while i < max(lin, lout) {
+        let d = i as f32 * cell
+        if d < w { wave_line(ox, oy, x0 + d, y0, x0 + d, y0 + h, 0x222b35) }
+        if d < h { wave_line(ox, oy, x0, y0 + d, x0 + w, y0 + d, 0x222b35) }
         i += 1
       }
     }
-    rect(x0, y0, m, 1.0, 0x3a4652)
-    rect(x0, y0 + m - 1.0, m, 1.0, 0x3a4652)
-    rect(x0, y0, 1.0, m, 0x3a4652)
-    rect(x0 + m - 1.0, y0, 1.0, m, 0x3a4652)
-    // (The run's name where the wave leaves room: above an even matrix,
-    // left of an odd one.)
+    let least = min(w, h)
+    let size = min(72.0, least * 0.3)
+    let cx = wave_x(ox, x0 + w * 0.5, y0 + h * 0.5)
+    let cy = wave_y(oy, x0 + w * 0.5, y0 + h * 0.5)
+    let step = WaveCol[k].step
+    window::write("{step + 1}", cx - least * 0.5, cy - size * 0.6, least, 0, size, 0.0, 0.0, 2, 1, 0x26303b)
+    wave_line(ox, oy, x0, y0, x0 + w, y0, 0x4a5866)
+    wave_line(ox, oy, x0 + w, y0, x0 + w, y0 + h, 0x4a5866)
+    wave_line(ox, oy, x0 + w, y0 + h, x0, y0 + h, 0x4a5866)
+    wave_line(ox, oy, x0, y0 + h, x0, y0, 0x4a5866)
+    k += 1
+  }
+  // The runs' names under their numbers, where a matrix has room.
+  for st: Stp where st.col >= first && st.col < last && ready {
+    let x0 = WaveCol[st.col].x * cell
+    let y0 = WaveCol[st.col].y * cell
+    let w = (if st.col % 2 == 0 { WaveCol[st.col + 1].count } else { WaveCol[st.col].count }) as f32 * cell
+    let h = (if st.col % 2 == 0 { WaveCol[st.col].count } else { WaveCol[st.col + 1].count }) as f32 * cell
+    let least = min(w, h)
     let words = short(st.system)
-    let size = 14.0
-    if st.col % 2 == 0 {
-      window::write("{st.step + 1}. " + words, x0 + 4.0, y0 - 20.0, 600.0, 0, size, 0.0, 0.0, 2, 0, 0xc8d4e0)
-    } else {
-      let w = text_extent("{st.step + 1}. " + words, 0, size, 0.0, 2)
-      window::write("{st.step + 1}. " + words, x0 - w - 10.0, y0 + 4.0, w + 4.0, 0, size, 0.0, 0.0, 2, 0, 0xc8d4e0)
+    if least >= 90.0 && text_extent(words, 0, 13.0, 0.0, 2) < least * 0.9 {
+      let cx = wave_x(ox, x0 + w * 0.5, y0 + h * 0.5)
+      let cy = wave_y(oy, x0 + w * 0.5, y0 + h * 0.5)
+      window::write(words, cx - least * 0.5, cy + min(72.0, least * 0.3) * 0.45, least, 0, 13.0, 0.0, 0.0, 2,
+            1, 0x3a4652)
     }
   }
-  // Where the pointer is: its row and column, along the matrix.
-  if Hover.k >= 0 {
-    let x0 = ox + matrix_x(Hover.k, m, gap())
-    let y0 = oy + matrix_y(Hover.k, m, gap())
-    let r = if Hover.k % 2 == 0 { Hover.from } else { Hover.to }
-    let c = if Hover.k % 2 == 0 { Hover.to } else { Hover.from }
-    rect(x0, y0 + r as f32 * cell, m, cell, 0x30ffffff)
-    rect(x0 + c as f32 * cell, y0, cell, m, 0x30ffffff)
+  // Where the pointer is: the row and column of a cell; or a place on an
+  // axis, the row or column it goes out by and that it comes in by.
+  if Hover.k >= 0 && ready {
+    let k = Hover.k
+    let x0 = WaveCol[k].x * cell
+    let y0 = WaveCol[k].y * cell
+    let w = (if k % 2 == 0 { WaveCol[k + 1].count } else { WaveCol[k].count }) as f32 * cell
+    let h = (if k % 2 == 0 { WaveCol[k].count } else { WaveCol[k + 1].count }) as f32 * cell
+    let pa = WaveAt[k * n + Hover.from].pos as f32 * cell
+    let pb = WaveAt[(k + 1) * n + Hover.to].pos as f32 * cell
+    let r = if k % 2 == 0 { pa } else { pb }
+    let c = if k % 2 == 0 { pb } else { pa }
+    wave_box(ox, oy, x0, y0 + r, x0 + w, y0 + r + cell, 0x28ffffff)
+    wave_box(ox, oy, x0 + c, y0, x0 + c + cell, y0 + h, 0x28ffffff)
   }
-  // The changes.
-  let pad = if cell >= 6.0 { 1.0 } else { 0.0 }
-  for f: Fl where f.col >= 0 {
+  if Hover.axis >= 0 && ready {
+    let a = Hover.axis
+    let j = WaveAt[a * n + Hover.node].pos as f32 * cell
+    if a < View.shown {
+      let x0 = WaveCol[a].x * cell
+      let y0 = WaveCol[a].y * cell
+      let w = (if a % 2 == 0 { WaveCol[a + 1].count } else { WaveCol[a].count }) as f32 * cell
+      let h = (if a % 2 == 0 { WaveCol[a].count } else { WaveCol[a + 1].count }) as f32 * cell
+      if a % 2 == 0 { wave_box(ox, oy, x0, y0 + j, x0 + w, y0 + j + cell, 0x28ffffff) }
+      else { wave_box(ox, oy, x0 + j, y0, x0 + j + cell, y0 + h, 0x28ffffff) }
+    }
+    if a > 0 {
+      let x0 = WaveCol[a - 1].x * cell
+      let y0 = WaveCol[a - 1].y * cell
+      let w = (if a % 2 == 1 { WaveCol[a].count } else { WaveCol[a - 1].count }) as f32 * cell
+      let h = (if a % 2 == 1 { WaveCol[a - 1].count } else { WaveCol[a].count }) as f32 * cell
+      if a % 2 == 1 { wave_box(ox, oy, x0 + j, y0, x0 + j + cell, y0 + h, 0x28ffffff) }
+      else { wave_box(ox, oy, x0, y0 + j, x0 + w, y0 + j + cell, 0x28ffffff) }
+    }
+  }
+  // The changes: a square in their cell.
+  let pad = if cell >= 6.0 { cell * 0.16 } else { 0.0 }
+  for f: Fl where f.col >= first && f.col < last && ready {
     let a = axis(f.from, StateRow[max(f.from, 0)].slot, total)
     let b = axis(f.to, StateRow[max(f.to, 0)].slot, total)
     if a >= 0 && b >= 0 {
-      let x0 = ox + matrix_x(f.col, m, gap())
-      let y0 = oy + matrix_y(f.col, m, gap())
-      let x = if f.col % 2 == 0 { x0 + b as f32 * cell } else { x0 + a as f32 * cell }
-      let y = if f.col % 2 == 0 { y0 + a as f32 * cell } else { y0 + b as f32 * cell }
-      rect(x + pad, y + pad, cell - 2.0 * pad, cell - 2.0 * pad, kind_colour(f.kind))
+      let pa = WaveAt[f.col * n + a].pos as f32 * cell
+      let pb = WaveAt[(f.col + 1) * n + b].pos as f32 * cell
+      let x0 = WaveCol[f.col].x * cell
+      let y0 = WaveCol[f.col].y * cell
+      let u = if f.col % 2 == 0 { x0 + pb } else { x0 + pa }
+      let v = if f.col % 2 == 0 { y0 + pa } else { y0 + pb }
+      wave_box(ox, oy, u + pad, v + pad, u + cell - pad, v + cell - pad, kind_colour(f.kind))
     }
   }
-  // The states, down the left of the first matrix.
-  if cell >= 9.0 {
-    let size = min(14.0, cell - 1.0)
-    for s: St where s.slot >= 0 {
-      let w = text_extent(s.name, 0, size, 0.0, 2)
-      window::write(s.name, ox - w - 8.0, oy + s.slot as f32 * cell + (cell - size) * 0.5, w + 4.0, 0, size,
-            0.0, 0.0, 2, 0, 0x9fb0c0)
+  // The axes, between the matrices: each place a bar, as long as how
+  // many changes come into it (towards the matrix before) and go out of it
+  // (towards the one after).
+  var ax = first
+  while ax <= last && ready {
+    let x0 = WaveCol[ax].x * cell
+    let y0 = WaveCol[ax].y * cell
+    let count = WaveCol[ax].count
+    let long = count as f32 * cell
+    let even = ax % 2 == 0
+    let mid = if even { x0 - g * 0.5 } else { y0 - g * 0.5 }
+    if even {
+      wave_box(ox, oy, x0 - g, y0, x0, y0 + long, 0x0d1115)
+      wave_line(ox, oy, mid, y0, mid, y0 + long, 0x3a4652)
+    } else {
+      wave_box(ox, oy, x0, y0 - g, x0 + long, y0, 0x0d1115)
+      wave_line(ox, oy, x0, mid, x0 + long, mid, 0x3a4652)
     }
-    let w = text_extent("born", 0, size, 0.0, 2)
-    window::write("born", ox - w - 8.0, oy + total as f32 * cell + (cell - size) * 0.5, w + 4.0, 0, size,
-          0.0, 0.0, 2, 0, 0x4f9de0)
-    let g = text_extent("gone", 0, size, 0.0, 2)
-    window::write("gone", ox - g - 8.0, oy + (total + 1) as f32 * cell + (cell - size) * 0.5, g + 4.0, 0,
-          size, 0.0, 0.0, 2, 0, 0xe0564f)
+    let half = g * 0.5 - 1.0
+    let inset = if cell >= 6.0 { 1.0 } else { 0.0 }
+    var p = 0
+    while p < count {
+      let j = WaveNode[ax * n + p].j
+      let at = ax * n + j
+      let inn = AxVol[at].inn
+      let out = AxVol[at].out
+      let lin = if inn > 0 { max(2.0, half * inn as f32 / View.most as f32) } else { 0.0 }
+      let lout = if out > 0 { max(2.0, half * out as f32 / View.most as f32) } else { 0.0 }
+      let p0 = (if even { y0 } else { x0 }) + p as f32 * cell + inset
+      let p1 = p0 + cell - 2.0 * inset
+      let colour = if j == total { 0x4f9de0 } else if j == total + 1 { 0xe0564f } else { 0xaab8c6 }
+      let lit = Hover.axis == ax && Hover.node == j
+      let shown = if lit { 0xffffff } else { colour }
+      if lin + lout > 0.0 {
+        if even { wave_box(ox, oy, mid - lin, p0, mid + lout, p1, shown) }
+        else { wave_box(ox, oy, p0, mid - lin, p1, mid + lout, shown) }
+      } else if lit {
+        if even { wave_box(ox, oy, mid - half, p0, mid + half, p1, 0x30ffffff) }
+        else { wave_box(ox, oy, p0, mid - half, p1, mid + half, 0x30ffffff) }
+      }
+      if cell >= 7.0 {
+        if even { wave_line(ox, oy, mid - 3.0, p0 - inset, mid + 3.0, p0 - inset, 0x3a4652) }
+        else { wave_line(ox, oy, p0 - inset, mid - 3.0, p0 - inset, mid + 3.0, 0x3a4652) }
+      }
+      p += 1
+    }
+    ax += 1
+  }
+  // The names, as the paper writes them: on the side of each matrix
+  // across from the axis they go in by, away from it; up and to the right
+  // of the ones above, down and to the right of the ones below.
+  if cell >= 8.0 && ready {
+    let size = min(12.0, cell - 2.0)
+    for s: St where s.slot >= 0 {
+      var k = first
+      while k < last {
+        let p = WaveAt[k * n + s.slot].pos
+        if p >= 0 {
+          let w = (if k % 2 == 0 { WaveCol[k + 1].count } else { WaveCol[k].count }) as f32 * cell
+          let h = (if k % 2 == 0 { WaveCol[k].count } else { WaveCol[k + 1].count }) as f32 * cell
+          let lit = (Hover.k == k && Hover.from == s.slot) || (Hover.axis == k && Hover.node == s.slot)
+          wave_name(s.name, k % 2 == 1, p, WaveCol[k].x * cell, WaveCol[k].y * cell, w, h, cell, size, ox, oy,
+                    if lit { 0xffffff } else { 0x9fb0c0 })
+        }
+        k += 1
+      }
+    }
+    var k = first
+    while k < last {
+      let w = (if k % 2 == 0 { WaveCol[k + 1].count } else { WaveCol[k].count }) as f32 * cell
+      let h = (if k % 2 == 0 { WaveCol[k].count } else { WaveCol[k + 1].count }) as f32 * cell
+      let pb = WaveAt[k * n + total].pos
+      if pb >= 0 {
+        wave_name("born", k % 2 == 1, pb, WaveCol[k].x * cell, WaveCol[k].y * cell, w, h, cell, size, ox, oy,
+                  0x4f9de0)
+      }
+      k += 1
+    }
   }
   unclip()
 
@@ -986,6 +1311,12 @@ system draw_wave() {
     if a.index == View.arch { rect(0.0, y, panel() - 1.0, row_height(), 0x24405e) }
     window::write(a.label + "  ({a.states})", 16.0, y + 3.0, panel() - 24.0, 0, 14.0, 0.0, 0.0, 2, 0, 0xd0d8e0)
   }
+  // Every state on every axis, or only those used there (A).
+  let foot = Window.height as f32 - 32.0
+  rect(0.0, foot - 4.0, panel() - 1.0, 1.0, 0x26303a)
+  rounded(16.0, foot + 4.0, 14.0, 14.0, 3.0, 3.0, 3.0, 3.0, if View.every { 0x4f9de0 } else { 0x26303a })
+  window::write("Every state on each axis (A)", 38.0, foot + 2.0, panel() - 46.0, 0, 13.0, 0.0, 0.0, 2, 0,
+        0x9fb0c0)
 
 }
 
@@ -1566,9 +1897,8 @@ system draw_top() {
   }
 
   // The words of the cell the pointer is on.
-  if Hover.k >= 0 && View.mode == 0 {
-    let all = (Hover.step_words + "\n" + Hover.from_name + "  ->  " + Hover.to_name + "\n" +
-               (if len(Hover.words) > 0 { Hover.words } else { "no change\n" })) as text[4094]
+  if len(Hover.tip) > 0 && View.mode == 0 {
+    let all = Hover.tip as text[4094]
     // (Without the line break at its end.)
     let words = slice(all, 0, len(all) - 1)
     let w = max(text_extent(words, 0, 14.0, 0.0, 1), 120.0) + 20.0
