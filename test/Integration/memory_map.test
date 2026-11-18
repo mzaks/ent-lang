@@ -1,0 +1,27 @@
+// How the world's memory is laid out (--ent-memory-map, ent map's Memory
+// view): the lamp's world as a tree of its bytes, each archetype's
+// components and fields as big as their rows (64 lamps: a 4-byte heat,
+// a byte for whether Lit is there, 4-byte ids), what aligning each array
+// left its owner's padding; every byte in one leaf.
+// RUN: ent-translate --import-ent %S/Inputs/world_map/life.ent \
+// RUN:     -I %S/../../devices --mlir-print-debuginfo -o %t.mlir
+// RUN: rm -f %t.mem
+// RUN: ent-opt %t.mlir --ent-indexes --ent-memory-map=out=%t.mem -o /dev/null
+// RUN: tr '\t' '|' < %t.mem | FileCheck %s
+// The sums: a node's bytes are its children's, the world's all of it.
+// RUN: python3 -c "import sys; lines = [l.rstrip('\n').split('\t') for l in open(sys.argv[1])]; total = int(lines[0][1]); nodes = [l for l in lines if l[0] == 'mem']; kids = {}; [kids.setdefault(int(n[2]), []).append(int(n[4])) for n in nodes]; print('sums', all(sum(kids[int(n[1])]) == int(n[4]) for n in nodes if int(n[1]) in kids), 'world', int(nodes[0][4]) == total)" %t.mem | FileCheck %s --check-prefix=SUMS
+
+// CHECK:      memory|16384|16384|128|32
+// CHECK-NEXT: mem|0|-1|0|16384|0|world|world|0
+// CHECK-NEXT: mem|1|0|1|{{[0-9]+}}|{{[0-9]+}}|archetype|archetypes|0
+// CHECK-DAG:  mem|{{[0-9]+}}|1|2|{{[0-9]+}}|{{[0-9]+}}|archetype|Lamp_archetype|64
+// CHECK-DAG:  mem|{{[0-9]+}}|1|2|{{[0-9]+}}|{{[0-9]+}}|archetype|Lamp_Done|64
+// CHECK-DAG:  mem|{{[0-9]+}}|0|1|4|{{[0-9]+}}|unique|uniques|0
+// CHECK-DAG:  mem|{{[0-9]+}}|{{[0-9]+}}|3|4|{{[0-9]+}}|unique|n|0
+// CHECK-DAG:  mem|{{[0-9]+}}|{{[0-9]+}}|3|{{[0-9]+}}|{{[0-9]+}}|archetype|padding|0
+// CHECK-DAG:  mem|{{[0-9]+}}|{{[0-9]+}}|3|256|{{[0-9]+}}|archetype|ids|0
+// CHECK-DAG:  mem|{{[0-9]+}}|{{[0-9]+}}|4|256|{{[0-9]+}}|archetype|heat|0
+// CHECK-DAG:  mem|{{[0-9]+}}|{{[0-9]+}}|4|64|{{[0-9]+}}|archetype|present?|0
+// CHECK-DAG:  mem|{{[0-9]+}}|{{[0-9]+}}|3|16|0|world|entity counts|0
+
+// SUMS: sums True world True

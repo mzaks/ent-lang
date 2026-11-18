@@ -2392,7 +2392,8 @@ def trace_into_map(trace, path):
 def world_map(arguments, path):
     """`ent map`: the program's world map (its archetypes, systems,
     schedules and its entities' lifecycle; --ent-world-map says what is in
-    it) written to `path`, and opened in tools/map/ent_map.ent: a window
+    it; and how its world's memory is laid out, --ent-memory-map) written
+    to `path`, and opened in tools/map/ent_map.ent: a window
     with the lifecycle as a MatrixWave."""
     own = [os.environ.get("ENT_BIN"), os.path.join(ROOT, "build/bin")]
     own = [path for path in own if path]
@@ -2410,6 +2411,11 @@ def world_map(arguments, path):
         if arguments.lens:
             options.append("lens=" + arguments.lens)
         run([optimise, imported, "--ent-world-map=" + " ".join(options),
+             "--mlir-print-op-on-diagnostic=false", "-o", os.devnull])
+        # (And how its world's memory is laid out: as the lowering lays
+        # it out, with the indexes it makes.)
+        run([optimise, imported, "--ent-indexes=remarks=0",
+             "--ent-memory-map=out=" + os.path.abspath(path),
              "--mlir-print-op-on-diagnostic=false", "-o", os.devnull])
     # (With --trace: how the program ran, from the trace a build of it with
     # --trace wrote; ENT_TRACE, else program.trace.json or its name's.)

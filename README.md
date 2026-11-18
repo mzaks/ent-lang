@@ -178,6 +178,13 @@ goes into; a click on one goes to it, Backspace back. A fourth, with
 (`ENT_TRACE`, else `program.trace.json`), is how it ran: how many
 entities each archetype had after each run of `main`'s schedules, how
 long each run took, and each system, schedule and loop by its own time.
+A fifth is the world's memory, which is laid out once when the world is
+made: a treemap of its bytes, as disk space analyzers draw a disk, the
+archetypes, uniques, relations, buffers, indexes, the queries' room for
+what they send, event logs and the entity table, each archetype's
+components and their fields as big as they are, what aligning each array
+left as its padding (`--ent-memory-map`, as the lowering lays it out); a
+click goes in, the secondary button out.
 The lens is the
 program's own components that it adds or removes, or those `--lens`
 names; `-o` keeps the map (`--no-window`: only that).

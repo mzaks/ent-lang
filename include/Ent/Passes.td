@@ -368,6 +368,26 @@ def EntWorldMap : Pass<"ent-world-map", "ModuleOp"> {
   ];
 }
 
+def EntMemoryMap : Pass<"ent-memory-map", "ModuleOp"> {
+  let summary = "Write how the world's memory is laid out, for ent map";
+  let description = [{
+    Lays the world out as the lowering and the C header do (after
+    `--ent-indexes`) and writes, as lines of tab-separated fields, its
+    bytes as a tree: the world; its kinds of arrays (archetypes, uniques,
+    relations, buffers, indexes, the queries' room for what they send,
+    event logs, the entities' table); each archetype, unique, ...; its
+    components or parts; their fields. Every byte placed is in one leaf
+    (what aligning an array left before it, its own): from the stretches
+    the layout placed, each cut where an array of the world starts.
+    Appended to `out` (lib/Ent/Transforms/WorldMap.cpp says each record).
+    Changes nothing.
+  }];
+  let options = [
+    Option<"out", "out", "std::string", /*default=*/"\"\"",
+           "The file to add the records to (standard output where none)">,
+  ];
+}
+
 def EntSchedule : Pass<"ent-schedule", "ModuleOp"> {
   let summary = "Group the runs of each schedule into parallel stages";
   let description = [{

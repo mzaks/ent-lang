@@ -300,7 +300,23 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
   }
   layout.countsBytes = 8 * layout.archetypes.size();
 
-  uint64_t end = layout.countsBytes;
+  // (Each stretch placed kept, for a map of the world's memory: where
+  // `end` moves past the furthest it has been.)
+  struct Cursor {
+    uint64_t at, most;
+    std::vector<WorldSpan> &spans;
+    operator uint64_t() const { return at; }
+    Cursor &operator=(uint64_t to) {
+      if (to > most) {
+        spans.push_back({most, to});
+        most = to;
+      }
+      at = to;
+      return *this;
+    }
+    Cursor &operator+=(uint64_t bytes) { return *this = at + bytes; }
+  };
+  Cursor end{layout.countsBytes, layout.countsBytes, layout.spans};
   // Archetypes that some query despawns from or moves entities out of need
   // pending lists and a counter for the rows to remove when that query
   // ends; moves also need to know their target and, for an add, the values.
@@ -1419,6 +1435,193 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
   }
   layout.totalBytes = llvm::alignTo(end, kArenaAlignment);
   return layout;
+}
+
+std::vector<WorldArray> WorldLayout::arrays() const {
+  std::vector<WorldArray> all;
+  auto add = [&](uint64_t offset, StringRef kind, StringRef owner,
+                 StringRef part, StringRef leaf = "") {
+    if (offset)
+      all.push_back(
+          {offset, kind.str(), owner.str(), part.str(), leaf.str()});
+  };
+  auto columnName = [](const WorldColumn &column) {
+    return column.isStamp()      ? std::string("stamp")
+           : column.isPresence() ? std::string("present?")
+                                 : column.field.getValue().str();
+  };
+  for (const WorldArchetype &archetype : archetypes) {
+    std::string name = ArchetypeOp(archetype.op).getSymName().str();
+    auto mine = [&](uint64_t offset, StringRef part) {
+      add(offset, "archetype", name, part);
+    };
+    for (const WorldColumn &column : archetype.columns)
+      add(column.offset, "archetype", name, column.component.getValue(),
+          columnName(column));
+    mine(archetype.idOffset, "ids");
+    mine(archetype.pendingOffset, "pending");
+    mine(archetype.pendingCountOffset, "pending");
+    mine(archetype.pendingActionOffset, "pending");
+    mine(archetype.rankFirstOffset, "ranks");
+    mine(archetype.rankEndOffset, "ranks");
+    mine(archetype.partitionCountsOffset, "partitions");
+    mine(archetype.rootCountOffset, "tree");
+    mine(archetype.parentRowOffset, "tree");
+    mine(archetype.parentLocationOffset, "tree");
+    mine(archetype.childBeginOffset, "tree");
+    mine(archetype.childEndOffset, "tree");
+    for (auto [begin, end] : archetype.childRangeOffsets) {
+      mine(begin, "tree");
+      mine(end, "tree");
+    }
+    mine(archetype.marksOffset, "marks");
+    mine(archetype.beforeIdOffset, "events");
+    mine(archetype.afterIdOffset, "events");
+    mine(archetype.connectedRowOffset, "tree");
+    mine(archetype.levelStartOffset, "tree");
+    mine(archetype.newRowOffset, "scratch");
+    for (uint64_t offset : archetype.columnScratchOffsets)
+      mine(offset, "scratch");
+    mine(archetype.idScratchOffset, "scratch");
+    for (const WorldMove &move : archetype.moves)
+      for (const WorldColumn &value : move.values)
+        add(value.offset, "archetype", name, "moves",
+            move.component.getValue());
+  }
+  for (const WorldResource &resource : resources)
+    for (const WorldResourceField &field : resource.fields)
+      add(field.offset, "unique", ResourceOp(resource.op).getSymName(),
+          field.field.getValue());
+  for (auto [i, apply] : llvm::enumerate(applies)) {
+    std::string name = "sends " + std::to_string(i);
+    for (const WorldApplyBuffer &buffer : apply.buffers) {
+      add(buffer.idOffset, "query", name, "targets");
+      add(buffer.valueOffset, "query", name, "values");
+    }
+    add(apply.edgeIdOffset, "query", name, "targets");
+    add(apply.edgeValueOffset, "query", name, "values");
+  }
+  for (auto [i, connect] : llvm::enumerate(connects)) {
+    std::string name = "connects " + std::to_string(i);
+    for (const WorldConnect::Buffer &buffer : connect.buffers) {
+      add(buffer.sourceOffset, "query", name, "sources");
+      add(buffer.targetOffset, "query", name, "targets");
+      for (uint64_t offset : buffer.valueOffsets)
+        add(offset, "query", name, "values");
+    }
+  }
+  for (auto [i, append] : llvm::enumerate(appends)) {
+    std::string name = "appends " + std::to_string(i);
+    for (const WorldAppend::Slots &slots : append.slots) {
+      add(slots.sentOffset, "query", name, "sent");
+      for (uint64_t offset : slots.valueOffsets)
+        add(offset, "query", name, "values");
+    }
+  }
+  for (const WorldRelation &relation : relations) {
+    std::string name = RelationOp(relation.op).getSymName().str();
+    auto mine = [&](uint64_t offset, StringRef part) {
+      add(offset, "relation", name, part);
+    };
+    mine(relation.countOffset, "count");
+    mine(relation.cleanOffset, "count");
+    mine(relation.sourceOffset, "sources");
+    mine(relation.targetOffset, "targets");
+    for (const WorldColumn &field : relation.fields)
+      add(field.offset, "relation", name, "fields", columnName(field));
+    mine(relation.deadOffset, "dead");
+    mine(relation.sortedOffset, "sorted");
+    mine(relation.indexOffset, "index");
+    mine(relation.indexEdgesOffset, "index");
+    mine(relation.endsOffset, "ends");
+    mine(relation.indexEndsOffset, "ends");
+    mine(relation.slotOffset, "slots");
+    mine(relation.mendsOffset, "mends");
+    mine(relation.cursorOffset, "scratch");
+    mine(relation.sourceScratchOffset, "scratch");
+    mine(relation.targetScratchOffset, "scratch");
+    for (uint64_t offset : relation.fieldScratchOffsets)
+      mine(offset, "scratch");
+    for (const WorldRelation::EdgeOrder &order : relation.orders) {
+      add(order.orderOffset, "relation", name, "orders",
+          order.field.getValue());
+      add(order.cleanOffset, "relation", name, "orders",
+          order.field.getValue());
+    }
+    for (uint64_t offset :
+         {relation.firstChildOffset, relation.lastChildOffset,
+          relation.childCountOffset, relation.nextSiblingOffset,
+          relation.previousSiblingOffset, relation.positionOffset})
+      mine(offset, "links");
+    for (uint64_t offset :
+         {relation.sequenceOffset, relation.orderKeysOffset,
+          relation.orderOffset, relation.orderParentOffset,
+          relation.sortedCountOffset, relation.orderLocationOffset,
+          relation.orderParentLocationOffset, relation.staleOffset,
+          relation.connectedOffset, relation.orderCountOffset,
+          relation.depthOffset})
+      mine(offset, "order");
+    for (uint64_t offset :
+         {relation.walkOrderOffset, relation.walkParentsOffset,
+          relation.walkSizesOffset, relation.walkCursorsOffset,
+          relation.walkStateOffset, relation.walkPlacesOffset,
+          relation.rowOrderOffset, relation.rowOrderParentOffset})
+      mine(offset, "walk");
+    for (uint64_t offset :
+         {relation.siblingTicksOffset, relation.siblingsBeforeOffset,
+          relation.siblingsAfterOffset, relation.childTicksOffset,
+          relation.childCountsOffset, relation.siblingIdsBeforeOffset,
+          relation.siblingIdsAfterOffset, relation.reachStackOffset,
+          relation.touchedOffset, relation.touchedTicksOffset,
+          relation.touchedStateOffset, relation.marksOffset})
+      mine(offset, "events");
+  }
+  for (const WorldBuffer &buffer : buffers) {
+    BufferOp op(buffer.op);
+    std::string name = op.getSymName().str();
+    StringRef kind = op->hasAttr("ent.index") || buffer.set ||
+                             op->hasAttr(kIndexedAttr)
+                         ? "index"
+                         : "buffer";
+    add(buffer.countOffset, kind, name, "count");
+    for (const WorldColumn &field : buffer.fields)
+      add(field.offset, kind, name, "rows", columnName(field));
+    for (const WorldColumn &field : buffer.before)
+      add(field.offset, kind, name, "before", columnName(field));
+    add(buffer.clashOffset, kind, name, "windows");
+    add(buffer.runOffset, kind, name, "windows");
+    add(buffer.ownerOffset, kind, name, "windows");
+    add(buffer.rankLowOffset, kind, name, "ranks");
+    add(buffer.rankHighOffset, kind, name, "ranks");
+  }
+  for (auto [i, log] : llvm::enumerate(logs)) {
+    if (!log.exists())
+      continue;
+    std::string name = "log " + std::to_string(i);
+    uint64_t idBytes = entities.idBits / 8;
+    for (int64_t s = 0; s < log.segments; ++s) {
+      add(log.idsOffset + uint64_t(s * log.segmentCapacity) * idBytes, "log",
+          name, "ids");
+      add(log.ticksOffset + uint64_t(s * log.segmentCapacity) * 8, "log",
+          name, "ticks");
+    }
+    add(log.countsOffset, "log", name, "counts");
+    add(log.endsOffset, "log", name, "counts");
+    for (uint64_t offset : log.readerOffsets)
+      add(offset, "log", name, "readers");
+  }
+  add(tickOffset, "world", "ticks", "tick");
+  for (uint64_t offset : reactiveOffsets)
+    add(offset, "world", "ticks", "last ticks");
+  add(nothingOffset, "world", "nothing", "nothing");
+  add(nextSlotOffset, "entities", "entities", "free slots");
+  add(freeHeadOffset, "entities", "entities", "free slots");
+  add(generationOffset, "entities", "entities", "generations");
+  add(locationOffset, "entities", "entities", "locations");
+  llvm::stable_sort(all, [](const WorldArray &a, const WorldArray &b) {
+    return a.offset < b.offset;
+  });
+  return all;
 }
 
 //===----------------------------------------------------------------------===//

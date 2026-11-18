@@ -42,6 +42,7 @@
 #include "Ent/Access.h"
 #include "Ent/Passes.h"
 #include "Ent/Structure.h"
+#include "Ent/World.h"
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -58,6 +59,7 @@
 
 namespace mlir::ent {
 #define GEN_PASS_DEF_ENTWORLDMAP
+#define GEN_PASS_DEF_ENTMEMORYMAP
 #include "Ent/Passes.h.inc"
 } // namespace mlir::ent
 
@@ -1039,6 +1041,157 @@ struct EntWorldMap : public mlir::ent::impl::EntWorldMapBase<EntWorldMap> {
            << "\t" << field(step.run.getSystem()) << "\t" << flow.from << "\t"
            << flow.to << "\t" << flow.kind << "\t" << flow.place << "\n";
       ++stepNumber;
+    }
+  }
+};
+
+/// How the world's memory is laid out (--ent-memory-map):
+///
+///   memory  total-bytes  saved-bytes  entity-capacity  id-bits
+///   mem     index  parent  depth  bytes  from  kind  name  rows
+///
+/// a `mem` for each node of the tree of its bytes, the world first (index
+/// 0, parent -1), each node's children after it, those with the most
+/// bytes first, in the order nodes are come to breadth first: under the
+/// world its kinds ("archetypes", "uniques", "relations", "buffers",
+/// "indexes", "queries", "logs", "entities", "world"), under a kind each
+/// archetype, unique, ... (its name, and of an archetype, a relation or
+/// a buffer its rows), under that its parts (a component, "ids", ...) and
+/// their fields. `from` is the first byte of what it holds. What aligning
+/// an array left before it is its owner's "padding" (columns are 64-byte
+/// aligned and staggered); a stretch no array starts in, and the end of
+/// the world after the last, the world's "padding".
+struct EntMemoryMap
+    : public mlir::ent::impl::EntMemoryMapBase<EntMemoryMap> {
+  using EntMemoryMapBase::EntMemoryMapBase;
+
+  struct Node {
+    std::string name, kind;
+    uint64_t bytes = 0, from = ~0ull;
+    int64_t rows = 0;
+    std::vector<unsigned> children;
+    std::map<std::string, unsigned> named;
+  };
+
+  void runOnOperation() override {
+    ModuleOp module = getOperation();
+    if (failed(inferArchetypes(module)))
+      return signalPassFailure();
+    FailureOr<WorldLayout> layout = WorldLayout::compute(module);
+    if (failed(layout))
+      return signalPassFailure();
+    std::error_code error;
+    std::string path = out.empty() ? std::string("-") : std::string(out);
+    llvm::raw_fd_ostream os(path, error,
+                            llvm::sys::fs::OF_Text | llvm::sys::fs::OF_Append);
+    if (error) {
+      module.emitError() << "cannot write the memory map to '" << out
+                         << "': " << error.message();
+      return signalPassFailure();
+    }
+
+    std::vector<Node> nodes(1);
+    nodes[0].name = "world";
+    nodes[0].kind = "world";
+    auto child = [&](unsigned parent, const std::string &name,
+                     const std::string &kind) {
+      auto found = nodes[parent].named.find(name);
+      if (found != nodes[parent].named.end())
+        return found->second;
+      unsigned made = nodes.size();
+      nodes.push_back({});
+      nodes[made].name = name;
+      nodes[made].kind = kind;
+      nodes[parent].named[name] = made;
+      nodes[parent].children.push_back(made);
+      return made;
+    };
+    // (Its rows: of an archetype, a relation or a buffer.)
+    llvm::StringMap<int64_t> rows;
+    for (const WorldArchetype &archetype : layout->archetypes)
+      rows[ArchetypeOp(archetype.op).getSymName()] = archetype.capacity;
+    for (const WorldRelation &relation : layout->relations)
+      rows[RelationOp(relation.op).getSymName()] = relation.capacity;
+    for (const WorldBuffer &buffer : layout->buffers)
+      rows[BufferOp(buffer.op).getSymName()] = buffer.capacity;
+    auto plural = [](StringRef kind) {
+      if (kind == "entities" || kind == "world" || kind == "padding")
+        return kind.str();
+      if (kind == "index")
+        return std::string("indexes");
+      if (kind == "query")
+        return std::string("queries");
+      return (kind + "s").str();
+    };
+    auto put = [&](const WorldArray &array, uint64_t from, uint64_t to) {
+      if (to <= from)
+        return;
+      unsigned at = child(0, plural(array.kind), array.kind);
+      at = child(at, array.owner, array.kind);
+      if (rows.count(array.owner))
+        nodes[at].rows = rows[array.owner];
+      if (array.part != array.owner)
+        at = child(at, array.part, array.kind);
+      if (!array.leaf.empty() && array.leaf != array.part)
+        at = child(at, array.leaf, array.kind);
+      nodes[at].bytes += to - from;
+      nodes[at].from = std::min(nodes[at].from, from);
+    };
+    put({0, "world", "counts", "entity counts", ""}, 0, layout->countsBytes);
+    // Each stretch placed, cut where an array starts: what is before the
+    // first array in it, the first's (what aligning it left).
+    std::vector<WorldArray> arrays = layout->arrays();
+    WorldArray padding{0, "padding", "padding", "padding", ""};
+    size_t next = 0;
+    uint64_t placed = layout->countsBytes;
+    for (const WorldSpan &span : layout->spans) {
+      while (next < arrays.size() && arrays[next].offset < span.from)
+        ++next;
+      size_t first = next;
+      while (next < arrays.size() && arrays[next].offset < span.to)
+        ++next;
+      if (first == next) {
+        put(padding, span.from, span.to);
+      } else {
+        // (What aligning the first left before it: its owner's padding.)
+        const WorldArray &lead = arrays[first];
+        put({0, lead.kind, lead.owner, "padding", ""}, span.from, lead.offset);
+        for (size_t k = first; k < next; ++k)
+          put(arrays[k], arrays[k].offset,
+              k + 1 < next ? arrays[k + 1].offset : span.to);
+      }
+      placed = std::max(placed, span.to);
+    }
+    put(padding, placed, layout->totalBytes);
+
+    // The sums, and each node's children, the most bytes first.
+    std::function<void(unsigned)> sum = [&](unsigned at) {
+      for (unsigned k : nodes[at].children) {
+        sum(k);
+        nodes[at].bytes += nodes[k].bytes;
+        nodes[at].from = std::min(nodes[at].from, nodes[k].from);
+      }
+      llvm::stable_sort(nodes[at].children, [&](unsigned a, unsigned b) {
+        return nodes[a].bytes > nodes[b].bytes;
+      });
+    };
+    sum(0);
+    os << "memory\t" << layout->totalBytes << "\t" << layout->savedBytes
+       << "\t" << layout->entityCapacity << "\t" << layout->entities.idBits
+       << "\n";
+    // Breadth first, numbered as they are written.
+    std::vector<std::pair<unsigned, int>> queue{{0, -1}};
+    std::vector<int> depth(nodes.size(), 0);
+    for (size_t k = 0; k < queue.size(); ++k) {
+      auto [at, parent] = queue[k];
+      const Node &node = nodes[at];
+      os << "mem\t" << k << "\t" << parent << "\t" << depth[at] << "\t"
+         << node.bytes << "\t" << (node.from == ~0ull ? 0 : node.from) << "\t"
+         << node.kind << "\t" << node.name << "\t" << node.rows << "\n";
+      for (unsigned c : node.children) {
+        depth[c] = depth[at] + 1;
+        queue.push_back({c, int(k)});
+      }
     }
   }
 };

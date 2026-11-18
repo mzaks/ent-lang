@@ -23,6 +23,9 @@
 // entities each archetype had as it ran, how long each run of the
 // schedules took, and the systems, schedules and loops by their time.
 //
+// Memory: the world's bytes as a treemap, each archetype, unique,
+// relation, buffer and index, its parts and fields as big as they are.
+//
 // And Provenance: a value (a component's field, a unique's...), the writes
 // that give it one, each with the values it is made from and those it
 // depends on, and the writes it goes into; a click on one shows that one.
@@ -32,8 +35,8 @@
 // from what to what, and where in the program.
 //
 // With ENT_MAP_SHOT=picture.png it draws the wave once (of the archetype
-// whose label ENT_MAP_ARCH is, where set; ENT_MAP_VIEW=data, provenance or
-// time: those views, ENT_MAP_VALUE the value's words), saves its picture there and
+// whose label ENT_MAP_ARCH is, where set; ENT_MAP_VIEW=data, provenance, time
+// or memory: those views, ENT_MAP_ZOOM the memory's node shown whole, ENT_MAP_VALUE the value's words), saves its picture there and
 // ends: for checks and pictures of it. ENT_MAP_POINT=x,y puts the pointer
 // there in it (in the window's points).
 import window
@@ -43,7 +46,7 @@ import text
 
 // What the map says of the program as a whole.
 unique Map {
-  loaded: bool, program: text, lens: text, labels: text,
+  loaded: bool, program: text, lens: text, labels: text, names: text,
   archetypes: i32, systems: i32, components: i32, tags: i32, resources: i32,
   schedules: i32, queries: i32, states: i32, flows: i32, steps: i32,
   rows: i32, columns: i32, cells: i32, main_rows: i32,
@@ -423,6 +426,77 @@ fn time_x(ms: f32, all_ms: f32, w: f32) -> f32 {
   chart_x() + (if all_ms > 0.0 { ms / all_ms } else { 0.0 }) * w
 }
 
+// ---- Memory -------------------------------------------------------------
+// The world's memory, laid out once for all its life (--ent-memory-map):
+// a treemap of its bytes, as disk space analyzers draw a disk, each box as
+// big as what it holds: the kinds of arrays, each archetype, unique,
+// relation, buffer and index in them, their components or parts, the
+// fields. A click goes into the box under the pointer, one level; the
+// secondary button, Backspace or a click on the path goes back out.
+
+// A node: its parent, depth, bytes, first byte, kind, rows (of an
+// archetype, relation or buffer), its first child and how many; where its
+// name is in Mem.names; its box (w < 0: not shown).
+buffer MemAt {
+  parent: i32, depth: i32, bytes: f64, from: f64, kind: i32, rows: i32, first: i32, count: i32,
+  start: i32, end: i32, x: f32, y: f32, w: f32, h: f32
+} capacity 65536
+
+// How big the world is and what a saved one holds; the names; the node
+// shown whole (the root of the boxes) and the box under the pointer; its
+// words and where; whether to lay the boxes out again (and of what size
+// the window was).
+unique Mem {
+  total: f64, saved: f64, names: text, root: i32, over: i32, words: text, tx: f32, ty: f32,
+  dirty: bool, lw: i32, lh: i32, zoom: text
+}
+
+fn mem_kind(kind: text) -> i32 {
+  if kind == "archetype" { 0 } else if kind == "unique" { 1 } else if kind == "relation" { 2 }
+  else if kind == "buffer" { 3 } else if kind == "index" { 4 } else if kind == "query" { 5 }
+  else if kind == "log" { 6 } else if kind == "entities" { 7 } else if kind == "padding" { 8 }
+  else { 9 }
+}
+fn mem_colour(kind: i32) -> i32 {
+  if kind == 0 { 0x4f9de0 } else if kind == 1 { 0xa77be0 } else if kind == 2 { 0xd0c050 }
+  else if kind == 3 { 0xe0a03a } else if kind == 4 { 0xe07bb0 } else if kind == 5 { 0x56c26a }
+  else if kind == 6 { 0x3fb8a8 } else if kind == 7 { 0x8fc0e0 } else if kind == 8 { 0x3a434d }
+  else { 0x7d8a98 }
+}
+// Darker, for the boxes that hold others.
+fn mem_shade(colour: i32, depth: i32) -> i32 {
+  let k = if depth <= 1 { 0.30 } else if depth == 2 { 0.42 } else { 0.55 }
+  let r = (((colour / 65536) % 256) as f32 * k) as i32
+  let g = (((colour / 256) % 256) as f32 * k) as i32
+  let b = ((colour % 256) as f32 * k) as i32
+  r * 65536 + g * 256 + b
+}
+// "1.50 MiB".
+fn size_text(bytes: f64) -> text {
+  var out = fixed(bytes, 0) + " B"
+  if bytes >= 1073741824.0 { out = fixed(bytes / 1073741824.0, 2) + " GiB" }
+  else if bytes >= 1048576.0 { out = fixed(bytes / 1048576.0, 2) + " MiB" }
+  else if bytes >= 1024.0 { out = fixed(bytes / 1024.0, 1) + " KiB" }
+  out
+}
+// Where the boxes are.
+fn mem_y() -> f32 { top() + 40.0 }
+fn mem_head() -> f32 { 17.0 }
+// The line of a text that is `name` (-1: none).
+fn line_index(t: text, name: text) -> i32 {
+  var at = 0
+  var k = 0
+  var found = -1
+  while at < len(t) && found < 0 {
+    var end = find(t, "\n", at)
+    if end < 0 { end = len(t) }
+    if slice(t, at, end) == name { found = k }
+    at = end + 1
+    k += 1
+  }
+  found
+}
+
 // The map read: every line a record (lib/Ent/Transforms/WorldMap.cpp).
 system load_map() {
   if !Map.loaded {
@@ -440,6 +514,8 @@ system load_map() {
       slice(file, 0, len(file) - 4) + ".ent"
     } else { file }
     var labels = ""
+    // (The node shown whole in a picture: ENT_MAP_ZOOM, by its name.)
+    Mem.zoom = environment_variable("ENT_MAP_ZOOM")
     var at = 0
     var step = -1
     var system_name = ""
@@ -459,6 +535,7 @@ system load_map() {
       } else if kind == "archetype" {
         let label = part(line, 7)
         labels = labels + label + "\n"
+        Map.names = Map.names + part(line, 2) + "\n"
         spawn { Arch { index: int(part(line, 1)), label: label, states: 0, row: -1 } }
         ArchRow += { states: 0 }
         ArchPk += { peak: 0, colour: 0x8fa0b0, rank: -1 }
@@ -528,6 +605,28 @@ system load_map() {
         }
         ValAt[v].uses += 1
         froms += 1
+      } else if kind == "memory" {
+        Mem.total = decimal(part(line, 1))
+        Mem.saved = decimal(part(line, 2))
+      } else if kind == "mem" {
+        let k = len(MemAt)
+        let parent = int(part(line, 2))
+        let mk = mem_kind(part(line, 6))
+        var name = part(line, 7)
+        // (An archetype by its label, as the other views say it.)
+        if mk == 0 && int(part(line, 3)) == 2 {
+          let at = line_index(Map.names, name)
+          if at >= 0 { name = line_at(labels, at) }
+        }
+        MemAt += { parent: parent, depth: int(part(line, 3)), bytes: decimal(part(line, 4)),
+                   from: decimal(part(line, 5)), kind: mk, rows: int(part(line, 8)), first: -1, count: 0,
+                   start: len(Mem.names), end: len(Mem.names) + len(name), x: 0.0, y: 0.0, w: -1.0, h: 0.0 }
+        Mem.names = Mem.names + name
+        if parent >= 0 {
+          if MemAt[parent].count == 0 { MemAt[parent].first = k }
+          MemAt[parent].count += 1
+        }
+        if name == Mem.zoom && Mem.root == 0 { Mem.root = k }
       } else if kind == "traced" {
         Tm.traced = true
         Tm.seconds = decimal(part(line, 1)) as f32
@@ -614,6 +713,8 @@ system load_map() {
     if environment_variable("ENT_MAP_VIEW") == "data" { View.mode = 1 }
     if environment_variable("ENT_MAP_VIEW") == "provenance" { View.mode = 2 }
     if environment_variable("ENT_MAP_VIEW") == "time" { View.mode = 3 }
+    if environment_variable("ENT_MAP_VIEW") == "memory" { View.mode = 4 }
+    Mem.dirty = true
     // (The archetypes with the most entities, a line each.)
     Tm.arch = -1
     Tm.at = -1.0
@@ -896,7 +997,8 @@ proc tab(name: text, x: f32, on: bool) {
 }
 system tabs() {
   if Mouse.clicks > 0 && Mouse.y >= 10.0 && Mouse.y < 38.0 {
-    let x = Mouse.x - (Window.width as f32 - 590.0)
+    let x = Mouse.x - (Window.width as f32 - 720.0)
+    if x >= 520.0 && x < 642.0 { View.mode = 4 }
     if x >= 0.0 && x < 122.0 { View.mode = 0 }
     if x >= 130.0 && x < 252.0 { View.mode = 1 }
     if x >= 260.0 && x < 382.0 { View.mode = 2 }
@@ -1396,10 +1498,16 @@ system draw_top() {
         "{Map.systems} systems ({Map.queries} queries; {Map.opaque} with effects outside the world, {Map.gpu} on the GPU) · " +
         "{Map.schedules} schedules", 16.0, 40.0, Window.width as f32 - 32.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
   // The views, as tabs.
-  tab("Lifecycle", Window.width as f32 - 590.0, View.mode == 0)
-  tab("Systems × data", Window.width as f32 - 460.0, View.mode == 1)
-  tab("Provenance", Window.width as f32 - 330.0, View.mode == 2)
-  tab("Time", Window.width as f32 - 200.0, View.mode == 3)
+  tab("Lifecycle", Window.width as f32 - 720.0, View.mode == 0)
+  tab("Systems × data", Window.width as f32 - 590.0, View.mode == 1)
+  tab("Provenance", Window.width as f32 - 460.0, View.mode == 2)
+  tab("Time", Window.width as f32 - 330.0, View.mode == 3)
+  tab("Memory", Window.width as f32 - 200.0, View.mode == 4)
+  if View.mode == 4 {
+    window::write("Memory: the world's bytes, laid out when it is made, as boxes as big as what they hold · " +
+          "a click goes in, the secondary button or Backspace out", 16.0, 62.0, Window.width as f32 - 32.0, 0,
+          14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+  }
   if View.mode == 3 {
     if Tm.traced {
       window::write("Time: how it ran (" + Tm.file + "): the entities of each archetype after each run of " +
@@ -1478,6 +1586,24 @@ system draw_top() {
     let h = lines as f32 * 18.0 + 14.0
     let x0 = min(Grid.tx, Window.width as f32 - w - 8.0)
     let y0 = min(Grid.ty, Window.height as f32 - h - 8.0)
+    rounded(x0, y0, w, h, 6.0, 6.0, 6.0, 6.0, 0xf0222b35)
+    window::write(words, x0 + 10.0, y0 + 7.0, w - 16.0, 0, 14.0, 0.0, 18.0, 1, 0, 0xe2ecf5)
+  }  if len(Tm.words) > 0 && View.mode == 3 {
+    let words = Tm.words as text[4094]
+    let w = max(text_extent(words, 0, 14.0, 0.0, 1), 120.0) + 20.0
+    let lines = text_lines(words, w, 0, 14.0, 0.0, 1)
+    let h = lines as f32 * 18.0 + 14.0
+    let x0 = min(Tm.tx, Window.width as f32 - w - 8.0)
+    let y0 = min(Tm.ty, Window.height as f32 - h - 8.0)
+    rounded(x0, y0, w, h, 6.0, 6.0, 6.0, 6.0, 0xf0222b35)
+    window::write(words, x0 + 10.0, y0 + 7.0, w - 16.0, 0, 14.0, 0.0, 18.0, 1, 0, 0xe2ecf5)
+  }  if len(Mem.words) > 0 && View.mode == 4 {
+    let words = Mem.words as text[4094]
+    let w = max(text_extent(words, 0, 14.0, 0.0, 1), 120.0) + 20.0
+    let lines = text_lines(words, w, 0, 14.0, 0.0, 1)
+    let h = lines as f32 * 18.0 + 14.0
+    let x0 = min(Mem.tx, Window.width as f32 - w - 8.0)
+    let y0 = min(Mem.ty, Window.height as f32 - h - 8.0)
     rounded(x0, y0, w, h, 6.0, 6.0, 6.0, 6.0, 0xf0222b35)
     window::write(words, x0 + 10.0, y0 + 7.0, w - 16.0, 0, 14.0, 0.0, 18.0, 1, 0, 0xe2ecf5)
   }  if len(Tm.words) > 0 && View.mode == 3 {
@@ -1743,6 +1869,304 @@ system draw_time() {
   }
 }
 
+// The boxes laid out again, where asked or the window's size changed:
+// the root's the whole of the view, each node's children squarified into
+// it (Bruls, Huizing and van Wijk, 2000): rows of them along its shorter
+// side, each row grown while its boxes get no further from square.
+system mem_layout() {
+  if Window.width != Mem.lw || Window.height != Mem.lh { Mem.dirty = true }
+  if Mem.dirty && len(MemAt) > 0 {
+    Mem.dirty = false
+    Mem.lw = Window.width
+    Mem.lh = Window.height
+    var k = 0
+    while k < len(MemAt) {
+      MemAt[k].w = -1.0
+      k += 1
+    }
+    let root = Mem.root
+    MemAt[root].x = panel() + 16.0
+    MemAt[root].y = mem_y()
+    MemAt[root].w = Window.width as f32 - panel() - 32.0
+    MemAt[root].h = Window.height as f32 - mem_y() - 16.0
+    k = root
+    while k < len(MemAt) {
+      let n = MemAt[k].count
+      if MemAt[k].w > 0.0 && n > 0 && MemAt[k].bytes > 0.0 {
+        // (Inside its edge, and under its name where there is room.)
+        let head = if k != root && MemAt[k].w > 60.0 && MemAt[k].h > 40.0 { mem_head() } else { 0.0 }
+        let pad = if k == root { 0.0 } else { 2.0 }
+        var x = MemAt[k].x + pad
+        var y = MemAt[k].y + pad + head
+        var w = MemAt[k].w - 2.0 * pad
+        var h = MemAt[k].h - 2.0 * pad - head
+        let first = MemAt[k].first
+        let end = first + n
+        var i = first
+        if w > 1.0 && h > 1.0 {
+          let scale = (w * h) as f64 / MemAt[k].bytes
+          while i < end && w > 0.5 && h > 0.5 && MemAt[i].bytes > 0.0 {
+            let side = min(w, h) as f64
+            var j = i
+            var sum = 0.0 as f64
+            var least = 0.0 as f64
+            var most = 0.0 as f64
+            var worst = 0.0 as f64
+            var growing = true
+            while j < end && growing {
+              let a = MemAt[j].bytes * scale
+              if a <= 0.0 {
+                growing = false
+              } else {
+                let s = sum + a
+                let lo = if j == i { a } else { min(least, a) }
+                let hi = if j == i { a } else { max(most, a) }
+                let ratio = max(side * side * hi / (s * s), s * s / (side * side * lo))
+                if j == i || ratio <= worst {
+                  sum = s
+                  least = lo
+                  most = hi
+                  worst = ratio
+                  j += 1
+                } else {
+                  growing = false
+                }
+              }
+            }
+            var r = i
+            if w >= h {
+              // (A column at its left.)
+              let t = (sum / h as f64) as f32
+              var yy = y
+              while r < j {
+                let hh = (MemAt[r].bytes * scale / t as f64) as f32
+                MemAt[r].x = x
+                MemAt[r].y = yy
+                MemAt[r].w = t
+                MemAt[r].h = hh
+                yy += hh
+                r += 1
+              }
+              x += t
+              w -= t
+            } else {
+              // (A row along its top.)
+              let t = (sum / w as f64) as f32
+              var xx = x
+              while r < j {
+                let ww = (MemAt[r].bytes * scale / t as f64) as f32
+                MemAt[r].x = xx
+                MemAt[r].y = y
+                MemAt[r].w = ww
+                MemAt[r].h = t
+                xx += ww
+                r += 1
+              }
+              y += t
+              h -= t
+            }
+            i = j
+          }
+        }
+      }
+      k += 1
+    }
+  }
+}
+
+// What the pointer is on: the deepest box under it. A click goes in, one
+// level; the secondary button or Backspace out.
+system steer_memory() {
+  Mem.over = -1
+  Mem.words = ""
+  let px = if Shot.px >= 0.0 { Shot.px } else { Mouse.x }
+  let py = if Shot.px >= 0.0 { Shot.py } else { Mouse.y }
+  Mem.tx = px + 16.0
+  Mem.ty = py + 14.0
+  var over = -1
+  var k = Mem.root
+  while k < len(MemAt) {
+    if MemAt[k].w >= 1.0 && MemAt[k].h >= 1.0 && px >= MemAt[k].x && px < MemAt[k].x + MemAt[k].w &&
+       py >= MemAt[k].y && py < MemAt[k].y + MemAt[k].h {
+      if over < 0 || MemAt[k].depth > MemAt[over].depth { over = k }
+    }
+    k += 1
+  }
+  if over >= 0 {
+    Mem.over = over
+    // Its path, from the world down; and what it is of its parent.
+    var path = ""
+    var at = over
+    var owner = -1
+    while at >= 0 {
+      let name = slice(Mem.names, MemAt[at].start, MemAt[at].end) as text[1024]
+      if len(path) > 0 { path = name + "  /  " + path } else { path = name }
+      if MemAt[at].rows > 0 && owner < 0 { owner = at }
+      at = MemAt[at].parent
+    }
+    let bytes = MemAt[over].bytes
+    var words = path + "\n" + size_text(bytes) + " (" + fixed(bytes, 0) + " bytes), " +
+                fixed(100.0 * bytes / max(Mem.total, 1.0), 2) + "% of the world"
+    let parent = MemAt[over].parent
+    if parent > 0 {
+      words = words + ", " + fixed(100.0 * bytes / max(MemAt[parent].bytes, 1.0), 1) + "% of " +
+              slice(Mem.names, MemAt[parent].start, MemAt[parent].end)
+    }
+    if owner >= 0 {
+      let rows = MemAt[owner].rows
+      words = words + "\n" + fixed(bytes / rows as f64, 1) + " bytes a row, of {rows} rows"
+    }
+    words = words + "\nfrom byte " + fixed(MemAt[over].from, 0)
+    if MemAt[over].count > 0 { words = words + " · {MemAt[over].count} parts" }
+    Mem.words = words
+  }
+  if px > panel() && py > mem_y() && Mouse.clicks > 0 && over >= 0 {
+    // (The root's child that the box is in.)
+    var at = over
+    while at >= 0 && MemAt[at].parent != Mem.root { at = MemAt[at].parent }
+    if at >= 0 && MemAt[at].count > 0 {
+      Mem.root = at
+      Mem.dirty = true
+    }
+  }
+  if (Mouse.secondary || key_pressed(259)) && Mem.root > 0 {
+    Mem.root = MemAt[Mem.root].parent
+    Mem.dirty = true
+  }
+  // A click on the path: out to that node.
+  if Mouse.clicks > 0 && py >= top() + 8.0 && py < mem_y() - 8.0 && px > panel() {
+    var at = Mem.root
+    var x = panel() + 16.0
+    var chosen = -1
+    // (The path is drawn from the world down: its parts measured the same way.)
+    var depth = MemAt[at].depth
+    while depth >= 0 {
+      var node = Mem.root
+      while MemAt[node].depth > depth { node = MemAt[node].parent }
+      let name = slice(Mem.names, MemAt[node].start, MemAt[node].end) as text[1024]
+      let w = text_extent(name, 0, 14.0, 0.0, 2)
+      if px >= x && px < x + w { chosen = node }
+      x += w + 26.0
+      depth -= 1
+    }
+    if chosen >= 0 {
+      Mem.root = chosen
+      Mem.dirty = true
+    }
+  }
+}
+
+system draw_memory() {
+  if len(MemAt) == 0 {
+    window::write("No memory map: ent map writes one with the map (ent-opt --ent-indexes --ent-memory-map).",
+                  panel() + 24.0, top() + 24.0, Window.width as f32 - panel() - 48.0, 0, 16.0, 0.0, 0.0, 2,
+                  0, 0xc8d4e0)
+  } else {
+    // The path to what is shown whole, from the world.
+    var x = panel() + 16.0
+    var depth = 0
+    let shown = MemAt[Mem.root].depth
+    while depth <= shown {
+      var node = Mem.root
+      while MemAt[node].depth > depth { node = MemAt[node].parent }
+      let name = slice(Mem.names, MemAt[node].start, MemAt[node].end) as text[1024]
+      let w = text_extent(name, 0, 14.0, 0.0, 2)
+      window::write(name, x, top() + 12.0, w + 4.0, 0, 14.0, 0.0, 0.0, 2, 0,
+                    if depth == shown { 0xe2ecf5 } else { 0x7fb6ea })
+      if depth < shown { window::write("/", x + w + 8.0, top() + 12.0, 14.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x7d8a98) }
+      x += w + 26.0
+      depth += 1
+    }
+    window::write(size_text(MemAt[Mem.root].bytes), x, top() + 12.0, 200.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+    // The boxes: those that hold others darker, with their name above
+    // what they hold; the leaves in their kind's colour.
+    var k = Mem.root
+    while k < len(MemAt) {
+      let bw = MemAt[k].w
+      let bh = MemAt[k].h
+      if bw >= 1.0 && bh >= 1.0 {
+        let bx = MemAt[k].x
+        let by = MemAt[k].y
+        let colour = mem_colour(MemAt[k].kind)
+        let name = slice(Mem.names, MemAt[k].start, MemAt[k].end) as text[1024]
+        if MemAt[k].count > 0 {
+          if k != Mem.root {
+            rect(bx, by, bw, bh, mem_shade(colour, MemAt[k].depth - MemAt[Mem.root].depth))
+            if bw > 60.0 && bh > 40.0 {
+              clip(bx + 3.0, by + 1.0, bw - 6.0, mem_head())
+              window::write(name + "  " + size_text(MemAt[k].bytes), bx + 4.0, by + 2.0, 2000.0, 0, 12.0, 0.0,
+                            0.0, 2, 0, 0xe2ecf5)
+              unclip()
+            }
+          }
+        } else {
+          var fill = colour
+          if name == "padding" { fill = 0x3a434d }
+          rect(bx, by, bw, bh, 0x101418)
+          if bw > 2.0 && bh > 2.0 { rect(bx + 0.5, by + 0.5, bw - 1.0, bh - 1.0, fill) }
+          if bw > 44.0 && bh > 16.0 {
+            clip(bx + 2.0, by + 1.0, bw - 4.0, bh - 2.0)
+            let ink = if name == "padding" { 0x9fb0c0 } else { 0x101418 }
+            window::write(short(name), bx + 4.0, by + 2.0, 2000.0, 0, 12.0, 0.0, 0.0, 2, 0, ink)
+            if bh > 30.0 {
+              window::write(size_text(MemAt[k].bytes), bx + 4.0, by + 16.0, 2000.0, 0, 11.0, 0.0, 0.0, 2, 0,
+                            if name == "padding" { 0x7d8a98 } else { 0x26303a })
+            }
+            unclip()
+          }
+        }
+      }
+      k += 1
+    }
+    let over = Mem.over
+    if over >= 0 {
+      let ox = MemAt[over].x
+      let oy = MemAt[over].y
+      let ow = MemAt[over].w
+      let oh = MemAt[over].h
+      rect(ox, oy, ow, 1.0, 0xffffff)
+      rect(ox, oy + oh - 1.0, ow, 1.0, 0xffffff)
+      rect(ox, oy, 1.0, oh, 0xffffff)
+      rect(ox + ow - 1.0, oy, 1.0, oh, 0xffffff)
+    }
+  }
+  // The list: the world's size, each kind of array.
+  rect(0.0, top(), panel(), Window.height as f32 - top(), 0x141a20)
+  rect(panel() - 1.0, top(), 1.0, Window.height as f32 - top(), 0x26303a)
+  if len(MemAt) > 0 {
+    window::write("The world: " + size_text(Mem.total), 16.0, top() + 8.0, panel() - 24.0, 0, 14.0, 0.0, 0.0, 2, 0,
+                  0xe2ecf5)
+    window::write(size_text(Mem.saved) + " of it saved with the world", 16.0, top() + 28.0, panel() - 24.0, 0,
+                  13.0, 0.0, 0.0, 2, 0, 0x7d8a98)
+    window::write("Laid out once, for its whole life", 16.0, top() + 46.0, panel() - 24.0, 0, 13.0, 0.0, 0.0, 2, 0,
+                  0x7d8a98)
+    let first = MemAt[0].first
+    var i = 0
+    while i < MemAt[0].count {
+      let k = first + i
+      let y = top() + 80.0 + i as f32 * row_height()
+      if Mem.root == k { rect(0.0, y, panel() - 1.0, row_height(), 0x24405e) }
+      rect(16.0, y + 7.0, 10.0, 10.0, mem_colour(MemAt[k].kind))
+      window::write(slice(Mem.names, MemAt[k].start, MemAt[k].end), 34.0, y + 3.0, 110.0, 0, 14.0, 0.0, 0.0, 2, 0,
+                    0xd0d8e0)
+      window::write(size_text(MemAt[k].bytes), panel() - 120.0, y + 3.0, 104.0, 0, 14.0, 0.0, 0.0, 2, 2,
+                    0x9fb0c0)
+      i += 1
+    }
+  }
+}
+
+// A click on a kind in the list: that, whole.
+system list_memory() {
+  if Mouse.clicks > 0 && Mouse.x < panel() && Mouse.y >= top() + 80.0 && len(MemAt) > 0 {
+    let row = ((Mouse.y - top() - 80.0) / row_height()) as i32
+    if row < MemAt[0].count {
+      Mem.root = MemAt[0].first + row
+      Mem.dirty = true
+    }
+  }
+}
+
 // The picture: the archetype asked for chosen, the wave drawn, saved.
 system shot() {
   if len(Shot.file) > 0 && Map.loaded {
@@ -1783,6 +2207,10 @@ schedule frame() {
   steer_time() run_if View.mode == 3
   hover_time() run_if View.mode == 3
   draw_time() run_if View.mode == 3
+  list_memory() run_if View.mode == 4
+  mem_layout() run_if View.mode == 4
+  steer_memory() run_if View.mode == 4
+  draw_memory() run_if View.mode == 4
   draw_top()
   present()
   shot()

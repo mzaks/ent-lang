@@ -655,6 +655,21 @@ struct WorldPart {
 /// archetypes, and the entity table comes last. Programs with reactive
 /// queries keep a tick counter and each reactive query's last tick in the
 /// header.
+/// A stretch of the world's bytes as WorldLayout::compute placed them, one
+/// after another (with what aligning it left before it).
+struct WorldSpan {
+  uint64_t from, to;
+};
+
+/// An array of the world, for a map of its memory (`ent map`): where it
+/// starts; whose it is, by kind ("archetype", "unique", "relation",
+/// "buffer", "index", "query", "log", "entities", "world") and name; what
+/// of it (a component, "ids", "pending", ...) and which (a field).
+struct WorldArray {
+  uint64_t offset;
+  std::string kind, owner, part, leaf;
+};
+
 struct WorldLayout {
   static constexpr uint64_t kArenaAlignment = 16384;
   static constexpr uint64_t kColumnAlignment = 64;
@@ -768,6 +783,11 @@ struct WorldLayout {
   /// are transient are all after it, so that they can be changed, added
   /// and taken away and a world saved before is still read.
   uint64_t savedBytes = 0;
+  /// Each stretch placed, in order (the counts at the start of the world
+  /// not among them).
+  std::vector<WorldSpan> spans;
+  /// The world's arrays, those that start at 0 left out, by offset.
+  std::vector<WorldArray> arrays() const;
 
   /// What a declaration is marked with that is not part of a saved world
   /// (`transient unique`, `transient buffer`).
