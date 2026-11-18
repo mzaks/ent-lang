@@ -166,6 +166,12 @@ extern proc choose_folder(title: text, start: text) -> text
 // (Finder on a Mac, Explorer on Windows; on Linux the folder it is in, by
 // xdg-open). False where it could not be.
 extern proc show_in_files(path: text) -> bool
+// What `url` names opened by the program the system has for it: a page
+// in the browser, a mail, or a file at a line in an editor by the
+// editor's own scheme ("vscode://file/..", "zed://file/.."). A space in it
+// written "%20". (NSWorkspace on a Mac, the shell on Windows, xdg-open on
+// Linux.) False where it could not be: no such scheme, or not here.
+extern proc open_url(url: text) -> bool
 // Whether the window is the one the user works in (the keys go to it):
 // what changed elsewhere (in files, say) is looked at again once it is.
 extern proc window_focused() -> bool

@@ -54,7 +54,7 @@ import text
 
 // What the map says of the program as a whole.
 unique Map {
-  loaded: bool, program: text, lens: text, labels: text, names: text,
+  sources: i32, loaded: bool, program: text, lens: text, labels: text, names: text,
   archetypes: i32, systems: i32, components: i32, tags: i32, resources: i32,
   schedules: i32, queries: i32, states: i32, flows: i32, steps: i32,
   rows: i32, columns: i32, cells: i32, main_rows: i32,
@@ -521,7 +521,7 @@ buffer FHead { count: i32 } capacity 65536
 // scrolled; the line under the pointer, its words and where.
 unique Fz {
   names: text, dirty: bool, chosen: i32, height: f32, top: f32, over: i32, words: text, tx: f32,
-  ty: f32, groups: i32, alone: i32
+  ty: f32, groups: i32, alone: i32, over_sname: text, over_pos: i32
 }
 
 fn group_colour(group: i32) -> i32 {
@@ -661,6 +661,103 @@ fn us_words(us: f32) -> text {
 }
 fn cores_x0() -> f32 { panel() + 130.0 }
 
+// ---- Source ---------------------------------------------------------------
+// The program's source where a place is (a click on a run, a slice, a site):
+// a panel at the right with the file at that line, coloured as the editors
+// colour it and by what each name declares (`ent map` gives the files to
+// the map, coloured: tools/ent's sources_into_map); and buttons that open
+// it there in VS Code or Zed.
+
+// A file of the program: its number, its name (as places say it), where
+// it is.
+component SrcFile { index: i32, name: text, path: text }
+// A line of one: its file, number, coloured words ("from,length,kind;..",
+// in bytes), text.
+component CodeLine { file: i32, line: i32, spans: text, text: text }
+
+// Whether the panel is open; the place asked for (until it is opened);
+// the file shown, its name and where it is; the line asked for and the
+// first one shown; the font of code; what the pointer is on (a button: 1
+// VS Code, 2 Zed, 3 close); a word of what could not be.
+unique Src {
+  open: bool, want: text, file: i32, name: text, path: text, line: i32, top: f32, mono: i32, over: i32,
+  note: text, lines: i32
+}
+
+fn source_x(width: f32) -> f32 { width * 0.42 }
+fn code_size() -> f32 { 13.0 }
+fn code_h() -> f32 { 18.0 }
+// The place in a trace's name of a site: "system lanes.drive
+// (lanes.ent:251)", "loop lanes.ent:254 in lanes.drive": "lanes.ent:254";
+// "" where it names none in a file of the program.
+fn place_in(name: text) -> text {
+  var out = ""
+  let open = find(name, " (", 0)
+  if starts(name, "loop ") {
+    let end = find(name, " in ", 5)
+    if end > 5 { out = slice(name, 5, end) }
+  } else if open >= 0 {
+    let end = find(name, ")", open)
+    if end > open { out = slice(name, open + 2, end) }
+  }
+  if find(out, ".ent:", 0) < 0 { out = "" }
+  out
+}
+// A path as a URL's: a space and what else a URL keeps for itself written
+// "%20" and the like.
+fn url_path(path: text) -> text {
+  var out = ""
+  var i = 0
+  while i < len(path) {
+    let c = path[i]
+    if c == ' ' { out = out + "%20" }
+    else if c == '#' { out = out + "%23" }
+    else if c == '?' { out = out + "%3F" }
+    else if c == '%' { out = out + "%25" }
+    else { out = out + slice(path, i, i + 1) }
+    i += 1
+  }
+  out
+}
+// The colour of a kind of word (see sources_into_map), on a dark ground,
+// near what VS Code's dark theme gives the same.
+fn code_colour(kind: text) -> i32 {
+  if kind == "k" { 0xc586c0 } else if kind == "t" { 0x569cd6 } else if kind == "s" { 0xce9178 }
+  else if kind == "n" { 0xb5cea8 } else if kind == "c" { 0x6a9955 } else if kind == "C" { 0x4ec9b0 }
+  else if kind == "U" { 0xe5c07b } else if kind == "T" { 0x9fb4ff } else if kind == "K" { 0x4fc1ff }
+  else if kind == "S" { 0xf0a050 } else if kind == "F" { 0xdcdcaa } else if kind == "H" { 0xe07a8a }
+  else if kind == "M" { 0x8a98a6 } else if kind == "p" { 0x9cdcfe } else if kind == "f" { 0xdcdcaa }
+  else { 0xd4d4d4 }
+}
+// A line of code, its words in their colours, from `x`.
+proc code_line(text: text, spans: text, x: f32, y: f32, font: i32, size: f32) {
+  var at = 0
+  var cx = x
+  var i = 0
+  while i < len(spans) {
+    var end = find(spans, ";", i)
+    if end < 0 { end = len(spans) }
+    let one = find(spans, ",", i)
+    let two = find(spans, ",", one + 1)
+    let from = int(slice(spans, i, one))
+    let length = int(slice(spans, one + 1, two))
+    let kind = slice(spans, two + 1, end)
+    if from > at {
+      let plain = slice(text, at, from)
+      window::write(plain, cx, y, 4000.0, font, size, 0.0, 0.0, 2, 0, 0xd4d4d4)
+      cx += text_extent(plain, font, size, 0.0, 2)
+    }
+    let word = slice(text, from, from + length)
+    window::write(word, cx, y, 4000.0, font, size, 0.0, 0.0, 2, 0, code_colour(kind))
+    cx += text_extent(word, font, size, 0.0, 2)
+    at = from + length
+    i = end + 1
+  }
+  if at < len(text) {
+    window::write(slice(text, at, len(text)), cx, y, 4000.0, font, size, 0.0, 0.0, 2, 0, 0xd4d4d4)
+  }
+}
+
 // ---- Memory -------------------------------------------------------------
 // The world's memory, laid out once for all its life (--ent-memory-map):
 // a treemap of its bytes, as disk space analyzers draw a disk, each box as
@@ -798,6 +895,14 @@ system load_map() {
                most: int(part(line, 9)), least: int(part(line, 10)) }
         }
         Fz.dirty = true
+      } else if kind == "source" {
+        spawn { SrcFile { index: Map.sources, name: part(line, 1), path: part(line, 2) } }
+        Map.sources += 1
+      } else if kind == "code" {
+        spawn {
+          CodeLine { file: int(part(line, 1)), line: int(part(line, 2)), spans: part(line, 3),
+                     text: part(line, 4) }
+        }
       } else if kind == "frame" {
         let threads = int(part(line, 6))
         spawn {
@@ -1008,6 +1113,11 @@ system load_map() {
     if environment_variable("ENT_MAP_VIEW") == "memory" { View.mode = 4 }
     if environment_variable("ENT_MAP_VIEW") == "schedule" { View.mode = 5 }
     if environment_variable("ENT_MAP_VIEW") == "cores" { View.mode = 6 }
+    // (Code in a font of letters as wide as each other, where the machine
+    // has one; ENT_MAP_PLACE, a place shown at the start.)
+    Src.mono = font("/System/Library/Fonts/SFNSMono.ttf", 32)
+    if Src.mono == 0 { Src.mono = font("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", 32) }
+    Src.want = environment_variable("ENT_MAP_PLACE")
     for h: mut FL where h.ref >= 0 { h.count = FHead[h.ref].count }
     Mem.dirty = true
     // (The archetypes with the most entities, a line each.)
@@ -1567,6 +1677,7 @@ proc tab(name: text, x: f32, on: bool) {
 }
 system tabs() {
   if Mouse.clicks > 0 && Mouse.y >= 10.0 && Mouse.y < 38.0 {
+    Src.open = false
     let x = Mouse.x - (Window.width as f32 - 980.0)
     if x >= 0.0 && x < 122.0 { View.mode = 0 }
     if x >= 130.0 && x < 252.0 { View.mode = 1 }
@@ -2078,7 +2189,7 @@ system draw_top() {
     let busy = Co.work / max(Co.us * Co.threads as f32, 1.0)
     window::write("Cores: a frame of " + Co.schedule + ", " + us_words(Co.us) + " on {Co.threads} threads · " +
           "in loops on many threads " + us_words(Co.parallel) + " ({(Co.parallel * 100.0 / max(Co.us, 1.0)) as i32}%) · " +
-          "the threads busy {(busy * 100.0) as i32}% of it · a fused loop in its group's colour",
+          "the threads busy {(busy * 100.0) as i32}% of it · a fused loop in its group's colour · a click shows the source",
           16.0, 62.0, Window.width as f32 - 32.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
   }
   tab("Provenance", Window.width as f32 - 460.0, View.mode == 2)
@@ -2086,7 +2197,7 @@ system draw_top() {
   tab("Memory", Window.width as f32 - 200.0, View.mode == 4)
   if View.mode == 5 {
     window::write("Schedule: each schedule's runs as `ent build` fuses them · a group is one loop over each archetype, " +
-          "every run's body in turn for an entity · {Fz.groups} groups of several runs, {Fz.alone} runs alone",
+          "every run's body in turn for an entity · {Fz.groups} groups of several runs, {Fz.alone} runs alone · a click shows the source",
           16.0, 62.0, Window.width as f32 - 32.0, 0, 14.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
   }
   if View.mode == 4 {
@@ -2251,7 +2362,7 @@ system steer_time() {
     }
     if chosen >= 0 { Tm.arch = if Tm.arch == chosen { -1 } else { chosen } }
   }
-  if mx > panel() && my > table_y() && Mouse.wheel_y != 0.0 {
+  if mx > panel() && my > table_y() && Mouse.wheel_y != 0.0 && (!Src.open || mx < source_x(Window.width as f32)) {
     let room = Window.height as f32 - table_y() - 30.0
     let most = max(0.0, Tm.took as f32 * took_h() - room)
     Tm.scroll = min(most, max(0.0, Tm.scroll - Mouse.wheel_y * 3.0 * took_h()))
@@ -2310,6 +2421,9 @@ system hover_time() {
     if row < Tm.took {
       Tm.row = row
       for k: Tk in turn by k.order where k.order == row {
+        if Mouse.clicks > 0 && (!Src.open || Mouse.x < source_x(Window.width as f32)) && find(k.place, ".ent:", 0) >= 0 {
+          Src.want = k.place
+        }
         Tm.words = k.label + "\n{k.times} times: " + duration(k.own as f64) + " its own, " +
                    duration(k.all as f64) + " in all, " + duration(k.all as f64 / k.times as f64) + " each" +
                    (if len(k.busy) > 0 { "\nits threads worked " + k.busy + "% of it" } else { "" })
@@ -2803,21 +2917,27 @@ system lay_out_schedule() {
 system steer_schedule() {
   let mx = Mouse.x
   let my = Mouse.y
+  let free = !Src.open || mx < source_x(Window.width as f32)
   if Mouse.clicks > 0 && mx < panel() && my > top() {
     let row = ((my - top() - 30.0) / row_height()) as i32
     if row == 0 { Grid.sched = -1 }
     for c: Sch in turn by c.row where c.row == row && row > 0 { Grid.sched = c.row }
   }
   let room = Window.height as f32 - top() - 32.0
-  if mx > panel() && my > top() && Mouse.wheel_y != 0.0 {
+  if mx > panel() && my > top() && Mouse.wheel_y != 0.0 && free {
     Fz.top = max(0.0, min(Fz.top - Mouse.wheel_y * 40.0, Fz.height - room))
   }
   Fz.words = ""
+  Fz.over_pos = -1
   let px = if Shot.px >= 0.0 { Shot.px } else { mx }
   let py = if Shot.px >= 0.0 { Shot.py } else { my }
   if px > panel() && py > top() {
     let at = py - top() - 16.0 + Fz.top
     for f: FL in turn by f.key where f.y >= 0.0 && at >= f.y && at < f.y + fl_height(f.kind, len(f.why) > 0, f.count, f.queries) {
+      if f.kind == 3 {
+        Fz.over_pos = f.position
+        Fz.over_sname = f.sname
+      }
       if f.kind == 3 && f.group >= 0 && f.count > 1 {
         Fz.words = "{f.position + 1}. " + f.words + " (in " + f.sname + ")\nfused in group {f.group + 1}, with " + if f.count == 2 { "the run beside it" } else { "the {f.count - 1} runs beside it" }
       }
@@ -2837,6 +2957,12 @@ system steer_schedule() {
     }
     Fz.tx = px + 16.0
     Fz.ty = py + 14.0
+  }
+  // (A click on a run: its system's source.)
+  if Mouse.clicks > 0 && free && Fz.over_pos >= 0 && mx > panel() {
+    let sname = Fz.over_sname as text[512]
+    let pos = Fz.over_pos
+    for r: Rw in turn by r.index where r.schedule == sname && r.position == pos { Src.want = r.place }
   }
 }
 
@@ -2969,6 +3095,7 @@ system steer_cores() {
         Co.words = what + s.name + "\nthread {s.thread} · " + us_words(s.us) + " · from " + us_words(s.from) +
                    " to " + us_words(s.from + s.us)
         Co.over_group = s.group
+        if Mouse.clicks > 0 && (!Src.open || Mouse.x < source_x(Window.width as f32)) { Src.want = place_in(s.name) }
       }
     }
     Co.tx = px + 16.0
@@ -3074,6 +3201,115 @@ system draw_cores() {
   }
 }
 
+// A place asked for: its file, at its line.
+system want_source() {
+  if len(Src.want) > 0 {
+    let place = Src.want as text[512]
+    Src.want = ""
+    var cut = len(place) - 1
+    while cut > 0 && place[cut] != ':' { cut -= 1 }
+    let name = slice(place, 0, cut)
+    let line = int(slice(place, cut + 1, len(place)))
+    Src.file = -1
+    for f: SrcFile in turn by f.index where f.name == name {
+      Src.file = f.index
+      Src.path = f.path
+    }
+    Src.name = name
+    Src.line = line
+    Src.open = true
+    Src.top = max(line as f32 - 12.0, 1.0)
+    Src.note = if Src.file >= 0 { "" } else {
+      "No source for " + place + " in this map: make it again with this ent (ent map program.ent)."
+    }
+    Src.lines = 0
+    let file = Src.file
+    for l: CodeLine where l.file == file { Src.lines max= l.line }
+  }
+}
+
+// Its buttons, Escape, the wheel.
+system steer_source() {
+  let x0 = source_x(Window.width as f32)
+  let right = Window.width as f32
+  let mx = Mouse.x
+  let my = Mouse.y
+  Src.over = 0
+  if my >= top() + 10.0 && my < top() + 36.0 {
+    if mx >= right - 250.0 && mx < right - 160.0 { Src.over = 1 }
+    if mx >= right - 150.0 && mx < right - 80.0 { Src.over = 2 }
+    if mx >= right - 44.0 && mx < right - 12.0 { Src.over = 3 }
+  }
+  let path = Src.path as text[2048]
+  let line = Src.line
+  let url = url_path(path) + ":{line}:1"
+  if Mouse.clicks > 0 && Src.over == 1 && Src.file >= 0 { open_url("vscode://file" + url) }
+  if Mouse.clicks > 0 && Src.over == 2 && Src.file >= 0 { open_url("zed://file" + url) }
+  if (Mouse.clicks > 0 && Src.over == 3) || key_pressed(256) { Src.open = false }
+  let rows = (Window.height as f32 - top() - 90.0) / code_h()
+  if mx > x0 && my > top() && Mouse.wheel_y != 0.0 {
+    Src.top = max(1.0, min(Src.top - Mouse.wheel_y * 3.0, Src.lines as f32 - rows + 1.0))
+  }
+}
+
+system draw_source() {
+  let x0 = source_x(Window.width as f32)
+  let right = Window.width as f32
+  let bottom = Window.height as f32
+  rect(x0 - 1.0, top(), 1.0, bottom - top(), 0x3a4652)
+  rect(x0, top(), right - x0, bottom - top(), 0x1e1e1e)
+  // The head: the file and line, where it is; the buttons.
+  rect(x0, top(), right - x0, 46.0, 0x252526)
+  window::write(Src.name + ":{Src.line}", x0 + 16.0, top() + 6.0, right - x0 - 280.0, 0, 15.0, 0.0, 0.0, 2, 0,
+        0xe2ecf5)
+  window::write(Src.path, x0 + 16.0, top() + 26.0, right - x0 - 280.0, 0, 11.0, 0.0, 0.0, 2, 0, 0x7d8a98)
+  rounded(right - 250.0, top() + 10.0, 90.0, 26.0, 5.0, 5.0, 5.0, 5.0, if Src.over == 1 { 0x2f6fb0 } else { 0x264f78 })
+  window::write("VS Code", right - 250.0, top() + 15.0, 90.0, 0, 13.0, 0.0, 0.0, 2, 1, 0xe2ecf5)
+  rounded(right - 150.0, top() + 10.0, 70.0, 26.0, 5.0, 5.0, 5.0, 5.0, if Src.over == 2 { 0x4a4f8a } else { 0x383c6b })
+  window::write("Zed", right - 150.0, top() + 15.0, 70.0, 0, 13.0, 0.0, 0.0, 2, 1, 0xe2ecf5)
+  window::write("×", right - 44.0, top() + 10.0, 32.0, 0, 20.0, 0.0, 0.0, 2, 1,
+        if Src.over == 3 { 0xffffff } else { 0x9fb0c0 })
+  if len(Src.note) > 0 {
+    window::write(Src.note, x0 + 16.0, top() + 64.0, right - x0 - 32.0, 0, 14.0, 0.0, 0.0, 0, 0, 0xd9a05b)
+  }
+  // The lines in the window; the one asked for marked.
+  let y0 = top() + 54.0
+  let first = Src.top as i32
+  let rows = ((bottom - y0 - 34.0) / code_h()) as i32
+  let file = Src.file
+  let line = Src.line
+  let font = Src.mono
+  let size = code_size()
+  let gutter = 52.0
+  clip(x0, y0, right - x0, bottom - y0 - 34.0)
+  for l: CodeLine where l.file == file && l.line >= first && l.line < first + rows {
+    let y = y0 + (l.line - first) as f32 * code_h()
+    if l.line == line {
+      rect(x0, y - 1.0, right - x0, code_h(), 0x37373d)
+      rect(x0, y - 1.0, 3.0, code_h(), 0xf0a050)
+    }
+    window::write("{l.line}", x0 + 4.0, y, gutter - 12.0, font, size, 0.0, 0.0, 2, 2,
+          if l.line == line { 0xc6c6c6 } else { 0x6e7681 })
+    code_line(l.text, l.spans, x0 + gutter, y, font, size)
+  }
+  unclip()
+  // What the colours say.
+  let ly = bottom - 28.0
+  rect(x0, ly - 6.0, right - x0, 34.0, 0x252526)
+  var lx = x0 + 16.0
+  let names = "component\nunique\nsystem\nfn\nschedule\ntype\nfield\nkeyword"
+  let kinds = "CUSFHTpk"
+  var k = 0
+  while k < len(kinds) {
+    let word = line_at(names, k)
+    rect(lx, ly + 4.0, 8.0, 8.0, code_colour(slice(kinds, k, k + 1)))
+    window::write(word, lx + 12.0, ly, 120.0, 0, 12.0, 0.0, 0.0, 2, 0, 0x9fb0c0)
+    lx += text_extent(word, 0, 12.0, 0.0, 2) + 28.0
+    k += 1
+  }
+  window::write("Esc closes", right - 100.0, ly, 90.0, 0, 12.0, 0.0, 0.0, 2, 2, 0x6a7886)
+}
+
 system shot() {
   if len(Shot.file) > 0 && Map.loaded {
     Shot.frames += 1
@@ -3124,6 +3360,9 @@ schedule frame() {
   steer_cores() run_if View.mode == 6
   draw_cores() run_if View.mode == 6
   draw_top()
+  want_source() run_if Map.loaded
+  steer_source() run_if Src.open && (View.mode == 3 || View.mode == 5 || View.mode == 6)
+  draw_source() run_if Src.open && (View.mode == 3 || View.mode == 5 || View.mode == 6)
   present()
   shot()
 }

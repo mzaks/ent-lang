@@ -1,6 +1,6 @@
 // The window device's clicks in a row, the secondary button, the keys
 // shortcuts are made with, the pointer's shape, a menu at the pointer,
-// the menu bar, a folder chosen and an alert,
+// the menu bar, a folder chosen, an alert and a URL opened,
 // through the headless device: nothing pressed, no menu chosen (-1).
 // (The menus themselves need a window: a Mac's and the drawn one were
 // tried by hand.)
@@ -11,3 +11,4 @@
 // CHECK-NEXT: name Ctrl
 // CHECK-NEXT: menu -1 shapes 2 4 5
 // CHECK-NEXT: bar false chosen [] folder [] alert -1
+// CHECK-NEXT: url false

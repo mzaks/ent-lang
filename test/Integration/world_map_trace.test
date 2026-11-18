@@ -15,6 +15,10 @@
 // JSON: entities after schedule start (life.ent:27) [('Lamp_Done', 0), ('Lamp_archetype', 1)]
 
 // CHECK:      ent-map|1
+// The program's file, where it is, and its lines with their words'
+// colours (a keyword, a system, a component, a call).
+// CHECK-NEXT: source|life.ent|{{.*}}/world_map/life.ent
+// CHECK:      code|0|24|0,6,k;7,4,S;16,3,k;22,4,k;27,4,C;36,7,f|system reap() { for e with Done { e.destroy() } }
 // CHECK:      traced|{{[0-9.]+}}|1|{{.*}}.json
 // CHECK-DAG:  took|schedule|frame|life.ent:28|6|{{[0-9.]+}}|{{[0-9.]+}}||schedule frame (life.ent:28)
 // CHECK-DAG:  took|system|dim|life.ent:16|6|

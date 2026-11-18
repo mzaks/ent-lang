@@ -4,6 +4,7 @@
 // line, the kind first:
 //
 //   ent-map 1
+//   source     file  path       (each file a place names, and where it is)
 //   component  name  fields  file:line  apart(0/1)
 //   resource   name  fields  file:line
 //   archetype  index  name  capacity  inferred  required  optional  label
@@ -369,6 +370,31 @@ struct EntWorldMap : public mlir::ent::impl::EntWorldMapBase<EntWorldMap> {
     }
     Mapper map(module);
     os << "ent-map\t1\n";
+
+    // The program's files, which the places of the records are in: each
+    // by its name, as a place says it, and where it is.
+    std::map<std::string, std::string> sources;
+    module->walk([&](Operation *op) {
+      op->getLoc()->walk([&](Location inner) {
+        if (auto file = dyn_cast<FileLineColLoc>(inner)) {
+          StringRef named = file.getFilename().getValue();
+          std::string name = llvm::sys::path::filename(named).str();
+          // (The program's own: what it was written in, not what a build
+          // made of it on the way.)
+          if (name.empty() || sources.count(name) ||
+              llvm::sys::path::extension(name) != ".ent")
+            return WalkResult::advance();
+          SmallString<256> whole(named);
+          llvm::sys::fs::make_absolute(whole);
+          llvm::sys::path::remove_dots(whole, /*remove_dot_dot=*/true);
+          if (llvm::sys::fs::exists(whole))
+            sources[name] = whole.str().str();
+        }
+        return WalkResult::advance();
+      });
+    });
+    for (auto &[name, whole] : sources)
+      os << "source\t" << field(name) << "\t" << field(whole) << "\n";
 
     // What the world is made of.
     // (An archetype's components are all it holds; those it requires are

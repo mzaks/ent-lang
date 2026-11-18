@@ -2391,6 +2391,112 @@ def trace_into_map(trace, path):
         out.write("".join(line + "\n" for line in lines))
 
 
+# What colours each word of a program's source, as tree-sitter-ent's
+# highlights.scm has them (the editors' colours), and the names it
+# declares, by what they are.
+KEYWORDS = set("""import asset component tag unique buffer transient gpu enum
+    table const prefab relation archetype system extern fn proc schedule world
+    main default_capacity capacity optional apart tree sorted ordered by reads
+    writes let var mut old spawn as with without any where on changed added
+    removed log top down bottom up bfs dfs turn connect run_if
+    if else for in loop until while return break continue""".split())
+TYPES = set("""f32 f64 bool i1 i8 i16 i32 i64 u8 u16 u32 u64 index entity text
+    rows row""".split())
+DECLARED = {"component": "C", "tag": "C", "unique": "U", "enum": "T",
+            "relation": "T", "archetype": "T", "buffer": "T", "table": "T",
+            "index": "T",
+            "const": "K", "prefab": "F", "system": "S", "fn": "F", "proc": "F",
+            "schedule": "H"}
+TOKEN = re.compile(r"""(?P<c>//.*)|(?P<s>"(?:\\.|[^"\\])*"?|'(?:\\.|[^'\\])*'?)
+    |(?P<n>\b(?:0[xX][0-9a-fA-F_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?)\b)
+    |(?P<w>[A-Za-z_]\w*)""", re.X)
+
+
+def sources_into_map(path):
+    """The program's files, as the map's `source` records name them, given
+    to the map line by line with the colours of their words, for ent map
+    to show where a place is:
+
+      code  file  line  spans  text
+
+    `file` is the source record's number (from 0), `line` from 1; `spans`
+    the coloured words, "from,length,kind" joined with ";" (in bytes of
+    the line): k a keyword, t a type of the language, s a string, n a
+    number, c a comment; what the program declares, C a component or tag,
+    U a unique, T an enum, relation, archetype, buffer or table, K a
+    constant, S a system, F a fn or proc, H a schedule; M a module, p a
+    field, f a call of something else; a tab is spaces."""
+    with open(path) as source:
+        files = [line.rstrip("\n").split("\t")[2] for line in source
+                 if line.startswith("source\t")]
+    texts = []
+    for name in files:
+        try:
+            with open(name, encoding="utf-8", errors="replace") as source:
+                texts.append(source.read().expandtabs(8).split("\n"))
+        except OSError:
+            texts.append([])
+    # (What each name is: by its declaration, in any of the files.)
+    kinds, modules = {}, set()
+    declaration = re.compile(r"^\s*(?:(?:extern|gpu|transient)\s+)*(\w+)\s+(\w+)")
+    for lines in texts:
+        for line in lines:
+            found = declaration.match(line)
+            if found and found.group(1) in DECLARED:
+                kinds.setdefault(found.group(2), DECLARED[found.group(1)])
+            elif found and found.group(1) == "import":
+                modules.add(found.group(2))
+    out = []
+    for number, lines in enumerate(texts):
+        for at, line in enumerate(lines):
+            spans = []
+            for token in TOKEN.finditer(line):
+                kind = token.lastgroup
+                word = token.group()
+                if kind == "w":
+                    after = line[token.end():].lstrip()
+                    before = line[:token.start()].rstrip()
+                    # (After a dot: a field, or a call of one's, unless
+                    # what is before the dot is a module.)
+                    owner = re.search(r"(\w+)\s*\.$", before)
+                    dotted = before.endswith(".") and not before.endswith("..")
+                    qualified = (owner and owner.group(1) in modules) or \
+                        before.endswith("::")
+                    named = after.startswith(":") and \
+                        not after.startswith("::")
+                    if dotted and not qualified:
+                        kind = "f" if after.startswith("(") else "p"
+                    elif word in ("true", "false"):
+                        kind = "n"
+                    elif word in KEYWORDS:
+                        kind = "k"
+                    elif word in TYPES and not named:
+                        kind = "t" if word not in ("row", "rows", "index",
+                                                   "text", "entity") or \
+                            re.search(r"(:|->|\bas|\bof|\[|,|\()$",
+                                      before) else None
+                        if kind is None:
+                            continue
+                    elif word in modules and after.startswith(("::", ".")) \
+                            and not dotted:
+                        kind = "M"
+                    elif word in kinds:
+                        kind = kinds[word]
+                    elif after.startswith("("):
+                        kind = "f"
+                    elif word[0].isupper():
+                        kind = "T"
+                    else:
+                        continue
+                start = len(line[:token.start()].encode("utf-8"))
+                spans.append("%d,%d,%s" % (start, len(word.encode("utf-8")),
+                                           kind))
+            out.append("code\t%d\t%d\t%s\t%s" % (number, at + 1,
+                                                ";".join(spans), line))
+    with open(path, "a") as target:
+        target.write("".join(line + "\n" for line in out))
+
+
 def frames_of(timed, start, path, mains):
     """Of the runs of the schedule `main` runs most (of those it runs),
     a few, each with what every thread did in it, for ent map's Cores
@@ -2544,6 +2650,8 @@ def world_map(arguments, path):
              "--ent-memory-map=out=" + os.path.abspath(path),
              "--ent-fusion-map=out=" + os.path.abspath(path),
              "--mlir-print-op-on-diagnostic=false", "-o", os.devnull])
+        # (And the program's source, coloured, for the map to show.)
+        sources_into_map(path)
     # (With --trace: how the program ran, from the trace a build of it with
     # --trace wrote; ENT_TRACE, else program.trace.json or its name's.)
     if arguments.trace:

@@ -2764,6 +2764,47 @@ bool ent_window_show_in_files(const ent_text *path) {
   return shown;
 }
 
+// What `url` names opened by the program the system has for it (see
+// window.ent).
+bool ent_window_open_url(const ent_text *url) {
+  char *at = ent_window_c_text(url);
+  bool opened = false;
+  if (!at || !*at || !strstr(at, ":")) {
+    free(at);
+    return false;
+  }
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+  void *pool = objc_autoreleasePoolPush();
+  id link = ((id(*)(id, SEL, id))objc_msgSend)(
+      ent_window_class("NSURL"), ent_window_sel("URLWithString:"),
+      ent_window_ns_text(at));
+  if (link) {
+    id workspace =
+        ent_window_send(ent_window_class("NSWorkspace"), "sharedWorkspace");
+    opened = ((bool (*)(id, SEL, id))objc_msgSend)(
+        workspace, ent_window_sel("openURL:"), link);
+  }
+  objc_autoreleasePoolPop(pool);
+#elif defined(_WIN32)
+  opened = _spawnlp(_P_NOWAIT, "rundll32.exe", "rundll32.exe",
+                    "url.dll,FileProtocolHandler", at, NULL) != -1;
+#elif !defined(__EMSCRIPTEN__)
+  char *quoted = ent_window_quoted(at);
+  if (quoted) {
+    size_t room = strlen(quoted) + 64;
+    char *command = malloc(room);
+    if (command) {
+      snprintf(command, room, "xdg-open %s >/dev/null 2>&1 &", quoted);
+      opened = system(command) == 0;
+      free(command);
+    }
+  }
+  free(quoted);
+#endif
+  free(at);
+  return opened;
+}
+
 // Whether the window is the one the user works in (the keys go to it).
 bool ent_window_window_focused(void) { return IsWindowReady() && IsWindowFocused(); }
 

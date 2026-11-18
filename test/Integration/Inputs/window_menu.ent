@@ -17,6 +17,8 @@ system go() {
   let folder = choose_folder("Open", "/tmp")
   let pressed = alert("Save?", "", "Save\nCancel")
   put("bar {shown} chosen [{menu_chosen()}] folder [{folder}] alert {pressed}")
+  let opened = open_url("")
+  put("url {opened}")
 }
 schedule frame() { begin()  go()  present() }
 main { frame() }
