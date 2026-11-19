@@ -33,6 +33,7 @@ what this model does, not what a culture would.
 | `learn_study.py` | Pong with a reward condition, by gain, as is and flipped |
 | `reach.py` | how much of the motor regions' answer to a stim comes along the axons |
 | `paths_probe.py` | conditioning's weights by path, minute by minute |
+| `feedback_study.py` | DishBrain's feedback (`stim`) against its controls on the `columns` layout, plain STDP |
 | `check/dish_check.c` | determinism and stim response through the C interface |
 | `check/plasticity.c` | does pairing two channels change how one answers the other? |
 | `culture/fetch.sh` | downloads the cultures' recordings (29 spontaneous, 21 with stims) |
@@ -983,8 +984,39 @@ of a culture's: the dish was calibrated with soft bounds (and its
 calibration is not checked again here). With `modulated` at gain 0
 only scaling changes the weights, so `hard` changes nothing there (the
 gain 0 rows are the same with and without it); with plain STDP
-(`modulated` off, as the calibration ran) it would, and that dish was
-not tried.
+(`modulated` off, as the calibration ran) it does, and its calibration
+check is above.
+
+**DishBrain's feedback, with no reward channel.** `stim`'s feedback
+(a hit: the 8 sensory electrodes at 100 Hz for 100 ms; a miss: 4 s of
+stims on random electrodes at 5 Hz) needs nothing a CL1 lacks. On the
+`rows` layout it could not show (the stims played the game along the
+axons; see [Pong in closed loop](#pong-in-closed-loop)); `feedback_study.py`
+plays it on `columns` with short axons, plain STDP (no `modulated`), as
+DishBrain compared it: against `silent`, `none` and `stim/off` (weights
+fixed, `stdp=0 w_exc=0.0027`). 20 minutes, seeds 1 to 8 as is and
+flipped (16 pairs), hits a rally:
+
+| | soft bounds, first 5 min / after | `hard=1`, first 5 min / after |
+|---|---|---|
+| `stim` | 0.45 / 0.42 | 0.45 / 0.41 |
+| `silent` | 0.39 / 0.43 | 0.38 / 0.39 |
+| `none` | 0.46 / 0.42 | 0.39 / 0.41 |
+| `stim/off` | 0.45 / 0.45 | 0.45 / 0.45 |
+| `stim`: after less first 5 min | −0.03 ± 0.03 | −0.05 ± 0.05 |
+| `stim` less `silent`, after | −0.01 ± 0.03 | +0.02 ± 0.02 |
+| `stim` less `none`, after | +0.00 ± 0.02 | +0.00 ± 0.02 |
+
+Nothing learnt, with either bound: every session plays at about what
+the gain 0 sessions above do (0.43), `stim` does not get better and does
+no better than its controls. (`stim/off` is not matched in activity:
+its motor regions fire at 21 Hz against 118, the weights fixed below
+where STDP and scaling hold them in play; the comparisons with `silent`
+and `none` do not have that problem.) DishBrain reported its cultures
+improving under `stim` and not under the controls; this dish, whose
+STDP and scaling have no term the feedback's predictability could act
+on, does not. That is a statement about the model, not about cultures,
+and is the comparison a real dish could settle.
 
 ```sh
 build/cl_bridge/venv/bin/python examples/cl_bridge/conditioning.py \
@@ -992,6 +1024,8 @@ build/cl_bridge/venv/bin/python examples/cl_bridge/conditioning.py \
 build/cl_bridge/venv/bin/python examples/cl_bridge/learn_study.py \
     [minutes [seeds [gains [out.json [columns] [moves|shuffled|hits_shuffled] [name=value ...]]]]]
 build/cl_bridge/venv/bin/python examples/cl_bridge/reach.py [axons [name=value ...]]
+build/cl_bridge/venv/bin/python examples/cl_bridge/feedback_study.py \
+    [minutes [seeds [out.json [name=value ...]]]]
 ```
 
 A `conditioning.py` run of 3 gains on 8 seeds (20 minutes each) takes
