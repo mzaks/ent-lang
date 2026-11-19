@@ -20,7 +20,10 @@
 // ENT_DISH_LIBRARY names another libdish.so, DISH_SEED another culture
 // (1), DISH_AXON the axons' length (0.11; at the dish's default 0.274 the
 // sensory stims drive the motor regions directly), DISH_STIM=0 leaves the
-// stims out (the dish's own activity alone).
+// stims out (the dish's own activity alone), DISH_GHOSTS=0 the ghosts'
+// (-1: their electrodes beside the region of their own way, which draws
+// him to them), PACMAN_FAST=1 runs the game
+// as fast as it can (a 60th of a second of it a frame, not waiting).
 //
 // The game below is examples/pacman.ent's, but for the pilot: `sense`,
 // the dish in `flow`, `draw_dish`, the wider window, and the restart.
@@ -46,7 +49,7 @@ unique Best: i32
 unique Tick { dt: f32, time: f32 }
 // The way the dish said last (0 right .. 3 up, 4 none), and whether the
 // keys steered this frame instead.
-unique Pilot { way: i32, keys: bool }
+unique Pilot { way: i32, keys: bool, fast: bool }
 
 // The first four in the order a turn to the right goes through them.
 enum Way { Right, Down, Left, Up, Nowhere }
@@ -281,7 +284,10 @@ world {
 
 // The frame's time, the keys, and the states that only wait.
 system flow() {
-  let dt = min(Window.dt, 0.05)
+  // PACMAN_FAST=1: a 60th of a second a frame, as fast as frames come.
+  Pilot.fast = pilot_fast()
+  Window.fps = if Pilot.fast { 0 } else { 60 }
+  let dt = if Pilot.fast { 1.0 / 60.0 } else { min(Window.dt, 0.05) }
   Tick.dt = dt
   Tick.time += dt
   if Score > Best { Best = Score }

@@ -10,5 +10,8 @@ extern proc pilot_pellet(dc: i32, dr: i32)
 extern proc pilot_ghost(dc: i32, dr: i32, scared: bool)
 extern proc pilot_step(ms: f32) -> i32
 extern proc pilot_activity(channel: i32) -> f32
+// PACMAN_FAST=1: the game should run as fast as it can, a 60th of a
+// second of it a frame, not in real time.
+extern proc pilot_fast() -> bool
 // 0 motor right, 1 down, 2 left, 3 up, 4 sensory food, 5 sensory danger, -1 none.
 extern proc pilot_role(channel: i32) -> i32

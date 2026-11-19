@@ -656,17 +656,37 @@ STDP: no reward, nothing that would make it learn the game.
 tools/ent build --shared examples/cl_bridge/network.ent \
     examples/cl_bridge/bridge.c -o build/cl_bridge/libdish.so
 tools/ent build examples/cl_bridge/pacman/pacman_dish.ent -o build/pacman_dish
-build/pacman_dish        # from the repository's root; DISH_SEED, DISH_STIM=0
+build/pacman_dish        # from the repository's root; DISH_SEED, DISH_STIM=0,
+                         # DISH_GHOSTS=0 or -1, PACMAN_FAST=1
 ```
 
-One try, seed 1, 15 minutes of each, played unattended (each game over
-starts the next): told where the food and the ghosts are, 21 games, a
-mean score of 950 ± 75 (480 to 1830); with `DISH_STIM=0`, the dish's own
-activity alone, 18 games, 693 ± 52 (350 to 1100). So what it is told
-moves Pac-Man somewhat towards what it is told of, at
-about 2.8 standard errors on one seed's games, which follow each other
-in one dish and are not independent; no level was cleared. Not a
-study: no seeds, no pairing, real time.
+The ghosts' electrodes sit beside the motor region of the opposite way
+(a ghost on the right, the electrode next to the left region), so the
+layout turns him away from them; nothing teaches the dish what a ghost
+is. At first they sat beside their own way's region, as the food's do,
+and he went for the ghosts (`DISH_GHOSTS=-1` puts them back; 0 leaves
+the ghosts out).
+
+`PACMAN_FAST=1` runs the game as fast as it can, a 60th of a second of
+it a frame (about 3.5 times real time; the dish's millisecond steps set
+the pace), and so replays the same: the same seed gives the same games.
+Seeds 1 to 3, about 35 minutes of game each, played unattended (each
+game over starts the next):
+
+| | games | score a game | seconds a game |
+|---|---|---|---|
+| food and ghosts (ghosts mirrored, the default) | 132 | 1208 ± 43 | 49 |
+| food and ghosts, the ghosts beside their own way | 151 | 1074 ± 33 | 42 |
+| food only (`DISH_GHOSTS=0`) | 140 | 1353 ± 46 | 47 |
+| nothing (`DISH_STIM=0`) | 123 | 648 ± 20 | 48 |
+
+Told where the food is, the dish scores about twice what it does on its
+own activity. The ghosts' stims do not help either way: beside their
+own way they shorten the games (42 s against 47 to 49), mirrored they
+only cost less, and food alone scores best: two streams of stims compete
+for four motor regions, and a way away from a ghost is often a wall. No
+level was cleared. Three seeds, the games of each one after another in
+one dish: a demonstration, not a study.
 
 ## Learning rules
 

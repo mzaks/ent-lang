@@ -3,13 +3,16 @@
 // game is an ent world too). ENT_DISH_LIBRARY names the library (default
 // build/cl_bridge/libdish.so), DISH_SEED the culture (1), DISH_AXON the
 // axons' length (0.11, so stims do not drive the motor regions directly),
-// DISH_STIM=0 leaves the stims out.
+// DISH_STIM=0 leaves the stims out, DISH_GHOSTS=0 the ghosts' (-1: their
+// electrodes beside the same way's region, towards them); PACMAN_FAST=1 asks the game to run
+// as fast as it can.
 //
 // Layout on the 8 x 8 grid (channel = row * 8 + col):
 //   motor up    rows 0-1, cols 2-5      motor down  rows 6-7, cols 2-5
 //   motor left  cols 0-1, rows 2-5      motor right cols 6-7, rows 2-5
 //   sensory, the middle 4 x 4: one electrode for each way the nearest
-//   pellet is (food) and one for each way the nearest ghost is (danger),
+//   pellet is (food), beside that way's motor region, and one for each
+//   way the nearest ghost is (danger), beside the opposite way's,
 //   its stims at 4 Hz far to 40 Hz near (DishBrain's rate code).
 // The way is the motor region with the most spikes, each averaged over
 // 100 ms, if it leads the next by 10%.
@@ -48,7 +51,14 @@ static int64_t (*spikes)(void *, int32_t *, int32_t *, int64_t);
 static void *dish;
 
 static const int FOOD[4] = {37, 44, 26, 19};    // right, down, left, up
-static const int DANGER[4] = {29, 43, 34, 20};
+// A ghost's way is stimulated beside the motor region of the opposite way
+// (a ghost on the right, the electrode next to the left region), so the
+// layout itself turns him away: the dish is not taught what a ghost is.
+static const int DANGER[4] = {34, 20, 29, 43};
+// DISH_GHOSTS=-1: beside the same way's region instead (towards him),
+// 0: no ghost stims.
+static const int TOWARDS[4] = {29, 43, 34, 20};
+static int ghosts = 1;
 static int role[64];
 static float motor[4], activity[64];
 static int food_dc, food_dr, food_d, ghost_dc, ghost_dr, ghost_d;
@@ -77,6 +87,8 @@ static void open_dish(void) {
   dish = create(&p);
   const char *stim = getenv("DISH_STIM");
   quiet = stim && atoi(stim) == 0;
+  const char *g = getenv("DISH_GHOSTS");
+  ghosts = g ? atoi(g) : 1;
   for (int c = 0; c < 64; ++c) {
     int r = c / 8, k = c % 8;
     role[c] = -1;
@@ -130,8 +142,8 @@ int32_t ent_dishpilot_pilot_step(float ms) {
       stimulate(dish, FOOD[way(food_dc, food_dr)], 1.0f);
       food_due = now_ms + 1000.0 / rate(food_d, 30);
     }
-    if (!quiet && ghost_d <= 10 && now_ms >= danger_due) {
-      stimulate(dish, DANGER[way(ghost_dc, ghost_dr)], 1.0f);
+    if (!quiet && ghosts != 0 && ghost_d <= 10 && now_ms >= danger_due) {
+      stimulate(dish, (ghosts < 0 ? TOWARDS : DANGER)[way(ghost_dc, ghost_dr)], 1.0f);
       danger_due = now_ms + 1000.0 / rate(ghost_d, 10);
     }
     step(dish, 1);
@@ -153,6 +165,15 @@ int32_t ent_dishpilot_pilot_step(float ms) {
 
 float ent_dishpilot_pilot_activity(int32_t channel) {
   return channel >= 0 && channel < 64 ? activity[channel] : 0.0f;
+}
+
+bool ent_dishpilot_pilot_fast(void) {
+  static int fast = -1;
+  if (fast < 0) {
+    const char *f = getenv("PACMAN_FAST");
+    fast = f && atoi(f) != 0;
+  }
+  return fast;
 }
 
 int32_t ent_dishpilot_pilot_role(int32_t channel) {
