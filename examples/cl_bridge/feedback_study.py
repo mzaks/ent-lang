@@ -10,7 +10,7 @@ dopamine: what a CL1 could do. On the `columns` layout, seeds 1 to
 `seeds`, each as is and flipped.
 
     build/cl_bridge/venv/bin/python examples/cl_bridge/feedback_study.py \\
-        [minutes [seeds [out.json [surprise] [name=value ...]]]]
+        [minutes [seeds [out.json [surprise|onset] [name=value ...]]]]
 
 name=value: dish parameters for every session (axon=0.11, hard=1, ...).
 Prints, for each session, hits a rally in the first 5 minutes and after,
@@ -34,13 +34,24 @@ SESSIONS = [("stim", {}), ("silent", {}), ("none", {}), ("stim/off", {"stdp": 0,
 # (pong.py's `surprise`), against its delayed control, with `silent`'s
 # feedback, and `stim` without it.
 SURPRISE_SESSIONS = [("surprise", {}), ("surprise_delayed", {}), ("surprise_silent", {}), ("stim", {})]
+# With `onset`: one pulse of it a hit or miss (pong.py's `surprise_onset`),
+# against the pulse of the one before.
+ONSET_SESSIONS = [("surprise_onset", {}), ("surprise_onset_previous", {}), ("stim", {})]
 
 
 def run(job):
     minutes, seed, flip, name, parameters = job
     os.environ["OMP_NUM_THREADS"] = "1"
     import pong
-    out = pong.play(minutes, seed, name.split("/")[0], flip, "columns", **parameters)
+    # (The SDK's simulator can time out under load; a session replays the
+    # same, so it is run again.)
+    for attempt in range(3):
+        try:
+            out = pong.play(minutes, seed, name.split("/")[0], flip, "columns", **parameters)
+            break
+        except TimeoutError:
+            if attempt == 2:
+                raise
     out["session"] = name
     return out
 
@@ -53,6 +64,8 @@ def main() -> int:
     global SESSIONS
     if "surprise" in sys.argv[4:]:
         SESSIONS = SURPRISE_SESSIONS
+    if "onset" in sys.argv[4:]:
+        SESSIONS = ONSET_SESSIONS
     extra = {k: float(v) for k, v in (a.split("=", 1) for a in sys.argv[4:] if "=" in a)}
     jobs = [(minutes, seed, flip, name, {**extra, **p})
             for name, p in SESSIONS for flip in (False, True) for seed in range(1, seeds + 1)]

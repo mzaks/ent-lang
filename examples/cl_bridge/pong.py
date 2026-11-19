@@ -50,6 +50,14 @@ conditions:
               timing apart from the play): `surprise`'s control
     surprise_silent   as `surprise`, but the feedback of `silent`: is it
               the feedback's unpredictability that teaches
+    surprise_onset  as `surprise`, but one pulse a hit or miss: the
+              signal's mean over the SURPRISE_WINDOW after it, less
+              that mean's running mean (as `reward`'s prediction error),
+              times SURPRISE_PULSE, at the window's end (and none
+              between): the timing is the game's, the sign and size the
+              dish's
+    surprise_onset_previous  as `surprise_onset`, but each pulse the one
+              of the hit or miss before: its control
 
 columns: the second layout (below), where the stims' direct answers in
 the motor regions do not play the game.
@@ -127,6 +135,9 @@ SURPRISE_SLOW = 10.0         # s: its running level
 SURPRISE_DOSE = 0.0125       # dopamine a tick at a surprise of -1 or 1 (4 s at -1 about a pulse of 0.5)
 SURPRISE_DELAY = 7.3         # s: `surprise_delayed`'s delay
 SURPRISE_WARM = 10.0         # s: no dopamine before this
+SURPRISE_WINDOW = 0.2        # s: `surprise_onset`'s window after a hit or miss
+SURPRISE_PULSE = 4.0         # its pulse: this times the window's mean signal less its running
+                             # mean (RPE_RATE): a hit's less a miss's about 0.7, as `reward`'s 1
 
 SENSORY = [26, 27, 28, 29, 37, 36, 35, 34]
 UP = list(range(0, 24))
@@ -140,8 +151,10 @@ LAYOUTS = {
                 [r * 8 + c for r in range(8) for c in (6, 7)], 28, 36),
 }
 CONDITIONS = ("stim", "silent", "none", "rest", "reward", "moves", "shuffled",
-              "hits_shuffled", "surprise", "surprise_delayed", "surprise_silent")
-SURPRISES = ("surprise", "surprise_delayed", "surprise_silent")
+              "hits_shuffled", "surprise", "surprise_delayed", "surprise_silent",
+              "surprise_onset", "surprise_onset_previous")
+SURPRISES = ("surprise", "surprise_delayed", "surprise_silent", "surprise_onset",
+             "surprise_onset_previous")
 MODULATED = ("reward", "moves", "shuffled", "hits_shuffled") + SURPRISES
 
 
@@ -255,7 +268,11 @@ class Pong:
         self.condition = condition
         # (What follows a hit and a miss: `surprise` and its control as `stim`.)
         self.feedback_as = {"surprise": "stim", "surprise_delayed": "stim",
-                            "surprise_silent": "silent"}.get(condition, condition)
+                            "surprise_silent": "silent", "surprise_onset": "stim",
+                            "surprise_onset_previous": "stim"}.get(condition, condition)
+        self.window_until = -1.0     # `surprise_onset`: the window after a hit or miss
+        self.window_kind = "hit"
+        self.pulses = {"hit": [], "miss": []}   # its pulses (before any swap), by which
         # (The surprise signal by what the game is doing: a check, not used.)
         self.phase_sum = {"hit": 0.0, "miss": 0.0, "play": 0.0}
         self.phase_n = {"hit": 0, "miss": 0, "play": 0}
@@ -387,12 +404,16 @@ class Pong:
                 elif self.condition in ("reward", "hits_shuffled"):
                     self.judge_hit(1.0, out)
                 self.hit_until = self.t + 2 * HIT_S
+                self.window_until = self.t + SURPRISE_WINDOW
+                self.window_kind = "hit"
             else:
                 self.rallies.append((round(self.start, 3), self.hits))
                 if self.feedback_as == "stim":
                     self.schedule(MISS_HZ, MISS_S, lambda: [self.rng.randrange(64)])
                 elif self.condition in ("reward", "hits_shuffled"):
                     self.judge_hit(0.0, out)
+                self.window_until = self.t + SURPRISE_WINDOW
+                self.window_kind = "miss"
                 if self.feedback_as in ("stim", "silent"):
                     self.paused_until = self.t + MISS_S
                 self.t += dt
@@ -440,6 +461,9 @@ def play(minutes: float, seed: int, condition: str, flip: bool = False,
         delayed = [0.0] * int(SURPRISE_DELAY * TICKS)
         given = [0.0, 0.0]   # dopamine given: up, down
         dump = [] if os.environ.get("SURPRISE_DUMP") else None
+        window = [0.0, 0]    # `surprise_onset`: the signal summed over the window, its ticks
+        previous = [0.0]     # `surprise_onset_previous`: the pulse before
+        expected = [0.0]     # `surprise_onset`: the window's mean expected
     with cl.open() as neurons:
         for k, tick in enumerate(neurons.loop(TICKS, stop_after_seconds=minutes * 60)):
             up = down = 0
@@ -462,6 +486,27 @@ def play(minutes: float, seed: int, condition: str, flip: bool = False,
                 if condition == "surprise_delayed":
                     delayed.append(signal)
                     signal = delayed.pop(0)
+                if condition.startswith("surprise_onset"):
+                    # (One pulse a hit or miss, at its window's end.)
+                    if game.t <= game.window_until + 1e-9:
+                        window[0] += signal
+                        window[1] += 1
+                        signal = 0.0
+                    elif window[1]:
+                        mean = window[0] / window[1]
+                        game.pulses[game.window_kind].append(mean)
+                        signal = max(-1.0, min(1.0, SURPRISE_PULSE * (mean - expected[0])))
+                        expected[0] += RPE_RATE * (mean - expected[0])
+                        window[:] = [0.0, 0]
+                        if condition == "surprise_onset_previous":
+                            signal, previous[0] = previous[0], signal
+                        if k >= SURPRISE_WARM * TICKS and signal != 0.0:
+                            channel = game.reward if signal > 0 else game.punish
+                            game.doses[channel] = abs(signal)
+                            given[signal < 0] += abs(signal)
+                        signal = 0.0
+                    else:
+                        signal = 0.0
                 if k >= SURPRISE_WARM * TICKS and signal != 0.0:
                     dose = SURPRISE_DOSE * abs(signal)
                     channel = game.reward if signal > 0 else game.punish
@@ -483,7 +528,9 @@ def play(minutes: float, seed: int, condition: str, flip: bool = False,
             "moves_towards": game.moves_towards / max(1, game.moves_judged),
             **({"surprise_by_phase": {p: game.phase_sum[p] / max(1, game.phase_n[p])
                                       for p in game.phase_sum},
-                "dopamine_given": given} if surprise else {})}
+                "dopamine_given": given,
+                "pulse_by_outcome": {kind: sum(v) / max(1, len(v)) for kind, v in game.pulses.items()}}
+               if surprise else {})}
 
 
 def main() -> int:

@@ -33,7 +33,7 @@ what this model does, not what a culture would.
 | `learn_study.py` | Pong with a reward condition, by gain, as is and flipped |
 | `reach.py` | how much of the motor regions' answer to a stim comes along the axons |
 | `paths_probe.py` | conditioning's weights by path, minute by minute |
-| `feedback_study.py` | DishBrain's feedback (`stim`) against its controls on the `columns` layout, plain STDP; with `surprise`, the dish's own surprise as dopamine |
+| `feedback_study.py` | DishBrain's feedback (`stim`) against its controls on the `columns` layout, plain STDP; with `surprise` (or `onset`), the dish's own surprise as dopamine |
 | `pacman/pacman_dish.ent` | `examples/pacman.ent` played by the dish, in a window, with its electrodes drawn beside the maze |
 | `pacman/dishpilot.ent`, `.c` | the pilot: a device that loads `libdish.so` at run time and turns the game into stims and spikes into a way |
 | `check/dish_check.c` | determinism and stim response through the C interface |
@@ -1138,6 +1138,36 @@ the 4 s after a miss, when the eligibility of the moves that missed
 (tau_elig 1 s) is mostly gone and that of the random stims' answers is
 what it meets.
 
+So a follow-up, `surprise_onset`, gives the signal the timing of the
+hit/miss reward: the signal's mean over the 0.2 s after a hit or a miss,
+less a running mean of it (the `rpe` rate, 0.05), times 4, clipped to
+±1, as one pulse on the reward or punish channel when the 0.2 s are
+over. Its control, `surprise_onset_previous`, gives each outcome the
+previous outcome's pulse: the same pulses in size and number, not tied
+to what just happened. The 0.2 s, the running mean and the 4 were
+chosen after the null result above, from 3-minute runs (the window's
+mean: hit about +0.25, miss about +0.03). `feedback_study.py ... onset`,
+the same 20 minutes, `hard=1 axon=0.11`, 16 pairs:
+
+| | first 5 min | after | window: hit / miss |
+|---|---|---|---|
+| `surprise_onset` | 0.53 | 0.48 | +0.41 / +0.10 |
+| `surprise_onset_previous` | 0.43 | 0.44 | +0.41 / +0.10 |
+| `stim` | 0.45 | 0.41 | |
+| `surprise_onset`: after less first 5 min | −0.05 ± 0.04 | | |
+| `surprise_onset` less `_previous`, after | +0.04 ± 0.04 | | |
+| `surprise_onset` less `stim`, after | +0.07 ± 0.03 | | |
+
+The pulses are now large (about +0.6 after a hit, −0.6 after a miss;
+73 of dopamine given and 57 taken in a session, about 150 rallies), and
+still nothing is learnt: `surprise_onset` falls from its first 5
+minutes as `stim` does. Its edge over `stim` after is there already in
+the first 5 minutes (0.53 against 0.45; minute by minute it is noise
+between 0.44 and 0.65), and over its own control it is within the
+error. The timing here is the game's, not the dish's: the window opens
+at the hit or miss the host saw, which no culture's own surprise would
+know.
+
 ```sh
 build/cl_bridge/venv/bin/python examples/cl_bridge/conditioning.py \
     bias|map|rpe [minutes [gains [seeds [name=value ...]]]]
@@ -1145,7 +1175,7 @@ build/cl_bridge/venv/bin/python examples/cl_bridge/learn_study.py \
     [minutes [seeds [gains [out.json [columns] [moves|shuffled|hits_shuffled] [name=value ...]]]]]
 build/cl_bridge/venv/bin/python examples/cl_bridge/reach.py [axons [name=value ...]]
 build/cl_bridge/venv/bin/python examples/cl_bridge/feedback_study.py \
-    [minutes [seeds [out.json [surprise] [name=value ...]]]]
+    [minutes [seeds [out.json [surprise|onset] [name=value ...]]]]
 ```
 
 A `conditioning.py` run of 3 gains on 8 seeds (20 minutes each) takes
