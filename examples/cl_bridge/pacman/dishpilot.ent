@@ -1,0 +1,14 @@
+// The dish of examples/cl_bridge (libdish.so, loaded at run time) as
+// Pac-Man's pilot. Each frame: pilot_begin, then each pellet's and each
+// ghost's place relative to him, then pilot_step runs the dish for the
+// frame's milliseconds, stimulating the electrode of the nearest pellet's
+// way and of the nearest ghost's, and gives the way its motor regions
+// say (0 right, 1 down, 2 left, 3 up, 4 none). pilot_activity gives a
+// channel's recent spikes, for drawing.
+extern proc pilot_begin()
+extern proc pilot_pellet(dc: i32, dr: i32)
+extern proc pilot_ghost(dc: i32, dr: i32, scared: bool)
+extern proc pilot_step(ms: f32) -> i32
+extern proc pilot_activity(channel: i32) -> f32
+// 0 motor right, 1 down, 2 left, 3 up, 4 sensory food, 5 sensory danger, -1 none.
+extern proc pilot_role(channel: i32) -> i32

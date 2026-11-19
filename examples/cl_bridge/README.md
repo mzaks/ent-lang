@@ -34,6 +34,8 @@ what this model does, not what a culture would.
 | `reach.py` | how much of the motor regions' answer to a stim comes along the axons |
 | `paths_probe.py` | conditioning's weights by path, minute by minute |
 | `feedback_study.py` | DishBrain's feedback (`stim`) against its controls on the `columns` layout, plain STDP |
+| `pacman/pacman_dish.ent` | `examples/pacman.ent` played by the dish, in a window, with its electrodes drawn beside the maze |
+| `pacman/dishpilot.ent`, `.c` | the pilot: a device that loads `libdish.so` at run time and turns the game into stims and spikes into a way |
 | `check/dish_check.c` | determinism and stim response through the C interface |
 | `check/plasticity.c` | does pairing two channels change how one answers the other? |
 | `culture/fetch.sh` | downloads the cultures' recordings (29 spontaneous, 21 with stims) |
@@ -47,7 +49,8 @@ Tests: `test/Integration/cl_bridge_dish.test` (run.ent: same seed twice and
 on 8 threads gives the same spikes and checksum, seed 2 others),
 `cl_bridge_abi.test` (dish_check.c through `libdish.so`, Linux),
 `cl_bridge_gpu.test` (the GPU library against the CPU's),
-`cl_bridge_pong.test` (pong.py replays the same) and
+`cl_bridge_pong.test` (pong.py replays the same),
+`cl_bridge_pacman.test` (the Pac-Man pilot compiles) and
 `cl_bridge_demo.test` (demo_loop.py on the SDK; these two run only where lit finds a
 Python that imports `cl`, in `build/cl_bridge/venv` or `CL_SDK_PYTHON`:
 the SDK is no dependency of the rest of the suite).
@@ -624,6 +627,46 @@ the study of 60 sessions took about 45 minutes on 22 processes (a session
 is the game's loop and the SDK's data producer, a core each).
 `cl_bridge_pong.test` plays half a minute of `stim` twice and checks it
 replays the same rallies.
+
+## Pac-Man
+
+`pacman/pacman_dish.ent` is `examples/pacman.ent` with the dish as its
+pilot, in real time: a game an ent world, the dish another, loaded by a
+device (`pacman/dishpilot.c`, with `dlopen`, its symbols kept to itself,
+`RTLD_LOCAL | RTLD_DEEPBIND`). Each frame:
+
+- the game tells the device where each pellet and each ghost is from
+  Pac-Man (`sense`), and the device keeps the nearest pellet and the
+  nearest ghost that is not frightened;
+- the device runs the dish for the frame's milliseconds, stimulating the
+  sensory electrode of the nearest pellet's way (four in the middle of
+  the grid: right, down, left, up) and, within 10 tiles, that of the
+  nearest ghost's way (four more), each at 4 Hz far to 40 Hz near, as
+  DishBrain's ball;
+- the way is that of the motor region (the grid's four edges, 8
+  electrodes each, the corners left out) whose spikes, each averaged
+  over 100 ms, lead the next by 10%; held arrow keys win over it.
+
+The panel beside the maze is the 64 electrodes lit by their spikes (blue
+motor, green food, red ghost). The dish has short axons (`DISH_AXON`,
+0.11) so the stims do not drive the motor regions directly, and plain
+STDP: no reward, nothing that would make it learn the game.
+
+```sh
+tools/ent build --shared examples/cl_bridge/network.ent \
+    examples/cl_bridge/bridge.c -o build/cl_bridge/libdish.so
+tools/ent build examples/cl_bridge/pacman/pacman_dish.ent -o build/pacman_dish
+build/pacman_dish        # from the repository's root; DISH_SEED, DISH_STIM=0
+```
+
+One try, seed 1, 15 minutes of each, played unattended (each game over
+starts the next): told where the food and the ghosts are, 21 games, a
+mean score of 950 ± 75 (480 to 1830); with `DISH_STIM=0`, the dish's own
+activity alone, 18 games, 693 ± 52 (350 to 1100). So what it is told
+moves Pac-Man somewhat towards what it is told of, at
+about 2.8 standard errors on one seed's games, which follow each other
+in one dish and are not independent; no level was cleared. Not a
+study: no seeds, no pairing, real time.
 
 ## Learning rules
 

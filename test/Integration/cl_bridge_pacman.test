@@ -1,0 +1,19 @@
+// examples/cl_bridge/pacman: examples/pacman.ent played by the dish, its
+// pilot a device (dishpilot.ent, dishpilot.c) found next to the game.
+// It compiles; running it needs a display, raylib and libdish.so.
+// RUN: ent-translate --import-ent %S/../../examples/cl_bridge/pacman/pacman_dish.ent \
+// RUN:     -I %S/../../devices -o %t.mlir
+// RUN: ent-translate --ent-to-c-extern-header %t.mlir | FileCheck %s
+// RUN: %host-cc -O2 -c %S/../../examples/cl_bridge/pacman/dishpilot.c -o %t.o
+// RUN: ent-opt %t.mlir --ent-lower-to-loops --convert-scf-to-cf \
+// RUN:     --convert-to-llvm --reconcile-unrealized-casts \
+// RUN:   | mlir-translate --mlir-to-llvmir | FileCheck %s --check-prefix=LLVM
+
+// CHECK-DAG: void ent_dishpilot_pilot_begin(void);
+// CHECK-DAG: void ent_dishpilot_pilot_pellet(int32_t arg0, int32_t arg1);
+// CHECK-DAG: void ent_dishpilot_pilot_ghost(int32_t arg0, int32_t arg1, bool arg2);
+// CHECK-DAG: int32_t ent_dishpilot_pilot_step(float arg0);
+// CHECK-DAG: float ent_dishpilot_pilot_activity(int32_t arg0);
+
+// LLVM-DAG: declare i32 @ent_dishpilot_pilot_step(float)
+// LLVM-DAG: declare void @ent_dishpilot_pilot_ghost(i32, i32, i8)
