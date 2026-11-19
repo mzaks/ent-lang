@@ -925,6 +925,22 @@ Its control, `shuffled` with `hard=1`: 0.43 hits a rally, −0.00 ± 0.03
 over gain 0, and `moves` +0.37 ± 0.04 above it (16 of 16): what is
 learnt comes from what the pulses say, as with soft bounds.
 
+The reward for hits and misses (`learn_study.py 20 24 0,1 out.json
+columns axon=0.11 hard=1`, and `hits_shuffled` for its control; seeds 1
+to 24, as is and flipped, 48 pairs), minutes 10 to 20:
+
+| hits a rally | soft bounds | `hard=1` |
+|---|---|---|
+| gain 1, mean | 0.51 | 0.61 |
+| less gain 0 (0.43) | +0.08 ± 0.01 (39 of 48) | +0.18 ± 0.02 (46 of 48) |
+| hard less soft | | +0.11 ± 0.02 (39 of 48) |
+| `hits_shuffled` less gain 0 | +0.00 ± 0.02 | +0.02 ± 0.02 |
+| less `hits_shuffled` | +0.07 ± 0.02 | +0.17 ± 0.02 (42 of 48) |
+
+Hard bounds more than double what either reward teaches; the reward
+for hits and misses still gets about half of what the one for each
+move does (+0.18 against +0.37).
+
 As every parameter here, `hard` is a choice of the model's, not a fact
 of a culture's: the dish was calibrated with soft bounds (and its
 calibration is not checked again here). With `modulated` at gain 0
