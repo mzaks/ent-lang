@@ -16,6 +16,9 @@ channel. Modes:
     build/cl_bridge/venv/bin/python examples/cl_bridge/conditioning.py \\
         mode [minutes [gains [seeds [name=value ...]]]]
 
+name=value sets a dish parameter, but for two of the loop's own: stim,
+the sensory stim's size (1), and answer, the answer window in ms (100).
+
 Prints, for each gain (reward_gain; 0: nothing learnt), the share of
 right answers in each 2-minute window, mean over seeds (map, rpe: the top
 half's / the bottom half's), and each seed's mean excitatory weight at
@@ -43,6 +46,9 @@ MODES = ("bias", "map", "rpe")
 
 def run(job):
     mode, seed, gain, minutes, extra = job
+    extra = dict(extra)
+    size = extra.pop("stim", 1.0)
+    answer = int(extra.pop("answer", ANSWER))
     os.environ["OMP_NUM_THREADS"] = "1"
     import ent_dish
     import pong
@@ -54,12 +60,15 @@ def run(job):
     expect = [0.5] * 8
     dish.step(SETTLE)
     windows, right = [], [[0, 0], [0, 0]]        # per half: right, wrong
+    said = trials = 0
     for k in range(int(minutes * 60000 / EVERY)):
         i = rng.randrange(8)
-        dish.stimulate(sensory[i], 1.0)
-        spikes = dish.step(ANSWER)
+        dish.stimulate(sensory[i], size)
+        spikes = dish.step(answer)
         u = sum(c in up for _, c in spikes)
         d = sum(c in down for _, c in spikes)
+        said += u + d
+        trials += 1
         half = 0 if mode == "bias" or i < 4 else 1
         want, other = (u, d) if half == 0 else (d, u)
         if want != other:
@@ -74,11 +83,11 @@ def run(job):
                 dish.stimulate(reward, err)
             elif err < 0:
                 dish.stimulate(punish, -err)
-        dish.step(EVERY - ANSWER)
+        dish.step(EVERY - answer)
         if (k + 1) % WINDOW == 0:
             windows.append([r / max(1, r + w) for r, w in right])
             right = [[0, 0], [0, 0]]
-    return seed, gain, windows, dish.mean_weight()
+    return seed, gain, windows, dish.mean_weight(), said / trials
 
 
 def main() -> int:
@@ -103,7 +112,8 @@ def main() -> int:
         cells = [f"{at(k, 0):.2f}" if mode == "bias" else f"{at(k, 0):.2f}/{at(k, 1):.2f}"
                  for k in range(n)]
         print(f"  gain {g:<6g} " + " ".join(cells)
-              + "   weight " + " ".join(f"{r[3]:.5f}" for r in rs))
+              + "   weight " + " ".join(f"{r[3]:.5f}" for r in rs)
+              + f"   motor spikes an answer {sum(r[4] for r in rs) / len(rs):.1f}")
     from pong_study import mean_se
 
     def score(r):

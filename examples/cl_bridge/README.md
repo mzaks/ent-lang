@@ -881,12 +881,12 @@ w_max at the start, 0.645 and 0.621 after 3 minutes, and so to the end;
 nowhere near w_max, and the prediction error is still 0.2 a trial. Nor
 is it bursts: split by the dish's spikes in the 100 ms before the stim,
 the quietest quarter of the trials scores +0.28 over gain 0, the
-busiest +0.18. What is left: each answer is a few spikes (most trials
-start with 0 to 2 in the whole dish in the 100 ms before), so a small
-difference in weights tips only some of them; and the weights stop
-diverging at a small difference, likely where STDP's soft bounds (a
-strengthening by `w_max - w`, a weakening by `w`) balance the reward's
-pull, each path at a fixed point of its own.
+busiest +0.18. What is left: the weights stop diverging at a small
+difference, likely where STDP's soft bounds (a strengthening by
+`w_max - w`, a weakening by `w`) balance the reward's pull, each path at
+a fixed point of its own. (That the answers are too few spikes, read
+from the quiet before most stims, was a guess; counted, an answer is
+about 26 motor spikes, see below.)
 
 **Hard bounds.** With `hard=1` the steps no longer shrink near the
 bounds. The plateau is partly the soft bounds', not all theirs:
@@ -907,8 +907,32 @@ without scaling (`settle=5 freeze=1`) both paths first grow (0.73 and
 0.71 of w_max) and then sink together as the dish quiets (5.5 Hz a
 channel to 2.4), the right share staying near 0.69: additive STDP here
 weakens more than it strengthens, and without scaling nothing holds the
-dish. So scaling is not the brake with hard bounds either; what is left
-is the few spikes an answer comes from.
+dish. So scaling is not the brake with hard bounds either.
+
+Nor is the size of the answer. `conditioning.py` now counts it (motor
+spikes in the answer window) and takes `stim=` (the sensory stim's
+size) and `answer=` (the window, ms); 10 minutes, `axon=0.11 hard=1`,
+seeds 1 to 8:
+
+| | motor spikes an answer (gain 0) | score less gain 0 |
+|---|---|---|
+| as is | 25.6 | +0.313 ± 0.016 |
+| `stim=2` | 25.8 | +0.329 ± 0.040 |
+| `stim=3` | 25.9 | +0.377 ± 0.019 |
+| `answer=200` | 36.8 | +0.310 ± 0.042 |
+
+An answer is some 26 spikes, not a few; a stronger stim hardly adds to
+it (with axons of 0.11 it reaches few motor neurons) and a longer window
+adds spikes but not learning. `stim=3` may help a little (+0.06, about
+two standard errors). Where the learning stops stays open.
+
+With plain STDP (`modulated` off, as the calibration ran), `hard=1`
+keeps the dish where the calibration put it: `validate.py ... 6
+axon=0.11 hard=1` has 9 of the 12 statistics in the cultures' middle
+half (bursts a minute 4.2 and the share of spikes in bursts 0.903, both
+just above it; soft bounds 10 of 12), score 3.72 against 3.77, and over
+45 minutes (`--long 6`) the rate stays 3.83 to 3.84 Hz, burst lengths
+growing a little (1.66 to 1.74 s).
 
 Pong with the reward for each move (`learn_study.py 20 8 0,1 out.json
 columns moves tau_elig=200 axon=0.11 hard=1`, as is and flipped, 16
@@ -940,6 +964,19 @@ to 24, as is and flipped, 48 pairs), minutes 10 to 20:
 Hard bounds more than double what either reward teaches; the reward
 for hits and misses still gets about half of what the one for each
 move does (+0.18 against +0.37).
+
+Is it the credit, a hit or miss coming seconds after the moves that made
+it? A longer eligibility should then help; it does not (seeds 1 to 8, as
+is and flipped, 16 pairs, `hard=1`, minutes 10 to 20):
+
+| `tau_elig` | hits a rally | less gain 0 | less `tau_elig` 1000 |
+|---|---|---|---|
+| 1000 ms (default) | 0.63 | +0.20 ± 0.04 | |
+| 2000 ms | 0.59 | +0.16 ± 0.03 | −0.04 ± 0.03 |
+| 5000 ms | 0.50 | +0.07 ± 0.02 | −0.13 ± 0.04 (12 of 16 lower) |
+
+A longer trace carries more of the moves that did not matter, and the
+reward for each move did best with a shorter one (200 ms).
 
 As every parameter here, `hard` is a choice of the model's, not a fact
 of a culture's: the dish was calibrated with soft bounds (and its
