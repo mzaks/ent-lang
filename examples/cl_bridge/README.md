@@ -33,7 +33,7 @@ what this model does, not what a culture would.
 | `learn_study.py` | Pong with a reward condition, by gain, as is and flipped |
 | `reach.py` | how much of the motor regions' answer to a stim comes along the axons |
 | `paths_probe.py` | conditioning's weights by path, minute by minute |
-| `feedback_study.py` | DishBrain's feedback (`stim`) against its controls on the `columns` layout, plain STDP |
+| `feedback_study.py` | DishBrain's feedback (`stim`) against its controls on the `columns` layout, plain STDP; with `surprise`, the dish's own surprise as dopamine |
 | `pacman/pacman_dish.ent` | `examples/pacman.ent` played by the dish, in a window, with its electrodes drawn beside the maze |
 | `pacman/dishpilot.ent`, `.c` | the pilot: a device that loads `libdish.so` at run time and turns the game into stims and spikes into a way |
 | `check/dish_check.c` | determinism and stim response through the C interface |
@@ -1081,6 +1081,63 @@ STDP and scaling have no term the feedback's predictability could act
 on, does not. That is a statement about the model, not about cultures,
 and is the comparison a real dish could settle.
 
+**The dish's own surprise as the third factor.** Why should the
+feedback's predictability teach? Under the free energy principle (Parr,
+Pezzulo and Friston, *Active Inference*, 2022, chapters 5 and 7 and
+appendix B), learning is Hebbian counting with nothing gating it, and
+what turns behaviour towards a goal is a precision: dopamine as a rise
+in confidence, which falls when outcomes are hard to predict. So
+`pong.py`'s `surprise` gives the dish a dopamine from how predictable
+its own spikes are, computed from them alone (nothing of the game), on
+the reward and punish channels of `modulated`: positive while they are
+more predictable than their running level (10 s), negative while less.
+Computed by the host: a global modulator no culture is known to have,
+an assumption as the reward channels are.
+
+What "predictable" is matters. A linear predictor of each electrode's
+spikes (from the two 5 ms ticks before, and their traces over 20 and
+100 ms; `SURPRISE_MEASURE=error` or `share`) finds the hit's burst the
+most surprising thing the dish sees and the miss's random stims the
+least: its error goes with how much fires, and a single pulse on a
+random electrode answers with less than play does (two 8-minute
+recordings, `hard=1 axon=0.11`):
+
+| | share of the time | spikes a 5 ms tick | squared error a spike | signal (+: predictable) |
+|---|---|---|---|---|
+| a hit's feedback (and 100 ms after) | 1% | 21.5 | 11.7 / 11.0 | −0.96 / −0.95 |
+| play | 48% | 1.7 / 1.5 | 0.97 / 0.79 | +0.08 / +0.14 |
+| a miss's feedback | 50% | 0.80 / 0.79 | 0.54 / 0.47 | +0.41 / +0.42 |
+
+That would teach the game backwards, and summing the electrodes into
+regions does not help (the burst is still 100 times play). What tells
+the two feedbacks apart is where the spikes are, not how many: the
+burst is the same pattern each time, the random stims a new one each.
+So the measure kept (`shape`, the default): each 20 ms, 1 less the
+cosine of the spikes' pattern over the electrodes (their number taken
+out) to that of the 100 ms before; on the recordings 0.44 / 0.47 in a
+hit's feedback, 0.61 in play, 0.85 / 0.87 in a miss's. `feedback_study.py
+... surprise` plays it against `surprise_delayed` (the same dopamine
+7.3 s later: the same in size and number, apart from the play),
+`surprise_silent` (`silent`'s feedback) and `stim`; 20 minutes, `hard=1
+axon=0.11`, seeds 1 to 8 as is and flipped, hits a rally:
+
+| | first 5 min | after | signal: hit / play / miss |
+|---|---|---|---|
+| `surprise` | 0.49 | 0.47 | +0.42 / +0.08 / −0.20 |
+| `surprise_delayed` | 0.45 | 0.43 | |
+| `surprise_silent` | 0.42 | 0.45 | +0.35 / +0.06 / −0.35 |
+| `stim` | 0.45 | 0.41 | |
+| `surprise`: after less first 5 min | −0.02 ± 0.04 | | |
+| `surprise` less `surprise_delayed`, after | +0.03 ± 0.04 | | |
+| `surprise` less `stim`, after | +0.06 ± 0.04 | | |
+
+Nothing learnt, though the signal says what DishBrain's account needs
+it to. A reading: the rise comes in the 200 ms after a hit, about 0.2
+of dopamine (`reward`'s pulse is up to 1), and the fall is spread over
+the 4 s after a miss, when the eligibility of the moves that missed
+(tau_elig 1 s) is mostly gone and that of the random stims' answers is
+what it meets.
+
 ```sh
 build/cl_bridge/venv/bin/python examples/cl_bridge/conditioning.py \
     bias|map|rpe [minutes [gains [seeds [name=value ...]]]]
@@ -1088,7 +1145,7 @@ build/cl_bridge/venv/bin/python examples/cl_bridge/learn_study.py \
     [minutes [seeds [gains [out.json [columns] [moves|shuffled|hits_shuffled] [name=value ...]]]]]
 build/cl_bridge/venv/bin/python examples/cl_bridge/reach.py [axons [name=value ...]]
 build/cl_bridge/venv/bin/python examples/cl_bridge/feedback_study.py \
-    [minutes [seeds [out.json [name=value ...]]]]
+    [minutes [seeds [out.json [surprise] [name=value ...]]]]
 ```
 
 A `conditioning.py` run of 3 gains on 8 seeds (20 minutes each) takes

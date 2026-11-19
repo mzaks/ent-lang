@@ -34,6 +34,22 @@ conditions:
               said is a coin that comes up a hit with the running share
               of real hits (so the pulses are alike in size and number):
               `reward`'s control
+    surprise  as `stim`, and the dish's own surprise as dopamine
+              (Surprise, below): each 20 ms, how far the pattern of its
+              spikes over the electrodes (their number taken out) is
+              from that of the 100 ms before; dopamine rises (REWARD)
+              while that is below its running level and falls (PUNISH)
+              while above. Only
+              the spikes go into it, nothing of the game: a third factor
+              driven by how predictable the dish's input is, after the
+              free energy principle's account of DishBrain. Computed
+              here, not in the dish: a global modulator no culture is
+              known to have, as the reward channels
+    surprise_delayed  as `surprise`, but the dopamine given is the one
+              of SURPRISE_DELAY earlier (alike in size and number, its
+              timing apart from the play): `surprise`'s control
+    surprise_silent   as `surprise`, but the feedback of `silent`: is it
+              the feedback's unpredictability that teaches
 
 columns: the second layout (below), where the stims' direct answers in
 the motor regions do not play the game.
@@ -106,6 +122,11 @@ MISS_HZ, MISS_S = 5, 4.0     # the unpredictable one, and the pause
 EARLY_S = 5 * 60             # DishBrain's first 5 minutes, against the rest
 RPE_RATE = 0.05              # how fast `reward`'s expected share of hits follows
 MOVE_S = 0.1                 # `moves`: how often a move is judged
+SURPRISE_FAST = 0.1          # s: the surprise now, averaged over this
+SURPRISE_SLOW = 10.0         # s: its running level
+SURPRISE_DOSE = 0.0125       # dopamine a tick at a surprise of -1 or 1 (4 s at -1 about a pulse of 0.5)
+SURPRISE_DELAY = 7.3         # s: `surprise_delayed`'s delay
+SURPRISE_WARM = 10.0         # s: no dopamine before this
 
 SENSORY = [26, 27, 28, 29, 37, 36, 35, 34]
 UP = list(range(0, 24))
@@ -119,7 +140,108 @@ LAYOUTS = {
                 [r * 8 + c for r in range(8) for c in (6, 7)], 28, 36),
 }
 CONDITIONS = ("stim", "silent", "none", "rest", "reward", "moves", "shuffled",
-              "hits_shuffled")
+              "hits_shuffled", "surprise", "surprise_delayed", "surprise_silent")
+SURPRISES = ("surprise", "surprise_delayed", "surprise_silent")
+MODULATED = ("reward", "moves", "shuffled", "hits_shuffled") + SURPRISES
+
+
+class Surprise:
+    """How unpredictable the dish's spikes are, from them alone: each tick
+    a linear predictor (normalised LMS) guesses each electrode's spikes
+    from all electrodes' spikes of the two ticks before; the surprise is
+    its squared error, summed over the electrodes. `step(counts)` gives
+    the signal: the surprise's running level (SURPRISE_SLOW) less its
+    level now (SURPRISE_FAST), over the running level, in [-1, 1]:
+    positive while the input is more predictable than usual."""
+
+    def __init__(self, ticks: int, rate: float = 0.05):
+        import numpy as np
+        self.np = np
+        self.x1 = np.zeros(64)
+        self.x2 = np.zeros(64)
+        # (With SURPRISE_FEATURES=traces, each electrode's spikes fading
+        # over 20 and 100 ms as well: memory for the stims' rhythms.)
+        self.traces = os.environ.get("SURPRISE_FEATURES", "traces") == "traces"
+        self.t20 = np.zeros(64)
+        self.t100 = np.zeros(64)
+        self.d20 = math.exp(-1.0 / (0.02 * ticks))
+        self.d100 = math.exp(-1.0 / (0.1 * ticks))
+        self.w = np.zeros((64, 257 if self.traces else 129))
+        self.rate = rate
+        self.fast = math.exp(-1.0 / (SURPRISE_FAST * ticks))
+        self.slow = math.exp(-1.0 / (SURPRISE_SLOW * ticks))
+        self.now = self.level = 0.0
+        self.measure = os.environ.get("SURPRISE_MEASURE", "shape")
+        # ("shape": per 20 ms bin, the spikes' pattern over the electrodes
+        # with their number taken out, against that of the 100 ms before.)
+        self.bin = np.zeros(64)
+        self.bin_ticks = max(1, round(0.02 * ticks))
+        self.pattern = np.zeros(64)
+        self.k = 0
+        self.held = 0.0
+        self.bin_fast = math.exp(-1.0 / (SURPRISE_FAST / 0.02))
+        self.bin_slow = math.exp(-1.0 / (SURPRISE_SLOW / 0.02))
+        self.bin_decay = math.exp(-1.0 / 5.0)
+        self.mean = np.zeros(64)
+        self.err_now = self.var_now = 0.0
+
+    def shape(self, counts) -> float:
+        """Each 20 ms bin with spikes: 1 - the cosine of its pattern to the
+        last 100 ms's; the signal held through the next bin."""
+        np = self.np
+        self.bin += counts
+        self.k += 1
+        if self.k < self.bin_ticks:
+            return self.held
+        self.k = 0
+        norm = float(np.linalg.norm(self.bin))
+        if norm > 0:
+            unit = self.bin / norm
+            before = float(np.linalg.norm(self.pattern))
+            s = 1.0 - (float(unit @ self.pattern) / before if before > 0 else 0.0)
+            self.now = self.bin_fast * self.now + (1 - self.bin_fast) * s
+            self.level = self.bin_slow * self.level + (1 - self.bin_slow) * s
+            self.pattern = self.bin_decay * self.pattern + unit
+        else:
+            self.pattern = self.bin_decay * self.pattern
+        self.bin[:] = 0.0
+        if self.level > 1e-9:
+            self.held = max(-1.0, min(1.0, (self.level - self.now) / self.level))
+        return self.held
+
+    def step(self, counts) -> float:
+        np = self.np
+        if self.measure == "shape":
+            return self.shape(counts)
+        if self.traces:
+            x = np.concatenate((self.x1, self.x2, self.t20, self.t100, [1.0]))
+        else:
+            x = np.concatenate((self.x1, self.x2, [1.0]))
+        err = counts - self.w @ x
+        self.w += (self.rate / (x @ x)) * np.outer(err, x)
+        self.x2, self.x1 = self.x1, counts.copy()
+        self.t20 = self.d20 * self.t20 + counts
+        self.t100 = self.d100 * self.t100 + counts
+        s = float(err @ err)
+        if self.measure == "error":
+            self.now = self.fast * self.now + (1 - self.fast) * s
+            self.level = self.slow * self.level + (1 - self.slow) * s
+            if self.level <= 1e-9:
+                return 0.0
+            return max(-1.0, min(1.0, (self.level - self.now) / self.level))
+        # "share": the share of the spikes' variance (about their running
+        # mean) the predictor leaves, now against its running level.
+        dev = counts - self.mean
+        self.mean = self.slow * self.mean + (1 - self.slow) * counts
+        self.err_now = self.fast * self.err_now + (1 - self.fast) * s
+        self.var_now = self.fast * self.var_now + (1 - self.fast) * float(dev @ dev)
+        if self.var_now <= 1e-6:
+            return 0.0
+        share = self.err_now / self.var_now
+        self.level = self.slow * self.level + (1 - self.slow) * share
+        if self.level <= 1e-9:
+            return 0.0
+        return max(-1.0, min(1.0, (self.level - share) / self.level))
 
 
 class Pong:
@@ -131,6 +253,13 @@ class Pong:
         if condition not in CONDITIONS:
             raise ValueError(f"no condition {condition!r}: {', '.join(CONDITIONS)}")
         self.condition = condition
+        # (What follows a hit and a miss: `surprise` and its control as `stim`.)
+        self.feedback_as = {"surprise": "stim", "surprise_delayed": "stim",
+                            "surprise_silent": "silent"}.get(condition, condition)
+        # (The surprise signal by what the game is doing: a check, not used.)
+        self.phase_sum = {"hit": 0.0, "miss": 0.0, "play": 0.0}
+        self.phase_n = {"hit": 0, "miss": 0, "play": 0}
+        self.hit_until = 0.0
         sensory, self.up_channels, self.down_channels, self.reward, self.punish = LAYOUTS[layout]
         # (Flipped: the ball at the top is stimulated at the bottom.)
         self.sensory = sensory[::-1] if flip else sensory
@@ -191,6 +320,13 @@ class Pong:
             out.append(channel)
             self.doses[channel] = abs(err)
 
+    def note(self, signal: float) -> None:
+        """The surprise signal of this tick, by what the game is doing."""
+        phase = ("miss" if self.t < self.paused_until else
+                 "hit" if self.t < self.hit_until else "play")
+        self.phase_sum[phase] += signal
+        self.phase_n[phase] += 1
+
     def judge_hit(self, got: float, out: list[int]) -> None:
         """A hit (1) or a miss (0): `reward` says so; `hits_shuffled` says
         what a coin says, a hit with the running share of real hits."""
@@ -246,17 +382,18 @@ class Pong:
                 self.x, self.vx = -self.x, -self.vx
                 self.aim()
                 self.hits += 1
-                if self.condition == "stim":
+                if self.feedback_as == "stim":
                     self.schedule(HIT_HZ, HIT_S, self.hit_channels)
                 elif self.condition in ("reward", "hits_shuffled"):
                     self.judge_hit(1.0, out)
+                self.hit_until = self.t + 2 * HIT_S
             else:
                 self.rallies.append((round(self.start, 3), self.hits))
-                if self.condition == "stim":
+                if self.feedback_as == "stim":
                     self.schedule(MISS_HZ, MISS_S, lambda: [self.rng.randrange(64)])
                 elif self.condition in ("reward", "hits_shuffled"):
                     self.judge_hit(0.0, out)
-                if self.condition in ("stim", "silent"):
+                if self.feedback_as in ("stim", "silent"):
                     self.paused_until = self.t + MISS_S
                 self.t += dt
                 self.serve()
@@ -293,29 +430,60 @@ def play(minutes: float, seed: int, condition: str, flip: bool = False,
     game = Pong(condition, seed, flip, layout)
     up_set, down_set = set(game.up_channels), set(game.down_channels)
     dish = dict(parameters)
-    if condition in ("reward", "moves", "shuffled", "hits_shuffled"):
+    if condition in MODULATED:
         dish = {"modulated": 1, "reward_channel": game.reward, "punish_channel": game.punish, **dish}
     ent_dish.use(seed=seed, **dish)
+    surprise = Surprise(TICKS) if condition in SURPRISES else None
+    if surprise:
+        import numpy as np
+        counts = np.zeros(64)
+        delayed = [0.0] * int(SURPRISE_DELAY * TICKS)
+        given = [0.0, 0.0]   # dopamine given: up, down
+        dump = [] if os.environ.get("SURPRISE_DUMP") else None
     with cl.open() as neurons:
-        for tick in neurons.loop(TICKS, stop_after_seconds=minutes * 60):
+        for k, tick in enumerate(neurons.loop(TICKS, stop_after_seconds=minutes * 60)):
             up = down = 0
+            if surprise:
+                counts[:] = 0.0
             for spike in tick.analysis.spikes:
+                if surprise:
+                    counts[spike.channel] += 1.0
                 if spike.channel in up_set:
                     up += 1
                 elif spike.channel in down_set:
                     down += 1
             channels = game.tick(up, down)
+            if surprise:
+                if dump is not None:
+                    dump.append((counts.copy(), "miss" if game.t < game.paused_until else
+                                 "hit" if game.t < game.hit_until else "play"))
+                signal = surprise.step(counts)
+                game.note(signal)
+                if condition == "surprise_delayed":
+                    delayed.append(signal)
+                    signal = delayed.pop(0)
+                if k >= SURPRISE_WARM * TICKS and signal != 0.0:
+                    dose = SURPRISE_DOSE * abs(signal)
+                    channel = game.reward if signal > 0 else game.punish
+                    game.doses[channel] = dose
+                    given[signal < 0] += dose
             plain = sorted(set(c for c in channels if c not in game.doses))
             if plain:
                 neurons.stim(cl.ChannelSet(*plain), 1.0)
             for channel, current in game.doses.items():
                 neurons.stim(channel, current)
+    if surprise and dump is not None:
+        np.savez(os.environ["SURPRISE_DUMP"], counts=np.array([c for c, _ in dump]),
+                 phase=np.array([p for _, p in dump]))
     return {"seed": seed, "condition": condition, "flip": flip, "minutes": minutes,
             "parameters": parameters, **summary(game.rallies),
             "paddle_top": game.at_top / game.ticks, "paddle_bottom": game.at_bottom / game.ticks,
             "up_hz": game.up_spikes / (minutes * 60), "down_hz": game.down_spikes / (minutes * 60),
             "rallies": game.rallies, "layout": layout,
-            "moves_towards": game.moves_towards / max(1, game.moves_judged)}
+            "moves_towards": game.moves_towards / max(1, game.moves_judged),
+            **({"surprise_by_phase": {p: game.phase_sum[p] / max(1, game.phase_n[p])
+                                      for p in game.phase_sum},
+                "dopamine_given": given} if surprise else {})}
 
 
 def main() -> int:

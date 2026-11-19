@@ -10,7 +10,7 @@ dopamine: what a CL1 could do. On the `columns` layout, seeds 1 to
 `seeds`, each as is and flipped.
 
     build/cl_bridge/venv/bin/python examples/cl_bridge/feedback_study.py \\
-        [minutes [seeds [out.json [name=value ...]]]]
+        [minutes [seeds [out.json [surprise] [name=value ...]]]]
 
 name=value: dish parameters for every session (axon=0.11, hard=1, ...).
 Prints, for each session, hits a rally in the first 5 minutes and after,
@@ -30,6 +30,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 SESSIONS = [("stim", {}), ("silent", {}), ("none", {}), ("stim/off", {"stdp": 0, "w_exc": 0.0027})]
+# With `surprise` among the arguments: the dish's own surprise as dopamine
+# (pong.py's `surprise`), against its delayed control, with `silent`'s
+# feedback, and `stim` without it.
+SURPRISE_SESSIONS = [("surprise", {}), ("surprise_delayed", {}), ("surprise_silent", {}), ("stim", {})]
 
 
 def run(job):
@@ -46,7 +50,10 @@ def main() -> int:
     minutes = float(sys.argv[1]) if len(sys.argv) > 1 else 20.0
     seeds = int(sys.argv[2]) if len(sys.argv) > 2 else 8
     out = sys.argv[3] if len(sys.argv) > 3 else None
-    extra = {k: float(v) for k, v in (a.split("=", 1) for a in sys.argv[4:])}
+    global SESSIONS
+    if "surprise" in sys.argv[4:]:
+        SESSIONS = SURPRISE_SESSIONS
+    extra = {k: float(v) for k, v in (a.split("=", 1) for a in sys.argv[4:] if "=" in a)}
     jobs = [(minutes, seed, flip, name, {**extra, **p})
             for name, p in SESSIONS for flip in (False, True) for seed in range(1, seeds + 1)]
     with ProcessPoolExecutor(min(len(jobs), 22)) as pool:
@@ -74,7 +81,8 @@ def main() -> int:
     print("differences, pair by pair (hits a rally):")
     pairs = [(f"{n}: after less first 5 min", lambda k, n=n: hits(n, "late", k) - hits(n, "early", k))
              for n, _ in SESSIONS]
-    pairs += [(f"stim less {n}, after", lambda k, n=n: hits("stim", "late", k) - hits(n, "late", k))
+    first = SESSIONS[0][0]
+    pairs += [(f"{first} less {n}, after", lambda k, n=n: hits(first, "late", k) - hits(n, "late", k))
               for n, _ in SESSIONS[1:]]
     for label, f in pairs:
         xs = [f(k) for k in keys]
