@@ -122,6 +122,8 @@ world {
   Window.background = 0x101418
   Window.fps = 60
   Window.resizable = true
+  // (Escape closes the source, not the map.)
+  Window.escape = true
   View.arch = -1
   View.cell = 14.0
   View.ox = 420.0

@@ -1,0 +1,139 @@
+// ---- tools/map/video: the tour (put in by make.py).
+// The map is used as a user would use it: the pointer glides to what is
+// clicked or pointed at, keys are pressed, as events posted into the
+// window. Over what the map draws come a pointer, a ring where it clicks,
+// frames round what is talked about, the keys pressed and the captions;
+// each picture goes to ffmpeg on a timeline that keeps up with the clock.
+// What happens when (video_script), the captions (caption_at) and the
+// frames (video_marks) are made by make.py from its script.
+
+// Seconds since the first frame, and in the frame before (-1 at first).
+unique VClock { start: f64, now: f32, prev: f32 }
+// The pointer: where it is, where it glides from and to, between when.
+unique Glide { x: f32, y: f32, fx: f32, fy: f32, tx: f32, ty: f32,
+               t0: f32, t1: f32, down: bool }
+unique Ripple { x: f32, y: f32, t: f32 }
+// The keys pressed, shown a moment.
+unique Badge { words: text, t: f32 }
+// What is being typed, a character at a time.
+unique Typing { words: text, at: i32, next: f32 }
+unique VideoDone: bool
+// What a target picks of the map's entities (a loop gives a unique, not
+// a var outside it).
+unique Pick { a: i32, b: i32, c: i32, f: f32, g: f32, h: f32 }
+
+fn crossed(prev: f32, now: f32, at: f32) -> bool { prev < at && now >= at }
+fn argb(alpha: i32, rgb: i32) -> i32 { (max(min(alpha, 255), 1) << 24) | rgb }
+fn smooth(u: f32) -> f32 {
+  let v = min(max(u, 0.0), 1.0)
+  v * v * (3.0 - 2.0 * v)
+}
+// How much of a frame shows at t, shown from a to b: in and out softly.
+fn fade(t: f32, a: f32, b: f32) -> f32 { smooth(min((t - a) / 0.25, (b - t) / 0.25)) }
+
+// The clock, the pointer gliding, the typing; every frame.
+system video_tick() {
+  if VClock.prev == 0.0 && VClock.now == 0.0 {
+    VClock.start = clock()
+    VClock.prev = -1.0
+    Glide.x = 760.0
+    Glide.y = 480.0
+    Glide.tx = 760.0
+    Glide.ty = 480.0
+  } else {
+    VClock.prev = VClock.now
+  }
+  VClock.now = (clock() - VClock.start) as f32
+  let now = VClock.now
+  if Glide.t1 > 0.0 && now <= Glide.t1 + 0.1 {
+    let u = smooth((now - Glide.t0) / max(Glide.t1 - Glide.t0, 0.001))
+    Glide.x = Glide.fx + (Glide.tx - Glide.fx) * u
+    Glide.y = Glide.fy + (Glide.ty - Glide.fy) * u
+    post_mouse(Glide.x, Glide.y, if Glide.down { 6 } else { 5 }, 0)
+  }
+  if Typing.at < len(Typing.words) && now >= Typing.next {
+    post_key(slice(Typing.words, Typing.at, Typing.at + 1), 0, false, 3)
+    Typing.at += 1
+    Typing.next = now + 0.11
+  }
+}
+
+// A frame round a place, its words in a tab above it; `part` of it shows.
+fn mark_colour() -> i32 { 0xff8a3d }
+proc mark_label(x: f32, y: f32, w: f32, h: f32, words: text, part: f32, width: f32) {
+  if part > 0.0 {
+    let a = (part * 255.0) as i32
+    let c = argb(a, mark_colour())
+    rect(x, y, w, h, argb((part * 30.0) as i32, mark_colour()))
+    rect(x - 2.0, y - 2.0, w + 4.0, 3.0, c)
+    rect(x - 2.0, y + h - 1.0, w + 4.0, 3.0, c)
+    rect(x - 2.0, y - 2.0, 3.0, h + 4.0, c)
+    rect(x + w - 1.0, y - 2.0, 3.0, h + 4.0, c)
+    if len(words) > 0 {
+      let size = 15.0
+      let tw = text_extent(words, 0, size, 0.0, 2)
+      let ty = if y > 30.0 { y - 26.0 } else { y + h + 4.0 }
+      let tx = min(x, width - tw - 24.0)
+      rounded(tx - 2.0, ty, tw + 20.0, 24.0, 6.0, 6.0, 6.0, 6.0, c)
+      window::write(words, tx + 8.0, ty + 4.0, tw + 4.0, 0, size, 0.0, 0.0, 2, 0, argb(a, 0x101418))
+    }
+  }
+}
+
+// The pointer: an arrow, white round black.
+proc arrow(x: f32, y: f32) {
+  let s = 1.25
+  quad(x, y - 1.5 * s, x, y + 20.0 * s, x + 5.0 * s, y + 15.5 * s, x + 14.5 * s, y + 14.0 * s, 0xffffff)
+  quad(x + 4.0 * s, y + 13.0 * s, x + 7.5 * s, y + 22.0 * s, x + 11.5 * s, y + 20.5 * s, x + 8.0 * s, y + 12.0 * s, 0xffffff)
+  quad(x + 1.4 * s, y + 2.0 * s, x + 1.4 * s, y + 16.8 * s, x + 5.0 * s, y + 13.2 * s, x + 11.0 * s, y + 12.6 * s, 0x000000)
+  quad(x + 4.6 * s, y + 13.0 * s, x + 8.2 * s, y + 20.2 * s, x + 9.9 * s, y + 19.4 * s, x + 6.6 * s, y + 12.2 * s, 0x000000)
+}
+
+// Over all that was drawn: the frames, the ring, the keys, the caption
+// and the pointer.
+system video_draw() {
+  let t = VClock.now
+  let width = Window.width as f32
+  let height = Window.height as f32
+  video_marks(t, width, height)
+  let since = t - Ripple.t
+  if Ripple.t > 0.0 && since < 0.45 {
+    let u = since / 0.45
+    circle(Ripple.x, Ripple.y, 6.0 + 20.0 * u, argb(((1.0 - u) * 150.0) as i32, 0xffc94d))
+  }
+  let size = 24.0
+  let bottom = height - 26.0
+  let words = caption_at(t)
+  var top_of = bottom
+  if len(words) > 0 {
+    let pad = 14.0
+    let most = min(980.0, width - 80.0)
+    let w = min(text_extent(words, 0, size, 0.0, 2), most - 2.0 * pad) + 2.0 * pad
+    let lines = text_lines(words, w - 2.0 * pad + 1.0, 0, size, 0.0, 0)
+    let h = lines as f32 * size * 1.3 + 2.0 * pad - size * 0.3
+    let x = (width - w) * 0.5
+    top_of = bottom - h
+    rounded(x, top_of, w, h, 10.0, 10.0, 10.0, 10.0, argb(228, 0x0b0e12))
+    window::write(words, x + pad, top_of + pad, w - 2.0 * pad + 1.0, 0, size, 0.0, size * 1.3, 0, 1, 0xf2f4f6)
+  }
+  if len(Badge.words) > 0 && t - Badge.t < 1.6 {
+    let part = fade(t, Badge.t, Badge.t + 1.6)
+    let bs = 22.0
+    let bw = text_extent(Badge.words, 0, bs, 0.0, 2) + 32.0
+    let bx = width - bw - 28.0
+    let by = top_of - 60.0
+    rounded(bx, by, bw, 42.0, 9.0, 9.0, 9.0, 9.0, argb((part * 235.0) as i32, 0xf2f4f6))
+    window::write(Badge.words, bx + 16.0, by + 10.0, bw, 0, bs, 0.0, 0.0, 2, 0, argb((part * 255.0) as i32, 0x101418))
+  }
+  arrow(Glide.x, Glide.y)
+}
+
+// The picture, to the video; the end, when the script is done.
+system video_capture() {
+  capture("screen.mp4", 30, VClock.now)
+  if VClock.now > total_seconds() && !VideoDone {
+    capture_end()
+    VideoDone = true
+  }
+}
+// ---- (end of tools/map/video's fixed part)

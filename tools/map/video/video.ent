@@ -1,0 +1,22 @@
+// The ent map tour's helpers (video.c): events posted into
+// the program's own window as if the user made them, a clock, and the
+// pictures drawn handed to ffmpeg. For tools/map/video only.
+import text
+// kind: 1 left down, 2 left up, 5 moved, 6 dragged (NSEventType); at
+// (x, y) in the window's points from its top left.
+extern proc post_mouse(x: f32, y: f32, kind: i32, clicks: i32)
+// phase: 1 down, 2 up, 3 both.
+extern proc post_key(chars: text, code: i32, command: bool, phase: i32)
+extern proc post_command(down: bool)
+// A file dropped at (x, y), as from Finder.
+extern proc post_drop(path: text, x: f32, y: f32)
+// The wheel turned so many lines (up: positive), where the pointer is.
+extern proc post_wheel(lines: f32)
+// The program's context menu in the video: what the script chose
+// (menu_answer_set, before the click that opens it), -1 where nothing.
+extern proc menu_answer_set(item: i32)
+extern proc video_menu(items: text) -> i32
+extern proc clock() -> f64
+extern proc capture(file: text, fps: i32, seconds: f32)
+extern proc capture_end()
+extern proc say(t: text)
