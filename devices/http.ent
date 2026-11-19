@@ -49,6 +49,21 @@ extern proc http_session(user_agent: text, cookies: bool, per_host: i32,
                          total: i32, http2: bool, verify_tls: bool,
                          ca_file: text, proxy: text) -> i64
 
+// A session's cookie jar (one kept with `cookies`), as curl's
+// cookies.txt has it (Netscape's): a cookie a line, its fields
+// tab-separated: domain (a "#HttpOnly_" before it where scripts may not
+// read it), whether its subdomains get it ("TRUE"/"FALSE"), path,
+// whether only over https, when it expires (seconds since 1970; 0: when
+// the program ends), name, value. Called while none of the session's
+// requests run (on a thread of its own too). None where it keeps none.
+extern proc http_cookies(session: i64) -> text
+// Puts cookies into a session's jar: each line one in the form above, or
+// a "Set-Cookie: ..." header as a server sends it, or "ALL" (all taken
+// out), "SESS" (those ending with the program taken out). Lines that
+// are none of these (or start with "#" but "#HttpOnly_") are passed by.
+// Gives how many lines it took; -1 where the session keeps no jar.
+extern proc http_add_cookies(session: i64, lines: text) -> i32
+
 // Puts a session on a thread of its own, before its first request: its
 // requests are then moved on there, while the program does other things,
 // and handed back to `http_poll` (the program sees no difference, but

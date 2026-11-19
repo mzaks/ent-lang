@@ -1,0 +1,3 @@
+# The sqlite device reads databases through SQLite (https://sqlite.org),
+# which macOS and most Linux systems carry.
+-lsqlite3

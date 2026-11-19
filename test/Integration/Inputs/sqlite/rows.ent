@@ -1,0 +1,15 @@
+import console
+import text
+import sqlite
+
+system go() {
+  let rows = sqlite_rows("db.sqlite", "SELECT host, name, value, n, b FROM c ORDER BY host")
+  put("{len(rows)} [{rows}]")
+  put("fine [{sqlite_failure()}]")
+  let none = sqlite_rows("db.sqlite", "SELECT nope FROM c")
+  put("{len(none)} [{sqlite_failure()}]")
+  let missing = sqlite_rows("no/such.sqlite", "SELECT 1")
+  put("missing {len(missing)} {len(sqlite_failure()) > 0}")
+}
+schedule t() { go() }
+main { t() }

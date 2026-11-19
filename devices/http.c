@@ -643,6 +643,74 @@ static bool handed_back(void) {
   return false;
 }
 
+// An easy handle that shares the session's jar (and nothing else is
+// asked of it): for its cookie list.
+static CURL *jar_handle(http_session *session) {
+  CURL *easy = curl_easy_init();
+  if (easy) {
+    curl_easy_setopt(easy, CURLOPT_SHARE, session->share);
+    curl_easy_setopt(easy, CURLOPT_COOKIEFILE, "");
+  }
+  return easy;
+}
+
+const ent_text *ent_http_http_cookies(int64_t number) {
+  if (number < 1 || number > session_count || !sessions[number - 1]->open ||
+      !sessions[number - 1]->cookies)
+    return 0;
+  CURL *easy = jar_handle(sessions[number - 1]);
+  if (!easy)
+    return 0;
+  struct curl_slist *list = NULL;
+  size_t length = 0;
+  if (curl_easy_getinfo(easy, CURLINFO_COOKIELIST, &list) == CURLE_OK)
+    for (struct curl_slist *at = list; at; at = at->next)
+      length += strlen(at->data) + 1;
+  ent_text *text = length ? ent_text_new((uint32_t)length) : 0;
+  size_t put = 0;
+  for (struct curl_slist *at = list; text && at; at = at->next) {
+    size_t n = strlen(at->data);
+    memcpy(text->bytes + put, at->data, n);
+    text->bytes[put + n] = '\n';
+    put += n + 1;
+  }
+  curl_slist_free_all(list);
+  curl_easy_cleanup(easy);
+  return text;
+}
+
+int32_t ent_http_http_add_cookies(int64_t number, const ent_text *lines) {
+  if (number < 1 || number > session_count || !sessions[number - 1]->open ||
+      !sessions[number - 1]->cookies)
+    return -1;
+  CURL *easy = jar_handle(sessions[number - 1]);
+  if (!easy)
+    return -1;
+  char *all = copied(lines);
+  int32_t taken = 0;
+  char *line = all;
+  while (line && *line) {
+    char *end = strchr(line, '\n');
+    if (end)
+      *end = 0;
+    size_t n = strlen(line);
+    if (n && line[n - 1] == '\r')
+      line[--n] = 0;
+    bool comment = line[0] == '#' && strncmp(line, "#HttpOnly_", 10) != 0;
+    bool netscape = strchr(line, '\t') != NULL;
+    bool header = strncasecmp(line, "Set-Cookie:", 11) == 0;
+    bool command = strcmp(line, "ALL") == 0 || strcmp(line, "SESS") == 0;
+    if (n && !comment && (netscape || header || command)) {
+      if (curl_easy_setopt(easy, CURLOPT_COOKIELIST, line) == CURLE_OK)
+        ++taken;
+    }
+    line = end ? end + 1 : NULL;
+  }
+  free(all);
+  curl_easy_cleanup(easy);
+  return taken;
+}
+
 bool ent_http_http_on_thread(int64_t number) {
   if (number < 1 || number > session_count || !sessions[number - 1]->open)
     return false;

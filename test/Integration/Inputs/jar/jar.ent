@@ -1,0 +1,19 @@
+import console
+import text
+import http
+
+system go() {
+  let s = http_session("t", true, 0, 0, false, true, "", "")
+  let plain = http_session("t", false, 0, 0, false, true, "", "")
+  let took = http_add_cookies(s, "# a comment\n.example.org\tTRUE\t/\tFALSE\t0\tsid\tabc\n#HttpOnly_api.example.org\tFALSE\t/v1\tTRUE\t4102444800\ttok\tx y\nSet-Cookie: lang=de; Domain=example.org; Path=/\nnot a cookie\n")
+  put("took {took}")
+  let jar = http_cookies(s)
+  put("{jar}")
+  let p1 = http_add_cookies(plain, "ALL")
+  let p2 = len(http_cookies(plain))
+  put("plain {p1} {p2}")
+  let out = http_add_cookies(s, "ALL")
+  put("cleared {out} {len(http_cookies(s))}")
+}
+schedule t() { go() }
+main { t() }

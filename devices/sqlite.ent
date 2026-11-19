@@ -1,0 +1,22 @@
+// SQLite databases read: a query's rows as text.
+//
+//   import sqlite
+//   let rows = sqlite_rows("places.sqlite", "SELECT url, title FROM moz_places")
+//   if len(sqlite_failure()) > 0 { put(sqlite_failure()) }
+//
+// The file is opened only to read (another program may write it
+// meanwhile; a database another program holds locked can be copied
+// first, with its "-wal" file, and the copy read).
+
+import text
+
+// The rows of `query` on the database file `file`: a row a line, its
+// values tab-separated, in the order the query gives them. A number as
+// SQLite writes it, a text or blob as its bytes, NULL as nothing; a tab,
+// a line's break and a backslash in a value as "\t", "\n" and "\\".
+// None where there are no rows, or the query failed (`sqlite_failure`
+// says why).
+extern proc sqlite_rows(file: text, query: text) -> text
+// Why the last `sqlite_rows` failed: SQLite's words; none where it did
+// not.
+extern proc sqlite_failure() -> text

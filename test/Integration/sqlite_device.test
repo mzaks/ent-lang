@@ -1,0 +1,12 @@
+// The sqlite device: a query's rows as text (a row a line, values
+// tab-separated; tab, break and backslash escaped; NULL as nothing; a blob
+// as its bytes), and why a query failed (sqlite_failure).
+// RUN: rm -rf %t && mkdir -p %t && %python %S/Inputs/sqlite/make.py %t/db.sqlite
+// RUN: cd %t && %ent run %S/Inputs/sqlite/rows.ent | FileCheck %s
+
+// CHECK:      53 [.a.org	x	1	10	
+// CHECK-NEXT: b.org	tab	a\tb\nc\\d	4102444800000	{{.*}}
+// CHECK-NEXT: ]
+// CHECK-NEXT: fine []
+// CHECK-NEXT: 0 [no such column: nope]
+// CHECK-NEXT: missing 0 true

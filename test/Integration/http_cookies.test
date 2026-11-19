@@ -1,0 +1,12 @@
+// A session's cookie jar read and written (http_cookies, http_add_cookies):
+// cookies.txt lines (a "#HttpOnly_" one too) and a Set-Cookie header put
+// in, comments and other lines passed by; read back as cookies.txt lines;
+// "ALL" empties it; a session without a jar has none. No network.
+// RUN: %ent run %S/Inputs/jar/jar.ent | FileCheck %s
+
+// CHECK: took 3
+// CHECK-DAG: .example.org	TRUE	/	FALSE	0	sid	abc
+// CHECK-DAG: #HttpOnly_api.example.org	FALSE	/v1	TRUE	4102444800	tok	x y
+// CHECK-DAG: .example.org	TRUE	/	FALSE	0	lang	de
+// CHECK: plain -1 0
+// CHECK: cleared 1 0
