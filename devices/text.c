@@ -910,6 +910,14 @@ ENT_TEXT_SAME_RESULT const ent_text *ent_text_date_text(double seconds,
   return text;
 }
 
+ENT_TEXT_SAME_RESULT const ent_text *ent_text_byte_text(int32_t value) {
+  if (value < 0 || value > 255)
+    return 0;
+  ent_text *made = ent_text_new(1);
+  made->bytes[0] = (char)value;
+  return made;
+}
+
 ENT_TEXT_SAME_RESULT const ent_text *ent_text_character(int32_t code) {
   if (code < 1 || code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF))
     return 0;

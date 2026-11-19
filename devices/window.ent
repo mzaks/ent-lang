@@ -162,6 +162,9 @@ extern proc menu_chosen() -> text
 // (none: where it was last). The call waits for it, and gives the folder
 // chosen, or none (cancelled; no panel on this system).
 extern proc choose_folder(title: text, start: text) -> text
+// The same panel for choosing a file (one, of any kind), opened in the
+// folder `start` (none: where it was last): the file chosen, or none.
+extern proc choose_file(title: text, start: text) -> text
 // The system's file browser opened where `path` is, with it selected
 // (Finder on a Mac, Explorer on Windows; on Linux the folder it is in, by
 // xdg-open). False where it could not be.

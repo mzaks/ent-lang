@@ -2616,22 +2616,26 @@ static char *ent_window_quoted(const char *t) {
 }
 #endif
 
-const ent_text *ent_window_choose_folder(const ent_text *title, const ent_text *start) {
+// The system's panel for a folder (`folder`) or a file: the path chosen,
+// or none.
+static const ent_text *ent_window_choose(const ent_text *title, const ent_text *start,
+                                         bool folder) {
   char *asked = ent_window_c_text(title), *from = ent_window_c_text(start);
   char chosen[4096] = "";
 #if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
   if (asked && from && IsWindowReady()) {
     void *pool = objc_autoreleasePoolPush();
     id panel = ent_window_send(ent_window_class("NSOpenPanel"), "openPanel");
-    ((void (*)(id, SEL, signed char))objc_msgSend)(panel, ent_window_sel("setCanChooseFiles:"), 0);
+    ((void (*)(id, SEL, signed char))objc_msgSend)(panel, ent_window_sel("setCanChooseFiles:"),
+                                                   !folder);
     ((void (*)(id, SEL, signed char))objc_msgSend)(
-        panel, ent_window_sel("setCanChooseDirectories:"), 1);
+        panel, ent_window_sel("setCanChooseDirectories:"), folder);
     ((void (*)(id, SEL, signed char))objc_msgSend)(
-        panel, ent_window_sel("setCanCreateDirectories:"), 1);
+        panel, ent_window_sel("setCanCreateDirectories:"), folder);
     ((void (*)(id, SEL, signed char))objc_msgSend)(
         panel, ent_window_sel("setAllowsMultipleSelection:"), 0);
     ent_window_with_text(panel, "setMessage:", asked);
-    ent_window_with_text(panel, "setPrompt:", "Open");
+    ent_window_with_text(panel, "setPrompt:", folder ? "Open" : "Choose");
     if (*from) {
       id url = ((id(*)(id, SEL, id, signed char))objc_msgSend)(
           ent_window_class("NSURL"), ent_window_sel("fileURLWithPath:isDirectory:"),
@@ -2658,10 +2662,11 @@ const ent_text *ent_window_choose_folder(const ent_text *title, const ent_text *
     if (command) {
       snprintf(command, room,
                "if command -v zenity >/dev/null 2>&1; then "
-               "zenity --file-selection --directory --title=%s --filename=%s/ 2>/dev/null; "
+               "zenity --file-selection %s --title=%s --filename=%s/ 2>/dev/null; "
                "elif command -v kdialog >/dev/null 2>&1; then "
-               "kdialog --getexistingdirectory %s --title %s 2>/dev/null; fi",
-               q_title, q_from, q_from, q_title);
+               "kdialog %s %s --title %s 2>/dev/null; fi",
+               folder ? "--directory" : "", q_title, q_from,
+               folder ? "--getexistingdirectory" : "--getopenfilename", q_from, q_title);
       FILE *out = popen(command, "r");
       if (out) {
         if (fgets(chosen, sizeof chosen, out)) {
@@ -2680,6 +2685,12 @@ const ent_text *ent_window_choose_folder(const ent_text *title, const ent_text *
   free(asked);
   free(from);
   return ent_window_ent_text(chosen);
+}
+const ent_text *ent_window_choose_folder(const ent_text *title, const ent_text *start) {
+  return ent_window_choose(title, start, true);
+}
+const ent_text *ent_window_choose_file(const ent_text *title, const ent_text *start) {
+  return ent_window_choose(title, start, false);
 }
 
 // The system's file browser opened where `path` is (a file or a

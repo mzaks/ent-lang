@@ -230,6 +230,10 @@ const ent_text *ent_window_choose_folder(const ent_text *title, const ent_text *
   (void)title, (void)start;
   return none_text();
 }
+const ent_text *ent_window_choose_file(const ent_text *title, const ent_text *start) {
+  (void)title, (void)start;
+  return none_text();
+}
 int32_t ent_window_alert(const ent_text *message, const ent_text *detail,
                          const ent_text *buttons) {
   (void)message, (void)detail, (void)buttons;

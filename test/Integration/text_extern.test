@@ -27,6 +27,7 @@
 // STATIC-NOT: 'slice'
 // STATIC-NOT: 'lower'
 // STATIC-NOT: 'character'
+// STATIC-NOT: 'byte_text'
 // STATIC:     text_extern.ent:17:11: warning: extern fn 'drift' is no fn
 // STATIC-NOT: warning
 
@@ -37,6 +38,7 @@
 // CHECK-NEXT: slice: 'bc' 'ab' 'ef' '' '' same: true
 // CHECK-NEXT: lower: 'mixed 123 {{.}}b' 'plain' ''
 // CHECK-NEXT: character: 'Aé€😀' 10 none: 0 0 0
+// CHECK-NEXT: byte_text: 'é' 3 none: 0 0
 // CHECK-NEXT: shout: 'HEY!' nothing: '' (0)
 // CHECK-NEXT: drift: hey
 // CHECK-NEXT: said: hello 3 times
@@ -51,4 +53,4 @@
 // HEADER: const ent_text * ent_shout(const ent_text * arg0);
 // HEADER: const ent_text * ent_greeting(int32_t arg0);
 
-// RANKS: text_extern.ent:56:10: error: on many ranks a proc that rank 0 calls cannot give a text back yet
+// RANKS: text_extern.ent:58:10: error: on many ranks a proc that rank 0 calls cannot give a text back yet

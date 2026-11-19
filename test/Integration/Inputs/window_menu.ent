@@ -14,7 +14,7 @@ system go() {
   put("menu {chosen} shapes {pointer_text()} {pointer_hand()} {pointer_resize_across()}")
   let shown = menu_bar("File", "New\tn\nOpen Recent\n  /tmp\n  -\n  Clear Menu\n-\n~Save\ts")
   window_title("x")
-  let folder = choose_folder("Open", "/tmp")
+  let folder = choose_folder("Open", "/tmp") + choose_file("Choose", "/tmp")
   let pressed = alert("Save?", "", "Save\nCancel")
   put("bar {shown} chosen [{menu_chosen()}] folder [{folder}] alert {pressed}")
   let opened = open_url("")
