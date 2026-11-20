@@ -48,6 +48,10 @@ for demo in "${demos[@]}"; do
     { cat "$out/$name.log"; exit 1; }
   rm "$out/$name.log"
 done
+# (The dish playing Pong: a page of its own over a library built with
+# --shared --web, not a window.)
+echo "dish-pong: examples/cl_bridge/web"
+examples/cl_bridge/web/build.sh "$out/dish-pong" >/dev/null
 cp "$here/index.html" "$out/index.html"
 mkdir -p "$out/shots"
 cp "$here"/shots/*.webp "$out/shots/"
