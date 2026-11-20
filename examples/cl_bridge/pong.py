@@ -109,6 +109,18 @@ return some paths forever).
 The loop runs at `TICKS` a second; a stim is a single pulse (the SDK's
 1 uA, 160 us a phase: 1 in the dish's units), scheduled here, so a run
 replays the same.
+
+Environment (all off by default):
+    BALL_EGO=1        the place is the ball's height less the paddle's,
+                      eighths of -1 to 1 (DishBrain's own code is
+                      egocentric, by arXiv 2405.16946's account)
+    PADDLE_SENSE=Hz   `columns` only: the paddle's place, eighths of the
+                      court, at a steady rate on columns 2 and 5
+                      (alternating: 2 13 21 26 34 45 53 58)
+    PONG_PROBE=n      after the game, each sensory electrode stimulated
+                      alone n times, 0.5 s apart, no ball, no reward; the
+                      output's `probe`: the up and down spikes in the
+                      100 ms after, a stim, by place from top to bottom
 """
 
 from __future__ import annotations
@@ -139,7 +151,17 @@ SURPRISE_WINDOW = 0.2        # s: `surprise_onset`'s window after a hit or miss
 SURPRISE_PULSE = 4.0         # its pulse: this times the window's mean signal less its running
                              # mean (RPE_RATE): a hit's less a miss's about 0.7, as `reward`'s 1
 
+# 1: the ball's place relative to the paddle (DishBrain's egocentric code: eighths of
+# -1 to 1 of the ball's height less the paddle's), 0: its height on the court
+BALL_EGO = os.environ.get("BALL_EGO", "0") == "1"
+# After the game: each sensory electrode stimulated alone this many times, 0.5 s
+# apart, no ball, no reward; the up and down spikes in the 100 ms after each
+PROBE = int(os.environ.get("PONG_PROBE", "0"))
+PADDLE_SENSE = float(os.environ.get("PADDLE_SENSE", "0"))   # Hz: the paddle's place, 0 none
 SENSORY = [26, 27, 28, 29, 37, 36, 35, 34]
+# `columns`: where the paddle is felt, eighths from top to bottom, columns 2 and 5
+# alternating (each half of the court two beside each motor region)
+PADDLE_PLACES = [r * 8 + c for r, c in zip(range(8), (2, 5, 5, 2, 2, 5, 5, 2))]
 UP = list(range(0, 24))
 DOWN = list(range(40, 64))
 REWARD, PUNISH = 31, 32      # free electrodes of rows 3 and 4 (`reward`)
@@ -287,6 +309,10 @@ class Pong:
         self.paddle = 0.5               # its centre
         self.up = self.down = 0.0       # the motor regions' averages
         self.next_sense = 0.0           # when the next sensory stim is due
+        self.next_feel = 0.0            # PADDLE_SENSE: when the paddle's next stim is due
+        if PADDLE_SENSE and layout != "columns":
+            raise ValueError("PADDLE_SENSE needs the columns layout")
+        self.paddle_places = PADDLE_PLACES[::-1] if flip else PADDLE_PLACES
         self.feedback: list[tuple[float, list[int]]] = []   # (when, channels)
         self.paused_until = 0.0
         self.rallies: list[tuple[float, int]] = []          # (start, hits)
@@ -422,10 +448,17 @@ class Pong:
                 return out
         # The ball's place and distance, as the sensory stims.
         if self.condition != "rest" and self.t >= self.next_sense:
-            row = min(int(self.y * 8), 7)
+            if BALL_EGO:
+                row = min(max(int((self.y - self.paddle + 1) * 4), 0), 7)
+            else:
+                row = min(int(self.y * 8), 7)
             out.append(self.sensory[row])
             hz = 4 + 36 * (1 - min(max(self.x, 0), 1))
             self.next_sense = self.t + 1 / hz
+        # The paddle's place, at a steady rate (PADDLE_SENSE).
+        if PADDLE_SENSE and self.condition != "rest" and self.t >= self.next_feel:
+            out.append(self.paddle_places[min(int(self.paddle * 8), 7)])
+            self.next_feel = self.t + 1 / PADDLE_SENSE
         self.t += dt
         return out
 
@@ -464,8 +497,28 @@ def play(minutes: float, seed: int, condition: str, flip: bool = False,
         window = [0.0, 0]    # `surprise_onset`: the signal summed over the window, its ticks
         previous = [0.0]     # `surprise_onset_previous`: the pulse before
         expected = [0.0]     # `surprise_onset`: the window's mean expected
+    game_ticks = int(round(minutes * 60 * TICKS))
+    probe_order = [i for i in range(8) for _ in range(PROBE)]
+    random.Random(seed * 31 + 5).shuffle(probe_order)
+    probe = [[0, 0] for _ in range(8)]
     with cl.open() as neurons:
-        for k, tick in enumerate(neurons.loop(TICKS, stop_after_seconds=minutes * 60)):
+        for k, tick in enumerate(neurons.loop(TICKS, stop_after_seconds=minutes * 60
+                                              + len(probe_order) * 0.5)):
+            if k >= game_ticks:
+                # The probe: a stim at each trial's start, its answer over 20 ticks.
+                trial, j = divmod(k - game_ticks, TICKS // 2)
+                if trial >= len(probe_order):
+                    continue
+                if 1 <= j <= 20:
+                    row = probe_order[trial]
+                    for spike in tick.analysis.spikes:
+                        if spike.channel in up_set:
+                            probe[row][0] += 1
+                        elif spike.channel in down_set:
+                            probe[row][1] += 1
+                if j == 0:
+                    neurons.stim(game.sensory[probe_order[trial]], 1.0)
+                continue
             up = down = 0
             if surprise:
                 counts[:] = 0.0
@@ -525,6 +578,7 @@ def play(minutes: float, seed: int, condition: str, flip: bool = False,
             "paddle_top": game.at_top / game.ticks, "paddle_bottom": game.at_bottom / game.ticks,
             "up_hz": game.up_spikes / (minutes * 60), "down_hz": game.down_spikes / (minutes * 60),
             "rallies": game.rallies, "layout": layout,
+            **({"probe": [[u / PROBE, d / PROBE] for u, d in probe]} if PROBE else {}),
             "moves_towards": game.moves_towards / max(1, game.moves_judged),
             **({"surprise_by_phase": {p: game.phase_sum[p] / max(1, game.phase_n[p])
                                       for p in game.phase_sum},

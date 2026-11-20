@@ -1168,6 +1168,56 @@ error. The timing here is the game's, not the dish's: the window opens
 at the hit or miss the host saw, which no culture's own surprise would
 know.
 
+**What the reward for each move teaches, and what the dish is told.**
+The dish feels the ball's height on the court, never where its paddle
+is; which way is towards the ball depends on both. An upper bound with
+no dish (a policy that knows only the ball's place, the best map from
+its 8 places to up, down or still that a search found; a scratch
+script, not kept): 1.67 hits a rally, 5.0
+with the ball's distance as well (4 bins); knowing the paddle's place
+too, every ball is hit. So pong.py has two inputs to try, off by
+default: `PADDLE_SENSE=10` (the paddle's place, eighths of the court, at
+10 Hz on columns 2 and 5, alternating as the ball's are) and
+`BALL_EGO=1` (the ball's height less the paddle's on the same 8
+electrodes). The second is what DishBrain itself seems to have done: a
+later paper by the same group (arXiv 2405.16946) describes the
+electrodes as "arranged topographically from an egocentric
+representation for the culture" and the stims as set "based on the
+relative position of the ball"; not checked in Kagan et al. 2022
+itself. And `PONG_PROBE=15`: after the game, each ball electrode
+stimulated alone 15 times, 0.5 s apart, no ball and no reward, and the
+up and down spikes in the 100 ms after counted.
+
+`learn_study.py 20 8 0,1 out.json columns moves tau_elig=200 axon=0.11
+hard=1`, as is and flipped, 16 pairs, minutes 15 to 20; map: the probe's
+up less down answer for the ball's top four places, less that for the
+bottom four (spikes; >0 is "ball above, go up"):
+
+| ball told as | hits less gain 0 (as is / flipped) | moves towards | map less gain 0 |
+|---|---|---|---|
+| height (as before) | +0.30 / +0.48 | 0.58 / 0.60 | +9.6 ± 1.5 (15 of 16) |
+| height, `PADDLE_SENSE=10` | +0.13 / +0.12 | 0.54 / 0.55 | |
+| `BALL_EGO=1` | +0.14 / +0.16 | 0.54 / 0.55 | +2.6 ± 0.9 (11 of 16) |
+
+The bias (the mean up less down answer over the 8 places) does not
+change with the reward (−0.1 ± 0.8 with the height, −0.4 ± 0.8
+relative). So what the reward for each move teaches is a map from the
+ball's place to a way, not a habit such as a wall to wait at: the up
+less down answers by place, top to bottom, go from the wiring's +5.0
+−5.1 −2.4 +9.2 +8.7 −3.4 −4.5 +4.5 at gain 0 to +15.7 +6.8 +1.8 +3.7
++3.2 −6.1 −7.7 −1.2 at gain 1, and across the pairs the map gained goes
+with the hits gained (r = +0.44). Neither input helps. The paddle's
+electrodes sit beside the motor regions and move it themselves: the
+paddle spends 14% of the time at the top wall against 29%, and the map
+the dish learnt with the height alone does not appear. The relative
+code learns a map a quarter as big; a guess, not tested: it moves with
+the paddle, so the ball is mostly in its two middle places, where which
+way is towards turns on a few hundredths. The map's edge is about 10 of
+the some 33 spikes a stim draws, while the motor regions fire about 118
+Hz of their own: over a judged move (0.1 s) the dish's own activity
+outweighs what the ball steers, which fits the moves towards the ball
+staying under 0.6.
+
 ```sh
 build/cl_bridge/venv/bin/python examples/cl_bridge/conditioning.py \
     bias|map|rpe [minutes [gains [seeds [name=value ...]]]]
