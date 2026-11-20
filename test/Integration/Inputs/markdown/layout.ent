@@ -1,0 +1,50 @@
+// lib/markdown_window.ent's setting of a document in lines, measured as
+// if each byte were 8 wide (a space 4, in every font): where blocks
+// start, how many lines, a table's columns, at two widths.
+import console
+import text
+import files
+import markdown
+import markdown_window
+
+proc eights(t: text, font: i32, size: f32) -> f32 {
+  var n = 0
+  for i in 0..len(t) { if t[i] != ' ' { n += 1 } }
+  8.0 * (n as f32) + if find(t, " ", 0) >= 0 { 4.0 } else { 0.0 }
+}
+
+system go() {
+  let doc = read_text(environment_variable("MD_FILE"))
+  md_parse(doc, MdBlocks, MdRuns)
+  md_measure(doc, "", MdBlocks, MdRuns, MdWords, 10.0, 1, 2, 3, 4, eights)
+  for k in 0..2 {
+    let width = if k == 0 { 2000.0 } else { 300.0 }
+    let high = md_lay(MdBlocks, MdWords, MdPieces, MdPlaced, MdTops, width, 10.0, 1.0)
+    put("width {width}: {len(MdPieces)} words set, {high} high")
+    for b in 0..len(MdBlocks) {
+      if MdBlocks[b].kind == MD_HEADING || MdBlocks[b].kind == MD_CODE || MdBlocks[b].kind == MD_ROW {
+        put("  block {b} kind {MdBlocks[b].kind} at {MdTops[b].y}")
+      }
+    }
+    // The lines of the long paragraph: its words' rows.
+    var lines = 0
+    var y = -1.0
+    for p in 0..len(MdPieces) {
+      if MdWords[MdPieces[p].word].block == 1 && MdPieces[p].y != y {
+        lines += 1
+        y = MdPieces[p].y
+      }
+    }
+    put("  paragraph lines {lines}")
+    // The table's cells: where each starts.
+    for p in 0..len(MdPieces) {
+      let w = MdPieces[p].word
+      if MdBlocks[MdWords[w].block].kind == MD_ROW && (p == 0 || MdWords[MdPieces[p - 1].word].cell != MdWords[w].cell || MdWords[MdPieces[p - 1].word].block != MdWords[w].block) {
+        let word = slice(doc, MdWords[w].start, MdWords[w].end)
+        put("  row {MdBlocks[MdWords[w].block].level} cell {MdWords[w].cell} at {MdPieces[p].x}, {MdPieces[p].y}: {word}")
+      }
+    }
+  }
+}
+schedule t() { go() }
+main { t() }

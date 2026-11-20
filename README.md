@@ -370,7 +370,12 @@ come with the compiler, in `devices/`, and two more that need
   colours, each on its way to where it now is) and its side bar with a
   container that scrolls (pictures, boxes that float, a list of a hundred
   texts, a bar that is dragged):
-  `tools/ent run examples/clay/video_demo.ent`; `examples/swarm/swarm.ent` is a shoot-'em-up on a field bigger than
+  `tools/ent run examples/clay/video_demo.ent`; `examples/markdown_view.ent`
+  shows a Markdown file as a page (`lib/markdown.ent` reads it into blocks
+  and runs, `lib/markdown_window.ent` sets them in lines as wide as the
+  window: headings, lists, quotes, code, tables, pictures, links that go
+  to their headings, search): `tools/ent run examples/markdown_view.ent --
+  README.md`; `examples/swarm/swarm.ent` is a shoot-'em-up on a field bigger than
   the window with foes, shots and sparks in their hundreds of thousands
   (its B key fills the field to what it holds; `bench/swarm/run.py`
   plays it by itself and says how long a frame takes), all of them drawn

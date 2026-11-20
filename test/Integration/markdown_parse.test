@@ -1,0 +1,94 @@
+// lib/markdown.ent's reading of a document: its blocks (headings,
+// paragraphs, items nested, quotes, fenced code, tables, rules, a picture)
+// and their runs (bold, italic, code, links and where they go, the signs
+// of keys apart, \ escapes left out, snake_case and 2 * 3 as they are),
+// and the headings links go to (a second of one name: -1).
+// RUN: env MD_FILE=%S/Inputs/markdown/sample.md %ent run %S/Inputs/markdown/parse.ent 2>/dev/null > %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK: 0 heading level=1 depth=0 number=0 cells=0 aligns=0
+// CHECK-NEXT:   [0]  'Title ' -> ''
+// CHECK-NEXT:   [0] i 'one' -> ''
+// CHECK-NEXT: 1 paragraph level=0 depth=0 number=0 cells=0 aligns=0
+// CHECK-NEXT:   [0]  'A paragraph with ' -> ''
+// CHECK-NEXT:   [0] b 'bold' -> ''
+// CHECK-NEXT:   [0]  ', ' -> ''
+// CHECK-NEXT:   [0] i 'italic' -> ''
+// CHECK-NEXT:   [0]  ', ' -> ''
+// CHECK-NEXT:   [0] c 'code | pipe' -> ''
+// CHECK-NEXT:   [0]  ', a ' -> ''
+// CHECK-NEXT:   [0] l 'link' -> '#second-part'
+// CHECK-NEXT:   [0]  '
+// CHECK-NEXT: ' -> ''
+// CHECK-NEXT:   [0]  'and snake_case_name, 2 * 3, and ' -> ''
+// CHECK-NEXT:   [0]  '*not italic' -> ''
+// CHECK-NEXT:   [0]  '*. Keys: ' -> ''
+// CHECK-NEXT:   [0] s '⌘' -> ''
+// CHECK-NEXT:   [0] s '⇧' -> ''
+// CHECK-NEXT:   [0]  'N and ' -> ''
+// CHECK-NEXT:   [0] s '✓' -> ''
+// CHECK-NEXT:   [0]  '.' -> ''
+// CHECK-NEXT: 2 heading level=2 depth=0 number=0 cells=0 aligns=0
+// CHECK-NEXT:   [0]  'Second part' -> ''
+// CHECK-NEXT: 3 item level=0 depth=0 number=0 cells=0 aligns=0
+// CHECK-NEXT:   [0]  'one' -> ''
+// CHECK-NEXT: 4 item level=0 depth=0 number=0 cells=0 aligns=0
+// CHECK-NEXT:   [0]  'two ' -> ''
+// CHECK-NEXT:   [0] b 'bold' -> ''
+// CHECK-NEXT:   [0] b '
+// CHECK-NEXT: ' -> ''
+// CHECK-NEXT:   [0] b 'across' -> ''
+// CHECK-NEXT:   [0]  ' lines' -> ''
+// CHECK-NEXT: 5 item level=0 depth=1 number=0 cells=0 aligns=0
+// CHECK-NEXT:   [0]  'nested, see ' -> ''
+// CHECK-NEXT:   [0] l 'https://example.org/x' -> 'https://example.org/x'
+// CHECK-NEXT:   [0]  '
+// CHECK-NEXT: ' -> ''
+// CHECK-NEXT:   [0]  'more of nested' -> ''
+// CHECK-NEXT: 6 item level=0 depth=0 number=0 cells=0 aligns=0
+// CHECK-NEXT:   [0]  'three' -> ''
+// CHECK-NEXT: 7 item level=0 depth=0 number=1 cells=0 aligns=0
+// CHECK-NEXT:   [0]  'first' -> ''
+// CHECK-NEXT: 8 item level=0 depth=0 number=2 cells=0 aligns=0
+// CHECK-NEXT:   [0]  'second' -> ''
+// CHECK-NEXT: 9 paragraph level=0 depth=1 number=0 cells=0 aligns=0
+// CHECK-NEXT:   [0]  'Inside the second.' -> ''
+// CHECK-NEXT: 10 paragraph level=0 depth=0 number=0 cells=0 aligns=0
+// CHECK-NEXT:   [0]  'Not in the list.' -> ''
+// CHECK-NEXT: 11 quote level=0 depth=0 number=0 cells=0 aligns=0
+// CHECK-NEXT:   [0]  'quoted ' -> ''
+// CHECK-NEXT:   [0] i 'line' -> ''
+// CHECK-NEXT:   [0]  '
+// CHECK-NEXT: ' -> ''
+// CHECK-NEXT:   [0]  'and more' -> ''
+// CHECK-NEXT: 12 code level=0 depth=0 number=0 cells=0 aligns=0
+// CHECK-NEXT:   [0] c 'curl -X GET 'x' | jq '.a * 2'' -> ''
+// CHECK-NEXT:   [0] c '' -> ''
+// CHECK-NEXT:   [0] c 'done' -> ''
+// CHECK-NEXT: 13 row level=0 depth=0 number=1 cells=2 aligns=4
+// CHECK-NEXT:   [0]  'Keys' -> ''
+// CHECK-NEXT:   [1]  'Does' -> ''
+// CHECK-NEXT: 14 row level=1 depth=0 number=1 cells=2 aligns=4
+// CHECK-NEXT:   [0] s '⌘' -> ''
+// CHECK-NEXT:   [0]  'S' -> ''
+// CHECK-NEXT:   [1]  'save ' -> ''
+// CHECK-NEXT:   [1]  '| keep' -> ''
+// CHECK-NEXT: 15 row level=2 depth=0 number=1 cells=2 aligns=4
+// CHECK-NEXT:   [0] c 'a|b' -> ''
+// CHECK-NEXT:   [1] l 'go' -> '#title-one'
+// CHECK-NEXT: 16 rule level=0 depth=0 number=0 cells=0 aligns=0
+// CHECK-NEXT: 17 paragraph level=0 depth=0 number=0 cells=0 aligns=0
+// CHECK-NEXT:   [0] p 'The window' -> 'docs/images/tour.png'
+// CHECK-NEXT: 18 heading level=2 depth=0 number=0 cells=0 aligns=0
+// CHECK-NEXT:   [0]  'Second part' -> ''
+// CHECK-NEXT: 19 paragraph level=0 depth=0 number=0 cells=0 aligns=0
+// CHECK-NEXT:   [0]  'Code ' -> ''
+// CHECK-NEXT:   [0] c 'across' -> ''
+// CHECK-NEXT:   [0] c '
+// CHECK-NEXT: ' -> ''
+// CHECK-NEXT:   [0] c 'two lines' -> ''
+// CHECK-NEXT:   [0]  ' and ' -> ''
+// CHECK-NEXT:   [0] b 'on' -> ''
+// CHECK-NEXT:   [0]  '.' -> ''
+// CHECK-NEXT: anchors 2 18 0 -1
+// CHECK-NEXT: slug run-load--replay-v2

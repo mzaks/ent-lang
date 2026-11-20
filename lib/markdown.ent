@@ -1,0 +1,632 @@
+// Markdown read into blocks and runs: what a document says, as pieces of
+// its own text, so nothing of it is copied. (lib/markdown_window.ent sets
+// them in lines and draws them.)
+//
+//   import markdown
+//   md_parse(doc, MdBlocks, MdRuns)
+//   for each block: its kind, how deep in lists it is; its runs: the
+//   bytes of `doc` they are, bold, italic, code, a link (and to where)
+//
+// What is read: headings (# to ######), paragraphs, lists (- * + and
+// 1. 1), nested by indenting), quotes (>), code fenced by ``` or ~~~,
+// rules (--- *** ___), tables (GitHub's: a row of | cells, then | --- |
+// under its first, :--- :---: ---: to align), and in the text **bold**,
+// *italic* (and with _), `code`, [links](to), ![pictures](from), <http..>
+// and \ before a sign that would mean something. Not: HTML (as text),
+// headings underlined, code by indenting alone, footnotes, references.
+//
+// The signs of keys and arrows (⌘ ⇧ ⌥ ↩ ⌫ ← → and such, and ✓) are runs
+// of their own (`MD_SYMBOL`), so that what draws them can use a font
+// that has them.
+import text
+
+// What a block is.
+const MD_PARAGRAPH = 0
+const MD_HEADING = 1
+const MD_ITEM = 2
+const MD_QUOTE = 3
+const MD_CODE = 4
+const MD_RULE = 5
+const MD_ROW = 6
+
+// What a run is: bits.
+const MD_BOLD = 1
+const MD_ITALIC = 2
+const MD_CODE_SPAN = 4
+const MD_LINK = 8
+const MD_IMAGE = 16
+const MD_SYMBOL = 32
+
+// A block: the bytes it stands on; `level`: a heading's (1 to 6), a
+// table row's number in its table (0 its head); `depth`: how deep in
+// lists (an item at 0 is not in one, the text inside it at 1); `number`:
+// an item's in its list (0: one with a bullet), a row's table (from 1);
+// `cells`: a row's, and how each is aligned, two bits each from the
+// lowest (0 left, 1 middle, 2 right).
+buffer MdBlocks { kind: i32, start: i32, end: i32, level: i32, depth: i32,
+                  number: i32, cells: i32, aligns: i32 } capacity 1048576
+// A run: bytes of a block alike (in a row, of cell `cell`), and the
+// bytes of where a link goes or a picture comes from (none: 0, 0).
+buffer MdRuns { block: i32, start: i32, end: i32, style: i32, cell: i32,
+                link_start: i32, link_end: i32 } capacity 4194304
+
+fn md_line_end(t: text, from: i32) -> i32 {
+  let at = find(t, "\n", from)
+  if at < 0 { len(t) } else { at }
+}
+fn md_byte(t: text, i: i32) -> i32 { (t[i] as i32) & 255 }
+fn md_space(c: i32) -> bool { c == 32 || c == 9 || c == 13 || c == 10 }
+fn md_alnum(c: i32) -> bool {
+  (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c >= 128
+}
+fn md_punct(c: i32) -> bool {
+  (c >= 33 && c <= 47) || (c >= 58 && c <= 64) || (c >= 91 && c <= 96) || (c >= 123 && c <= 126)
+}
+// How far in a line's text starts: spaces, a tab to the next of four.
+fn md_indent(t: text, from: i32, to: i32) -> i32 {
+  var col = 0
+  var i = from
+  while i < to && (t[i] == ' ' || t[i] == '\t') {
+    if t[i] == '\t' { col = col + 4 - col % 4 } else { col += 1 }
+    i += 1
+  }
+  col
+}
+fn md_skip_spaces(t: text, from: i32, to: i32) -> i32 {
+  var i = from
+  while i < to && (t[i] == ' ' || t[i] == '\t') { i += 1 }
+  i
+}
+// The end, less the spaces (and a \r) before it.
+fn md_trim_end(t: text, from: i32, to: i32) -> i32 {
+  var e = to
+  while e > from && md_space(md_byte(t, e - 1)) { e -= 1 }
+  e
+}
+fn md_blank(t: text, from: i32, to: i32) -> bool { md_skip_spaces(t, from, md_trim_end(t, from, to)) >= md_trim_end(t, from, to) }
+
+// A heading's level where the line is one (0 where not).
+fn md_heading_level(t: text, at: i32, to: i32) -> i32 {
+  var n = 0
+  while at + n < to && t[at + n] == '#' { n += 1 }
+  if n >= 1 && n <= 6 && (at + n == to || t[at + n] == ' ' || t[at + n] == '\t') { n } else { 0 }
+}
+// A rule: three or more of one of - * _, spaces between, nothing else.
+fn md_is_rule(t: text, at: i32, to: i32) -> bool {
+  let c = if at < to { t[at] } else { ' ' }
+  var n = 0
+  var other = false
+  for i in at..to {
+    if t[i] == c { n += 1 } else if t[i] != ' ' && t[i] != '\t' && t[i] != '\r' { other = true }
+  }
+  (c == '-' || c == '*' || c == '_') && n >= 3 && !other
+}
+// A fence's length (``` or ~~~, three or more; 0 where it is none).
+fn md_fence(t: text, at: i32, to: i32) -> i32 {
+  let c = if at < to { t[at] } else { ' ' }
+  var n = 0
+  while at + n < to && t[at + n] == c { n += 1 }
+  if (c == '`' || c == '~') && n >= 3 { n } else { 0 }
+}
+fn md_gap(at_end: bool) -> i32 { if at_end { 1 } else { 2 } }
+// A list item's marker: how long it is with the space after it (0 where
+// the line is no item), and its number (0: a bullet).
+fn md_marker(t: text, at: i32, to: i32) -> (i32, i32) {
+  let c = if at < to { t[at] } else { ' ' }
+  var digits = 0
+  while at + digits < to && digits < 10 && t[at + digits] >= '0' && t[at + digits] <= '9' { digits += 1 }
+  let after = at + digits
+  if (c == '-' || c == '*' || c == '+') && (at + 1 == to || t[at + 1] == ' ' || t[at + 1] == '\t') {
+    (md_gap(at + 1 == to), 0)
+  } else if digits >= 1 && digits <= 9 && after < to && (t[after] == '.' || t[after] == ')')
+            && (after + 1 == to || t[after + 1] == ' ') {
+    (digits + md_gap(after + 1 == to), number(slice(t, at, after)) as i32)
+  } else { (0, 0) }
+}
+// A table's line under its head: | --- | :---: |, at least one -.
+fn md_is_table_rule(t: text, at: i32, to: i32) -> bool {
+  var dash = false
+  var bar = false
+  var other = false
+  for i in at..to {
+    let c = t[i]
+    if c == '-' { dash = true } else if c == '|' { bar = true }
+    else if c != ':' && c != ' ' && c != '\t' && c != '\r' { other = true }
+  }
+  dash && bar && !other
+}
+// Where a row's cells start: its bytes less a | at the start and end.
+fn md_row_from(t: text, at: i32, to: i32) -> i32 {
+  let s = md_skip_spaces(t, at, to)
+  if s < to && t[s] == '|' { s + 1 } else { s }
+}
+fn md_row_to(t: text, at: i32, to: i32) -> i32 {
+  let e = md_trim_end(t, at, to)
+  if e > at && t[e - 1] == '|' && (e - 2 < at || t[e - 2] != '\\') { e - 1 } else { e }
+}
+// The next | that ends a cell (not one after \, nor one in `code`), or
+// `to`.
+fn md_cell_end(t: text, from: i32, to: i32) -> i32 {
+  var i = from
+  var found = -1
+  var ticks = false
+  while i < to && found < 0 {
+    if t[i] == '\\' { i += 2 }
+    else {
+      if t[i] == '`' { ticks = !ticks }
+      if t[i] == '|' && !ticks { found = i }
+      i += 1
+    }
+  }
+  if found < 0 { to } else { found }
+}
+fn md_cell_count(t: text, at: i32, to: i32) -> i32 {
+  let a = md_row_from(t, at, to)
+  let b = md_row_to(t, at, to)
+  var n = 0
+  var i = a
+  while i <= b {
+    n += 1
+    i = md_cell_end(t, i, b) + 1
+  }
+  n
+}
+// How a table's cells are aligned, from its rule: two bits each.
+fn md_aligns(t: text, at: i32, to: i32) -> i32 {
+  let a = md_row_from(t, at, to)
+  let b = md_row_to(t, at, to)
+  var bits = 0
+  var k = 0
+  var i = a
+  while i <= b && k < 16 {
+    let e = md_cell_end(t, i, b)
+    let s = md_skip_spaces(t, i, e)
+    let z = md_trim_end(t, s, e)
+    let left = s < z && t[s] == ':'
+    let right = z > s && t[z - 1] == ':'
+    let how = if left && right { 1 } else if right { 2 } else { 0 }
+    bits = bits | (how << (2 * k))
+    k += 1
+    i = e + 1
+  }
+  bits
+}
+
+// Where the paragraph a line is in ends: at the next line left empty.
+fn md_para_end(t: text, at: i32) -> i32 {
+  var i = at
+  var found = -1
+  while i < len(t) && found < 0 {
+    let e = md_line_end(t, i)
+    if md_blank(t, i, e) { found = i } else { i = e + 1 }
+  }
+  if found < 0 { len(t) } else { found }
+}
+
+// The lists open, as a stack of columns where their items' text starts:
+// eight of them, a byte each (0: none), in an i64.
+fn md_level_col(open: i64, d: i32) -> i32 { ((open >> (8 * d)) & 255) as i32 }
+fn md_levels(open: i64) -> i32 {
+  var n = 0
+  while n < 8 && md_level_col(open, n) > 0 { n += 1 }
+  n
+}
+fn md_levels_kept(open: i64, n: i32) -> i64 {
+  if n <= 0 { 0 } else if n >= 8 { open } else { open & ((1 << (8 * n)) - 1) }
+}
+// How many of the lists open a line indented so far is inside.
+fn md_inside(open: i64, indent: i32) -> i32 {
+  var n = 0
+  while n < md_levels(open) && md_level_col(open, n) <= indent + 1 { n += 1 }
+  n
+}
+
+// A sign that is drawn in a font of signs: arrows (U+2190 to U+21FF),
+// those of the keys (U+2300 to U+23FF), and ✓ and its like (U+2700 to
+// U+27BF): three bytes from 0xE2.
+fn md_symbol_at(t: text, i: i32) -> bool {
+  let b = md_byte(t, i + 1)
+  md_byte(t, i) == 0xE2 && i + 2 < len(t) && ((b >= 0x86 && b <= 0x8F) || (b >= 0x9C && b <= 0x9E))
+}
+
+// A run, cut where signs are.
+proc md_emit(t: text, runs: mut MdRuns, block: i32, cell: i32, from: i32, to: i32,
+             style: i32, link_start: i32, link_end: i32) {
+  var a = from
+  var i = from
+  while i < to {
+    if md_symbol_at(t, i) && i + 3 <= to {
+      if i > a {
+        runs += { block: block, start: a, end: i, style: style, cell: cell,
+                  link_start: link_start, link_end: link_end }
+      }
+      runs += { block: block, start: i, end: i + 3, style: style | MD_SYMBOL, cell: cell,
+                link_start: link_start, link_end: link_end }
+      i += 3
+      a = i
+    } else { i += 1 }
+  }
+  if to > a {
+    runs += { block: block, start: a, end: to, style: style, cell: cell,
+              link_start: link_start, link_end: link_end }
+  }
+}
+
+// Of `n` of `c` at `i`, whether they may open or close bold or italic.
+fn md_can_open(t: text, i: i32, n: i32, to: i32, c: i8) -> bool {
+  let next = if i + n < to { md_byte(t, i + n) } else { 32 }
+  let prev = if i > 0 { md_byte(t, i - 1) } else { 32 }
+  !md_space(next) && (c == '*' || !md_alnum(prev))
+}
+fn md_can_close(t: text, i: i32, n: i32, to: i32, c: i8) -> bool {
+  let next = if i + n < to { md_byte(t, i + n) } else { 32 }
+  let prev = if i > 0 { md_byte(t, i - 1) } else { 32 }
+  !md_space(prev) && (c == '*' || !md_alnum(next))
+}
+// Whether `what` closes later, before `limit` (a run of them that can).
+fn md_closes(t: text, what: text, from: i32, limit: i32) -> bool {
+  var at = find(t, what, from)
+  var found = false
+  while at >= 0 && at < limit && !found {
+    if md_can_close(t, at, len(what), limit, t[at]) && at > from { found = true }
+    else { at = find(t, what, at + 1) }
+  }
+  found
+}
+
+// The text of a line (bytes `from` to `to`) as runs, starting as `style`
+// says (bold or italic open from the line before); gives the style it
+// ends in. `limit`: where the block ends (what opens, closes before it).
+proc md_inline(t: text, runs: mut MdRuns, block: i32, cell: i32, from: i32, to: i32,
+               limit: i32, style_in: i32) -> i32 {
+  var style = style_in
+  var a = from
+  var i = from
+  var link_a = 0
+  var link_b = 0
+  var link_close = -1
+  // A code span from the line before goes on to its ticks.
+  if (style & MD_CODE_SPAN) != 0 {
+    let close = find(t, "`", from)
+    if close >= 0 && close < to {
+      var n = 1
+      while close + n < to && t[close + n] == '`' { n += 1 }
+      md_emit(t, runs, block, cell, from, close, style, 0, 0)
+      style = style & (63 - MD_CODE_SPAN)
+      i = close + n
+    } else {
+      md_emit(t, runs, block, cell, from, to, style, 0, 0)
+      i = to
+    }
+    a = i
+  }
+  while i < to {
+    let c = t[i]
+    if c == '\\' && i + 1 < to && md_punct(md_byte(t, i + 1)) {
+      md_emit(t, runs, block, cell, a, i, style, link_a, link_b)
+      a = i + 1
+      i += 2
+    } else if i == link_close {
+      md_emit(t, runs, block, cell, a, i, style, link_a, link_b)
+      style = style & (63 - MD_LINK)
+      i = link_b + 1
+      a = i
+      link_a = 0
+      link_b = 0
+      link_close = -1
+    } else if c == '`' {
+      var n = 1
+      while i + n < to && t[i + n] == '`' { n += 1 }
+      var close = find(t, slice(t, i, i + n), i + n)
+      while close >= 0 && close < to && close + n < to && t[close + n] == '`' {
+        var m = close
+        while m < to && t[m] == '`' { m += 1 }
+        close = find(t, slice(t, i, i + n), m)
+      }
+      if close >= 0 && close < to {
+        md_emit(t, runs, block, cell, a, i, style, link_a, link_b)
+        var s = i + n
+        var e = close
+        if e - s >= 2 && t[s] == ' ' && t[e - 1] == ' ' {
+          s += 1
+          e -= 1
+        }
+        md_emit(t, runs, block, cell, s, e, style | MD_CODE_SPAN, link_a, link_b)
+        i = close + n
+        a = i
+      } else if close >= 0 && close < limit && n == 1 {
+        // (One that closes on a line after this.)
+        md_emit(t, runs, block, cell, a, i, style, link_a, link_b)
+        style = style | MD_CODE_SPAN
+        md_emit(t, runs, block, cell, i + 1, to, style, link_a, link_b)
+        i = to
+        a = to
+      } else { i += n }
+    } else if c == '*' || c == '_' {
+      var n = 1
+      while i + n < to && t[i + n] == c { n += 1 }
+      let opens = md_can_open(t, i, n, to, c)
+      let closes = md_can_close(t, i, n, to, c)
+      var used = 0
+      var next = style
+      if n >= 2 {
+        let two = slice(t, i, i + 2)
+        if (style & MD_BOLD) != 0 && closes { next = next & (63 - MD_BOLD)  used = 2 }
+        else if (style & MD_BOLD) == 0 && opens && md_closes(t, two, i + 2, limit) {
+          next = next | MD_BOLD
+          used = 2
+        }
+      }
+      if n - used >= 1 {
+        let one = slice(t, i, i + 1)
+        if (style & MD_ITALIC) != 0 && closes { next = next & (63 - MD_ITALIC)  used += 1 }
+        else if (style & MD_ITALIC) == 0 && opens && md_closes(t, one, i + n, limit) {
+          next = next | MD_ITALIC
+          used += 1
+        }
+      }
+      if used > 0 {
+        md_emit(t, runs, block, cell, a, i, style, link_a, link_b)
+        style = next
+        i += used
+        a = i
+      } else { i += n }
+    } else if c == '!' && i + 1 < to && t[i + 1] == '[' {
+      let close = find(t, "](", i + 2)
+      let end = if close >= 0 { find(t, ")", close + 2) } else { -1 }
+      if close >= 0 && end >= 0 && end < to {
+        md_emit(t, runs, block, cell, a, i, style, link_a, link_b)
+        runs += { block: block, start: i + 2, end: close, style: style | MD_IMAGE, cell: cell,
+                  link_start: close + 2, link_end: end }
+        i = end + 1
+        a = i
+      } else { i += 1 }
+    } else if c == '[' && link_close < 0 {
+      let close = find(t, "](", i + 1)
+      let end = if close >= 0 { find(t, ")", close + 2) } else { -1 }
+      let inner = find(t, "[", i + 1)
+      if close >= 0 && end >= 0 && end < to && (inner < 0 || inner > close) {
+        md_emit(t, runs, block, cell, a, i, style, link_a, link_b)
+        style = style | MD_LINK
+        link_a = close + 2
+        link_b = end
+        link_close = close
+        i += 1
+        a = i
+      } else { i += 1 }
+    } else if c == '<' && link_close < 0 && (find(t, "http://", i + 1) == i + 1 || find(t, "https://", i + 1) == i + 1) {
+      let end = find(t, ">", i + 1)
+      let gap = find(t, " ", i + 1)
+      if end >= 0 && end < to && (gap < 0 || gap > end) {
+        md_emit(t, runs, block, cell, a, i, style, link_a, link_b)
+        md_emit(t, runs, block, cell, i + 1, end, style | MD_LINK, i + 1, end)
+        i = end + 1
+        a = i
+      } else { i += 1 }
+    } else { i += 1 }
+  }
+  md_emit(t, runs, block, cell, a, to, style, link_a, link_b)
+  style & (MD_BOLD | MD_ITALIC | MD_CODE_SPAN)
+}
+
+// A table row's cells as runs.
+proc md_row_runs(t: text, runs: mut MdRuns, block: i32, at: i32, to: i32) {
+  let a = md_row_from(t, at, to)
+  let b = md_row_to(t, at, to)
+  var k = 0
+  var i = a
+  while i <= b {
+    let e = md_cell_end(t, i, b)
+    let s = md_skip_spaces(t, i, e)
+    let z = md_trim_end(t, s, e)
+    let ignored = md_inline(t, runs, block, k, s, z, z, 0)
+    k += 1
+    i = e + 1
+  }
+}
+
+// Reads the document into blocks and runs, in place of those they have.
+proc md_parse(t: text, blocks: mut MdBlocks, runs: mut MdRuns) {
+  blocks = []
+  runs = []
+  let n = len(t)
+  var open = 0 as i64      // the lists open
+  var para = -1            // the paragraph, item or quote that goes on
+  var para_style = 0
+  var fence = 0            // in code: its fence's length
+  var fence_char = '`'
+  var fence_indent = 0
+  var code = -1
+  var table = 0            // tables so far
+  var row = -1             // the row of the table that goes on (-1: none)
+  var aligns = 0
+  var cells = 0
+  var blank_before = true
+  var at = 0
+  while at < n {
+    let raw_end = md_line_end(t, at)
+    let end = if raw_end > at && t[raw_end - 1] == '\r' { raw_end - 1 } else { raw_end }
+    let indent = md_indent(t, at, end)
+    let s = md_skip_spaces(t, at, end)
+    let blank = md_blank(t, at, end)
+    if fence > 0 {
+      if md_fence(t, s, end) >= fence && t[s] == fence_char && md_blank(t, s + md_fence(t, s, end), end) {
+        fence = 0
+        code = -1
+      } else {
+        // (The code's own indent is kept, less that of its fence.)
+        var c = at
+        var k = 0
+        while c < end && k < fence_indent && t[c] == ' ' { c += 1  k += 1 }
+        if code < 0 {
+          blocks += { kind: MD_CODE, start: at, end: raw_end, level: 0, depth: md_inside(open, fence_indent),
+                      number: 0, cells: 0, aligns: 0 }
+          code = len(blocks) - 1
+        }
+        blocks[code].end = raw_end
+        // (An empty line is a run too, of no bytes: it is a line.)
+        runs += { block: code, start: c, end: end, style: MD_CODE_SPAN, cell: 0, link_start: 0, link_end: 0 }
+      }
+    } else if blank {
+      para = -1
+      row = -1
+      blank_before = true
+    } else {
+      let level = if indent < 4 { md_heading_level(t, s, end) } else { 0 }
+      let (mark, num) = md_marker(t, s, end)
+      let fenced = md_fence(t, s, end)
+      let deep = md_inside(open, indent)
+      // A row of the table that goes on, or a table's head (the line
+      // under it its rule).
+      let next_from = raw_end + 1
+      let next_end = if next_from < n { md_line_end(t, next_from) } else { n }
+      let head = row < 0 && para < 0 && find(t, "|", s) >= 0 && find(t, "|", s) < end && next_from < n
+                 && md_is_table_rule(t, next_from, next_end)
+      if row >= 0 && find(t, "|", s) >= 0 && find(t, "|", s) < end {
+        blocks += { kind: MD_ROW, start: at, end: raw_end, level: blocks[row].level + 1, depth: blocks[row].depth,
+                    number: table, cells: cells, aligns: aligns }
+        row = len(blocks) - 1
+        md_row_runs(t, runs, row, at, end)
+      } else if head {
+        table += 1
+        cells = md_cell_count(t, at, end)
+        aligns = md_aligns(t, next_from, next_end)
+        blocks += { kind: MD_ROW, start: at, end: raw_end, level: 0, depth: deep,
+                    number: table, cells: cells, aligns: aligns }
+        row = len(blocks) - 1
+        md_row_runs(t, runs, row, at, end)
+        para = -1
+        // (Its rule is no row.)
+        at = next_end
+      } else if fenced > 0 {
+        row = -1
+        para = -1
+        fence = fenced
+        fence_char = t[s]
+        fence_indent = indent
+        code = -1
+        open = md_levels_kept(open, deep)
+        // (A code block of no lines is drawn too.)
+        blocks += { kind: MD_CODE, start: raw_end, end: raw_end, level: 0, depth: deep,
+                    number: 0, cells: 0, aligns: 0 }
+        code = len(blocks) - 1
+      } else if level > 0 {
+        row = -1
+        para = -1
+        if indent < 2 { open = 0 }
+        var e = md_trim_end(t, s, end)
+        var h = e
+        while h > s && t[h - 1] == '#' { h -= 1 }
+        if h > s && (t[h - 1] == ' ' || t[h - 1] == '\t') { e = md_trim_end(t, s, h) }
+        let from = md_skip_spaces(t, s + level, e)
+        blocks += { kind: MD_HEADING, start: at, end: raw_end, level: level, depth: 0,
+                    number: 0, cells: 0, aligns: 0 }
+        let ignored = md_inline(t, runs, len(blocks) - 1, 0, from, max(from, e), max(from, e), 0)
+      } else if md_is_rule(t, s, end) && indent < 4 {
+        row = -1
+        para = -1
+        open = 0
+        blocks += { kind: MD_RULE, start: at, end: raw_end, level: 0, depth: 0,
+                    number: 0, cells: 0, aligns: 0 }
+      } else if mark > 0 && (para < 0 || blocks[para].kind == MD_ITEM || blank_before || num <= 1) {
+        row = -1
+        // Inside the lists whose text starts no further right than it.
+        let d = md_inside(open, indent)
+        open = md_levels_kept(open, d) | ((min(indent + mark, 255) as i64) << (8 * min(d, 7)))
+        blocks += { kind: MD_ITEM, start: at, end: raw_end, level: 0, depth: d,
+                    number: num, cells: 0, aligns: 0 }
+        para = len(blocks) - 1
+        let e = md_trim_end(t, s, end)
+        para_style = md_inline(t, runs, para, 0, min(s + mark, e), e, md_para_end(t, at), 0)
+      } else if t[s] == '>' {
+        row = -1
+        var c = s + 1
+        if c < end && t[c] == ' ' { c += 1 }
+        if para < 0 || blocks[para].kind != MD_QUOTE {
+          blocks += { kind: MD_QUOTE, start: at, end: raw_end, level: 0, depth: deep,
+                      number: 0, cells: 0, aligns: 0 }
+          para = len(blocks) - 1
+          para_style = 0
+        }
+        blocks[para].end = raw_end
+        let e = md_trim_end(t, c, end)
+        // (Lines of a quote are one text: a space between them.)
+        if blocks[para].start < at { md_emit(t, runs, para, 0, at - 1, at, para_style, 0, 0) }
+        para_style = md_inline(t, runs, para, 0, c, e, md_para_end(t, at), para_style)
+      } else {
+        row = -1
+        if para < 0 || (blank_before && blocks[para].kind == MD_ITEM) {
+          // After a line left empty a line is in the lists it is
+          // indented as far as; one that is not indented ends them.
+          if blank_before { open = md_levels_kept(open, deep) }
+          blocks += { kind: MD_PARAGRAPH, start: at, end: raw_end, level: 0, depth: md_levels(open),
+                      number: 0, cells: 0, aligns: 0 }
+          para = len(blocks) - 1
+          para_style = 0
+        } else {
+          blocks[para].end = raw_end
+          // (The line before ends in a space or a break.)
+          md_emit(t, runs, para, 0, at - 1, at, para_style, 0, 0)
+        }
+        let e = md_trim_end(t, s, end)
+        para_style = md_inline(t, runs, para, 0, s, e, md_para_end(t, at), para_style)
+      }
+      blank_before = false
+    }
+    at = md_line_end(t, at) + 1
+  }
+}
+
+// The text of a block as it reads: its runs, one after another (a
+// picture's words too; a row's cells with a tab between).
+proc md_text(t: text, blocks: MdBlocks, runs: MdRuns, block: i32) -> text {
+  var out = ""
+  var cell = 0
+  for r in 0..len(runs) {
+    if runs[r].block == block {
+      if runs[r].cell != cell { out += "\t" }
+      cell = runs[r].cell
+      let piece = slice(t, runs[r].start, runs[r].end)
+      if piece == "\n" { out += " " } else { out += piece }
+    }
+  }
+  out
+}
+
+// A heading's name as a link to it is written (as GitHub has it): small
+// letters, digits, - and _ (and letters past ASCII) as they are, a space
+// a -, the rest left out.
+fn md_slug(heading: text) -> text {
+  var out = ""
+  for i in 0..len(heading) {
+    let c = md_byte(heading, i)
+    if c >= 65 && c <= 90 { out += byte_text(c + 32) }
+    else if md_alnum(c) || c == 45 || c == 95 { out += byte_text(c) }
+    else if c == 32 { out += "-" }
+  }
+  out
+}
+
+// The heading a link (#name, or the name) goes to: its block, -1 where
+// there is none. (A name that is there before: -1, -2 after it.)
+proc md_anchor(t: text, blocks: MdBlocks, runs: MdRuns, name: text) -> i32 {
+  let wanted = if len(name) > 0 && name[0] == '#' { slice(name, 1, len(name)) } else { name }
+  var found = -1
+  var slugs = "\n"
+  for b in 0..len(blocks) {
+    if found < 0 && blocks[b].kind == MD_HEADING {
+      let slug = md_slug(md_text(t, blocks, runs, b))
+      // (How often it came before: counted in the names so far.)
+      var seen = 0
+      var at = find(slugs, "\n" + slug + "\n", 0)
+      while at >= 0 {
+        seen += 1
+        at = find(slugs, "\n" + slug + "\n", at + 1)
+      }
+      slugs += slug + "\n"
+      let full = if seen == 0 { slug } else { slug + "-{seen}" }
+      if full == wanted { found = b }
+    }
+  }
+  found
+}

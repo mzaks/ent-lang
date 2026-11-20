@@ -1047,6 +1047,38 @@ static const char *ent_window_plain_file(void) {
 
 static float ent_window_zoom_now(void);
 
+// The letters a font is read with: those of Latin-1, as the library's
+// own font has them, the marks texts are written with beyond it (… – —
+// ‘ ’ “ ” • € ™), and the signs keys and arrows are written with (← ↑ →
+// ↓ ↩ ⇥ ⇧ ⌃ ⌘ ⌥ ⌫ ⌦ ⎋ ✓ ✗), where the font has them.
+#define ENT_WINDOW_LETTERS 220
+static int ent_window_letters(int *letters) {
+  static const int more[] = {0x2026, 0x2013, 0x2014, 0x2018, 0x2019,
+                             0x201c, 0x201d, 0x2022, 0x20ac, 0x2122,
+                             0x2190, 0x2191, 0x2192, 0x2193, 0x21a9,
+                             0x21e5, 0x21e7, 0x2303, 0x2318, 0x2325,
+                             0x232b, 0x2326, 0x238b, 0x2713, 0x2717};
+  enum { latin = 191, all = latin + sizeof more / sizeof more[0] };
+  _Static_assert(all <= ENT_WINDOW_LETTERS, "room for the letters");
+  for (int i = 0; i < all; ++i)
+    letters[i] = i < 95 ? 32 + i : i < latin ? 160 + (i - 95) : more[i - latin];
+  return all;
+}
+// (A font that lacks some of them is no news: raylib's warning of it is
+// not said.)
+static Font ent_window_font_load(const char *kind, const unsigned char *bytes,
+                                 int size, const char *file, int pixels,
+                                 int *letters, int all) {
+  SetTraceLogLevel(LOG_ERROR);
+  Font made = bytes ? LoadFontFromMemory(kind, bytes, size, pixels, letters, all)
+                    : LoadFontEx(file, pixels, letters, all);
+#ifndef __EMSCRIPTEN__
+  if (IsWindowReady())
+    SetTraceLogLevel(LOG_WARNING);
+#endif
+  return made;
+}
+
 static Font ent_window_plain(float size) {
   const char *file = ent_window_plain_file();
   if (!file || !IsWindowReady())
@@ -1057,20 +1089,12 @@ static Font ent_window_plain(float size) {
   for (int i = 0; i < ENT_WINDOW_PLAIN_SIZES; ++i)
     if (ent_window_plain_face.pixels[i] == pixels)
       return ent_window_plain_face.at[i];
-  // (The letters of Latin-1, as the library's own font has them, and
-  // the marks texts are written with beyond it: … – — ‘ ’ “ ” • € ™.)
-  static const int more[] = {0x2026, 0x2013, 0x2014, 0x2018, 0x2019,
-                             0x201c, 0x201d, 0x2022, 0x20ac, 0x2122};
-  enum { latin = 191, all = latin + sizeof more / sizeof more[0] };
-  int letters[all];
-  for (int i = 0; i < all; ++i)
-    letters[i] = i < 95 ? 32 + i : i < latin ? 160 + (i - 95) : more[i - latin];
-  Font made = ent_window_plain_face.held.bytes
-                  ? LoadFontFromMemory(ent_window_plain_face.kind,
-                                       ent_window_plain_face.held.bytes,
-                                       (int)ent_window_plain_face.held.size,
-                                       pixels, letters, all)
-                  : LoadFontEx(file, pixels, letters, all);
+  int letters[ENT_WINDOW_LETTERS];
+  int all = ent_window_letters(letters);
+  Font made = ent_window_font_load(ent_window_plain_face.kind,
+                                   ent_window_plain_face.held.bytes,
+                                   (int)ent_window_plain_face.held.size, file,
+                                   pixels, letters, all);
   if (!made.texture.id || !made.glyphCount) {
     ent_window_plain_face.file = 0;
     return GetFontDefault();
@@ -1230,10 +1254,12 @@ static void ent_window_font_read(int32_t font) {
   if (ent_window_faces[font].read || !IsWindowReady())
     return;
   ent_window_faces[font].read = 1;
-  Font made = LoadFontFromMemory(ent_window_faces[font].kind,
-                                 ent_window_faces[font].file.bytes,
-                                 (int)ent_window_faces[font].file.size,
-                                 ent_window_faces[font].size, 0, 0);
+  int letters[ENT_WINDOW_LETTERS];
+  int all = ent_window_letters(letters);
+  Font made = ent_window_font_load(ent_window_faces[font].kind,
+                                   ent_window_faces[font].file.bytes,
+                                   (int)ent_window_faces[font].file.size, 0,
+                                   ent_window_faces[font].size, letters, all);
   // (One that cannot be read after all: the window's own.)
   if (made.texture.id == 0) {
     ent_window_faces[font].broken = 1;
@@ -1269,10 +1295,12 @@ static Font ent_window_font_shown(int32_t font, float size) {
   for (int i = 0; i < ENT_WINDOW_SIZES; ++i)
     if (ent_window_faces[font].pixels[i] == pixels)
       return ent_window_faces[font].at[i];
-  Font made = LoadFontFromMemory(ent_window_faces[font].kind,
-                                 ent_window_faces[font].file.bytes,
-                                 (int)ent_window_faces[font].file.size,
-                                 pixels, 0, 0);
+  int letters[ENT_WINDOW_LETTERS];
+  int all = ent_window_letters(letters);
+  Font made = ent_window_font_load(ent_window_faces[font].kind,
+                                   ent_window_faces[font].file.bytes,
+                                   (int)ent_window_faces[font].file.size, 0,
+                                   pixels, letters, all);
   if (made.texture.id == 0)
     return ent_window_fonts[font];
   SetTextureFilter(made.texture, TEXTURE_FILTER_BILINEAR);

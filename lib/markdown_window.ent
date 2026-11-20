@@ -1,0 +1,745 @@
+// A Markdown document shown in a window, as a page is (lib/markdown.ent
+// reads it): headings in sizes, paragraphs set in lines as wide as the
+// box, lists with their bullets and numbers, quotes with a bar, code on
+// a panel of its own, tables with their columns as wide as they need
+// (and can have), rules, pictures as wide as they are or as the box is,
+// links that go where they say. The wheel moves it; search finds in it.
+//
+//   import markdown_window
+//   Md.text = doc  Md.base = "folder/of/doc"  Md.fresh = true
+//   Md.x = ..  Md.y = ..  Md.w = ..  Md.h = ..   (each frame, the box)
+//   schedule frame() { begin()  md_read()  md_layout()  md_input()
+//                      md_search()  ...  md_draw()  present() }
+//
+// The program says:
+// - `Md.text`, `Md.base` (where its pictures' paths start from) and
+//   `Md.fresh` for a document to show; `Md.size` the size of its text
+//   (15 where 0);
+// - the box, each frame, and `Md.shown` (false: nothing is drawn, and
+//   the wheel and the pointer are left alone); `Md.no_bar` where it
+//   draws the scrollbar itself (`MdState.scroll` of `MdState.height`);
+// - `Md.go` = "#heading-name" to go to a heading (the name as GitHub
+//   makes it: `md_slug`), "#" to its top; `Md.back` to go back to where a link was
+//   followed from (`MdState.can_back` says whether there is one);
+// - `Md.sought` and `Md.sought_fresh` to find a text (ignoring case),
+//   then `Md.step` 1 or -1 for the next match or the one before;
+//   `MdState.count` says how many there are, `MdState.current` which one
+//   is shown (from 0).
+// It reads `MdState.link`: a link clicked that is no heading's and not
+// on the web (http, https, mailto: those are opened), and
+// `MdState.linked` that it is new.
+//
+// Fonts: the bold, the italic, the one for code and the one for the
+// signs of keys are found where machines have them (`md_fonts`); the
+// program may set `MdFonts` first (and `found`) for its own. Colours:
+// `MdLook` (a dark look where the program sets none).
+//
+// One document at a time, for now.
+import window
+import text
+import markdown
+
+unique Md {
+  text: text, base: text, fresh: bool, size: f32,
+  x: f32, y: f32, w: f32, h: f32, shown: bool, no_bar: bool,
+  go: text, back: bool,
+  sought: text, sought_fresh: bool, step: i32
+}
+unique MdState {
+  laid_w: f32, laid_size: f32, height: f32, scroll: f32,
+  back_to: f32, can_back: bool,
+  hover: i32, link: text, linked: bool,
+  count: i32, current: i32, dragging: bool, drag_from: f32, pressed: i32
+}
+unique MdFonts { found: bool, bold: i32, italic: i32, mono: i32, symbols: i32 }
+unique MdLook {
+  set: bool, text: i32, dim: i32, heading: i32, link: i32, code: i32,
+  code_back: i32, rule: i32, mark: i32, current: i32, quote: i32, head_back: i32
+}
+
+// A word: bytes of a run set together (no break inside), its font (0
+// plain, 1 bold, 2 italic, 3 code, 4 signs), how big against the text,
+// how wide, and the room before it where it is not the first in its line
+// (0: no break before it either). A picture is a word of its own.
+buffer MdWords { block: i32, cell: i32, run: i32, start: i32, end: i32, font: i32, scale: f32,
+                 width: f32, gap: f32, picture: bool, image: i32, ratio: f32 } capacity 4194304
+// A word set: where its line starts and how high it is.
+buffer MdPieces { word: i32, x: f32, y: f32, h: f32 } capacity 4194304
+// What is drawn besides words: 0 a panel of code, 1 a quote's bar, 2 a
+// rule, 3 a bullet, 4 an item's number, 5 a picture, 6 a table head's
+// back, 7 a line of a table.
+buffer MdPlaced { kind: i32, x: f32, y: f32, w: f32, h: f32, value: i32 } capacity 1048576
+// Where each block starts.
+buffer MdTops { y: f32 } capacity 1048576
+// The matches of a search: bytes of the text.
+buffer MdFound { start: i32, end: i32 } capacity 1048576
+
+fn md_pad(size: f32) -> f32 { size * 1.2 }
+fn md_indent_w(size: f32) -> f32 { size * 1.6 }
+fn md_line_h(size: f32) -> f32 { size * 1.45 }
+fn md_heading_scale(level: i32) -> f32 {
+  if level == 1 { 1.75 } else if level == 2 { 1.4 } else if level == 3 { 1.18 } else { 1.05 }
+}
+fn md_font_of(kind: i32, level: i32, style: i32) -> i32 {
+  if (style & MD_SYMBOL) != 0 { 4 }
+  else if (style & MD_CODE_SPAN) != 0 || kind == MD_CODE { 3 }
+  else if (style & MD_BOLD) != 0 || kind == MD_HEADING || (kind == MD_ROW && level == 0) { 1 }
+  else if (style & MD_ITALIC) != 0 { 2 }
+  else { 0 }
+}
+fn md_scale_of(kind: i32, level: i32, style: i32) -> f32 {
+  if kind == MD_HEADING { md_heading_scale(level) }
+  else if (style & MD_CODE_SPAN) != 0 || kind == MD_CODE { 0.9 }
+  else { 1.0 }
+}
+fn md_web(link: text) -> bool {
+  find(link, "http://", 0) == 0 || find(link, "https://", 0) == 0 || find(link, "mailto:", 0) == 0
+}
+
+// The first of the files (a line each) that is a font, or 0.
+proc md_font_from(files: text, size: i32) -> i32 {
+  var found = 0
+  var at = 0
+  while at < len(files) && found == 0 {
+    let end = md_line_end(files, at)
+    if end > at { found = font(slice(files, at, end) as text[126], size) }
+    at = end + 1
+  }
+  found
+}
+fn md_bold_files() -> text {
+  "/System/Library/Fonts/Supplemental/Arial Bold.ttf\n/Library/Fonts/Arial Bold.ttf\n" +
+  "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf\n/usr/share/fonts/liberation/LiberationSans-Bold.ttf\n" +
+  "/usr/share/fonts/liberation-sans/LiberationSans-Bold.ttf\n/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf\n" +
+  "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf\n/usr/share/fonts/noto/NotoSans-Bold.ttf\nC:/Windows/Fonts/segoeuib.ttf\nC:/Windows/Fonts/arialbd.ttf\n"
+}
+fn md_italic_files() -> text {
+  "/System/Library/Fonts/Supplemental/Arial Italic.ttf\n/Library/Fonts/Arial Italic.ttf\n" +
+  "/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf\n/usr/share/fonts/liberation/LiberationSans-Italic.ttf\n" +
+  "/usr/share/fonts/liberation-sans/LiberationSans-Italic.ttf\n/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf\n" +
+  "/usr/share/fonts/TTF/DejaVuSans-Oblique.ttf\n/usr/share/fonts/noto/NotoSans-Italic.ttf\nC:/Windows/Fonts/segoeuii.ttf\nC:/Windows/Fonts/ariali.ttf\n"
+}
+fn md_mono_files() -> text {
+  "/System/Library/Fonts/Supplemental/Andale Mono.ttf\n/System/Library/Fonts/Monaco.ttf\n" +
+  "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf\n/usr/share/fonts/liberation/LiberationMono-Regular.ttf\n" +
+  "/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf\n/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf\n" +
+  "/usr/share/fonts/TTF/DejaVuSansMono.ttf\n/usr/share/fonts/noto/NotoSansMono-Regular.ttf\nC:/Windows/Fonts/consola.ttf\nC:/Windows/Fonts/cour.ttf\n"
+}
+fn md_symbol_files() -> text {
+  "/System/Library/Fonts/Supplemental/Arial Unicode.ttf\n/Library/Fonts/Arial Unicode.ttf\n" +
+  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf\n/usr/share/fonts/TTF/DejaVuSans.ttf\n" +
+  "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf\nC:/Windows/Fonts/seguisym.ttf\n"
+}
+fn md_font_number(f: i32, bold: i32, italic: i32, mono: i32, symbols: i32) -> i32 {
+  if f == 1 { bold } else if f == 2 { italic } else if f == 3 { mono } else if f == 4 { symbols } else { 0 }
+}
+
+// How wide a text is in a font at a size (as the window sets it; a
+// test may measure otherwise).
+proc md_extent(t: text, font: i32, size: f32) -> f32 { text_extent(t, font, size, 0.0, 2) }
+// How wide a space is, in a font at a size.
+proc md_space_w(measure: proc(t: text, font: i32, size: f32) -> f32, font: i32, size: f32) -> f32 {
+  max(measure("a a", font, size) - measure("aa", font, size), size * 0.25)
+}
+
+// The document's words, measured (and its pictures read: `base` and the
+// path; a picture whose path is a web address is not read).
+proc md_measure(t: text, base: text, blocks: MdBlocks, runs: MdRuns, words: mut MdWords,
+                size: f32, bold: i32, italic: i32, mono: i32, symbols: i32,
+                measure: proc(t: text, font: i32, size: f32) -> f32) {
+  words = []
+  var block = -1
+  var cell = -1
+  var gap = false
+  for r in 0..len(runs) {
+    let b = runs[r].block
+    let kind = blocks[b].kind
+    let level = blocks[b].level
+    let style = runs[r].style
+    if b != block || runs[r].cell != cell { gap = false }
+    block = b
+    cell = runs[r].cell
+    let f = md_font_of(kind, level, style)
+    let fn_ = md_font_number(f, bold, italic, mono, symbols)
+    let sc = md_scale_of(kind, level, style)
+    let space = md_space_w(measure, fn_, size * sc)
+    if (style & MD_IMAGE) != 0 {
+      let path = slice(t, runs[r].link_start, runs[r].link_end)
+      let file = if len(base) > 0 && !md_web(path) && find(path, "/", 0) != 0 { base + "/" + path } else { path }
+      let image = if md_web(path) { 0 } else { picture_load(file as text[126]) }
+      let ratio = if image > 0 { picture_ratio(image) } else { 1.0 }
+      let natural = if image > 0 { picture_width(image) as f32 } else { 0.0 }
+      words += { block: b, cell: cell, run: r, start: runs[r].start, end: runs[r].end, font: 2, scale: 1.0,
+                 width: natural, gap: 0.0, picture: true, image: image, ratio: ratio }
+      gap = false
+    } else if kind == MD_CODE {
+      // A line of code is a word: as it is, spaces and all.
+      words += { block: b, cell: cell, run: r, start: runs[r].start, end: runs[r].end, font: 3, scale: sc,
+                 width: measure(slice(t, runs[r].start, runs[r].end), mono, size * sc),
+                 gap: 0.0, picture: false, image: 0, ratio: 0.0 }
+    } else {
+      var i = runs[r].start
+      let e = runs[r].end
+      while i < e {
+        if md_space(md_byte(t, i)) {
+          gap = true
+          i += 1
+        } else {
+          var j = i
+          while j < e && !md_space(md_byte(t, j)) { j += 1 }
+          let first = len(words) == 0 || words[len(words) - 1].block != b || words[len(words) - 1].cell != cell
+          words += { block: b, cell: cell, run: r, start: i, end: j, font: f, scale: sc,
+                     width: measure(slice(t, i, j), fn_, size * sc),
+                     gap: if gap && !first { space } else { 0.0 }, picture: false, image: 0, ratio: 0.0 }
+          gap = false
+          i = j
+        }
+      }
+    }
+  }
+}
+
+// Words `from` to `to` set in lines from (x, y), `width` wide, each line
+// to the left, middle or right (`align` 0, 1, 2); pictures a line each.
+// Gives where it ends below.
+proc md_set(words: MdWords, from: i32, to: i32, x: f32, width: f32, y: f32, align: i32, size: f32,
+            scale: f32, pieces: mut MdPieces, placed: mut MdPlaced) -> f32 {
+  var top = y
+  var i = from
+  while i < to {
+    if words[i].picture {
+      // A picture: as wide as it is (in points), or as the box.
+      let w = min(width, words[i].width / max(scale, 1.0))
+      let h = if words[i].ratio > 0.0 { w / words[i].ratio } else { 0.0 }
+      if words[i].image > 0 {
+        placed += { kind: 5, x: x, y: top, w: w, h: h, value: words[i].image }
+        top += h + size * 0.4
+      }
+      i += 1
+    } else {
+      // The words of a line: up to where the next would reach past the
+      // width, broken where a word has room before it.
+      var w = words[i].width
+      var j = i + 1
+      var last_break = -1
+      var full = false
+      var high = md_line_h(size * words[i].scale)
+      while j < to && !full && !words[j].picture {
+        if words[j].gap > 0.0 { last_break = j }
+        if w + words[j].gap + words[j].width > width && words[j].gap > 0.0 { full = true }
+        else if w + words[j].gap + words[j].width > width && last_break > i { full = true }
+        else {
+          w += words[j].gap + words[j].width
+          high = max(high, md_line_h(size * words[j].scale))
+          j += 1
+        }
+      }
+      var end = j
+      if full && words[j].gap <= 0.0 && last_break > i { end = last_break }
+      // (How wide and high the line is, to where it ends.)
+      var lw = 0.0
+      var lh = 0.0
+      for k in i..end {
+        lw += (if k > i { words[k].gap } else { 0.0 }) + words[k].width
+        lh = max(lh, md_line_h(size * words[k].scale))
+      }
+      let left = if align == 1 { x + (width - lw) / 2.0 } else if align == 2 { x + width - lw } else { x }
+      var at = left
+      for k in i..end {
+        if k > i { at += words[k].gap }
+        pieces += { word: k, x: at, y: top, h: lh }
+        at += words[k].width
+      }
+      top += lh
+      i = end
+    }
+  }
+  top
+}
+
+// How wide a cell's words are, all in a line, and its widest word.
+proc md_cell_wide(words: MdWords, from: i32, to: i32) -> f32 {
+  var w = 0.0
+  for k in from..to { w += (if k > from { words[k].gap } else { 0.0 }) + words[k].width }
+  w
+}
+proc md_cell_least(words: MdWords, from: i32, to: i32) -> f32 {
+  var w = 0.0
+  for k in from..to { w = max(w, words[k].width) }
+  w
+}
+// The first word of a block's cell at or after `from` (or `to`).
+proc md_cell_start(words: MdWords, from: i32, to: i32, block: i32, cell: i32) -> i32 {
+  var k = from
+  while k < to && !(words[k].block == block && words[k].cell >= cell) { k += 1 }
+  k
+}
+proc md_cell_stop(words: MdWords, from: i32, to: i32, block: i32, cell: i32) -> i32 {
+  var k = from
+  while k < to && words[k].block == block && words[k].cell == cell { k += 1 }
+  k
+}
+
+// The words and what else is drawn, set for a box `width` wide; gives
+// how high it all is.
+proc md_lay(blocks: MdBlocks, words: MdWords, pieces: mut MdPieces, placed: mut MdPlaced,
+            tops: mut MdTops, width: f32, size: f32, scale: f32) -> f32 {
+  pieces = []
+  placed = []
+  tops = []
+  let pad = md_pad(size)
+  let room = max(width - 2.0 * pad, size * 4.0)
+  var y = pad * 0.6
+  var wi = 0
+  var b = 0
+  var before = -1
+  while b < len(blocks) {
+    let kind = blocks[b].kind
+    let depth = blocks[b].depth
+    let left = pad + (depth as f32) * md_indent_w(size)
+    let avail = max(room - (depth as f32) * md_indent_w(size), size * 4.0)
+    // The room above it.
+    if before >= 0 {
+      let was = blocks[before].kind
+      if kind == MD_HEADING { y += size * (if blocks[b].level <= 2 { 1.6 } else { 1.1 }) }
+      else if kind == MD_ITEM && (was == MD_ITEM || (was == MD_PARAGRAPH && blocks[before].depth > 0)) { y += size * 0.3 }
+      else if was == MD_HEADING { y += size * 0.55 }
+      else { y += size * 0.75 }
+    }
+    while len(tops) <= b { tops += { y: y } }
+    var w0 = wi
+    while w0 < len(words) && words[w0].block < b { w0 += 1 }
+    var w1 = w0
+    while w1 < len(words) && words[w1].block == b { w1 += 1 }
+    if kind == MD_CODE {
+      let inner = size * 0.6
+      let lh = md_line_h(size * 0.9)
+      let top = y
+      var at = y + inner
+      for k in w0..w1 {
+        pieces += { word: k, x: left + inner, y: at, h: lh }
+        at += lh
+      }
+      if w1 == w0 { at += lh }
+      placed += { kind: 0, x: left, y: top, w: avail, h: at + inner - top, value: 0 }
+      y = at + inner
+      b += 1
+    } else if kind == MD_RULE {
+      placed += { kind: 2, x: pad, y: y + size * 0.3, w: room, h: 1.0, value: 0 }
+      y += size * 0.6
+      b += 1
+    } else if kind == MD_ROW {
+      // The table: its rows, its cells' widths.
+      let table = blocks[b].number
+      var last = b
+      while last + 1 < len(blocks) && blocks[last + 1].kind == MD_ROW && blocks[last + 1].number == table { last += 1 }
+      var wend = w1
+      while wend < len(words) && words[wend].block <= last { wend += 1 }
+      let cells = max(blocks[b].cells, 1)
+      let cpad = size * 0.55
+      // Each column as wide as its widest cell; where all are too wide
+      // for the box, each gives up of what it has past its widest word,
+      // as much of that as it has.
+      var total = 0.0
+      var spare = 0.0
+      for c in 0..cells {
+        var wide = 0.0
+        var least = 0.0
+        for r in b..(last + 1) {
+          let s = md_cell_start(words, w0, wend, r, c)
+          let z = md_cell_stop(words, s, wend, r, c)
+          if s < z && words[s].cell == c && words[s].block == r {
+            wide = max(wide, md_cell_wide(words, s, z))
+            least = max(least, md_cell_least(words, s, z))
+          }
+        }
+        total += wide + 2.0 * cpad
+        spare += wide - least
+      }
+      let over = max(total - avail, 0.0)
+      let give = if spare > 0.0 { min(over / spare, 1.0) } else { 0.0 }
+      var row_y = y
+      for r in b..(last + 1) {
+        if r > b { while len(tops) <= r { tops += { y: row_y } } }
+        var x = left
+        var row_h = md_line_h(size)
+        let row_top = row_y
+        let start_pieces = len(pieces)
+        for c in 0..cells {
+          var wide = 0.0
+          var least = 0.0
+          for rr in b..(last + 1) {
+            let s = md_cell_start(words, w0, wend, rr, c)
+            let z = md_cell_stop(words, s, wend, rr, c)
+            if s < z && words[s].cell == c && words[s].block == rr {
+              wide = max(wide, md_cell_wide(words, s, z))
+              least = max(least, md_cell_least(words, s, z))
+            }
+          }
+          let cw = wide - (wide - least) * give
+          let s = md_cell_start(words, w0, wend, r, c)
+          let z = md_cell_stop(words, s, wend, r, c)
+          let how = (blocks[r].aligns >> (2 * min(c, 15))) & 3
+          if s < z && words[s].cell == c && words[s].block == r {
+            let bottom = md_set(words, s, z, x + cpad, cw, row_top + size * 0.35, how, size, scale, pieces, placed)
+            row_h = max(row_h, bottom - row_top + size * 0.35)
+          }
+          if c > 0 { placed += { kind: 7, x: x, y: row_top, w: 1.0, h: -1.0, value: r } }
+          x += cw + 2.0 * cpad
+        }
+        if r == b { placed += { kind: 6, x: left, y: row_top, w: x - left, h: row_h, value: 0 } }
+        placed += { kind: 7, x: left, y: row_top + row_h, w: x - left, h: 1.0, value: -1 }
+        // (The lines between the cells: as high as the row.)
+        for p in 0..len(placed) {
+          if placed[p].kind == 7 && placed[p].h < 0.0 && placed[p].value == r { placed[p].h = row_h }
+        }
+        row_y = row_top + row_h
+      }
+      y = row_y
+      b = last + 1
+    } else {
+      // Text: a heading, a paragraph, an item, a quote.
+      var x = left
+      var w = avail
+      if kind == MD_ITEM {
+        x = left + md_indent_w(size)
+        w = avail - md_indent_w(size)
+        if blocks[b].number > 0 { placed += { kind: 4, x: left, y: y, w: md_indent_w(size) - size * 0.4, h: md_line_h(size), value: blocks[b].number } }
+        else { placed += { kind: 3, x: left + size * 0.45, y: y + md_line_h(size) * 0.5, w: size * 0.18, h: 0.0, value: depth } }
+      }
+      if kind == MD_QUOTE {
+        x = left + size * 1.0
+        w = avail - size * 1.0
+      }
+      let top = y
+      y = md_set(words, w0, w1, x, w, y, 0, size, scale, pieces, placed)
+      if kind == MD_QUOTE { placed += { kind: 1, x: left, y: top, w: size * 0.22, h: y - top, value: 0 } }
+      if kind == MD_HEADING && blocks[b].level <= 2 {
+        y += size * 0.3
+        placed += { kind: 2, x: pad, y: y, w: room, h: 1.0, value: 1 }
+      }
+      b += 1
+    }
+    before = b - 1
+    wi = w1
+  }
+  while len(tops) <= len(blocks) { tops += { y: y } }
+  y + pad
+}
+
+// The first piece whose line ends below `y` (the pieces go down).
+proc md_piece_at(pieces: MdPieces, y: f32) -> i32 {
+  var lo = 0
+  var hi = len(pieces)
+  while lo < hi {
+    let mid = (lo + hi) / 2
+    if pieces[mid].y + pieces[mid].h < y { lo = mid + 1 } else { hi = mid }
+  }
+  lo
+}
+
+// The block whose top is the last at or above `y`.
+proc md_block_at(tops: MdTops, y: f32) -> i32 {
+  var lo = 0
+  var hi = len(tops)
+  while lo < hi {
+    let mid = (lo + hi) / 2
+    if tops[mid].y <= y { lo = mid + 1 } else { hi = mid }
+  }
+  max(lo - 1, 0)
+}
+
+// The piece under (x, y) of the page, -1 where none.
+proc md_piece_under(pieces: MdPieces, words: MdWords, x: f32, y: f32) -> i32 {
+  var p = md_piece_at(pieces, y)
+  var found = -1
+  while p < len(pieces) && pieces[p].y <= y && found < 0 {
+    let w = words[pieces[p].word].width
+    if x >= pieces[p].x && x <= pieces[p].x + w && y >= pieces[p].y { found = p }
+    p += 1
+  }
+  found
+}
+
+// The matches of `what` (ignoring case) in the runs' text.
+proc md_find_all(t: text, runs: MdRuns, what: text, found: mut MdFound) {
+  found = []
+  let low = lower(what)
+  if len(low) > 0 {
+    for r in 0..len(runs) {
+      if (runs[r].style & MD_IMAGE) == 0 {
+        let piece = lower(slice(t, runs[r].start, runs[r].end))
+        var at = find(piece, low, 0)
+        while at >= 0 {
+          found += { start: runs[r].start + at, end: runs[r].start + at + len(low) }
+          at = find(piece, low, at + len(low))
+        }
+      }
+    }
+  }
+}
+// The piece a byte is in (-1 where none is).
+proc md_piece_of(pieces: MdPieces, words: MdWords, at: i32) -> i32 {
+  var found = -1
+  for p in 0..len(pieces) {
+    let w = pieces[p].word
+    if found < 0 && words[w].start <= at && at < max(words[w].end, words[w].start + 1) { found = p }
+  }
+  found
+}
+
+// --- Systems. ---
+
+system md_fonts() {
+  if !MdFonts.found {
+    MdFonts.found = true
+    MdFonts.bold = md_font_from(md_bold_files(), 48)
+    MdFonts.italic = md_font_from(md_italic_files(), 48)
+    MdFonts.mono = md_font_from(md_mono_files(), 48)
+    MdFonts.symbols = md_font_from(md_symbol_files(), 48)
+  }
+  if !MdLook.set {
+    MdLook.set = true
+    MdLook.text = 0xd7dce2
+    MdLook.dim = 0x8b949e
+    MdLook.heading = 0xf0f3f6
+    MdLook.link = 0x58a6ff
+    MdLook.code = 0xe6b673
+    MdLook.code_back = 0x1b2129
+    MdLook.rule = 0x30363d
+    MdLook.mark = 0x6e5a1e
+    MdLook.current = 0xb08a1e
+    MdLook.quote = 0x3d444d
+    MdLook.head_back = 0x161b22
+  }
+}
+
+// A document given: read, measured, found in again.
+system md_read() {
+  if Md.size <= 0.0 { Md.size = 15.0 }
+  if Md.fresh || (Md.size != MdState.laid_size && len(Md.text) > 0) {
+    if Md.fresh {
+      md_parse(Md.text, MdBlocks, MdRuns)
+      MdState.scroll = 0.0
+      MdState.can_back = false
+      MdState.hover = -1
+      MdState.pressed = -1
+      MdFound = []
+      MdState.count = 0
+      MdState.current = -1
+    }
+    md_measure(Md.text, Md.base, MdBlocks, MdRuns, MdWords, Md.size,
+               MdFonts.bold, MdFonts.italic, MdFonts.mono, MdFonts.symbols, md_extent)
+    MdState.laid_size = Md.size
+    MdState.laid_w = -1.0
+    if Md.fresh && len(Md.sought) > 0 { Md.sought_fresh = true }
+    Md.fresh = false
+  }
+}
+
+// Set again where the box is another width (where it was, kept: the
+// block at the top stays there).
+system md_layout() {
+  if Md.w > 0.0 && Md.w != MdState.laid_w {
+    let top = md_block_at(MdTops, MdState.scroll)
+    let into = if top < len(MdTops) { MdState.scroll - MdTops[top].y } else { 0.0 }
+    MdState.height = md_lay(MdBlocks, MdWords, MdPieces, MdPlaced, MdTops, Md.w - 12.0, Md.size, window_scale())
+    MdState.laid_w = Md.w
+    if MdState.scroll > 0.0 && top < len(MdTops) { MdState.scroll = MdTops[top].y + max(into, 0.0) }
+    MdState.scroll = max(min(MdState.scroll, MdState.height - Md.h), 0.0)
+  }
+}
+
+proc md_goto(tops: MdTops, block: i32) -> f32 {
+  if block >= 0 && block < len(tops) { max(tops[block].y - 8.0, 0.0) } else { -1.0 }
+}
+
+// The wheel, the scrollbar, links: hovered (the hand) and clicked.
+system md_input() {
+  let most = max(MdState.height - Md.h, 0.0)
+  if Md.go == "#" { MdState.scroll = 0.0 }
+  else if len(Md.go) > 0 {
+    let y = md_goto(MdTops, md_anchor(Md.text, MdBlocks, MdRuns, Md.go))
+    if y >= 0.0 { MdState.scroll = min(y, most) }
+  }
+  Md.go = ""
+  if Md.back {
+    Md.back = false
+    if MdState.can_back {
+      MdState.scroll = min(MdState.back_to, most)
+      MdState.can_back = false
+    }
+  }
+  MdState.linked = false
+  if !Mouse.left && Mouse.clicks == 0 && MdState.pressed >= 0 && MdState.hover != MdState.pressed { MdState.pressed = -1 }
+  if Md.shown {
+    let mx = Mouse.x
+    let my = Mouse.y
+    let inside = mx >= Md.x && mx < Md.x + Md.w && my >= Md.y && my < Md.y + Md.h
+    if inside { MdState.scroll = max(min(MdState.scroll - Mouse.wheel_y * Md.size * 3.0, most), 0.0) }
+    // The scrollbar, dragged.
+    let bar_x = Md.x + Md.w - 10.0
+    if Mouse.clicks > 0 && inside && mx >= bar_x && most > 0.0 {
+      MdState.dragging = true
+      MdState.drag_from = my
+    }
+    if MdState.dragging {
+      if !Mouse.left { MdState.dragging = false }
+      else {
+        MdState.scroll = max(min(MdState.scroll + (my - MdState.drag_from) * MdState.height / Md.h, most), 0.0)
+        MdState.drag_from = my
+      }
+    }
+    MdState.hover = -1
+    if inside && !MdState.dragging && mx < bar_x {
+      let p = md_piece_under(MdPieces, MdWords, mx - Md.x, my - Md.y + MdState.scroll)
+      if p >= 0 && (MdRuns[MdWords[MdPieces[p].word].run].style & MD_LINK) != 0 {
+        MdState.hover = MdWords[MdPieces[p].word].run
+        pointer_shape(pointer_hand())
+        if Mouse.clicks > 0 { MdState.pressed = MdState.hover }
+        if !Mouse.left && MdState.pressed == MdState.hover {
+          MdState.pressed = -1
+          let r = MdState.hover
+          let to = slice(Md.text, MdRuns[r].link_start, MdRuns[r].link_end) as text[2048]
+          if len(to) > 0 && to[0] == '#' {
+            let y = md_goto(MdTops, md_anchor(Md.text, MdBlocks, MdRuns, to))
+            if y >= 0.0 {
+              MdState.back_to = MdState.scroll
+              MdState.can_back = true
+              MdState.scroll = min(y, most)
+            }
+          } else if md_web(to) { let opened = open_url(to) }
+          else {
+            MdState.link = to
+            MdState.linked = true
+          }
+        }
+      }
+    }
+  }
+}
+
+// Search: the matches found anew, or the next or the one before; the
+// page goes to the one it is at.
+system md_search() {
+  var go = false
+  if Md.sought_fresh {
+    Md.sought_fresh = false
+    md_find_all(Md.text, MdRuns, Md.sought, MdFound)
+    MdState.count = len(MdFound)
+    // (The first at or below the top of the page.)
+    var first = -1
+    for k in 0..len(MdFound) {
+      if first < 0 {
+        let p = md_piece_of(MdPieces, MdWords, MdFound[k].start)
+        if p >= 0 && MdPieces[p].y >= MdState.scroll { first = k }
+      }
+    }
+    MdState.current = if len(MdFound) == 0 { -1 } else if first < 0 { 0 } else { first }
+    go = len(MdFound) > 0
+  }
+  if Md.step != 0 && len(MdFound) > 0 {
+    MdState.current = (MdState.current + Md.step + len(MdFound)) % len(MdFound)
+    go = true
+  }
+  Md.step = 0
+  if go && MdState.current >= 0 {
+    let p = md_piece_of(MdPieces, MdWords, MdFound[MdState.current].start)
+    if p >= 0 && (MdPieces[p].y < MdState.scroll || MdPieces[p].y + MdPieces[p].h > MdState.scroll + Md.h) {
+      MdState.scroll = max(min(MdPieces[p].y - Md.h * 0.35, MdState.height - Md.h), 0.0)
+    }
+  }
+}
+
+// Whether runs `a` to `b` are all code (one span, over a line's end).
+proc md_code_joined(runs: MdRuns, a: i32, b: i32) -> bool {
+  var all = a <= b && b - a < 4
+  for k in a..(b + 1) { if k < len(runs) && (runs[k].style & MD_CODE_SPAN) == 0 { all = false } }
+  all
+}
+
+proc md_draw_page(t: text, words: MdWords, pieces: MdPieces, placed: MdPlaced, runs: MdRuns,
+                  blocks: MdBlocks, found: MdFound, x: f32, y: f32, w: f32, h: f32, scroll: f32,
+                  size: f32, hover: i32, current: i32, bold: i32, italic: i32, mono: i32, symbols: i32,
+                  c_text: i32, c_heading: i32, c_link: i32, c_code: i32, c_code_back: i32,
+                  c_rule: i32, c_mark: i32, c_current: i32, c_quote: i32, c_head_back: i32, c_dim: i32) {
+  clip(x, y, w, h)
+  let ox = x
+  let oy = y - scroll
+  // Panels, bars, rules, bullets, pictures.
+  for p in 0..len(placed) {
+    let k = placed[p].kind
+    let py = oy + placed[p].y
+    if py + placed[p].h >= y - 2.0 && py <= y + h + 2.0 {
+      if k == 0 { rounded(ox + placed[p].x, py, placed[p].w, placed[p].h, 6.0, 6.0, 6.0, 6.0, c_code_back) }
+      else if k == 1 { rect(ox + placed[p].x, py, placed[p].w, placed[p].h, c_quote) }
+      else if k == 2 { rect(ox + placed[p].x, py, placed[p].w, max(placed[p].h, 1.0), c_rule) }
+      else if k == 3 {
+        if placed[p].value == 0 { circle(ox + placed[p].x, py, placed[p].w, c_dim) }
+        else { rect(ox + placed[p].x - placed[p].w, py - placed[p].w * 0.5, placed[p].w * 1.6, placed[p].w * 1.1, c_dim) }
+      }
+      else if k == 4 {
+        write("{placed[p].value}.", ox + placed[p].x, py + size * 0.18, placed[p].w,
+              0, size, 0.0, 0.0, 2, 2, c_dim)
+      }
+      else if k == 5 { picture(placed[p].value, ox + placed[p].x, py, placed[p].w, placed[p].h, 0xffffff) }
+      else if k == 6 { rect(ox + placed[p].x, py, placed[p].w, placed[p].h, c_head_back) }
+      else if k == 7 { rect(ox + placed[p].x, py, max(placed[p].w, 1.0), max(placed[p].h, 1.0), c_rule) }
+    }
+  }
+  // The words in sight.
+  var p = md_piece_at(pieces, scroll)
+  while p < len(pieces) && pieces[p].y <= scroll + h {
+    let wd = pieces[p].word
+    let r = words[wd].run
+    let style = runs[r].style
+    let kind = blocks[words[wd].block].kind
+    let sz = size * words[wd].scale
+    let f = md_font_number(words[wd].font, bold, italic, mono, symbols)
+    let px = ox + pieces[p].x
+    // (On the line's foot, whatever its size: the line's height less
+    // the word's own.)
+    let py = oy + pieces[p].y + pieces[p].h - md_line_h(sz) + sz * 0.18
+    // Matches.
+    for k in 0..len(found) {
+      if found[k].end > words[wd].start && found[k].start < words[wd].end {
+        let a = max(found[k].start, words[wd].start)
+        let z = min(found[k].end, words[wd].end)
+        let before = text_extent(slice(t, words[wd].start, a), f, sz, 0.0, 2)
+        let wide = text_extent(slice(t, a, z), f, sz, 0.0, 2)
+        rect(px + before - 1.0, py - sz * 0.1, wide + 2.0, sz * 1.25, if k == current { c_current } else { c_mark })
+      }
+    }
+    // A code span's panel: one for its words in a line (from its first
+    // there, as far as its last).
+    let same_before = p > 0 && pieces[p - 1].y == pieces[p].y && md_code_joined(runs, words[pieces[p - 1].word].run, r)
+    if (style & MD_CODE_SPAN) != 0 && kind != MD_CODE && !same_before {
+      var q = p
+      while q + 1 < len(pieces) && pieces[q + 1].y == pieces[p].y && md_code_joined(runs, r, words[pieces[q + 1].word].run) { q += 1 }
+      let wide = pieces[q].x + words[pieces[q].word].width - pieces[p].x
+      rounded(px - 2.0, py - sz * 0.08, wide + 4.0, sz * 1.22, 3.0, 3.0, 3.0, 3.0, c_code_back)
+    }
+    let colour = if (style & MD_LINK) != 0 { c_link } else if (style & MD_CODE_SPAN) != 0 || kind == MD_CODE { c_code }
+                 else if kind == MD_HEADING { c_heading } else { c_text }
+    write(slice(t, words[wd].start, words[wd].end), px, py, 1000000.0, f, sz, 0.0, 0.0, 2, 0, colour)
+    if r == hover { rect(px, py + sz * 1.08, words[wd].width + (if p + 1 < len(pieces) && words[pieces[p + 1].word].run == r { words[pieces[p + 1].word].gap } else { 0.0 }), 1.0, c_link) }
+    p += 1
+  }
+  unclip()
+}
+
+system md_draw() {
+  if Md.shown && Md.w > 0.0 {
+    md_draw_page(Md.text, MdWords, MdPieces, MdPlaced, MdRuns, MdBlocks, MdFound,
+                 Md.x, Md.y, Md.w, Md.h, MdState.scroll, Md.size, MdState.hover, MdState.current,
+                 MdFonts.bold, MdFonts.italic, MdFonts.mono, MdFonts.symbols,
+                 MdLook.text, MdLook.heading, MdLook.link, MdLook.code, MdLook.code_back,
+                 MdLook.rule, MdLook.mark, MdLook.current, MdLook.quote, MdLook.head_back, MdLook.dim)
+    // The scrollbar (where the program draws none of its own).
+    if MdState.height > Md.h && !Md.no_bar {
+      let bh = max(Md.h * Md.h / MdState.height, 24.0)
+      let by = Md.y + (Md.h - bh) * MdState.scroll / (MdState.height - Md.h)
+      rounded(Md.x + Md.w - 8.0, by, 5.0, bh, 2.5, 2.5, 2.5, 2.5, MdLook.quote)
+    }
+  }
+}

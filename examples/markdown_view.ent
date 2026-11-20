@@ -1,0 +1,59 @@
+// A Markdown file in a window (lib/markdown_window.ent): its name is
+// the first thing after the program's. The wheel moves it; links to its
+// headings go there; Cmd+F and typing finds (Enter: the next match).
+//
+//   ent run examples/markdown_view.ent -- README.md
+import window
+import text
+import files
+import console
+import markdown
+import markdown_window
+
+unique Asked { done: bool }
+
+system open_doc() {
+  if !Asked.done {
+    Asked.done = true
+    Window.title = "Markdown"
+    Window.width = 900
+    Window.height = 700
+    Window.resizable = true
+    Window.background = 0x0d1117
+    let file = argument(0)
+    Md.text = read_text(file)
+    let slash = find(file, "/", 0)
+    var last = -1
+    var at = slash
+    while at >= 0 {
+      last = at
+      at = find(file, "/", at + 1)
+    }
+    Md.base = if last >= 0 { slice(file, 0, last) } else { "." }
+    Md.fresh = true
+    Md.shown = true
+  }
+}
+system place() {
+  Md.x = 0.0
+  Md.y = 0.0
+  Md.w = Window.width as f32
+  Md.h = Window.height as f32
+}
+
+schedule frame() {
+  open_doc()
+  begin()
+  place()
+  md_fonts()
+  md_read()
+  md_layout()
+  md_input()
+  md_search()
+  md_draw()
+  present()
+}
+
+main {
+  loop { frame() } until Window.closed
+}

@@ -1,0 +1,37 @@
+// lib/markdown_window.ent sets a document in lines (measured here as if
+// each byte were 8 wide): blocks one under another, a paragraph in more
+// lines where the box is narrower, a table's cells in columns as wide as
+// their widest (the second, :---:, in the middle).
+// RUN: env MD_FILE=%S/Inputs/markdown/sample.md %ent run %S/Inputs/markdown/layout.ent 2>/dev/null > %t.out
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK: width 2000.0: 79 words set, 491.324951 high
+// CHECK-NEXT:   block 0 kind 1 at 7.2
+// CHECK-NEXT:   block 2 kind 1 at 71.574997
+// CHECK-NEXT:   block 12 kind 4 at 275.875
+// CHECK-NEXT:   block 13 kind 6 at 334.524963
+// CHECK-NEXT:   block 14 kind 6 at 356.024963
+// CHECK-NEXT:   block 15 kind 6 at 377.524963
+// CHECK-NEXT:   block 18 kind 1 at 436.024963
+// CHECK-NEXT:   paragraph lines 1
+// CHECK-NEXT:   row 0 cell 0 at 17.5, 338.024963: Keys
+// CHECK-NEXT:   row 0 cell 1 at 84.5, 338.024963: Does
+// CHECK-NEXT:   row 1 cell 0 at 17.5, 359.524963: ⌘
+// CHECK-NEXT:   row 1 cell 1 at 60.5, 359.524963: save
+// CHECK-NEXT:   row 2 cell 0 at 17.5, 381.024963: a|b
+// CHECK-NEXT:   row 2 cell 1 at 92.5, 381.024963: go
+// CHECK-NEXT: width 300.0: 79 words set, 563.824951 high
+// CHECK-NEXT:   block 0 kind 1 at 7.2
+// CHECK-NEXT:   block 2 kind 1 at 115.074997
+// CHECK-NEXT:   block 12 kind 4 at 348.375
+// CHECK-NEXT:   block 13 kind 6 at 407.024963
+// CHECK-NEXT:   block 14 kind 6 at 428.524963
+// CHECK-NEXT:   block 15 kind 6 at 450.024963
+// CHECK-NEXT:   block 18 kind 1 at 508.524963
+// CHECK-NEXT:   paragraph lines 4
+// CHECK-NEXT:   row 0 cell 0 at 17.5, 410.524963: Keys
+// CHECK-NEXT:   row 0 cell 1 at 84.5, 410.524963: Does
+// CHECK-NEXT:   row 1 cell 0 at 17.5, 432.024963: ⌘
+// CHECK-NEXT:   row 1 cell 1 at 60.5, 432.024963: save
+// CHECK-NEXT:   row 2 cell 0 at 17.5, 453.524963: a|b
+// CHECK-NEXT:   row 2 cell 1 at 92.5, 453.524963: go

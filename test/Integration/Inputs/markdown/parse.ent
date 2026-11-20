@@ -1,0 +1,45 @@
+// Prints the blocks and runs md_parse reads, and where links go.
+import console
+import text
+import files
+import markdown
+
+proc kind_name(k: i32) -> text {
+  if k == MD_HEADING { "heading" } else if k == MD_ITEM { "item" } else if k == MD_QUOTE { "quote" }
+  else if k == MD_CODE { "code" } else if k == MD_RULE { "rule" } else if k == MD_ROW { "row" } else { "paragraph" }
+}
+proc style_name(s: i32) -> text {
+  var out = ""
+  if (s & MD_BOLD) != 0 { out += "b" }
+  if (s & MD_ITALIC) != 0 { out += "i" }
+  if (s & MD_CODE_SPAN) != 0 { out += "c" }
+  if (s & MD_LINK) != 0 { out += "l" }
+  if (s & MD_IMAGE) != 0 { out += "p" }
+  if (s & MD_SYMBOL) != 0 { out += "s" }
+  out
+}
+system go() {
+  let doc = read_text(environment_variable("MD_FILE"))
+  md_parse(doc, MdBlocks, MdRuns)
+  for b in 0..len(MdBlocks) {
+    let k = kind_name(MdBlocks[b].kind)
+    put("{b} {k} level={MdBlocks[b].level} depth={MdBlocks[b].depth} number={MdBlocks[b].number} cells={MdBlocks[b].cells} aligns={MdBlocks[b].aligns}")
+    for r in 0..len(MdRuns) {
+      if MdRuns[r].block == b {
+        let piece = slice(doc, MdRuns[r].start, MdRuns[r].end)
+        let st = style_name(MdRuns[r].style)
+        let to = slice(doc, MdRuns[r].link_start, MdRuns[r].link_end)
+        put("  [{MdRuns[r].cell}] {st} '{piece}' -> '{to}'")
+      }
+    }
+  }
+  let a1 = md_anchor(doc, MdBlocks, MdRuns, "#second-part")
+  let a2 = md_anchor(doc, MdBlocks, MdRuns, "#second-part-1")
+  let a3 = md_anchor(doc, MdBlocks, MdRuns, "#title-one")
+  let a4 = md_anchor(doc, MdBlocks, MdRuns, "#nothing")
+  put("anchors {a1} {a2} {a3} {a4}")
+  let slug = md_slug("Run, Load & Replay (v2)")
+  put("slug {slug}")
+}
+schedule t() { go() }
+main { t() }
