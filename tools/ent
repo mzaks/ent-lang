@@ -1819,8 +1819,9 @@ def build(arguments, output, directory):
                 [path for path in host.get(variable, "").split(os.pathsep)
                  if path] + more)
     others = []
-    # (With --shared, a library: its code made to be loaded anywhere.)
-    pic = ["-fPIC"] if arguments.shared else []
+    # (With --shared, a library: its code made to be loaded anywhere; on
+    # the web a JavaScript module, which needs no such code.)
+    pic = ["-fPIC"] if arguments.shared and not arguments.web else []
     for index, path in enumerate(given):
         name, extension = os.path.splitext(os.path.basename(path))
         built = os.path.join(directory, f"{name}.{index}.o")
@@ -2218,7 +2219,29 @@ def build(arguments, output, directory):
     # linked into a program without the console: main then ends with 0.)
     if sys.platform == "darwin" and not arguments.windows:
         maths += ["-Wl,-U,_omp_in_parallel", "-Wl,-U,_ent_console_exit_code"]
-    if arguments.web:
+    if arguments.web and arguments.shared:
+        # A library for a page's JavaScript (or Node.js's): output.mjs, an
+        # ES module whose default export makes an instance, with the
+        # functions the C given with the program defines (as `_name`) and
+        # its memory (HEAP32, HEAPF32, ..) for their arrays.
+        nm = os.path.join(os.path.dirname(emscripten("emcc")), "..", "bin", "llvm-nm")
+        exported = {"_malloc", "_free"}
+        for index, path in enumerate(given):
+            name, extension = os.path.splitext(os.path.basename(path))
+            if extension not in (".c", ".cpp"):
+                continue
+            symbols = subprocess.run([nm, "--defined-only", "--extern-only",
+                                      os.path.join(directory, f"{name}.{index}.o")],
+                                     capture_output=True, text=True, check=True).stdout
+            exported |= {"_" + line.split()[2] for line in symbols.splitlines()
+                         if len(line.split()) == 3 and line.split()[1] == "T"}
+        maths += ["-O2", "--no-entry", "-sMODULARIZE=1", "-sEXPORT_ES6=1",
+                  "-sENVIRONMENT=web,worker,node",
+                  "-sEXPORTED_FUNCTIONS=" + ",".join(sorted(exported)),
+                  "-sEXPORTED_RUNTIME_METHODS=HEAP32,HEAPF32,HEAPF64,HEAPU8",
+                  "-sALLOW_MEMORY_GROWTH=1", "-sMAXIMUM_MEMORY=4GB",
+                  "-sSTACK_SIZE=8MB"]
+    elif arguments.web:
         # A page: the program (output.wasm), what starts it (output.js)
         # and the page (output.html) with a canvas, which the window
         # draws on. The program's `main` never gives the browser its turn
@@ -2257,7 +2280,7 @@ def build(arguments, output, directory):
                 written_page.write(page)
         if output.endswith(".html"):
             maths += ["--shell-file", shell]
-    if arguments.shared:
+    if arguments.shared and not arguments.web:
         maths.append("-shared")
     run([cxx if uses_cxx else cc] + objects + link + maths + ["-o", output],
         env=host)
@@ -2735,7 +2758,11 @@ def main():
                         help="build a shared library (.so, .dylib) for a "
                         "host to load, of a program without `main`: the C "
                         "given with it calls the world through ent_world.h "
-                        "(examples/cl_bridge)")
+                        "(examples/cl_bridge); with --web an ES module "
+                        "(name.mjs and name.wasm) whose exports are the "
+                        "functions that C defines, as _name, and the memory "
+                        "(HEAP32, HEAPF32, HEAPF64, HEAPU8) for their arrays "
+                        "(examples/cl_bridge/web)")
     parser.add_argument("--windows", action="store_true",
                         help="build a program for 64-bit Windows (an .exe), "
                         "with llvm-mingw's x86_64-w64-mingw32-clang; `run` "
@@ -2789,8 +2816,12 @@ def main():
         arguments.touch_keys = touch_keys(arguments.touch_keys)
         # (A page is three files: not kept as one in the cache.)
         arguments.no_cache = True
-        # (A name.js alone, without the page, runs under Node.js too.)
-        if not (arguments.output or "").endswith((".html", ".js")):
+        # (A name.js alone, without the page, runs under Node.js too; a
+        # library, --shared, is a module, name.mjs.)
+        if arguments.shared:
+            if not (arguments.output or "").endswith(".mjs"):
+                arguments.output = (arguments.output or stem) + ".mjs"
+        elif not (arguments.output or "").endswith((".html", ".js")):
             arguments.output = (arguments.output or stem) + ".html"
     # A program that is run from here is told where its source is, and
     # that of the modules it imports: the files they name are looked for

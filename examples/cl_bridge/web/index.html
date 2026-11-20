@@ -1,0 +1,348 @@
+<title>Dish Pong</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600&display=swap">
+<style>
+/* Layout: a lab instrument read-out. A control strip, then two dishes side by side (court + electrode array each), then the learning curve. */
+:root {
+  --bg: #eef1f2; --panel: #f9fafa; --line: #cfd6d9; --fg: #18232a; --muted: #5a6a73;
+  --pad: #dfe5e8; --up: #b7cbe6; --down: #d6c3e3; --sense: #bfe0da;
+  --spike: #d9660b; --stim: #0b7f86; --reward: #1f8a3b; --punish: #c2352b;
+  --ball: #18232a; --paddle: #0b7f86; --court: #ffffff; --base: #8a979e;
+  --display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0e171b; --panel: #142127; --line: #26363e; --fg: #e3eaed; --muted: #8fa1aa;
+  --pad: #1d2c33; --up: #22344d; --down: #33284a; --sense: #1d3c38;
+  --spike: #ffab4c; --stim: #4fd1d9; --reward: #5ad27a; --punish: #ff6b5e;
+  --ball: #f3f6f7; --paddle: #4fd1d9; --court: #0a1114; --base: #6d7d85; color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #0e171b; --panel: #142127; --line: #26363e; --fg: #e3eaed; --muted: #8fa1aa;
+  --pad: #1d2c33; --up: #22344d; --down: #33284a; --sense: #1d3c38;
+  --spike: #ffab4c; --stim: #4fd1d9; --reward: #5ad27a; --punish: #ff6b5e;
+  --ball: #f3f6f7; --paddle: #4fd1d9; --court: #0a1114; --base: #6d7d85; color-scheme: dark; }
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--fg); font: 15px/1.55 var(--body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 28px 40px; }
+main { max-width: 1180px; margin: 0 auto; display: grid; gap: 20px; }
+h1 { font: 600 2rem/1.1 var(--display); letter-spacing: .01em; margin: 0; text-wrap: balance; }
+.lede { max-width: 70ch; color: var(--muted); margin: 6px 0 0; }
+.lede b { color: var(--fg); font-weight: 500; }
+.controls { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px;
+  display: flex; flex-wrap: wrap; align-items: end; gap: 12px 16px; }
+.field { display: grid; gap: 4px; min-width: 0; }
+.field label, .field .lab { font: 500 .7rem/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+input[type=text], select, button { font: 500 .9rem/1 var(--body); color: var(--fg); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 4px; padding: 9px 12px; }
+input[type=text] { width: 16rem; max-width: 100%; }
+button { cursor: pointer; }
+button.primary { background: var(--paddle); color: var(--bg); border-color: var(--paddle); }
+button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid var(--stim); outline-offset: 2px; }
+.seedno { font: .8rem/1.2 var(--mono); color: var(--muted); }
+.status { margin-left: auto; font: 500 .9rem/1.3 var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
+.status small { display: block; color: var(--muted); font-size: .75rem; }
+.panels { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 860px) { .panels { grid-template-columns: minmax(0, 1fr); } .status { margin-left: 0; text-align: left; } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px; display: grid; gap: 10px; min-width: 0; }
+.panel header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.panel h2 { font: 600 1.1rem/1.2 var(--display); margin: 0; letter-spacing: .02em; }
+.tag { font: 500 .72rem/1 var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.views { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+canvas.sq { width: 100%; height: auto; aspect-ratio: 1; display: block; max-width: 100%; border-radius: 4px; }
+.cap { font: 500 .7rem/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: 5px; }
+.meter { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; font: .75rem/1 var(--mono); color: var(--muted); }
+.bar { position: relative; height: 10px; background: var(--pad); border-radius: 5px; overflow: hidden; }
+.bar i { position: absolute; top: 0; bottom: 0; left: 50%; width: 2px; background: var(--line); }
+.bar b { position: absolute; top: 1px; bottom: 1px; background: var(--paddle); border-radius: 4px; }
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; font-variant-numeric: tabular-nums; }
+.stat { border-top: 1px solid var(--line); padding-top: 6px; min-width: 0; }
+.stat .v { font: 500 1.25rem/1.1 var(--mono); }
+.stat .k { font-size: .75rem; color: var(--muted); }
+.curve { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px; display: grid; gap: 8px; }
+.curve h2 { font: 600 1.05rem/1.2 var(--display); margin: 0; }
+.curve canvas { width: 100%; height: 200px; display: block; }
+.key { display: flex; gap: 16px; flex-wrap: wrap; font-size: .8rem; color: var(--muted); }
+.key span { display: inline-flex; align-items: center; gap: 6px; }
+.key i { width: 18px; height: 3px; display: inline-block; border-radius: 2px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: .8rem; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; border: 1px solid var(--line); }
+.ring { width: 12px; height: 12px; border-radius: 50%; display: inline-block; border: 2px solid; }
+.notes { max-width: 74ch; color: var(--muted); font-size: .88rem; display: grid; gap: 6px; }
+.notes p { margin: 0; }
+code { font: .85em var(--mono); }
+.error { color: var(--punish); font-weight: 500; }
+</style>
+
+<main>
+  <div>
+    <h1>Dish Pong</h1>
+    <p class="lede">A simulated culture of 1,024 spiking neurons plays Pong through 64 electrodes, running in your browser. Both dishes start the same from your seed. <b>Left</b> gets no reward. <b>Right</b> gets a reward pulse for each move towards the ball and learns.</p>
+  </div>
+
+  <form class="controls" id="controls">
+    <div class="field">
+      <label for="seed">Seed: any text</label>
+      <input id="seed" type="text" value="hello dish" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="field">
+      <label for="cond">Reward for</label>
+      <select id="cond"><option value="0" selected>each move</option><option value="1">hits and misses</option></select>
+    </div>
+    <div class="field">
+      <label for="speed">Speed</label>
+      <select id="speed"><option value="1" selected>real time</option><option value="0">as fast as it goes</option></select>
+    </div>
+    <button class="primary" id="start" type="submit">Start</button>
+    <button id="pause" type="button">Pause</button>
+    <div class="field">
+      <label for="file" class="lab">Or replay a recording</label>
+      <input id="file" type="file" accept=".json,application/json">
+    </div>
+    <div class="status"><span id="clock">0:00</span> of <span id="total">20:00</span><small id="seedno">&nbsp;</small></div>
+  </form>
+
+  <div class="panels">
+    <section class="panel" id="p0">
+      <header><h2>Untrained</h2><span class="tag">reward gain 0</span></header>
+      <div class="views">
+        <div><canvas class="sq court" width="480" height="480"></canvas><div class="cap">court · paddle on the left</div></div>
+        <div><canvas class="sq mea" width="480" height="480"></canvas><div class="cap">electrodes · 8 × 8</div></div>
+      </div>
+      <div class="meter"><span>up</span><div class="bar"><i></i><b></b></div><span>down</span></div>
+      <div class="stats">
+        <div class="stat"><div class="v recent">–</div><div class="k">hits a rally, last 2 min</div></div>
+        <div class="stat"><div class="v late">–</div><div class="k">hits a rally, after min 5</div></div>
+        <div class="stat"><div class="v nr">–</div><div class="k">rallies</div></div>
+      </div>
+    </section>
+    <section class="panel" id="p1">
+      <header><h2>Trained</h2><span class="tag" id="tag1">reward for each move</span></header>
+      <div class="views">
+        <div><canvas class="sq court" width="480" height="480"></canvas><div class="cap">court · paddle on the left</div></div>
+        <div><canvas class="sq mea" width="480" height="480"></canvas><div class="cap">electrodes · 8 × 8</div></div>
+      </div>
+      <div class="meter"><span>up</span><div class="bar"><i></i><b></b></div><span>down</span></div>
+      <div class="stats">
+        <div class="stat"><div class="v recent">–</div><div class="k">hits a rally, last 2 min</div></div>
+        <div class="stat"><div class="v late">–</div><div class="k">hits a rally, after min 5</div></div>
+        <div class="stat"><div class="v nr">–</div><div class="k">rallies</div></div>
+      </div>
+    </section>
+  </div>
+
+  <section class="curve">
+    <h2>Hits a rally, minute by minute</h2>
+    <canvas id="chart" width="1100" height="200" aria-label="Hits a rally per minute for both dishes"></canvas>
+    <div class="key"><span><i style="background:var(--base)"></i>untrained</span><span><i style="background:var(--paddle)"></i>trained</span></div>
+  </section>
+
+  <div class="legend" aria-label="Electrode legend">
+    <span><i class="sw" style="background:var(--sense)"></i>ball's place (sensory)</span>
+    <span><i class="sw" style="background:var(--up)"></i>motor "up"</span>
+    <span><i class="sw" style="background:var(--down)"></i>motor "down"</span>
+    <span><i class="sw" style="background:var(--spike)"></i>spikes (glow)</span>
+    <span><i class="ring" style="border-color:var(--stim)"></i>stimulus</span>
+    <span><i class="ring" style="border-color:var(--reward)"></i>reward pulse</span>
+    <span><i class="ring" style="border-color:var(--punish)"></i>punish pulse</span>
+  </div>
+
+  <div class="notes">
+    <p>How it plays: the ball's height is stimulated into one of 8 sensory electrodes, faster as the ball nears the paddle (4 to 40 Hz). The paddle moves towards whichever motor region, up or down, has fired more over the last 0.1 s; the bar under each array shows that balance. Most of the learning happens in the first few minutes.</p>
+    <p>What it is: a model, not a culture. The dish is a simplified leaky integrate-and-fire network written in ent (examples/cl_bridge in ent-lang), compiled to WebAssembly, not validated against recordings of real cultures. The reward and punish electrodes deliver a dopamine-like signal that no real culture has. The same seed gives the same games here as in <code>dish_pong.py</code> on your own computer, which writes recordings this page replays.</p>
+    <p id="msg"></p>
+  </div>
+</main>
+
+<script type="module">
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const C = {};
+function colors() { for (const k of ["court","line","ball","paddle","pad","up","down","sense","spike","stim","reward","punish","muted","fg","base","display"]) C[k] = css("--" + k); }
+colors();
+const FS = 0.02, KEEP = 6000;   // frames of 20 ms; the last 2 minutes kept
+const UP = new Set(), DOWN = new Set(), SENSE = [3, 12, 20, 27, 35, 44, 52, 59];
+for (let r = 0; r < 8; r++) { UP.add(r * 8); UP.add(r * 8 + 1); DOWN.add(r * 8 + 6); DOWN.add(r * 8 + 7); }
+const ROLE = Array.from({ length: 64 }, (_, k) => SENSE.includes(k) ? "sense" : UP.has(k) ? "up" : DOWN.has(k) ? "down" : "pad");
+
+class Clip {
+  constructor(el) {
+    this.el = el; this.court = el.querySelector(".court").getContext("2d"); this.mea = el.querySelector(".mea").getContext("2d");
+    this.bar = el.querySelector(".bar b"); this.reset();
+  }
+  reset() { this.f = []; this.spk = []; this.stim = []; this.upN = []; this.downN = []; this.rallies = []; this.summary = null; }
+  push(fr) {
+    const spk = Array.from(fr[6], ch => ch.charCodeAt(0) - 48), stim = Array.from(fr[7], ch => +ch);
+    let u = 0, d = 0; for (let c = 0; c < 64; c++) { if (UP.has(c)) u += spk[c]; else if (DOWN.has(c)) d += spk[c]; }
+    this.f.push(fr); this.spk.push(spk); this.stim.push(stim); this.upN.push(u); this.downN.push(d);
+    if (this.f.length > KEEP + 600) for (const a of [this.f, this.spk, this.stim, this.upN, this.downN]) a.splice(0, 600);
+  }
+  draw(i) {
+    if (!this.f.length) return;
+    i = Math.max(0, Math.min(i, this.f.length - 1));
+    this.drawCourt(i); this.drawMea(i); this.drawMeter(i);
+  }
+  drawCourt(i) {
+    const g = this.court, W = g.canvas.width, fr = this.f[i];
+    g.fillStyle = C.court; g.fillRect(0, 0, W, W);
+    g.strokeStyle = C.line; g.lineWidth = 2; g.strokeRect(1, 1, W - 2, W - 2);
+    g.setLineDash([6, 8]); g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, W); g.stroke(); g.setLineDash([]);
+    for (let j = 8; j >= 1; j--) {
+      const p = this.f[Math.max(0, i - j)];
+      if (Math.abs(p[1] - fr[1]) > 0.3) continue;
+      g.globalAlpha = 0.25 * (1 - j / 9); g.fillStyle = C.ball; g.beginPath(); g.arc(p[1] * W, p[2] * W, W * 0.016, 0, 7); g.fill();
+    }
+    g.globalAlpha = 1;
+    const ph = 0.3 * W, py = fr[3] * W;
+    g.fillStyle = C.paddle; g.fillRect(4, py - ph / 2, W * 0.025, ph);
+    g.fillStyle = C.ball; g.beginPath(); g.arc(fr[1] * W, fr[2] * W, W * 0.022, 0, 7); g.fill();
+    const back = this.f[Math.max(0, i - 30)];
+    let label = null, col = null;
+    if (fr[4] > back[4]) { label = "MISS"; col = C.punish; } else if (fr[5] > back[5]) { label = "HIT"; col = C.reward; }
+    if (label) { g.fillStyle = col; g.font = `600 ${W * 0.08}px ${C.display}`; g.textAlign = "center"; g.fillText(label, W * 0.62, W * 0.12); }
+  }
+  drawMea(i) {
+    const g = this.mea, W = g.canvas.width, s = W / 8, r = s * 0.36;
+    g.clearRect(0, 0, W, W);
+    for (let ch = 0; ch < 64; ch++) {
+      const x = (ch % 8 + 0.5) * s, y = (Math.floor(ch / 8) + 0.5) * s;
+      g.fillStyle = C[ROLE[ch]]; g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+      let glow = 0;
+      for (let j = 0; j < 10 && i - j >= 0; j++) glow += this.spk[i - j][ch] * Math.exp(-j / 3);
+      if (glow > 0) {
+        g.globalAlpha = Math.min(1, glow / 4); g.fillStyle = C.spike;
+        g.beginPath(); g.arc(x, y, r * (0.45 + Math.min(0.55, glow / 12)), 0, 7); g.fill(); g.globalAlpha = 1;
+      }
+      let st = 0, age = 0;
+      for (let j = 0; j < 4 && i - j >= 0; j++) if (this.stim[i - j][ch]) { st = this.stim[i - j][ch]; age = j; break; }
+      if (st) {
+        g.strokeStyle = st === 2 ? C.reward : st === 3 ? C.punish : C.stim;
+        g.globalAlpha = 1 - age / 4; g.lineWidth = st > 1 ? 5 : 3;
+        g.beginPath(); g.arc(x, y, r + 4 + age * 2, 0, 7); g.stroke(); g.globalAlpha = 1;
+      }
+    }
+  }
+  drawMeter(i) {
+    let u = 0, d = 0;
+    for (let j = 0; j < 25 && i - j >= 0; j++) { const w = Math.exp(-j * FS / 0.1); u += this.upN[i - j] * w; d += this.downN[i - j] * w; }
+    const share = u + d > 0 ? (d - u) / (u + d) : 0, half = Math.abs(share) * 50;
+    this.bar.style.left = (share < 0 ? 50 - half : 50) + "%"; this.bar.style.width = half + "%";
+  }
+  stats(tNow) {
+    const upto = this.rallies.filter(r => r[0] <= tNow + 1e-6), recent = upto.filter(r => r[0] > tNow - 120);
+    const q = s => this.el.querySelector(s);
+    q(".recent").textContent = recent.length ? (recent.reduce((a, r) => a + r[1], 0) / recent.length).toFixed(2) : "–";
+    q(".nr").textContent = upto.length;
+    q(".late").textContent = this.summary && this.summary.lateRallies ? this.summary.late.toFixed(2) : "–";
+  }
+}
+
+const clips = [new Clip(document.getElementById("p0")), new Clip(document.getElementById("p1"))];
+let mode = "live", worker = null, totalFrames = 0, doneFrames = 0, replayPos = 0, playing = true, last = null;
+const $ = id => document.getElementById(id);
+const fmt = t => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+
+function mergeRallies(clip, list) {
+  const known = clip.rallies.length ? clip.rallies[clip.rallies.length - 1][0] : -1;
+  for (const r of list) if (r[0] > known) clip.rallies.push(r);
+}
+
+function startLive() {
+  mode = "live"; playing = true; $("pause").textContent = "Pause";
+  for (const c of clips) c.reset();
+  if (worker) worker.terminate();
+  worker = new Worker(new URL("./worker.mjs", import.meta.url), { type: "module" });
+  const text = $("seed").value || "1", cond = +$("cond").value;
+  $("tag1").textContent = cond ? "reward for hits and misses" : "reward for each move";
+  totalFrames = 20 * 60 / FS; doneFrames = 0; $("total").textContent = "20:00"; $("msg").textContent = "";
+  worker.onmessage = e => {
+    const m = e.data;
+    if (m.type === "started") $("seedno").textContent = `seed ${m.seed} · dish_pong.py 20 "${m.text}"${cond ? " reward" : ""}`;
+    if (m.type === "frames") {
+      m.batch.forEach((b, i) => { for (const fr of b) clips[i].push(fr); mergeRallies(clips[i], m.rallies[i]); clips[i].summary = m.summary[i]; });
+      doneFrames = m.done;
+    }
+    if (m.type === "finished") $("msg").textContent = "Finished: 20 minutes played. Change the seed and start again, or replay a recording.";
+    if (m.type === "error") { $("msg").innerHTML = ""; const s = document.createElement("span"); s.className = "error"; s.textContent = "The dish could not start: " + m.message; $("msg").append(s); }
+  };
+  worker.postMessage({ speed: +$("speed").value });
+  worker.postMessage({ start: { text, cond, minutes: 20 } });
+}
+
+function loadRecording(json) {
+  if (worker) { worker.terminate(); worker = null; }
+  mode = "replay"; playing = true; $("pause").textContent = "Pause";
+  const list = json.clips || [json];
+  if (list.length < 2) list.push(list[0]);
+  list.slice(0, 2).forEach((c, i) => {
+    clips[i].reset(); for (const fr of c.frames.slice(-KEEP)) clips[i].push(fr);
+    clips[i].rallies = (c.rallies || []).map(r => [r[0], r[1]]);
+    clips[i].summary = c.late_hits !== undefined ? { late: c.late_hits, lateRallies: c.late_rallies ?? 1 } : null;
+  });
+  replayPos = 0; totalFrames = clips[0].f.length;
+  const c0 = list[0];
+  $("seedno").textContent = `recording · seed ${c0.seed}${json.seed_text ? ` ("${json.seed_text}")` : ""}`;
+  $("msg").textContent = "Replaying the last two minutes of the recording; Start plays live again.";
+}
+
+$("controls").addEventListener("submit", e => { e.preventDefault(); startLive(); });
+$("speed").addEventListener("change", () => worker && worker.postMessage({ speed: +$("speed").value }));
+$("pause").addEventListener("click", () => {
+  playing = !playing; $("pause").textContent = playing ? "Pause" : "Resume";
+  if (worker) worker.postMessage({ pause: !playing });
+});
+$("file").addEventListener("change", async e => {
+  const file = e.target.files[0]; if (!file) return;
+  try { loadRecording(JSON.parse(await file.text())); }
+  catch (err) { $("msg").textContent = "That file is not a recording from dish_pong.py or pong.py's PONG_RECORD: " + err.message; }
+});
+
+function chart() {
+  const cv = $("chart"), g = cv.getContext("2d"), W = cv.width, H = cv.height, L = 40, B = 24, T = 10, R = 10;
+  g.clearRect(0, 0, W, H);
+  const minutes = 20, ymax = 2;
+  g.strokeStyle = C.line; g.lineWidth = 1; g.fillStyle = C.muted; g.font = `12px ${css("--mono")}`;
+  for (let y = 0; y <= ymax; y += 0.5) {
+    const py = T + (H - T - B) * (1 - y / ymax);
+    g.globalAlpha = y === 0 ? 1 : 0.5; g.beginPath(); g.moveTo(L, py); g.lineTo(W - R, py); g.stroke(); g.globalAlpha = 1;
+    g.textAlign = "right"; g.fillText(y.toFixed(1), L - 6, py + 4);
+  }
+  g.textAlign = "center";
+  for (let m = 0; m <= minutes; m += 5) {
+    g.textAlign = m === 0 ? "left" : m === minutes ? "right" : "center";
+    g.fillText(m + " min", L + (W - L - R) * m / minutes, H - 6);
+  }
+  clips.forEach((c, i) => {
+    const per = [];
+    for (const [t, h] of c.rallies) { const m = Math.floor(t / 60); if (m < minutes) { (per[m] ||= [0, 0]); per[m][0] += h; per[m][1]++; } }
+    g.strokeStyle = i ? C.paddle : C.base; g.fillStyle = g.strokeStyle; g.lineWidth = i ? 3 : 2; g.beginPath();
+    let first = true;
+    per.forEach((v, m) => {
+      if (!v) return;
+      const x = L + (W - L - R) * (m + 0.5) / minutes, y = T + (H - T - B) * (1 - Math.min(ymax, v[0] / v[1]) / ymax);
+      first ? g.moveTo(x, y) : g.lineTo(x, y); first = false;
+    });
+    g.stroke();
+  });
+}
+
+let chartAt = 0;
+function frame(now) {
+  if (mode === "replay" && playing && last !== null) { replayPos += (now - last) / 1000 / FS; if (replayPos >= totalFrames - 1) replayPos = 0; }
+  last = now;
+  const tNow = clips[0].f.length ? clips[0].f[mode === "live" ? clips[0].f.length - 1 : Math.floor(replayPos)][0] : 0;
+  for (const c of clips) { c.draw(mode === "live" ? c.f.length - 1 : Math.floor(replayPos)); c.stats(tNow); }
+  $("clock").textContent = fmt(tNow);
+  if (mode === "replay") $("total").textContent = fmt(clips[0].f.length ? clips[0].f[clips[0].f.length - 1][0] : 0);
+  if (now - chartAt > 500) { chart(); chartAt = now; }
+  requestAnimationFrame(frame);
+}
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", colors);
+new MutationObserver(colors).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+// (For a test driving the page: load a recording without the file picker.)
+window.dishPong = { loadRecording };
+startLive();
+requestAnimationFrame(frame);
+</script>

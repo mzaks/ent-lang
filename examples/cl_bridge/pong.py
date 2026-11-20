@@ -7,6 +7,8 @@ stimulation (or not, by condition).
     build/cl_bridge/venv/bin/python examples/cl_bridge/pong.py \\
         [minutes [seed [condition [flip] [columns] [name=value ...]]]]
 
+seed: a number or any text (hashed to one, ent_dish.seed_of).
+
 conditions:
     stim      a hit: all 8 sensory electrodes at 100 Hz for 100 ms
               (predictable); a miss: 4 s of stims on random electrodes at
@@ -121,6 +123,9 @@ Environment (all off by default):
                       alone n times, 0.5 s apart, no ball, no reward; the
                       output's `probe`: the up and down spikes in the
                       100 ms after, a stim, by place from top to bottom
+    PONG_RECORD=out.json  the game's last PONG_RECORD_S seconds (120), a
+                      frame each 20 ms: the ball, the paddle, each
+                      channel's spikes and stims; web/index.html replays it
 """
 
 from __future__ import annotations
@@ -157,6 +162,11 @@ BALL_EGO = os.environ.get("BALL_EGO", "0") == "1"
 # After the game: each sensory electrode stimulated alone this many times, 0.5 s
 # apart, no ball, no reward; the up and down spikes in the 100 ms after each
 PROBE = int(os.environ.get("PONG_PROBE", "0"))
+# PONG_RECORD=out.json: the game's last PONG_RECORD_S seconds, a frame each
+# RECORD_TICKS ticks, for replay.html
+RECORD = os.environ.get("PONG_RECORD")
+RECORD_S = float(os.environ.get("PONG_RECORD_S", "120"))
+RECORD_TICKS = 4
 PADDLE_SENSE = float(os.environ.get("PADDLE_SENSE", "0"))   # Hz: the paddle's place, 0 none
 SENSORY = [26, 27, 28, 29, 37, 36, 35, 34]
 # `columns`: where the paddle is felt, eighths from top to bottom, columns 2 and 5
@@ -501,6 +511,7 @@ def play(minutes: float, seed: int, condition: str, flip: bool = False,
     probe_order = [i for i in range(8) for _ in range(PROBE)]
     random.Random(seed * 31 + 5).shuffle(probe_order)
     probe = [[0, 0] for _ in range(8)]
+    tape, tape_spikes, tape_stims = [], [0] * 64, [0] * 64
     with cl.open() as neurons:
         for k, tick in enumerate(neurons.loop(TICKS, stop_after_seconds=minutes * 60
                                               + len(probe_order) * 0.5)):
@@ -522,9 +533,12 @@ def play(minutes: float, seed: int, condition: str, flip: bool = False,
             up = down = 0
             if surprise:
                 counts[:] = 0.0
+            taping = RECORD and k >= game_ticks - int(RECORD_S * TICKS)
             for spike in tick.analysis.spikes:
                 if surprise:
                     counts[spike.channel] += 1.0
+                if taping:
+                    tape_spikes[spike.channel] += 1
                 if spike.channel in up_set:
                     up += 1
                 elif spike.channel in down_set:
@@ -570,6 +584,25 @@ def play(minutes: float, seed: int, condition: str, flip: bool = False,
                 neurons.stim(cl.ChannelSet(*plain), 1.0)
             for channel, current in game.doses.items():
                 neurons.stim(channel, current)
+            if taping:
+                for c in plain:
+                    tape_stims[c] = max(tape_stims[c], 1)
+                for c, current in game.doses.items():
+                    tape_stims[c] = max(tape_stims[c], 2 if c == game.reward else 3)
+                if (k + 1) % RECORD_TICKS == 0:
+                    tape.append([round(game.t, 3), round(game.x, 3), round(game.y, 3),
+                                 round(game.paddle, 3), len(game.rallies), game.hits,
+                                 "".join(chr(48 + min(n, 74)) for n in tape_spikes),
+                                 "".join(str(n) for n in tape_stims)])
+                    tape_spikes, tape_stims = [0] * 64, [0] * 64
+    if RECORD:
+        with open(RECORD, "w") as f:
+            json.dump({"seed": seed, "condition": condition, "flip": flip, "layout": layout,
+                       "parameters": parameters, "minutes": minutes, "frame_s": RECORD_TICKS / TICKS,
+                       "sensory": game.sensory, "up": game.up_channels, "down": game.down_channels,
+                       "reward": game.reward, "punish": game.punish, "paddle_h": PADDLE,
+                       "rallies": game.rallies,
+                       "frames": tape}, f, separators=(",", ":"))
     if surprise and dump is not None:
         np.savez(os.environ["SURPRISE_DUMP"], counts=np.array([c for c, _ in dump]),
                  phase=np.array([p for _, p in dump]))
@@ -589,7 +622,12 @@ def play(minutes: float, seed: int, condition: str, flip: bool = False,
 
 def main() -> int:
     minutes = float(sys.argv[1]) if len(sys.argv) > 1 else 20.0
-    seed = int(sys.argv[2]) if len(sys.argv) > 2 else 1
+    seed = sys.argv[2] if len(sys.argv) > 2 else "1"
+    if not seed.isdigit():
+        # (Any text: hashed to a seed, as dish_pong.py and the web page do.)
+        import ent_dish
+        seed = ent_dish.seed_of(seed)
+    seed = int(seed)
     condition = sys.argv[3] if len(sys.argv) > 3 else "stim"
     flip = "flip" in sys.argv[4:]
     layout = "columns" if "columns" in sys.argv[4:] else "rows"

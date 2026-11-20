@@ -34,6 +34,9 @@ what this model does, not what a culture would.
 | `reach.py` | how much of the motor regions' answer to a stim comes along the axons |
 | `paths_probe.py` | conditioning's weights by path, minute by minute |
 | `feedback_study.py` | DishBrain's feedback (`stim`) against its controls on the `columns` layout, plain STDP; with `surprise` (or `onset`), the dish's own surprise as dopamine |
+| `game.c` | Pong next to the dish, in C: the per-move or hit/miss reward on `columns`, one call a frame, no cl-sdk |
+| `dish_pong.py` | `game.c` through ctypes: one seed (a number or any text) untrained and trained, a recording for the page |
+| `web/` | the page: `game.c` and the dish as WebAssembly in a worker, played live in a browser, or a recording replayed (`build.sh`) |
 | `pacman/pacman_dish.ent` | `examples/pacman.ent` played by the dish, in a window, with its electrodes drawn beside the maze |
 | `pacman/dishpilot.ent`, `.c` | the pilot: a device that loads `libdish.so` at run time and turns the game into stims and spikes into a way |
 | `check/dish_check.c` | determinism and stim response through the C interface |
@@ -687,6 +690,44 @@ only cost less, and food alone scores best: two streams of stims compete
 for four motor regions, and a way away from a ghost is often a wall. No
 level was cleared. Three seeds, the games of each one after another in
 one dish: a demonstration, not a study.
+
+## Pong in a browser
+
+`web/` is a page on which the dish plays Pong in the browser: two dishes
+of one seed, the untrained one (reward gain 0) beside the trained one
+(the reward for each move, or for hits and misses), each with its court,
+its 64 electrodes lit by their spikes and ringed by their stims, the
+balance of its motor regions, and the hits a rally minute by minute. The
+seed is any text, hashed to a number (FNV-1a of its UTF-8, the low 31
+bits: `ent_dish.seed_of`). It also replays a recording, of `dish_pong.py`
+or of `pong.py` with `PONG_RECORD`.
+
+```sh
+examples/cl_bridge/web/build.sh            # into build/cl_bridge/web
+python3 -m http.server -d build/cl_bridge/web   # http://localhost:8000
+build/cl_bridge/venv/bin/python examples/cl_bridge/dish_pong.py 20 "hello dish" rec.json
+```
+
+What runs there is not `pong.py` through cl-sdk, which a browser cannot
+run, but `game.c`: the same game (`columns`, both rewards, the same
+constants) in C next to the dish, which runs the dish 5 steps a tick and
+reads their spikes, one call a frame. `dish_pong.py` runs it natively
+through ctypes; the page runs it as WebAssembly in a worker
+(`tools/ent build --shared --web`: an ES module whose exports are the C's
+functions). Its ball's paths come from its own generator, and its `tan`
+and `exp` are series in plain arithmetic, so the native library and
+WebAssembly play the same games, frame for frame
+(`test/Integration/cl_bridge_web.test`); a seed plays other games than in
+`pong.py`. One dish runs about 3.7 times faster than real time in either
+(16 s a minute, one core), so the page's two run at real time with room
+to spare, or about twice as fast.
+
+It learns as the study's runs through cl-sdk do (the reward for each move,
+`axon=0.11 hard=1 tau_elig=200`, 20 minutes, seeds 1 to 8, hits a rally
+after the first 5 minutes): 0.43 at gain 0, 0.85 at gain 1, +0.43 ± 0.09
+(8 of 8); "hello dish" 0.41 against 0.91. The page says what the dish is:
+a model, not validated against cultures, with a reward channel that no
+culture has.
 
 ## Learning rules
 

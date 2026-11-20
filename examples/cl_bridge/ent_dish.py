@@ -96,6 +96,15 @@ PARAMETERS = [name for name, _ in DishParams._fields_]
 INTEGERS = {name for name, kind in DishParams._fields_ if kind in (ctypes.c_int32, ctypes.c_int64)}
 
 
+def seed_of(text: str) -> int:
+    """A seed from any text, as the web page makes it: FNV-1a (64-bit) of
+    its UTF-8, its low 31 bits."""
+    h = 0xCBF29CE484222325
+    for byte in text.encode("utf-8"):
+        h = ((h ^ byte) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h & 0x7FFFFFFF
+
+
 def library_path(library: str | None = None) -> Path:
     return Path(library or os.environ.get("ENT_DISH_LIBRARY") or DEFAULT_LIBRARY)
 
@@ -106,7 +115,7 @@ def build_library(library: str | None = None) -> Path:
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run([str(ROOT / "tools" / "ent"), "build", "--shared",
-                        str(HERE / "network.ent"), str(HERE / "bridge.c"),
+                        str(HERE / "network.ent"), str(HERE / "bridge.c"), str(HERE / "game.c"),
                         "-o", str(path)], check=True)
     return path
 

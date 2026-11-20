@@ -1,0 +1,18 @@
+// The dish of examples/cl_bridge with its Pong (game.c) as a library for a
+// web page (ent build --shared --web: an ES module whose exports are the C's
+// functions), driven from JavaScript under Node.js (web/check.mjs) as the
+// page's worker drives it, plays what the native library plays through
+// dish_pong.py: every frame of 12 seconds of a seed given as text, each
+// channel's spikes and stims, the ball and the paddle, the same.
+// REQUIRES: web, cl-sdk, system-linux
+// RUN: rm -rf %t.dir && mkdir -p %t.dir
+// RUN: %ent build --shared %S/../../examples/cl_bridge/network.ent %S/../../examples/cl_bridge/bridge.c %S/../../examples/cl_bridge/game.c -o %t.dir/libdish.so
+// RUN: %ent build --shared --web %S/../../examples/cl_bridge/network.ent %S/../../examples/cl_bridge/bridge.c %S/../../examples/cl_bridge/game.c -o %t.dir/dish.mjs
+// RUN: cp %S/../../examples/cl_bridge/web/pong.mjs %S/../../examples/cl_bridge/web/check.mjs %t.dir/
+// RUN: cd %t.dir && env ENT_DISH_LIBRARY=%t.dir/libdish.so %cl-python %S/../../examples/cl_bridge/dish_pong.py 0.2 "hello dish" %t.dir/native.json record=0 | FileCheck %s
+// RUN: cd %t.dir && %node check.mjs dish.mjs 0.2 "hello dish" 1 > %t.dir/web.json
+// RUN: %cl-python -c "import json,sys; a=json.load(open(sys.argv[1]))['clips'][1]; b=json.load(open(sys.argv[2])); print('same' if a['frames']==b['frames'] and a['rallies']==b['rallies'] and len(a['frames'])==600 else 'differ')" %t.dir/native.json %t.dir/web.json | FileCheck %s --check-prefix=SAME
+
+// CHECK: seed 945407425 ('hello dish'), gain 0:
+// CHECK: seed 945407425 ('hello dish'), gain 1:
+// SAME: same

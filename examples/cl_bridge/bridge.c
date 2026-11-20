@@ -55,6 +55,42 @@ typedef struct {
   int32_t hard;
 } dish_params;
 
+// By name, for a host that does not know the struct's layout (a web
+// page's JavaScript, game.c): gives 0 where there is no such parameter.
+#include <stddef.h>
+#define FIELD(name, kind) {#name, offsetof(dish_params, name), kind}
+static const struct { const char *name; size_t at; char kind; } FIELDS[] = {
+    FIELD(seed, 'l'), FIELD(neurons, 'i'), FIELD(inhibitory, 'f'), FIELD(tau, 'f'),
+    FIELD(thr, 'f'), FIELD(refractory, 'f'), FIELD(density, 'f'), FIELD(reach, 'f'),
+    FIELD(w_exc, 'f'), FIELD(w_inh, 'f'), FIELD(w_max, 'f'), FIELD(stdp, 'i'),
+    FIELD(a_plus, 'f'), FIELD(a_minus, 'f'), FIELD(tau_plus, 'f'), FIELD(tau_minus, 'f'),
+    FIELD(noise_rate, 'f'), FIELD(noise_amp, 'f'), FIELD(stim_gain, 'f'),
+    FIELD(stim_reach, 'f'), FIELD(adapt_inc, 'f'), FIELD(tau_adapt, 'f'),
+    FIELD(reach_cut, 'f'), FIELD(depress, 'f'), FIELD(tau_recover, 'f'),
+    FIELD(hear_reach, 'f'), FIELD(tau_syn, 'f'), FIELD(home_rate, 'f'),
+    FIELD(tau_home, 'f'), FIELD(home_gain, 'f'), FIELD(axon, 'f'), FIELD(fast, 'f'),
+    FIELD(conduct, 'f'), FIELD(modulated, 'i'), FIELD(tau_elig, 'f'),
+    FIELD(tau_reward, 'f'), FIELD(reward_gain, 'f'), FIELD(reward_channel, 'i'),
+    FIELD(punish_channel, 'i'), FIELD(hard, 'i'),
+};
+
+int32_t dish_params_size(void) { return (int32_t)sizeof(dish_params); }
+
+int32_t dish_params_set(dish_params *p, const char *name, double value) {
+  for (size_t i = 0; i < sizeof FIELDS / sizeof *FIELDS; ++i)
+    if (strcmp(FIELDS[i].name, name) == 0) {
+      char *at = (char *)p + FIELDS[i].at;
+      if (FIELDS[i].kind == 'l')
+        *(int64_t *)at = (int64_t)value;
+      else if (FIELDS[i].kind == 'i')
+        *(int32_t *)at = (int32_t)value;
+      else
+        *(float *)at = (float)value;
+      return 1;
+    }
+  return 0;
+}
+
 typedef struct {
   ent_world *world;
   int32_t *channel, *step;  // the spikes not yet handed out
