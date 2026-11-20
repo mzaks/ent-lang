@@ -1,0 +1,78 @@
+// WebSockets (RFC 6455): a connection opened by an HTTP upgrade, then
+// messages both ways, text or binary, until one side closes it.
+//
+//   import websocket
+//   unique Chat { socket: i64 }
+//   system open() { Chat.socket = ws_open("wss://example.org/chat", "", 10.0, true, "", "") }
+//   system talk() {
+//     ws_poll(0.05, WsDone)            // waits at most 50 ms for events
+//     for i in 0..len(WsDone) {
+//       if WsDone[i].event == WsEvent.Opened { let sent = ws_send(Chat.socket, "hello", false) }
+//       else if WsDone[i].event == WsEvent.Text { put(ws_event_data(i)) }
+//     }
+//   }
+//
+// A connection is opened and runs while the program does other things;
+// what happens to it comes in a later `ws_poll` as a row of the buffer
+// given: it opened (the handshake answered 101), a message came (its
+// bytes by `ws_event_data`), it closed (its code and reason), or it
+// failed (refused, unreachable, or a server that would not upgrade:
+// its HTTP status, and why by `ws_failure`). Pings are answered by
+// themselves; messages sent in parts come whole.
+//
+// The connection goes through libcurl (as the http device does: TLS,
+// the system's certificates or a CA file, a proxy), its frames are this
+// device's. Procs, on the program's main thread. Not on Windows or the
+// web yet.
+//
+// Implemented in devices/websocket.c; linked with libcurl (websocket.link).
+import text
+
+// What happened to a connection.
+enum WsEvent { Opened, Text, Binary, Closed, Failed }
+// The events since the last poll, in the order they happened: the
+// connection's handle, what happened, a number (Opened: the handshake's
+// status, 101; Closed: the close code, 1006 where the connection was
+// lost without one; Failed: the HTTP status where the server answered
+// and would not upgrade, else 0) and the seconds since it was opened.
+buffer WsDone { socket: i64, event: WsEvent, code: i32, at: f64 } capacity 4096
+
+// Opens a connection to `url` (ws:// or wss://), sending `headers` with
+// the upgrade ("Name: value" lines: a cookie, a token, a protocol asked
+// for), giving up after `timeout` seconds (0: none) where it is not open
+// by then; `verify_tls` checks the server's certificate, against
+// `ca_file` where it is not empty (a PEM file), else the system's;
+// through `proxy` where it is not empty ("http://host:port"). Gives its
+// handle, never 0 (one that could not start fails at the next poll).
+extern proc ws_open(url: text, headers: text, timeout: f64, verify_tls: bool,
+                    ca_file: text, proxy: text) -> i64
+
+// Sends a message (text, or bytes where `binary`) on an open connection;
+// false where it is not open (not yet, or not any more).
+extern proc ws_send(socket: i64, data: text, binary: bool) -> bool
+
+// Closes a connection with a code (1000: a normal close) and a reason:
+// it is Closed when the server says so too (or after two seconds). One
+// not open yet is closed at once.
+extern proc ws_close(socket: i64, code: i32, reason: text)
+
+// Waits for events, at most `wait` seconds (none where some came
+// already), and puts a row in `done` for each, in place of what it had:
+// how many (at most as many as it holds, the rest at the next poll).
+extern proc ws_poll(wait: f64, done: mut WsDone) -> i32
+
+// The bytes of the event `i` of the last poll: a message's, or a close's
+// reason, or a failure's words; none else. Until the next poll.
+extern proc ws_event_data(i: i32) -> text
+
+// Of a connection: the handshake answer's headers (each line ended by
+// "\r\n", without its status line: Set-Cookie, Sec-WebSocket-Protocol);
+// why it failed (none where it did not: "refused", "dns", "tls",
+// "timeout", "status 401", "no upgrade", ...); whether it is open.
+extern proc ws_answer_headers(socket: i64) -> text
+extern proc ws_failure(socket: i64) -> text
+extern proc ws_is_open(socket: i64) -> bool
+
+// Forgets a connection (closing it where it is open, without waiting):
+// its handle is none from then on.
+extern proc ws_forget(socket: i64)

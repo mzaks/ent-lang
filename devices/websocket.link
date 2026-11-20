@@ -1,0 +1,2 @@
+# The websocket device connects through libcurl (https://curl.se/libcurl).
+-lcurl

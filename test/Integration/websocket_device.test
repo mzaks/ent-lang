@@ -1,0 +1,24 @@
+// The websocket device (devices/websocket.ent, on libcurl) against a
+// local server (Inputs/ws/serve.py: ws, wss with a self-signed
+// certificate, a port nothing listens on): the upgrade with headers and
+// its Set-Cookie, a message in two frames, binary bytes with a zero, a
+// ping answered, a message of 64-bit length, the server's close and the
+// client's, and what fails. No network beyond 127.0.0.1.
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: %python %S/Inputs/ws/serve.py %t -- %ent run %S/Inputs/ws/device.ent > %t.out
+// RUN: sort %t.out | FileCheck %s
+
+// CHECK: closed failed 0 refused
+// CHECK-NEXT: plain binary length=3 same=true
+// CHECK-NEXT: plain closed 4000 bye open=false
+// CHECK-NEXT: plain opened 101 cookie-set=true
+// CHECK-NEXT: plain text frag-afrag-b
+// CHECK-NEXT: plain text hello
+// CHECK-NEXT: plain text length=70000
+// CHECK-NEXT: plain text pong p1
+// CHECK-NEXT: plain text x-test=yes cookie=a=b
+// CHECK-NEXT: refused failed 401 status 401
+// CHECK-NEXT: tls closed 1000 done open=false
+// CHECK-NEXT: tls opened 101 cookie-set=true
+// CHECK-NEXT: tls text hello
+// CHECK-NEXT: untrusted failed 0 tls

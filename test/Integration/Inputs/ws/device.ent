@@ -1,0 +1,72 @@
+// The websocket device against the local server (websocket_device.test,
+// Inputs/ws/serve.py): a talk over plain ws (each answer sends the next
+// message), one over wss with a trusted certificate that the client
+// closes, and those that fail: a certificate not trusted, a server that
+// will not upgrade, a port nothing listens on. Each event said as a line.
+import console
+import text
+import files
+import websocket
+
+unique Ws { plain: i64, tls: i64, untrusted: i64, refused: i64, closed: i64, done: i32 }
+
+fn has(t: text, what: text) -> bool { find(t, what, 0) >= 0 }
+
+system setup() {
+  let base = read_text("server.url")
+  let tls = read_text("server_tls.url")
+  Ws.plain = ws_open(base + "/echo", "X-Test: yes\nCookie: a=b\n", 5.0, true, "", "")
+  Ws.tls = ws_open(tls + "/echo?x=1", "", 5.0, true, "cert.pem", "")
+  Ws.untrusted = ws_open(tls + "/echo", "", 5.0, true, "", "")
+  Ws.refused = ws_open(base + "/refuse", "", 5.0, true, "", "")
+  Ws.closed = ws_open(read_text("closed.url") + "/echo", "", 5.0, true, "", "")
+}
+
+fn name_of(s: i64, plain: i64, tls: i64, untrusted: i64, refused: i64) -> text {
+  if s == plain { "plain" } else if s == tls { "tls" } else if s == untrusted { "untrusted" }
+  else if s == refused { "refused" } else { "closed" }
+}
+
+system talk() {
+  ws_poll(0.05, WsDone)
+  for i in 0..len(WsDone) {
+    let s = WsDone[i].socket
+    let name = name_of(s, Ws.plain, Ws.tls, Ws.untrusted, Ws.refused) as text[16]
+    let ev = WsDone[i].event
+    let data = ws_event_data(i)
+    let code = WsDone[i].code
+    if ev == WsEvent.Opened {
+      let set = has(ws_answer_headers(s), "Set-Cookie: sid=1")
+      put("{name} opened {code} cookie-set={set}")
+    } else if ev == WsEvent.Text && len(data) > 100 {
+      put("{name} text length={len(data)}")
+      let sent = ws_send(s, "close", false)
+    } else if ev == WsEvent.Text {
+      put("{name} text {data}")
+      if name == "tls" { ws_close(s, 1000, "done") }
+      else if data == "hello" { let sent = ws_send(s, "frag", false) }
+      else if data == "frag-afrag-b" { let sent = ws_send(s, "headers", false) }
+      else if has(data, "x-test=") { let sent = ws_send(s, "a" + byte_text(0) + "b", true) }
+      else if data == "pong p1" { let sent = ws_send(s, "big", false) }
+    } else if ev == WsEvent.Binary {
+      let same = data == "a" + byte_text(0) + "b"
+      put("{name} binary length={len(data)} same={same}")
+      let sent = ws_send(s, "ping", false)
+    } else if ev == WsEvent.Closed {
+      let open = ws_is_open(s)
+      put("{name} closed {code} {data} open={open}")
+      Ws.done += 1
+    } else {
+      put("{name} failed {code} {ws_failure(s)}")
+      Ws.done += 1
+    }
+  }
+}
+
+schedule start() { setup() }
+schedule frame() { talk() }
+
+main {
+  start()
+  loop { frame() } until Ws.done == 5
+}
