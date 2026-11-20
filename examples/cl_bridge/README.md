@@ -38,7 +38,7 @@ what this model does, not what a culture would.
 | `dish_pong.py` | `game.c` through ctypes: one seed (a number or any text) untrained and trained, a recording for the page |
 | `web/` | the page: `game.c` and the dish as WebAssembly in a worker, played live in a browser, or a recording replayed (`build.sh`) |
 | `pacman/pacman_dish.ent` | `examples/pacman.ent` played by the dish, in a window, with its electrodes drawn beside the maze |
-| `pacman/dishpilot.ent`, `.c` | the pilot: a device that loads `libdish.so` at run time and turns the game into stims and spikes into a way |
+| `pacman/dishpilot.ent`, `.c` | the pilot: a device that loads `libdish.so` at run time and turns the game into stims and spikes into a way; on a web page (`.web.link`, `.pre.js`) the dish's WebAssembly module instead |
 | `check/dish_check.c` | determinism and stim response through the C interface |
 | `check/plasticity.c` | does pairing two channels change how one answers the other? |
 | `culture/fetch.sh` | downloads the cultures' recordings (29 spontaneous, 21 with stims) |
@@ -690,6 +690,16 @@ only cost less, and food alone scores best: two streams of stims compete
 for four motor regions, and a way away from a ghost is often a wall. No
 level was cleared. Three seeds, the games of each one after another in
 one dish: a demonstration, not a study.
+
+Pac-Man with the dish runs on a web page too (tools/pages/build.sh's
+`dish-pacman`): `tools/ent build --web` of `pacman_dish.ent`, with the
+dish's WebAssembly module of `web/build.sh` (`dish.mjs`, `dish.wasm`)
+beside the page. There is no `dlopen` on the web: `dishpilot.pre.js`
+(linked by `dishpilot.web.link`) loads that module before the game starts,
+and `dishpilot.c` calls it through a few JavaScript functions, which copy
+the spikes from its memory into the game's. The page's address takes
+`?seed=` (any text, hashed as `ent_dish.seed_of` does), `?stim=0` and
+`?ghosts=` for `DISH_SEED`, `DISH_STIM` and `DISH_GHOSTS`.
 
 ## Pong in a browser
 

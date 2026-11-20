@@ -1,0 +1,3 @@
+# For a web page (ent build --web): the dish loaded beside the game before
+# it starts (dishpilot.pre.js), and the URL's settings.
+--pre-js $ENT_MODULE/dishpilot.pre.js

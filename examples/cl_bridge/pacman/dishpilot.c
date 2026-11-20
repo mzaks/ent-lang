@@ -16,8 +16,18 @@
 //   its stims at 4 Hz far to 40 Hz near (DishBrain's rate code).
 // The way is the motor region with the most spikes, each averaged over
 // 100 ms, if it leads the next by 10%.
+//
+// On a web page (ent build --web) there is no dlopen: the dish is its own
+// WebAssembly module (examples/cl_bridge/web/build.sh's dish.mjs and
+// dish.wasm, next to the page), loaded by dishpilot.pre.js before the game
+// starts, and called through the functions below, which copy the spikes
+// from its memory into the game's. The URL's ?seed= (any text, hashed as
+// ent_dish.seed_of does), ?stim=0 and ?ghosts= stand for DISH_SEED,
+// DISH_STIM and DISH_GHOSTS.
 #define _GNU_SOURCE
+#ifndef __EMSCRIPTEN__
 #include <dlfcn.h>
+#endif
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -50,6 +60,57 @@ static int64_t (*step)(void *, int32_t);
 static int64_t (*spikes)(void *, int32_t *, int32_t *, int64_t);
 static void *dish;
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#include <string.h>
+EM_JS(int, web_dish_create, (double seed, double axon), {
+  const D = Module.dish;
+  const p = D._malloc(D._dish_params_size());
+  D._dish_defaults(p);
+  const set = (name, value) => {
+    const bytes = new TextEncoder().encode(name + "\0"), at = D._malloc(bytes.length);
+    D.HEAPU8.set(bytes, at);
+    D._dish_params_set(p, at, value);
+    D._free(at);
+  };
+  set("seed", seed);
+  set("axon", axon);
+  Module.dishOne = D._dish_create(p);
+  D._free(p);
+  Module.dishSpikes = D._malloc(8 * 4096);
+  return Module.dishOne ? 1 : 0;
+});
+EM_JS(void, web_dish_stimulate, (int32_t channel, float amount), {
+  Module.dish._dish_stimulate(Module.dishOne, channel, amount);
+});
+EM_JS(double, web_dish_step, (int32_t n), {
+  return Number(Module.dish._dish_step(Module.dishOne, n));
+});
+EM_JS(int32_t, web_dish_spikes, (int32_t *channel, int32_t max), {
+  const D = Module.dish, at = Module.dishSpikes;
+  const got = Number(D._dish_spikes(Module.dishOne, at, at + 4 * 4096, BigInt(Math.min(max, 4096))));
+  HEAP32.set(D.HEAP32.subarray(at / 4, at / 4 + got), channel / 4);
+  return got;
+});
+static void web_defaults(dish_params *p) { memset(p, 0, sizeof *p); }
+static void *web_create(const dish_params *p) {
+  return web_dish_create((double)p->seed, p->axon) ? (void *)1 : NULL;
+}
+static void web_stimulate(void *d, int32_t channel, float amount) {
+  (void)d;
+  web_dish_stimulate(channel, amount);
+}
+static int64_t web_step(void *d, int32_t n) {
+  (void)d;
+  return (int64_t)web_dish_step(n);
+}
+static int64_t web_spikes(void *d, int32_t *channel, int32_t *step, int64_t max) {
+  (void)d;
+  (void)step;
+  return web_dish_spikes(channel, (int32_t)(max < 4096 ? max : 4096));
+}
+#endif
+
 static const int FOOD[4] = {37, 44, 26, 19};    // right, down, left, up
 // A ghost's way is stimulated beside the motor region of the opposite way
 // (a ghost on the right, the electrode next to the left region), so the
@@ -68,6 +129,13 @@ static int quiet;  // DISH_STIM=0: no stims, the dish's own activity alone
 static void open_dish(void) {
   if (dish)
     return;
+#ifdef __EMSCRIPTEN__
+  defaults = web_defaults;
+  create = web_create;
+  stimulate = web_stimulate;
+  step = web_step;
+  spikes = web_spikes;
+#else
   const char *path = getenv("ENT_DISH_LIBRARY");
   void *lib = dlopen(path ? path : "build/cl_bridge/libdish.so", RTLD_NOW | RTLD_LOCAL | RTLD_DEEPBIND);
   if (!lib) {
@@ -79,6 +147,7 @@ static void open_dish(void) {
   stimulate = dlsym(lib, "dish_stimulate");
   step = dlsym(lib, "dish_step");
   spikes = dlsym(lib, "dish_spikes");
+#endif
   dish_params p;
   defaults(&p);
   const char *seed = getenv("DISH_SEED"), *axon = getenv("DISH_AXON");

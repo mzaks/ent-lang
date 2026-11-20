@@ -52,6 +52,15 @@ done
 # --shared --web, not a window.)
 echo "dish-pong: examples/cl_bridge/web"
 examples/cl_bridge/web/build.sh "$out/dish-pong" >/dev/null
+# (And Pac-Man steered by the dish: the game a page of its own, the dish
+# its module beside it, loaded by the pilot before the game starts.)
+echo "dish-pacman: examples/cl_bridge/pacman/pacman_dish.ent"
+mkdir -p "$out/dish-pacman"
+tools/ent build --web --no-index-remarks --touch-keys arrows,Enter \
+  examples/cl_bridge/pacman/pacman_dish.ent -o "$out/dish-pacman/index.html" \
+  >"$out/dish-pacman.log" 2>&1 || { cat "$out/dish-pacman.log"; exit 1; }
+rm "$out/dish-pacman.log"
+cp "$out/dish-pong/dish.mjs" "$out/dish-pong/dish.wasm" "$out/dish-pacman/"
 cp "$here/index.html" "$out/index.html"
 mkdir -p "$out/shots"
 cp "$here"/shots/*.webp "$out/shots/"

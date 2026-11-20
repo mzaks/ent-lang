@@ -1769,7 +1769,8 @@ def build(arguments, output, directory):
     given += arguments.sources
     # The libraries the modules ask for, after everything that uses them.
     # (For a web page a module's .web.link where it has one; $NAMES in it
-    # are the environment's, and ENT_RAYLIB_WEB is raylib_web().)
+    # are the environment's, ENT_RAYLIB_WEB is raylib_web() and ENT_MODULE
+    # the module's own folder, for a --pre-js beside it.)
     for path in files:
         flags = os.path.splitext(path)[0] + ".link"
         if arguments.web:
@@ -1779,7 +1780,8 @@ def build(arguments, output, directory):
                 said = source.read()
             if arguments.web:
                 said = os.path.expandvars(said.replace(
-                    "$ENT_RAYLIB_WEB", raylib_web()))
+                    "$ENT_RAYLIB_WEB", raylib_web()).replace(
+                    "$ENT_MODULE", os.path.dirname(os.path.abspath(path))))
             link = shlex.split(said, comments=True) + link
     # (A page with a window has a font in it: there are none of the
     # machine's on the web.)
