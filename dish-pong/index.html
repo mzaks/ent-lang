@@ -56,6 +56,9 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .tag { font: 500 .72rem/1 var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
 .views { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
 canvas.sq { width: 100%; height: auto; aspect-ratio: 1; display: block; max-width: 100%; border-radius: 4px; }
+/* (The court's ground from the stylesheet itself, so it follows the theme
+   whatever the script has read.) */
+canvas.court { background: var(--court); border: 1px solid var(--line); }
 .cap { font: 500 .7rem/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-top: 5px; }
 .meter { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; font: .75rem/1 var(--mono); color: var(--muted); }
 .bar { position: relative; height: 10px; background: var(--pad); border-radius: 5px; overflow: hidden; }
@@ -190,8 +193,8 @@ class Clip {
   }
   drawCourt(i) {
     const g = this.court, W = g.canvas.width, fr = this.f[i];
-    g.fillStyle = C.court; g.fillRect(0, 0, W, W);
-    g.strokeStyle = C.line; g.lineWidth = 2; g.strokeRect(1, 1, W - 2, W - 2);
+    g.clearRect(0, 0, W, W);
+    g.strokeStyle = C.line; g.lineWidth = 2;
     g.setLineDash([6, 8]); g.beginPath(); g.moveTo(W / 2, 0); g.lineTo(W / 2, W); g.stroke(); g.setLineDash([]);
     for (let j = 8; j >= 1; j--) {
       const p = this.f[Math.max(0, i - j)];
@@ -200,8 +203,11 @@ class Clip {
     }
     g.globalAlpha = 1;
     const ph = 0.3 * W, py = fr[3] * W;
-    g.fillStyle = C.paddle; g.fillRect(4, py - ph / 2, W * 0.025, ph);
-    g.fillStyle = C.ball; g.beginPath(); g.arc(fr[1] * W, fr[2] * W, W * 0.022, 0, 7); g.fill();
+    // (Each with a ring of the other's colour: seen on a light court and a dark one.)
+    g.fillStyle = C.paddle; g.strokeStyle = C.ball; g.lineWidth = 2;
+    g.fillRect(5, py - ph / 2, W * 0.03, ph); g.strokeRect(5, py - ph / 2, W * 0.03, ph);
+    g.fillStyle = C.ball; g.strokeStyle = C.paddle; g.lineWidth = 3;
+    g.beginPath(); g.arc(fr[1] * W, fr[2] * W, W * 0.024, 0, 7); g.fill(); g.stroke();
     const back = this.f[Math.max(0, i - 30)];
     let label = null, col = null;
     if (fr[4] > back[4]) { label = "MISS"; col = C.punish; } else if (fr[5] > back[5]) { label = "HIT"; col = C.reward; }
@@ -334,6 +340,7 @@ function chart() {
 
 let chartAt = 0;
 function frame(now) {
+  colors();   // (the theme's colours each frame: a theme switched, or read late)
   if (mode === "replay" && playing && last !== null) { replayPos += (now - last) / 1000 / FS; if (replayPos >= totalFrames - 1) replayPos = 0; }
   last = now;
   const tNow = clips[0].f.length ? clips[0].f[mode === "live" ? clips[0].f.length - 1 : Math.floor(replayPos)][0] : 0;
