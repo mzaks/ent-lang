@@ -312,6 +312,16 @@ void dish_set_home_gain(dish *d, float gain) {
   WROTE(home_gain, sizeof *home_gain);
 }
 
+// Sets how far a reward or punish pulse moves the weights (reward_gain,
+// the learning rate of the modulated rule; 0: not at all) from the next
+// step on.
+void dish_set_reward_gain(dish *d, float gain) {
+  float *reward_gain = ent_Dish_reward_gain(d->world);
+  BACK(reward_gain, sizeof *reward_gain);
+  *reward_gain = gain;
+  WROTE(reward_gain, sizeof *reward_gain);
+}
+
 // The steps run so far.
 int32_t dish_tick(dish *d) {
   int32_t *tick = ent_Dish_tick(d->world);

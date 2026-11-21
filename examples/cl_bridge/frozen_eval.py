@@ -49,6 +49,7 @@ def _lib():
     lib.pong_state.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.pong_fixed_serves.argtypes = [ctypes.c_void_p, ctypes.c_int64]
     lib.pong_destroy.argtypes = [ctypes.c_void_p]
+    lib.dish_destroy.argtypes = [ctypes.c_void_p]
     lib.dish_set_stdp.argtypes = [ctypes.c_void_p, ctypes.c_int32]
     return lib
 
@@ -85,6 +86,8 @@ def job(seed: int, gain: float, minute: int, rallies: int, live: bool,
             hits_at.append(state[7])
         if len(hits_at) >= rallies or state[0] - t0 > 900:
             break
+    lib.pong_destroy(test)
+    lib.dish_destroy(dish)   # a worker runs many jobs: the dish is ~170 MB
     n = min(len(hits_at), rallies)
     score = hits_at[n - 1] / n if n else 0.0
     return {"seed": seed, "gain": gain, "minute": minute, "frozen": score,
