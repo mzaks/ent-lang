@@ -18,6 +18,7 @@ The ways on, each from the best minute and, for comparison, from minute 20
     0.3      a third of the learning rate
     0.1      a tenth
     halving  1.0 halved every 2 minutes (1/32 at the end of 10)
+    both ... the same, and the neurons' scaling (home_gain) slowed alike
 
 21 November 2026, 8 seeds, frozen hits a rally on the new serves (+- s.e.):
                      from best minute  from minute 20
@@ -26,10 +27,17 @@ The ways on, each from the best minute and, for comparison, from minute 20
     +10 min, 0.3     0.81 +- 0.09      0.94 +- 0.13
     +10 min, 0.1     0.80 +- 0.10      1.11 +- 0.21
     +10 min, halving 0.90 +- 0.12      0.84 +- 0.10
-A smaller learning rate does not keep the best wiring, it loses it: the
-neurons' scaling (home_gain) goes on at its full rate, and with less
+    +10 min, both 0.3     1.34 +- 0.13      1.14 +- 0.13
+    +10 min, both 0.1     1.44 +- 0.14      1.19 +- 0.10
+    +10 min, both halving 1.30 +- 0.13      1.40 +- 0.10
+A smaller learning rate alone does not keep the best wiring, it loses it:
+the neurons' scaling (home_gain) goes on at its full rate, and with less
 reward to hold it the map fades towards the no-reward dish (0.4-0.5).
-Learning on at 1.0 keeps most of it; stopping at the best minute keeps all.
+Slowed together with the scaling, the map is kept (both 0.1 beats 0.1 for
+all 8 seeds) but not bettered: as good as stopping at the best minute.
+From minute 20, with no best minute picked, halving both every 2 minutes
+gets as far as the picked best minute (1.40; above minute 20 frozen for 6
+of 8 seeds): a schedule that settles the dish, not a search.
 
 Picking the best minute is the host searching the dish's wiring with the
 score in hand: it can be done to the model, never to a culture.
@@ -48,22 +56,34 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import frozen_eval as fe  # noqa: E402
 
 SERVES, EVAL_SEED = 0x0BADC0DE, 777   # frozen_eval.py's retest serves
-WAYS = ["1.0", "0.3", "0.1", "halving"]
+WAYS = ["1.0", "0.3", "0.1", "halving", "both 0.3", "both 0.1", "both halving"]
 
 
 def _gain(way: str, minute: int) -> float:
+    way = way.removeprefix("both ")
     return 0.5 ** (minute // 2) if way == "halving" else float(way)
+
+
+def _home_gain() -> float:
+    import ent_dish
+    p = ent_dish.DishParams()
+    ent_dish._load(None).dish_defaults(ctypes.byref(p))
+    return p.home_gain
 
 
 def job(seed: int, start: int, way: str, extra: int, rallies: int) -> dict:
     lib = fe._lib()
     lib.dish_set_reward_gain.argtypes = [ctypes.c_void_p, ctypes.c_float]
+    lib.dish_set_home_gain.argtypes = [ctypes.c_void_p, ctypes.c_float]
+    home = _home_gain()
     state = (ctypes.c_double * 12)()
     dish = lib.pong_make_dish(seed, 1.0, 0)
     game = lib.pong_create(dish, seed, 0, 0)
     for m in range(start + extra):
         if m >= start:
             lib.dish_set_reward_gain(dish, _gain(way, m - start))
+            if way.startswith("both "):
+                lib.dish_set_home_gain(dish, home * _gain(way, m - start))
         if lib.pong_run(game, 60 * fe.TICKS, None, None) < 0:
             raise RuntimeError("the dish had no room for its spikes")
     lib.pong_state(game, state)
@@ -137,13 +157,14 @@ def main() -> int:
         return f"{statistics.mean(v):.2f} +- {se:.2f}"
 
     print(f"frozen hits a rally on {rallies} new serves, mean over {len(starts)} seeds +- s.e.")
-    print(f"{'':22s}from best minute  from minute 20")
-    print(f"{'at the start':22s}{show(column(0, '1.0', 0)):18s}{show(column(1, '1.0', 0))}")
+    print(f"{'':25s}from best minute  from minute 20")
+    print(f"{'at the start':25s}{show(column(0, '1.0', 0)):18s}{show(column(1, '1.0', 0))}")
     for way in WAYS:
-        print(f"{'+' + str(extra) + ' min, gain ' + way:22s}"
+        print(f"{'+' + str(extra) + ' min, gain ' + way:25s}"
               f"{show(column(0, way, extra)):18s}{show(column(1, way, extra))}")
-    print("seed  best  start  " + "  ".join(f"{w:>7s}" for w in WAYS) + "   | m20 start  " +
-          "  ".join(f"{w:>7s}" for w in WAYS))
+    short = [w.replace("both ", "b").replace("halving", "half") for w in WAYS]
+    print("seed  best  start  " + "  ".join(f"{w:>7s}" for w in short) + "   | m20 start  " +
+          "  ".join(f"{w:>7s}" for w in short))
     for s, (best, last) in sorted(starts.items()):
         a = [got[(s, best, w, extra)] for w in WAYS]
         b = [got[(s, last, w, extra)] for w in WAYS]
