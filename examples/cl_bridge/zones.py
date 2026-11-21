@@ -10,7 +10,13 @@ columns (6, 7) (bridge.c's dish_paths). A ball in the top rows wants the
 paddle up, so a good map is positive at the top and negative at the bottom.
 
     build/cl_bridge/venv/bin/python examples/cl_bridge/zones.py \\
-        [seeds (8)] [rallies (120)] [out.json]
+        [seeds (8)] [rallies (120)] [out.json] [ego (0)]
+
+ego 1: the ball told as its height less the paddle's (game.c's ego, pong.py's
+BALL_EGO=1; the row the ball arrives in is still the court's), in training
+and in the test; the wiring's rows are then the ball's place against the
+paddle, the top ones "ball above it", so a good map is again positive at
+the top.
 
 Minutes 0, 5, 10 and 20 with the reward, and minute 20 of the gain 0 dish
 (no reward; scaling only).
@@ -25,6 +31,14 @@ is, which the dish is not told: the reward for a middle row's moves is
 up as often as down and teaches nothing. Edge rows want the same way
 wherever the paddle is. Some seeds learn one edge only (seed 5: rows 0-1
 all hit, rows 4-7 none).
+
+The same with ego 1 (relative code), minute 20: rows 3 and 4 at 0.31 and
+0.27 (height code 0.22, 0.20; no reward 0.17, 0.19), the edges lower (row
+6 0.36 against 0.68), all rows 0.44 against 0.54. Two seeds of 8 (3 and 4)
+track the ball over the whole court, 0.43-0.73 in every row, which no
+seed does with the height code; most park the paddle at the top. The
+reward rewires one row only (3, ball just above the paddle: up, 0.12 to
+0.31); rows 1 and 2 ("ball well above") stay wired down as grown.
 """
 from __future__ import annotations
 
@@ -44,13 +58,13 @@ SENSORY = [3, 12, 20, 27, 35, 44, 52, 59]   # game.c's, a row each
 POINTS = [(1.0, 0), (1.0, 5), (1.0, 10), (1.0, 20), (0.0, 20)]
 
 
-def job(seed: int, gain: float, minute: int, rallies: int) -> dict:
+def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0) -> dict:
     lib = fe._lib()
     lib.pong_zones.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.dish_paths.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
     state = (ctypes.c_double * 12)()
     dish = lib.pong_make_dish(seed, gain, 0)
-    game = lib.pong_create(dish, seed, 0, 0)
+    game = lib.pong_create(dish, seed, 0, ego)
     for _ in range(minute):
         if lib.pong_run(game, 60 * fe.TICKS, None, None) < 0:
             raise RuntimeError("the dish had no room for its spikes")
@@ -64,7 +78,7 @@ def job(seed: int, gain: float, minute: int, rallies: int) -> dict:
         up = sum(w[c * 64 + b] for b in range(64) if b % 8 <= 1)
         down = sum(w[c * 64 + b] for b in range(64) if b % 8 >= 6)
         wiring.append(up - down)
-    test = lib.pong_create(dish, EVAL_SEED, 0, 0)
+    test = lib.pong_create(dish, EVAL_SEED, 0, ego)
     lib.pong_fixed_serves(test, SERVES)
     t0 = None
     while True:
@@ -79,7 +93,7 @@ def job(seed: int, gain: float, minute: int, rallies: int) -> dict:
     lib.pong_zones(test, z)
     lib.pong_destroy(test)
     lib.dish_destroy(dish)
-    return {"seed": seed, "gain": gain, "minute": minute, "rallies": int(state[4]),
+    return {"seed": seed, "gain": gain, "minute": minute, "ego": ego, "rallies": int(state[4]),
             "seen": list(z[:8]), "hit": list(z[8:]), "wiring": wiring}
 
 
@@ -88,7 +102,8 @@ def main() -> int:
     seeds = int(args[0]) if args else 8
     rallies = int(args[1]) if len(args) > 1 else 120
     out = args[2] if len(args) > 2 else None
-    jobs = [(s, g, m, rallies) for g, m in POINTS for s in range(1, seeds + 1)]
+    ego = int(args[3]) if len(args) > 3 else 0
+    jobs = [(s, g, m, rallies, ego) for g, m in POINTS for s in range(1, seeds + 1)]
     jobs.sort(key=lambda j: -j[2])
     fe._lib()
     results = []
