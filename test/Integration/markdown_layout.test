@@ -1,9 +1,11 @@
 // lib/markdown_window.ent sets a document in lines (measured here as if
 // each byte were 8 wide): blocks one under another, a paragraph in more
 // lines where the box is narrower, a table's cells in columns as wide as
-// their widest (the second, :---:, in the middle).
+// their widest (the second, :---:, in the middle); and what is selected
+// copied as text (cells with a tab, items a line each, other blocks a
+// line left empty between them; a part from inside a word).
 // RUN: env MD_FILE=%S/Inputs/markdown/sample.md %ent run %S/Inputs/markdown/layout.ent 2>/dev/null > %t.out
-// RUN: FileCheck %s --input-file=%t.out
+// RUN: FileCheck %s --input-file=%t.out --strict-whitespace
 
 // CHECK: width 2000.0: 79 words set, 491.324951 high
 // CHECK-NEXT:   block 0 kind 1 at 7.2
@@ -35,3 +37,35 @@
 // CHECK-NEXT:   row 1 cell 1 at 60.5, 432.024963: save
 // CHECK-NEXT:   row 2 cell 0 at 17.5, 453.524963: a|b
 // CHECK-NEXT:   row 2 cell 1 at 92.5, 453.524963: go
+// CHECK-NEXT: copied:
+// CHECK-NEXT: Title one
+// CHECK-EMPTY:
+// CHECK-NEXT: A paragraph with bold, italic, code | pipe, a link and snake_case_name, 2 * 3, and *not italic*. Keys: ⌘⇧N and ✓.
+// CHECK-EMPTY:
+// CHECK-NEXT: Second part
+// CHECK-EMPTY:
+// CHECK-NEXT: one
+// CHECK-NEXT: two bold across lines
+// CHECK-NEXT: nested, see https://example.org/x more of nested
+// CHECK-NEXT: three
+// CHECK-NEXT: first
+// CHECK-NEXT: second
+// CHECK-EMPTY:
+// CHECK-NEXT: Inside the second.
+// CHECK-EMPTY:
+// CHECK-NEXT: Not in the list.
+// CHECK-EMPTY:
+// CHECK-NEXT: quoted line and more
+// CHECK-EMPTY:
+// CHECK-NEXT: curl -X GET 'x' | jq '.a * 2'
+// CHECK-EMPTY:
+// CHECK-NEXT: done
+// CHECK-EMPTY:
+// CHECK-NEXT: Keys	Does
+// CHECK-NEXT: ⌘S	save | keep
+// CHECK-NEXT: a|b	go
+// CHECK-EMPTY:
+// CHECK-NEXT: Second part
+// CHECK-EMPTY:
+// CHECK-NEXT: Code across two lines and on.
+// CHECK-NEXT: part: [tle o]

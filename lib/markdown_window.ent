@@ -3,12 +3,14 @@
 // box, lists with their bullets and numbers, quotes with a bar, code on
 // a panel of its own, tables with their columns as wide as they need
 // (and can have), rules, pictures as wide as they are or as the box is,
-// links that go where they say. The wheel moves it; search finds in it.
+// links that go where they say. The wheel moves it; search finds in it;
+// what is selected (dragged over, two clicks a word, three a block, Cmd+A)
+// Cmd+C copies as text.
 //
 //   import markdown_window
 //   Md.text = doc  Md.base = "folder/of/doc"  Md.fresh = true
 //   Md.x = ..  Md.y = ..  Md.w = ..  Md.h = ..   (each frame, the box)
-//   schedule frame() { begin()  md_read()  md_layout()  md_input()
+//   schedule frame() { begin()  md_read()  md_layout()  md_input()  md_select()
 //                      md_search()  ...  md_draw()  present() }
 //
 // The program says:
@@ -49,12 +51,14 @@ unique MdState {
   laid_w: f32, laid_size: f32, height: f32, scroll: f32,
   back_to: f32, can_back: bool,
   hover: i32, link: text, linked: bool,
-  count: i32, current: i32, dragging: bool, drag_from: f32, pressed: i32
+  count: i32, current: i32, dragging: bool, drag_from: f32, pressed: i32,
+  anchor: i32, caret: i32, selecting: bool, focused: bool, over: bool, unit: i32,
+  unit_from: i32, unit_to: i32
 }
 unique MdFonts { found: bool, bold: i32, italic: i32, mono: i32, symbols: i32 }
 unique MdLook {
   set: bool, text: i32, dim: i32, heading: i32, link: i32, code: i32,
-  code_back: i32, rule: i32, mark: i32, current: i32, quote: i32, head_back: i32
+  code_back: i32, rule: i32, mark: i32, current: i32, quote: i32, head_back: i32, selection: i32
 }
 
 // A word: bytes of a run set together (no break inside), its font (0
@@ -488,6 +492,94 @@ proc md_piece_of(pieces: MdPieces, words: MdWords, at: i32) -> i32 {
   found
 }
 
+// The byte of the text at (x, y) of the page: in the word under it or
+// the nearest at its left in that line (its end where it is past it), or
+// the start of the first word below.
+proc md_byte_at(t: text, pieces: MdPieces, words: MdWords, x: f32, y: f32, size: f32,
+                bold: i32, italic: i32, mono: i32, symbols: i32,
+                measure: proc(t: text, font: i32, size: f32) -> f32) -> i32 {
+  // (A table's cells go down each by itself: a little above, too.)
+  var p = md_piece_at(pieces, y - size * 20.0)
+  var best = -1
+  var first_in = -1
+  var below = -1
+  while p < len(pieces) && pieces[p].y <= y + size * 20.0 {
+    let w = pieces[p].word
+    if !words[w].picture {
+      if y >= pieces[p].y && y < pieces[p].y + pieces[p].h {
+        if pieces[p].x <= x && (best < 0 || pieces[p].x >= pieces[best].x) { best = p }
+        if first_in < 0 || pieces[p].x < pieces[first_in].x { first_in = p }
+      } else if pieces[p].y > y && (below < 0 || pieces[p].y < pieces[below].y) { below = p }
+    }
+    p += 1
+  }
+  var at = len(t)
+  if best >= 0 {
+    let w = pieces[best].word
+    let f = md_font_number(words[w].font, bold, italic, mono, symbols)
+    let sz = size * words[w].scale
+    if x >= pieces[best].x + words[w].width { at = words[w].end }
+    else {
+      // (Letter by letter: where the pointer is past half of one.)
+      at = words[w].start
+      var i = words[w].start
+      var done = false
+      while i < words[w].end && !done {
+        var j = i + 1
+        while j < words[w].end && (md_byte(t, j) & 0xC0) == 0x80 { j += 1 }
+        let left = measure(slice(t, words[w].start, i), f, sz)
+        let right = measure(slice(t, words[w].start, j), f, sz)
+        if x - pieces[best].x < (left + right) * 0.5 { done = true } else { at = j }
+        i = j
+      }
+    }
+  } else if first_in >= 0 { at = words[pieces[first_in].word].start }
+  else if below >= 0 { at = words[pieces[below].word].start }
+  at
+}
+
+// The piece a byte is in or ends (-1 where none).
+proc md_piece_with(pieces: MdPieces, words: MdWords, at: i32) -> i32 {
+  var found = -1
+  for p in 0..len(pieces) {
+    let w = pieces[p].word
+    if found < 0 && !words[w].picture && words[w].start <= at && at <= words[w].end { found = p }
+  }
+  found
+}
+
+// What is selected (bytes `from` to `to`) as text: words with a space
+// where they have room between them, a row's cells with a tab, lines of
+// code, items and rows each a line, other blocks a line left empty
+// between them.
+proc md_copy(t: text, blocks: MdBlocks, words: MdWords, pieces: MdPieces, from: i32, to: i32) -> text {
+  var out = ""
+  var last = -1
+  for p in 0..len(pieces) {
+    let w = pieces[p].word
+    let a = max(from, words[w].start)
+    let z = min(to, words[w].end)
+    let empty_line = words[w].start == words[w].end && from <= words[w].start && words[w].start < to
+    if !words[w].picture && (a < z || empty_line) {
+      if last >= 0 {
+        let b = words[w].block
+        let was = words[last].block
+        let kind = blocks[b].kind
+        if b != was {
+          let tight = (kind == MD_ROW && blocks[was].kind == MD_ROW && blocks[b].number == blocks[was].number)
+                      || (kind == MD_ITEM && blocks[was].kind == MD_ITEM)
+          if tight { out += "\n" } else { out += "\n\n" }
+        } else if words[w].cell != words[last].cell { out += "\t" }
+        else if kind == MD_CODE { out += "\n" }
+        else if words[w].gap > 0.0 { out += " " }
+      }
+      if a < z { out += slice(t, a, z) }
+      last = w
+    }
+  }
+  out
+}
+
 // --- Systems. ---
 
 system md_fonts() {
@@ -511,6 +603,7 @@ system md_fonts() {
     MdLook.current = 0xb08a1e
     MdLook.quote = 0x3d444d
     MdLook.head_back = 0x161b22
+    MdLook.selection = 0x703a7bd5
   }
 }
 
@@ -524,6 +617,9 @@ system md_read() {
       MdState.can_back = false
       MdState.hover = -1
       MdState.pressed = -1
+      MdState.anchor = 0
+      MdState.caret = 0
+      MdState.selecting = false
       MdFound = []
       MdState.count = 0
       MdState.current = -1
@@ -597,7 +693,7 @@ system md_input() {
         MdState.hover = MdWords[MdPieces[p].word].run
         pointer_shape(pointer_hand())
         if Mouse.clicks > 0 { MdState.pressed = MdState.hover }
-        if !Mouse.left && MdState.pressed == MdState.hover {
+        if !Mouse.left && MdState.pressed == MdState.hover && MdState.anchor == MdState.caret {
           MdState.pressed = -1
           let r = MdState.hover
           let to = slice(Md.text, MdRuns[r].link_start, MdRuns[r].link_end) as text[2048]
@@ -617,6 +713,105 @@ system md_input() {
       }
     }
   }
+}
+
+// Selecting: pressed and dragged over the words (two clicks a word, three
+// a block, then by those as it is dragged; the page moves where the
+// pointer is past its top or bottom); Cmd+A all, Cmd+C copies, the
+// secondary click a menu of Copy and Select All. A press in the page
+// gives it the focus, one elsewhere takes it (the program may too:
+// `MdState.focused`).
+system md_select() {
+  let most = max(MdState.height - Md.h, 0.0)
+  let mx = Mouse.x
+  let my = Mouse.y
+  let inside = Md.shown && mx >= Md.x && mx < Md.x + Md.w - 10.0 && my >= Md.y && my < Md.y + Md.h
+  MdState.over = inside && MdState.hover < 0
+  if Mouse.clicks > 0 && !inside { MdState.focused = false }
+  if !Md.shown {
+    MdState.focused = false
+    MdState.selecting = false
+  }
+  if Mouse.clicks > 0 && inside && !MdState.dragging {
+    MdState.focused = true
+    let at = md_byte_at(Md.text, MdPieces, MdWords, mx - Md.x, my - Md.y + MdState.scroll, Md.size,
+                        MdFonts.bold, MdFonts.italic, MdFonts.mono, MdFonts.symbols, md_extent)
+    MdState.unit = min(Mouse.clicks, 3) - 1
+    if MdState.unit == 0 {
+      MdState.anchor = at
+      MdState.caret = at
+    } else {
+      let p = md_piece_with(MdPieces, MdWords, at)
+      if p >= 0 {
+        let w = MdPieces[p].word
+        // (A word: with those it is set against, no room between.)
+        var k0 = w
+        while k0 > 0 && MdWords[k0].gap <= 0.0 && MdWords[k0 - 1].block == MdWords[w].block
+              && MdWords[k0 - 1].cell == MdWords[w].cell && !MdWords[k0 - 1].picture && MdWords[w].font != 3 { k0 -= 1 }
+        var e0 = w
+        while e0 + 1 < len(MdWords) && MdWords[e0 + 1].gap <= 0.0 && MdWords[e0 + 1].block == MdWords[w].block
+              && MdWords[e0 + 1].cell == MdWords[w].cell && !MdWords[e0 + 1].picture && MdBlocks[MdWords[w].block].kind != MD_CODE { e0 += 1 }
+        var from = MdWords[k0].start
+        var to = MdWords[e0].end
+        if MdState.unit == 2 {
+          let b = MdWords[w].block
+          var k = w
+          while k > 0 && MdWords[k - 1].block == b { k -= 1 }
+          var e = w
+          while e + 1 < len(MdWords) && MdWords[e + 1].block == b { e += 1 }
+          from = MdWords[k].start
+          to = MdWords[e].end
+        }
+        MdState.unit_from = from
+        MdState.unit_to = to
+        MdState.anchor = from
+        MdState.caret = to
+      }
+    }
+    MdState.selecting = true
+  }
+  if MdState.selecting {
+    if !Mouse.left { MdState.selecting = false }
+    else if Mouse.clicks == 0 {
+      if my < Md.y { MdState.scroll = max(MdState.scroll - Md.size, 0.0) }
+      if my > Md.y + Md.h { MdState.scroll = min(MdState.scroll + Md.size, most) }
+      let at = md_byte_at(Md.text, MdPieces, MdWords, mx - Md.x, my - Md.y + MdState.scroll, Md.size,
+                          MdFonts.bold, MdFonts.italic, MdFonts.mono, MdFonts.symbols, md_extent)
+      if MdState.unit == 0 { MdState.caret = at }
+      else {
+        // By words or blocks: the one first chosen, to the one the
+        // pointer is at.
+        let p = md_piece_with(MdPieces, MdWords, at)
+        if p >= 0 {
+          let w = MdPieces[p].word
+          if at < MdState.unit_from {
+            MdState.anchor = MdState.unit_to
+            MdState.caret = MdWords[w].start
+          } else {
+            MdState.anchor = MdState.unit_from
+            MdState.caret = max(MdWords[w].end, MdState.unit_to)
+          }
+        }
+      }
+    }
+  }
+  if MdState.focused && command_down() && key_pressed('A' as i32) {
+    MdState.anchor = 0
+    MdState.caret = len(Md.text)
+  }
+  let lo = min(MdState.anchor, MdState.caret)
+  let hi = max(MdState.anchor, MdState.caret)
+  var copy = MdState.focused && command_down() && key_pressed('C' as i32) && hi > lo
+  if inside && Mouse.secondary {
+    MdState.focused = true
+    let chosen = context_menu(if hi > lo { "Copy\nSelect All" } else { "~Copy\nSelect All" })
+    if chosen == 0 && hi > lo { copy = true }
+    if chosen == 1 {
+      MdState.anchor = 0
+      MdState.caret = len(Md.text)
+    }
+  }
+  if copy { set_clipboard(md_copy(Md.text, MdBlocks, MdWords, MdPieces, lo, hi)) }
 }
 
 // Search: the matches found anew, or the next or the one before; the
@@ -660,7 +855,8 @@ proc md_code_joined(runs: MdRuns, a: i32, b: i32) -> bool {
 
 proc md_draw_page(t: text, words: MdWords, pieces: MdPieces, placed: MdPlaced, runs: MdRuns,
                   blocks: MdBlocks, found: MdFound, x: f32, y: f32, w: f32, h: f32, scroll: f32,
-                  size: f32, hover: i32, current: i32, bold: i32, italic: i32, mono: i32, symbols: i32,
+                  size: f32, hover: i32, current: i32, sel_from: i32, sel_to: i32, c_selection: i32,
+                  bold: i32, italic: i32, mono: i32, symbols: i32,
                   c_text: i32, c_heading: i32, c_link: i32, c_code: i32, c_code_back: i32,
                   c_rule: i32, c_mark: i32, c_current: i32, c_quote: i32, c_head_back: i32, c_dim: i32) {
   clip(x, y, w, h)
@@ -700,6 +896,19 @@ proc md_draw_page(t: text, words: MdWords, pieces: MdPieces, placed: MdPlaced, r
     // (On the line's foot, whatever its size: the line's height less
     // the word's own.)
     let py = oy + pieces[p].y + pieces[p].h - md_line_h(sz) + sz * 0.18
+    // What is selected: of the word, and the room to the next where that
+    // is selected too.
+    if sel_to > sel_from && sel_to > words[wd].start && sel_from < words[wd].end {
+      let a = max(sel_from, words[wd].start)
+      let z = min(sel_to, words[wd].end)
+      let before = if a > words[wd].start { text_extent(slice(t, words[wd].start, a), f, sz, 0.0, 2) } else { 0.0 }
+      var wide = if z < words[wd].end { text_extent(slice(t, a, z), f, sz, 0.0, 2) } else { words[wd].width - before }
+      if z == words[wd].end && sel_to > words[wd].end && p + 1 < len(pieces) && pieces[p + 1].y == pieces[p].y
+         && words[pieces[p + 1].word].block == words[wd].block && words[pieces[p + 1].word].cell == words[wd].cell {
+        wide = pieces[p + 1].x - pieces[p].x - before
+      }
+      rect(px + before, py - sz * 0.1, wide, sz * 1.25, c_selection)
+    }
     // Matches.
     for k in 0..len(found) {
       if found[k].end > words[wd].start && found[k].start < words[wd].end {
@@ -732,6 +941,7 @@ system md_draw() {
   if Md.shown && Md.w > 0.0 {
     md_draw_page(Md.text, MdWords, MdPieces, MdPlaced, MdRuns, MdBlocks, MdFound,
                  Md.x, Md.y, Md.w, Md.h, MdState.scroll, Md.size, MdState.hover, MdState.current,
+                 min(MdState.anchor, MdState.caret), max(MdState.anchor, MdState.caret), MdLook.selection,
                  MdFonts.bold, MdFonts.italic, MdFonts.mono, MdFonts.symbols,
                  MdLook.text, MdLook.heading, MdLook.link, MdLook.code, MdLook.code_back,
                  MdLook.rule, MdLook.mark, MdLook.current, MdLook.quote, MdLook.head_back, MdLook.dim)

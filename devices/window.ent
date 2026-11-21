@@ -145,10 +145,13 @@ fn pointer_resize_up_down() -> i32 { 6 }
 extern proc context_menu(items: text) -> i32
 
 // The menu bar's menus, where the system has one (a Mac's: the menus go
-// after the program's own and before Window). `title` names a menu; given
+// after the program's own and before Window; one titled "Help" goes last,
+// after Window, and is the system's Help menu, which searches the items). `title` names a menu; given
 // again, the menu is made anew with these items. `items` as a
 // `context_menu`'s, and also: after a tab, the key that chooses the item
-// with the command key ("o"; "O" with Shift too), and a line that starts
+// with the command key ("o"; "O" with Shift too; "=c": the item is that
+// key, which the program then reads as pressed, with the command key, as
+// Edit's Cut, Copy, Paste, Undo are), and a line that starts
 // with two spaces is in a menu of the item above it (Open Recent's).
 // False where no menu is shown (Windows, Linux, a web page: the program
 // then reads the keys itself).

@@ -536,6 +536,7 @@ void ent_window_begin_frame(int32_t background, int32_t fps, float zoom) {
   rlScalef(ent_window_zoom, ent_window_zoom, 1);
 }
 
+static void ent_window_took_events(void); // (Below: a menu item's key.)
 void ent_window_end_frame(void) {
   ent_window_shift(0, 0);
   ent_window_unclip();
@@ -551,6 +552,7 @@ void ent_window_end_frame(void) {
   ent_window_next_frame(ent_window_fps > 0 ? 1.0 / ent_window_fps : 0);
   ent_window_fit();
 #endif
+  ent_window_took_events();
   double now = GetTime();
   if (ent_window_frame_end > 0)
     ent_window_frame_was = now - ent_window_frame_end;
@@ -594,6 +596,7 @@ void ent_window_still_frame(int32_t fps) {
     }
   }
 #endif
+  ent_window_took_events();
   double now = GetTime();
   if (ent_window_frame_end > 0)
     ent_window_frame_was = now - ent_window_frame_end;
@@ -751,9 +754,31 @@ int32_t ent_window_mouse_clicks(void) {
 }
 
 bool ent_window_mouse_secondary(void) { return ent_window_secondary_now; }
-bool ent_window_key_down(int32_t key) { return IsKeyDown(key); }
+
+// A menu bar item that is its key (Edit's Copy: "=c"), chosen with the
+// pointer or by the key: the frame after, the program reads that key as
+// pressed, with the command key (and Shift, "=Z") down, as it would
+// have without the menu (which takes the key before the window).
+// raylib's key and Shift (bit 16): pending while the events are taken
+// in, then the frame's.
+static int32_t ent_window_menu_key_pending, ent_window_menu_key_now;
+static void ent_window_took_events(void) {
+  ent_window_menu_key_now = ent_window_menu_key_pending;
+  ent_window_menu_key_pending = 0;
+}
+static bool ent_window_menu_key_down(int32_t key) {
+  int32_t k = ent_window_menu_key_now;
+  if (!k)
+    return false;
+  bool shift = (k & 0x10000) != 0;
+  return (k & 0xFFFF) == key || key == KEY_LEFT_SUPER || key == KEY_RIGHT_SUPER ||
+         (shift && (key == KEY_LEFT_SHIFT || key == KEY_RIGHT_SHIFT));
+}
+
+bool ent_window_key_down(int32_t key) { return IsKeyDown(key) || ent_window_menu_key_down(key); }
 bool ent_window_key_pressed(int32_t key) {
-  return IsKeyPressed(key) || IsKeyPressedRepeat(key);
+  return IsKeyPressed(key) || IsKeyPressedRepeat(key) ||
+         (ent_window_menu_key_now && (ent_window_menu_key_now & 0xFFFF) == key);
 }
 
 // The characters typed: raylib queues them as they come, and gives them
@@ -2094,7 +2119,7 @@ static double ent_window_double_click(void) {
 
 bool ent_window_command_down(void) {
 #if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
-  return IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
+  return IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER) || ent_window_menu_key_now != 0;
 #elif defined(__EMSCRIPTEN__)
   // (A page does not know whether the machine is a Mac: either.)
   return IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER) ||
@@ -2304,6 +2329,11 @@ static int32_t ent_window_menu_pick;
 static char ent_window_bar_pick[1024];
 static void ent_window_bar_picked(id self, SEL command, id sender) {
   (void)self, (void)command;
+  long key = ((long (*)(id, SEL))objc_msgSend)(sender, ent_window_sel("tag"));
+  if (key > 0) {
+    ent_window_menu_key_pending = (int32_t)key;
+    return;
+  }
   id path = ent_window_send(sender, "representedObject");
   const char *said =
       path ? ((const char *(*)(id, SEL))objc_msgSend)(path, ent_window_sel("UTF8String"))
@@ -2515,11 +2545,16 @@ bool ent_window_menu_bar(const ent_text *title, const ent_text *items) {
   }
   void *pool = objc_autoreleasePoolPush();
   id target = ent_window_menu_target();
-  // In place of the menu of this title, else before Window (the last).
+  // In place of the menu of this title, else before Window; Help last
+  // (Apple's order: the app's, File, Edit, View, the app's own, Window,
+  // Help).
+  bool help = strcmp(name, "Help") == 0;
   long at = ((long (*)(id, SEL, id))objc_msgSend)(
       bar, ent_window_sel("indexOfItemWithTitle:"), ent_window_ns_text(name));
   if (at >= 0) {
     ((void (*)(id, SEL, long))objc_msgSend)(bar, ent_window_sel("removeItemAtIndex:"), at);
+  } else if (help) {
+    at = ent_window_count(bar);
   } else {
     // (Window is the menu the application has as its windows'; its title
     // may be none.)
@@ -2553,6 +2588,14 @@ bool ent_window_menu_bar(const ent_text *title, const ent_text *items) {
     char *key = strchr(it, '\t');
     if (key)
       *key++ = 0;
+    // ("=c": the item is the key, Command+C.)
+    long is_key = 0;
+    if (key && key[0] == '=' && key[1]) {
+      ++key;
+      char c = key[0];
+      is_key = (c >= 'a' && c <= 'z') ? c - 'a' + 'A'
+             : (c >= 'A' && c <= 'Z') ? (c | 0x10000) : (unsigned char)c;
+    }
     id into = menu;
     if (in_inner && above) {
       if (!inner) {
@@ -2577,6 +2620,8 @@ bool ent_window_menu_bar(const ent_text *title, const ent_text *items) {
           ent_window_sel("initWithTitle:action:keyEquivalent:"), ent_window_ns_text(it),
           ent_window_sel("barPick:"), ent_window_ns_text(key ? key : ""));
       ((void (*)(id, SEL, id))objc_msgSend)(item, ent_window_sel("setTarget:"), target);
+      if (is_key)
+        ((void (*)(id, SEL, long))objc_msgSend)(item, ent_window_sel("setTag:"), is_key);
       ((void (*)(id, SEL, id))objc_msgSend)(item, ent_window_sel("setRepresentedObject:"),
                                             ent_window_ns_text(path));
       ((void (*)(id, SEL, signed char))objc_msgSend)(item, ent_window_sel("setEnabled:"),
@@ -2598,6 +2643,8 @@ bool ent_window_menu_bar(const ent_text *title, const ent_text *items) {
   ((void (*)(id, SEL, id))objc_msgSend)(top, ent_window_sel("setSubmenu:"), menu);
   ((void (*)(id, SEL, id, long))objc_msgSend)(bar, ent_window_sel("insertItem:atIndex:"),
                                              top, at);
+  if (help)
+    ((void (*)(id, SEL, id))objc_msgSend)(app, ent_window_sel("setHelpMenu:"), menu);
   ent_window_send(menu, "release");
   ent_window_send(top, "release");
   objc_autoreleasePoolPop(pool);

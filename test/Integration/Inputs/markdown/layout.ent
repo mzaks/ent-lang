@@ -45,6 +45,11 @@ system go() {
       }
     }
   }
+  // All of it copied, as text.
+  let all = md_copy(doc, MdBlocks, MdWords, MdPieces, 0, len(doc))
+  put("copied:")
+  put(all)
+  put("part: [" + md_copy(doc, MdBlocks, MdWords, MdPieces, 4, 10) + "]")
 }
 schedule t() { go() }
 main { t() }

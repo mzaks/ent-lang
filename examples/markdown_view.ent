@@ -49,6 +49,7 @@ schedule frame() {
   md_read()
   md_layout()
   md_input()
+  md_select()
   md_search()
   md_draw()
   present()
