@@ -22,6 +22,14 @@
 //   void pong_zones(p, int32_t z[16])   the balls that reached the paddle's
 //       line in each eighth of its height (z[0..7], 0 the top) and of
 //       those the paddle hit (z[8..15])
+//   void pong_rows(p, int32_t r[24])   by the row of the ball's sensory
+//       stims (the court's or, ego, against the paddle): the stims (r[0..7]),
+//       the moves judged with that row the last stim (r[8..15]) and of
+//       those the moves towards the ball (r[16..23])
+//   void pong_far_serves(p, share)   from the next serve on, that share of
+//       the serves from the half of the court the paddle is not in, and
+//       flat, a quarter of the usual slope, so that they stay there
+//       (practice where the ball is far from it; 0: off, the default)
 //   void pong_fixed_serves(p, base)   from the next serve on, each rally's
 //       paths from a generator of its own, base and the rally's number: the
 //       k-th rally starts the same whatever the paddle did before
@@ -66,12 +74,14 @@ static const int32_t SENSORY[8] = {3, 12, 20, 27, 35, 44, 52, 59};
 typedef struct pong {
   dish *d;
   uint64_t rng, fixed;
+  double far;
   int32_t cond, ego;
   double t, x, y, vx, vy, paddle, up, down, decay;
   double next_sense, judged_at, judged_paddle, expect, expect_move, start;
   int32_t hits, rallies, last_hits, moves_judged, moves_towards;
   int64_t hits_all, late_rallies, late_hits;
   int32_t zone_seen[8], zone_hit[8];
+  int32_t last_row, row_sensed[8], row_judged[8], row_towards[8];
   int32_t channel[4096], step[4096];
   // This tick's stims: channel, amount, kind.
   int32_t n_out, out_ch[16], out_kind[16];
@@ -121,8 +131,13 @@ static void serve(pong *p) {
     p->rng = p->fixed + (uint64_t)p->rallies * 0xD1B54A32D192ED03ull;
   p->x = 1.0;
   p->y = uniform(p, 0.1, 0.9);
+  int far = p->far > 0 && next_unit(p) < p->far;
+  if (far)
+    p->y = p->paddle < 0.5 ? uniform(p, 0.6, 0.9) : uniform(p, 0.1, 0.4);
   p->vx = -BALL_SPEED;
   aim(p);
+  if (far)
+    p->vy *= 0.25;   // flat: it stays in that half on its way
   p->hits = 0;
   p->start = p->t;
 }
@@ -169,6 +184,7 @@ pong *pong_create(dish *d, int64_t seed, int32_t cond, int32_t ego) {
   if (!p)
     return NULL;
   p->d = d;
+  p->last_row = -1;
   p->rng = (uint64_t)seed * 7919u + 1u;
   p->cond = cond;
   p->ego = ego;
@@ -183,10 +199,20 @@ void pong_destroy(pong *p) { free(p); }
 
 void pong_fixed_serves(pong *p, int64_t base) { p->fixed = (uint64_t)base; }
 
+void pong_far_serves(pong *p, double share) { p->far = share; }
+
 void pong_zones(pong *p, int32_t *z) {
   for (int k = 0; k < 8; ++k) {
     z[k] = p->zone_seen[k];
     z[8 + k] = p->zone_hit[k];
+  }
+}
+
+void pong_rows(pong *p, int32_t *r) {
+  for (int k = 0; k < 8; ++k) {
+    r[k] = p->row_sensed[k];
+    r[8 + k] = p->row_judged[k];
+    r[16 + k] = p->row_towards[k];
   }
 }
 
@@ -208,6 +234,10 @@ static void game_tick(pong *p, int32_t up, int32_t down) {
       int towards = (moved > 0) == (p->y > p->judged_paddle);
       p->moves_judged++;
       p->moves_towards += towards;
+      if (p->last_row >= 0) {
+        p->row_judged[p->last_row]++;
+        p->row_towards[p->last_row] += towards;
+      }
       outcome(p, towards ? 1.0 : 0.0, 1);
     }
     p->judged_at = p->t;
@@ -264,6 +294,8 @@ static void game_tick(pong *p, int32_t up, int32_t down) {
       row = row > 7 ? 7 : row;
     }
     emit(p, SENSORY[row], 1.0f, 1);
+    p->last_row = row;
+    p->row_sensed[row]++;
     double near = p->x < 0 ? 0 : p->x > 1 ? 1 : p->x;
     p->next_sense = p->t + 1 / (4 + 36 * (1 - near));
   }

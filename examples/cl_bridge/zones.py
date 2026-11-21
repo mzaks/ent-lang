@@ -12,6 +12,28 @@ paddle up, so a good map is positive at the top and negative at the bottom.
     build/cl_bridge/venv/bin/python examples/cl_bridge/zones.py \\
         [seeds (8)] [rallies (120)] [out.json] [ego (0)]
 
+    ... zones.py rows [seeds (8)] [minutes (20)] [out.json]
+
+how often each row of the ball's code is used in training, both codes:
+the share of the sensory stims, of the moves judged (the row of the last
+stim before), and of those how many were towards the ball (pong_rows).
+
+    ... zones.py practice [seeds (16)] [rallies (120)] [out.json] [ego (1)]
+
+weak-spot practice: 20 minutes of training with no, half or all of the
+serves from the half of the court the paddle is not in (game.c's
+pong_far_serves), then frozen and scored by row on the usual uniform
+fixed serves. Each result is kept in out.jsonl as it comes.
+
+21 November 2026, relative code, 16 seeds (rows mode first: in training
+rows 3-5, the ball near the paddle, get ~80% of the stims, rows 0-2 and
+6-7 0-6% each, and rows 1-2 move the right way 0.46-0.48 of the time):
+far 0.0 all rows 0.42 +- 0.04, far 0.5 0.39 +- 0.03, far 1.0 0.33 +- 0.03.
+The practice does not rewire the far rows (rows 1-2 up less down -0.10,
+-0.14 with none, -0.07, -0.12 with half) and the middle loses what the
+usual serves taught it (rows 3-4 0.32, 0.34 to 0.19, 0.22). Too little
+use was not what kept the far rows wrong.
+
 ego 1: the ball told as its height less the paddle's (game.c's ego, pong.py's
 BALL_EGO=1; the row the ball arrives in is still the court's), in training
 and in the test; the wiring's rows are then the ball's place against the
@@ -58,13 +80,17 @@ SENSORY = [3, 12, 20, 27, 35, 44, 52, 59]   # game.c's, a row each
 POINTS = [(1.0, 0), (1.0, 5), (1.0, 10), (1.0, 20), (0.0, 20)]
 
 
-def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0) -> dict:
+def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0,
+        far: float = 0.0) -> dict:
     lib = fe._lib()
     lib.pong_zones.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.dish_paths.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
     state = (ctypes.c_double * 12)()
     dish = lib.pong_make_dish(seed, gain, 0)
     game = lib.pong_create(dish, seed, 0, ego)
+    if far:
+        lib.pong_far_serves.argtypes = [ctypes.c_void_p, ctypes.c_double]
+        lib.pong_far_serves(game, far)
     for _ in range(minute):
         if lib.pong_run(game, 60 * fe.TICKS, None, None) < 0:
             raise RuntimeError("the dish had no room for its spikes")
@@ -93,12 +119,108 @@ def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0) -> dict
     lib.pong_zones(test, z)
     lib.pong_destroy(test)
     lib.dish_destroy(dish)
-    return {"seed": seed, "gain": gain, "minute": minute, "ego": ego, "rallies": int(state[4]),
+    return {"seed": seed, "gain": gain, "minute": minute, "ego": ego, "far": far,
+            "rallies": int(state[4]),
             "seen": list(z[:8]), "hit": list(z[8:]), "wiring": wiring}
+
+
+def rows_job(seed: int, ego: int, minutes: int) -> dict:
+    lib = fe._lib()
+    lib.pong_rows.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    dish = lib.pong_make_dish(seed, 1.0, 0)
+    game = lib.pong_create(dish, seed, 0, ego)
+    marks = []
+    r = (ctypes.c_int32 * 24)()
+    for m in range(1, minutes + 1):
+        if lib.pong_run(game, 60 * fe.TICKS, None, None) < 0:
+            raise RuntimeError("the dish had no room for its spikes")
+        lib.pong_rows(game, r)
+        marks.append(list(r))
+    lib.pong_destroy(game)
+    lib.dish_destroy(dish)
+    return {"seed": seed, "ego": ego, "rows": marks}
+
+
+def rows_main(args: list[str]) -> int:
+    seeds = int(args[0]) if args else 8
+    minutes = int(args[1]) if len(args) > 1 else 20
+    out = args[2] if len(args) > 2 else None
+    jobs = [(s, e, minutes) for e in (0, 1) for s in range(1, seeds + 1)]
+    fe._lib()
+    with ProcessPoolExecutor(10) as pool:
+        results = [f.result() for f in as_completed([pool.submit(rows_job, *j) for j in jobs])]
+    if out:
+        Path(out).write_text(json.dumps(results))
+    first = 5
+    for ego in (0, 1):
+        rs = [r for r in results if r["ego"] == ego]
+        print(f"\n{'relative code (ego 1): row 0-3 ball above the paddle' if ego else 'height code: row 0 the top of the court'}"
+              f", {len(rs)} seeds")
+        print("                  " + "  ".join(f" row{k}" for k in range(8)))
+        for name, a, b in (("minutes 0-5", None, first - 1), (f"minutes {first * 3}-{minutes}", first * 3 - 1, minutes - 1)):
+            tot = [0] * 24
+            for r in rs:
+                hi = r["rows"][b]
+                lo = r["rows"][a] if a is not None else [0] * 24
+                tot = [t + h - l for t, h, l in zip(tot, hi, lo)]
+            sensed, judged, towards = tot[:8], tot[8:16], tot[16:]
+            print(f"{name:14s} stims " + "  ".join(f"{x / sum(sensed):5.2f}" for x in sensed))
+            print(f"{'':14s} moves " + "  ".join(f"{x / sum(judged):5.2f}" for x in judged))
+            print(f"{'':14s} right " + "  ".join(f"{t / j if j else 0:5.2f}" for t, j in zip(towards, judged)))
+    return 0
+
+
+def practice_main(args: list[str]) -> int:
+    seeds = int(args[0]) if args else 16
+    rallies = int(args[1]) if len(args) > 1 else 120
+    out = args[2] if len(args) > 2 else None
+    ego = int(args[3]) if len(args) > 3 else 1
+    shares = [0.0, 0.5, 1.0]
+    done_path = Path((out or "build/cl_bridge/practice.json") + "l")
+    results = []
+    if done_path.exists():
+        results = [json.loads(line) for line in done_path.read_text().splitlines() if line]
+    have = {(r["seed"], r["far"]) for r in results}
+    jobs = [(s, 1.0, 20, rallies, ego, f) for f in shares for s in range(1, seeds + 1)
+            if (s, f) not in have]
+    fe._lib()
+    with ProcessPoolExecutor(10) as pool, done_path.open("a") as log:
+        for f in as_completed([pool.submit(job, *j) for j in jobs]):
+            r = f.result()
+            log.write(json.dumps(r) + "\n")
+            log.flush()
+            results.append(r)
+    if out:
+        Path(out).write_text(json.dumps(results))
+    print(f"{'relative' if ego else 'height'} code, 20 minutes of training, a share of the serves "
+          f"far from the paddle; frozen, {rallies} uniform fixed serves, {seeds} seeds")
+    print("hit rate by court row  " + "  ".join(f" row{k}" for k in range(8)) + "    all  +- s.e.")
+    for f in shares:
+        rs = [r for r in results if r["far"] == f]
+        seen = [sum(r["seen"][k] for r in rs) for k in range(8)]
+        hit = [sum(r["hit"][k] for r in rs) for k in range(8)]
+        each = [sum(r["hit"]) / sum(r["seen"]) for r in rs]
+        se = statistics.stdev(each) / len(each) ** 0.5
+        print(f"far {f:.1f}               " + "  ".join(f"{h / s:5.2f}" for h, s in zip(hit, seen)) +
+              f"   {statistics.mean(each):5.2f}  {se:.2f}")
+    print("wiring up less down")
+    for f in shares:
+        rs = [r for r in results if r["far"] == f]
+        print(f"far {f:.1f}               " + "  ".join(
+            f"{statistics.mean(r['wiring'][k] for r in rs):5.2f}" for k in range(8)))
+    print("all rows by seed")
+    for f in shares:
+        rs = sorted((r for r in results if r["far"] == f), key=lambda r: r["seed"])
+        print(f"far {f:.1f}  " + " ".join(f"{sum(r['hit']) / sum(r['seen']):.2f}" for r in rs))
+    return 0
 
 
 def main() -> int:
     args = sys.argv[1:]
+    if args and args[0] == "practice":
+        return practice_main(args[1:])
+    if args and args[0] == "rows":
+        return rows_main(args[1:])
     seeds = int(args[0]) if args else 8
     rallies = int(args[1]) if len(args) > 1 else 120
     out = args[2] if len(args) > 2 else None
