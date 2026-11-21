@@ -19,6 +19,9 @@
 //   int32_t pong_run(p, ticks, spikes, stims)  runs `ticks` ticks; adds
 //       each channel's spikes to spikes[64]; stims[64] the most of each
 //       channel's stims (1 a sensory stim, 2 a reward, 3 a punish pulse)
+//   void pong_zones(p, int32_t z[16])   the balls that reached the paddle's
+//       line in each eighth of its height (z[0..7], 0 the top) and of
+//       those the paddle hit (z[8..15])
 //   void pong_fixed_serves(p, base)   from the next serve on, each rally's
 //       paths from a generator of its own, base and the rally's number: the
 //       k-th rally starts the same whatever the paddle did before
@@ -68,6 +71,7 @@ typedef struct pong {
   double next_sense, judged_at, judged_paddle, expect, expect_move, start;
   int32_t hits, rallies, last_hits, moves_judged, moves_towards;
   int64_t hits_all, late_rallies, late_hits;
+  int32_t zone_seen[8], zone_hit[8];
   int32_t channel[4096], step[4096];
   // This tick's stims: channel, amount, kind.
   int32_t n_out, out_ch[16], out_kind[16];
@@ -179,6 +183,13 @@ void pong_destroy(pong *p) { free(p); }
 
 void pong_fixed_serves(pong *p, int64_t base) { p->fixed = (uint64_t)base; }
 
+void pong_zones(pong *p, int32_t *z) {
+  for (int k = 0; k < 8; ++k) {
+    z[k] = p->zone_seen[k];
+    z[8 + k] = p->zone_hit[k];
+  }
+}
+
 // One tick of the game, with the spikes of the motor regions this tick.
 static void game_tick(pong *p, int32_t up, int32_t down) {
   p->up = p->decay * p->up + up;
@@ -215,6 +226,11 @@ static void game_tick(pong *p, int32_t up, int32_t down) {
   }
   if (p->x < 0) {
     double off = p->y - p->paddle;
+    int32_t zone = (int32_t)(p->y * 8);
+    zone = zone < 0 ? 0 : zone > 7 ? 7 : zone;
+    p->zone_seen[zone]++;
+    if ((off < 0 ? -off : off) <= PADDLE / 2)
+      p->zone_hit[zone]++;
     if ((off < 0 ? -off : off) <= PADDLE / 2) {
       p->x = -p->x;
       p->vx = -p->vx;
