@@ -21,4 +21,4 @@ and openly so.
 | 11 | [Other languages behind devices, and v0.1](11-other-languages-and-v0-1.md) | 31 Oct – 4 Nov |
 | 12 | [A device in Goose, and which language a device function wants](12-goose-and-device-languages.md) | 4 – 6 Nov |
 | 13 | [A crawler on a pipeline of requests](13-a-crawler.md) | 6 – 11 Nov |
-
+| 14 | [A dish of neurons, playing Pong in your browser](14-a-dish-in-the-browser.md) | 16 – 21 Nov |
