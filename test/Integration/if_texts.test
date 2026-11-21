@@ -1,0 +1,11 @@
+// An `if` that gives a text, one branch a text made with "{value}" (of a
+// capacity of its own): the other branch's text is not cut to that, in a
+// fn's result, a `let` and a text of a capacity.
+// RUN: %ent run %S/Inputs/if_texts.ent > %t.out 2>&1
+// RUN: FileCheck %s --input-file=%t.out --match-full-lines
+
+// CHECK: [a much longer text than the first branch]
+// CHECK-NEXT: [a much longer text than the first branch]
+// CHECK-NEXT: [took 5 s]
+// CHECK-NEXT: [a text of more than two bytes] [ab]
+// CHECK-NEXT: [a text longer than one byte]

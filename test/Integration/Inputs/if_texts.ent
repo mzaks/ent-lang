@@ -1,0 +1,25 @@
+// Texts from the two branches of an `if` (if_texts.test).
+import console
+import text
+
+fn n() -> i32 { 5 }
+fn given(line: text) -> text { if line == "a" { "took {n()} s" } else { line } }
+fn kept(line: text) -> text {
+  let said = if line == "a" { "took {n()} s" } else { line }
+  said
+}
+fn wide(short: bool) -> text[40] {
+  let a = "ab" as text[2]
+  let b = "a text of more than two bytes" as text[40]
+  if short { a } else { b }
+}
+system go() {
+  put("[" + given("a much longer text than the first branch") + "]")
+  put("[" + kept("a much longer text than the first branch") + "]")
+  put("[" + given("a") + "]")
+  put("[" + wide(false) + "] [" + wide(true) + "]")
+  let x = if n() > 9 { "{n()}" } else { "a text longer than one byte" }
+  put("[" + x + "]")
+}
+schedule s() { go() }
+main { s() }

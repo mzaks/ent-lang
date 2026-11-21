@@ -16768,6 +16768,29 @@ FailureOr<mlir::Value> Parser::emitIf(const Expr &expr, Type expected) {
       isTextLiteral(*expr.thenBranch->value) &&
       isTextLiteral(*expr.elseBranch->value))
     type = StringType::get(context);
+  // Texts: not the first branch's capacity for both (`if c { "{n} s" }
+  // else { line }` would cut `line` to what "{n} s" holds), but the text
+  // expected where one is; else, where the branches differ, a text of any
+  // length (where the module `text` keeps them) or the wider.
+  auto isText = [](Type t) {
+    return t && (isa<TextType>(t) || isa<StringType>(t));
+  };
+  if (isText(type) && isText(expected)) {
+    type = expected;
+  } else if (isText(type) && !expected) {
+    Type thenType = typeOf(*expr.thenBranch->value);
+    Type elseType = typeOf(*expr.elseBranch->value);
+    if (thenType != elseType) {
+      auto thenText = dyn_cast_or_null<TextType>(thenType);
+      auto elseText = dyn_cast_or_null<TextType>(elseType);
+      if (isa_and_nonnull<StringType>(thenType) ||
+          isa_and_nonnull<StringType>(elseType) || importsText())
+        type = StringType::get(context);
+      else if (thenText && elseText)
+        type = thenText.getCapacity() >= elseText.getCapacity() ? thenType
+                                                                : elseType;
+    }
+  }
   if (!type)
     type = expected ? expected : defaultType(*expr.thenBranch->value);
   auto branch = scf::IfOp::create(builder, at, TypeRange{type}, *condition,
