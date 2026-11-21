@@ -1,0 +1,84 @@
+// devices/regex: patterns as JavaScript writes them, matched by a machine
+// that follows every way at once. Each line of Inputs/regex/cases.txt (the
+// pattern, its flags, a text) and where the first match starts and ends,
+// as JavaScript says (node's RegExp exec, in bytes of UTF-8), or why the
+// pattern is none: an ISO time, an email, flags i m s, alternatives and
+// lazy repeats in JavaScript's order, classes with \d \w \s and their
+// opposites, \b, UTF-8, escapes, [] and [^], what needs going back (\1,
+// looking ahead or behind) said to be unsupported, wrong patterns, and
+// (a*)*b and (a|aa)+$ that hang a backtracking matcher.
+// RUN: env REGEX_CASES=%S/Inputs/regex/cases.txt %ent run %S/Inputs/regex/cases.ent 2>/dev/null > %t.out
+// RUN: FileCheck %s --input-file=%t.out --match-full-lines
+
+// CHECK: 0 24 true
+// CHECK-NEXT: -1 -1 false
+// CHECK-NEXT: 0 15 true
+// CHECK-NEXT: -1 -1 false
+// CHECK-NEXT: 12 16 true
+// CHECK-NEXT: 0 10 true
+// CHECK-NEXT: 0 4 true
+// CHECK-NEXT: 0 15 true
+// CHECK-NEXT: 0 22 true
+// CHECK-NEXT: 0 1 true
+// CHECK-NEXT: 0 2 true
+// CHECK-NEXT: 0 0 true
+// CHECK-NEXT: 0 1 true
+// CHECK-NEXT: 2 7 true
+// CHECK-NEXT: 0 0 true
+// CHECK-NEXT: 2 3 true
+// CHECK-NEXT: -1 -1 false
+// CHECK-NEXT: 0 1 true
+// CHECK-NEXT: -1 -1 false
+// CHECK-NEXT: -1 -1 false
+// CHECK-NEXT: 0 3 true
+// CHECK-NEXT: 2 5 true
+// CHECK-NEXT: -1 -1 false
+// CHECK-NEXT: 2 4 true
+// CHECK-NEXT: 2 5 true
+// CHECK-NEXT: 3 6 true
+// CHECK-NEXT: 3 7 true
+// CHECK-NEXT: 1 3 true
+// CHECK-NEXT: 0 2 true
+// CHECK-NEXT: 0 2 true
+// CHECK-NEXT: 1 2 true
+// CHECK-NEXT: 1 5 true
+// CHECK-NEXT: 2 3 true
+// CHECK-NEXT: 2 3 true
+// CHECK-NEXT: 2 4 true
+// CHECK-NEXT: 0 2 true
+// CHECK-NEXT: 0 4 true
+// CHECK-NEXT: 0 1 true
+// CHECK-NEXT: 0 5 true
+// CHECK-NEXT: 0 4 true
+// CHECK-NEXT: 0 6 true
+// CHECK-NEXT: 2 4 true
+// CHECK-NEXT: -1 -1 false
+// CHECK-NEXT: 0 1 true
+// CHECK-NEXT: 0 1 true
+// CHECK-NEXT: 0 3 true
+// CHECK-NEXT: error: back references (\1) are not supported
+// CHECK-NEXT: error: looking ahead or behind ((?= (?! (?<= (?<!) is not supported
+// CHECK-NEXT: error: looking ahead or behind ((?= (?! (?<= (?<!) is not supported
+// CHECK-NEXT: error: looking ahead or behind ((?= (?! (?<= (?<!) is not supported
+// CHECK-NEXT: error: a ( is not closed
+// CHECK-NEXT: error: a ) has no ( before it
+// CHECK-NEXT: error: a [ is not closed
+// CHECK-NEXT: error: a repeat (* + ?) follows nothing
+// CHECK-NEXT: error: a repeat's {n,m} has m below n
+// CHECK-NEXT: error: \ at the end of the pattern
+// CHECK-NEXT: error: a repeat follows a repeat (a** or a+*)
+// CHECK-NEXT: -1 -1 false
+// CHECK-NEXT: -1 -1 false
+// CHECK-NEXT: 0 0 true
+// CHECK-NEXT: 0 0 true
+// CHECK-NEXT: 3 3 true
+// CHECK-NEXT: 0 0 true
+// CHECK-NEXT: 0 0 true
+// CHECK-NEXT: 0 1 true
+// CHECK-NEXT: 0 1 true
+// CHECK-NEXT: 0 1 true
+// CHECK-NEXT: 1 2 true
+// CHECK-NEXT: 1 2 true
+// CHECK-NEXT: 1 2 true
+// CHECK-NEXT: 1 3 true
+// CHECK-NEXT: 2 5 true

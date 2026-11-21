@@ -1,0 +1,49 @@
+// Runs the cases of a file (REGEX_CASES): a line each, the pattern, a
+// tab, the flags, a tab, the text (\n in it as \n); prints for each where
+// the first match starts and ends, or why the pattern is none.
+import console
+import text
+import files
+import regex
+
+fn unescaped(t: text) -> text {
+  var out = ""
+  var i = 0
+  while i < len(t) {
+    if t[i] == '\\' && i + 1 < len(t) && t[i + 1] == 'n' {
+      out += "\n"
+      i += 2
+    } else {
+      out += slice(t, i, i + 1)
+      i += 1
+    }
+  }
+  out
+}
+system go() {
+  let all = read_text(environment_variable("REGEX_CASES"))
+  var at = 0
+  while at < len(all) {
+    var end = find(all, "\n", at)
+    if end < 0 { end = len(all) }
+    let line = slice(all, at, end)
+    let a = find(line, "\t", 0)
+    let b = find(line, "\t", a + 1)
+    if a >= 0 && b > a {
+      let pattern = slice(line, 0, a)
+      let flags = slice(line, a + 1, b)
+      let t = unescaped(slice(line, b + 1, len(line)))
+      let why = regex_error(pattern, flags)
+      if len(why) > 0 { put("error: " + why) }
+      else {
+        let s = regex_find(t, pattern, flags, 0)
+        let e = regex_end(t, pattern, flags, 0)
+        let m = regex_matches(t, pattern, flags)
+        put("{s} {e} {m}")
+      }
+    }
+    at = end + 1
+  }
+}
+schedule t() { go() }
+main { t() }

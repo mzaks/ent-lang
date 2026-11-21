@@ -1,0 +1,36 @@
+// Regular expressions as JavaScript writes them, without its slashes:
+// `regex_matches(t, "^\\d{4}-\\d{2}", "")`. A pattern is followed every
+// way at once (Pike's machine, in devices/regex.c), so it takes time in
+// proportion to the text times the pattern, whatever the pattern: one
+// from a file cannot make a program hang. Where it may match in more
+// ways, the match is the one JavaScript finds: the leftmost, then the
+// alternatives and greedy or lazy repeats in their order.
+//
+// Read: characters (UTF-8, one code point each), `.`, classes `[a-z]`
+// `[^...]`, `\d \w \s` and `\D \W \S`, `^ $`, `\b \B`, groups `( )`
+// `(?: )` `(?<name> )`, `|`, repeats `* + ? {n} {n,} {n,m}` (lazy with a
+// `?` after), the escapes `\n \r \t \f \v \0 \xHH \uHHHH`, and `\` before
+// a sign. Flags: `i` (A to Z as a to z), `m` (`^ $` of each line), `s`
+// (`.` takes a line's end too); `g u y d` are taken and change nothing.
+// Not read: back references (`\1`) and looking ahead or behind (`(?=`
+// `(?!` `(?<=` `(?<!`), which need going back; such a pattern is wrong
+// (`regex_error` says why) and matches nothing.
+//
+// One way it differs from JavaScript: where a repeated group can match
+// nothing and is lazy inside (`(?:a*?)+`), JavaScript leaves out a round
+// that matched nothing and goes on, and the match it gives may end
+// later; whether there is a match is the same. (20,000 random patterns
+// compared with node's: no other difference.)
+//
+// A repeat counts to 1000 at most; a pattern makes a program of 50000
+// steps at most (repeats of repeats multiply).
+import text
+
+// Why `pattern` (with `flags`) is no pattern: "" where it is one.
+extern fn regex_error(pattern: text, flags: text) -> text
+// Whether `pattern` matches somewhere in `t` (as JavaScript's `test`).
+extern fn regex_matches(t: text, pattern: text, flags: text) -> bool
+// Where the first match from byte `from` on starts, and where it ends
+// (the byte after it); -1 where there is none.
+extern fn regex_find(t: text, pattern: text, flags: text, from: i32) -> i32
+extern fn regex_end(t: text, pattern: text, flags: text, from: i32) -> i32

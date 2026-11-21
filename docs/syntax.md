@@ -1354,6 +1354,12 @@ component is removed or its entity destroyed.
   `lower(t)`, A to Z as a to z), extern fns in its C
   (test/Integration/text_extern.test takes the links out of a page with
   them).
+- The module `regex` (devices/regex.ent) matches patterns as JavaScript
+  writes them: `regex_matches(t, "^\\d{4}-", "i")`, `regex_find` and
+  `regex_end` (where the first match from a byte starts and ends),
+  `regex_error` (why a pattern is none). It follows every way at once, so
+  no pattern takes longer than the text times the pattern; it has no back
+  references and no looking ahead or behind.
 - When `main` is done, what fields and uniques still hold is given back.
   (A C host's world keeps what it holds.)
 - A value of it is what a field holds or a literal is, seen, not a
