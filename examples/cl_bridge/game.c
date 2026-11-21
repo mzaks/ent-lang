@@ -19,6 +19,10 @@
 //   int32_t pong_run(p, ticks, spikes, stims)  runs `ticks` ticks; adds
 //       each channel's spikes to spikes[64]; stims[64] the most of each
 //       channel's stims (1 a sensory stim, 2 a reward, 3 a punish pulse)
+//   void pong_fixed_serves(p, base)   from the next serve on, each rally's
+//       paths from a generator of its own, base and the rally's number: the
+//       k-th rally starts the same whatever the paddle did before
+//       (frozen_eval.py's evaluation; 0: off)
 //   void pong_state(p, double s[12])   t, x, y, paddle, rallies, hits,
 //       the last rally's hits, hits of all rallies, moves judged, moves
 //       towards the ball, rallies after 5 minutes, their hits
@@ -58,7 +62,7 @@ static const int32_t SENSORY[8] = {3, 12, 20, 27, 35, 44, 52, 59};
 
 typedef struct pong {
   dish *d;
-  uint64_t rng;
+  uint64_t rng, fixed;
   int32_t cond, ego;
   double t, x, y, vx, vy, paddle, up, down, decay;
   double next_sense, judged_at, judged_paddle, expect, expect_move, start;
@@ -109,6 +113,8 @@ static void aim(pong *p) {
 }
 
 static void serve(pong *p) {
+  if (p->fixed)
+    p->rng = p->fixed + (uint64_t)p->rallies * 0xD1B54A32D192ED03ull;
   p->x = 1.0;
   p->y = uniform(p, 0.1, 0.9);
   p->vx = -BALL_SPEED;
@@ -170,6 +176,8 @@ pong *pong_create(dish *d, int64_t seed, int32_t cond, int32_t ego) {
 }
 
 void pong_destroy(pong *p) { free(p); }
+
+void pong_fixed_serves(pong *p, int64_t base) { p->fixed = (uint64_t)base; }
 
 // One tick of the game, with the spikes of the motor regions this tick.
 static void game_tick(pong *p, int32_t up, int32_t down) {
