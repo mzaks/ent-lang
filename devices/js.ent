@@ -1,0 +1,84 @@
+// JavaScript, run by QuickJS-ng (devices/quickjs, MIT): a context of its
+// own for each handle, with limits on its memory and its time, and
+// nothing of the machine (no files, no network, no processes) but what
+// the program answers. Procs, all on the main thread (a context is no
+// fn: do not call these from a `for` over entities on many threads).
+//
+//     let js = js_open(64 * 1024 * 1024, 5.0)
+//     js_eval(js, "host('fetch', {url: 'https://x'}).then(r => out = r.length)", "a.js")
+//     ... each frame:
+//     let n = js_poll(0.0, JsCalls)
+//     for i in 0..n { ... js_answer(JsCalls[i].js, JsCalls[i].call, true, "[1,2]") }
+//     if js_pending(js) == 0 { put(js_get(js, "out")) }        // 2
+//
+// What a script has besides the language: `host(kind, data)`, a call of
+// the program (a Promise of what it answers), `setTimeout`,
+// `setInterval`, `clearTimeout`, `clearInterval`, `queueMicrotask`,
+// `crypto.getRandomValues` and `require(name)` of the sources
+// `js_module` gave. `host` can be taken and deleted by a script the
+// program runs first (`const h = host; delete globalThis.host`), so
+// that scripts after it cannot call the program but through what it
+// gives them.
+import text
+
+// The calls of scripts waiting for the program: the context's handle,
+// the call's number (to answer with js_answer); its kind and data by
+// js_call_kind and js_call_data, until the next poll.
+buffer JsCalls { js: i64, call: i64 } capacity 1024
+
+// A context, with at most `memory` bytes (0: no limit) and `seconds` of
+// work each time the program enters it (js_eval, js_answer, a timer or
+// a job in js_poll; 0: no limit). Its handle; 0 where it could not be
+// made.
+extern proc js_open(memory: i64, seconds: f64) -> i64
+
+// Changes a context's limits.
+extern proc js_limit(js: i64, memory: i64, seconds: f64)
+
+// Runs `code` as a global script (`name` is said in errors and stacks),
+// then the jobs it queued (what promises do next). Its value as JSON;
+// none for undefined, a function, a promise or where it failed
+// (js_failed says why).
+extern proc js_eval(js: i64, code: text, name: text) -> text
+
+// Why what the program last entered (js_eval, js_answer) failed, and
+// what failed since (timers, promises rejected that nothing handled),
+// each "Name: message" and its stack lines; none where nothing did.
+// The limits say "interrupted" (time, which no `catch` stops) and "out
+// of memory"; recursion too deep is a RangeError ("Maximum call stack
+// size exceeded"). The context can be used after them.
+extern proc js_failed(js: i64) -> text
+
+// Sets a global to what `json` says (false where it is no JSON), and
+// gives one as JSON (none for undefined or what JSON cannot say).
+extern proc js_set(js: i64, name: text, json: text) -> bool
+extern proc js_get(js: i64, name: text) -> text
+
+// The source `require(name)` runs, the first time, as CommonJS (with
+// `module`, `exports` and `require`), giving its `module.exports` (that
+// time and after). A name with none: an Error "no module 'name'".
+extern proc js_module(js: i64, name: text, source: text)
+
+// Fires the timers that are due and runs the jobs, of all contexts,
+// waiting at most `wait` seconds for a timer where no call is waiting,
+// and puts a row in `calls` for each call of `host` since the last poll
+// (in place of what it had): how many (at most as many as it holds, the
+// rest at the next poll).
+extern proc js_poll(wait: f64, calls: mut JsCalls) -> i32
+
+// The kind and the data (JSON) of the call `i` of the last poll.
+extern proc js_call_kind(i: i32) -> text
+extern proc js_call_data(i: i32) -> text
+
+// Answers a call: its promise resolves to what `json` says (`ok`), or
+// is rejected with an Error whose message is `json` (not ok). Then the
+// jobs that follow are run.
+extern proc js_answer(js: i64, call: i64, ok: bool, json: text)
+
+// What a context still has to do: its calls not answered, its timers,
+// its jobs. 0: it is done (or no context).
+extern proc js_pending(js: i64) -> i32
+
+// Ends a context: its calls are answered by nobody, its handle is none
+// from then on.
+extern proc js_close(js: i64)

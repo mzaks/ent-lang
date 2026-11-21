@@ -1,0 +1,46 @@
+// The js device (devices/js.ent, QuickJS-ng in devices/quickjs): values
+// to and from JSON (UTF-8 kept), errors with where they were, a loop
+// stopped by its time (and no `catch` stopping that), memory run out,
+// recursion too deep, the context used after each; no std, os or
+// import; two contexts apart; random bytes; require (each source run
+// once); a promise rejected that nothing handles; calls of the program
+// answered and refused, awaited; timers in the order they are due, one
+// cleared, an interval; a handle closed is none, and a new one another.
+// RUN: %ent run %S/Inputs/js/device.ent > %t.out 2>&1
+// RUN: FileCheck %s --input-file=%t.out
+
+// CHECK: value: 3
+// CHECK-NEXT: object: {"x":[1,"é",null],"y":{"z":true}}
+// CHECK-NEXT: undefined: []
+// CHECK-NEXT: set: true "Zoë2"
+// CHECK-NEXT: get: {"name":"Zoë","n":[1,2.5]}
+// CHECK-NEXT: set bad: false
+// CHECK-NEXT: syntax: [] SyntaxError: unexpected token in expression: ';'
+// CHECK-NEXT:     at bad.js:1:9
+// CHECK-NEXT: thrown: TypeError: cannot read property 'x' of null
+// CHECK-NEXT:     at f (throw.js:1:15)
+// CHECK-NEXT:     at <eval> (throw.js:2:1)
+// CHECK-NEXT: thrown text: Uncaught plain
+// CHECK-NEXT: ok after: "fine"[]
+// CHECK-NEXT: loop: [] interrupted
+// CHECK-NEXT: loop catch:  interrupted
+// CHECK-NEXT: after loop: 42
+// CHECK-NEXT: memory: out of memory
+// CHECK-NEXT: after memory: "ok"
+// CHECK-NEXT: deep: RangeError: Maximum call stack size exceeded
+// CHECK: no std: "undefined undefined undefined undefined"
+// CHECK-NEXT: import: [] not handled: ReferenceError: could not load module 'x'
+// CHECK-NEXT: apart: "undefined"
+// CHECK-NEXT: random: "16 true"
+// CHECK-NEXT: require: "3 5 1"
+// CHECK-NEXT: require none: ReferenceError: no module 'nope'
+// CHECK: rejected: [] not handled: TypeError: no
+// CHECK-NEXT:     at <eval> (r.js:1:20)
+// CHECK-NEXT: host gone: "undefined"
+// CHECK-NEXT: pending: true
+// CHECK-NEXT: call: add {"a":2,"b":3}
+// CHECK-NEXT: call: fail 1
+// CHECK-NEXT: log: ["queued","add 5","fail refused","micro","t10","t30","ticks 3"]
+// CHECK-NEXT: pending at end: 0 true
+// CHECK-NEXT: closed: [] 0 []
+// CHECK-NEXT: new handle: true "undefined"

@@ -1,0 +1,2 @@
+# A larger stack than the 64 KB default: QuickJS recurses as it parses.
+-sSTACK_SIZE=1048576

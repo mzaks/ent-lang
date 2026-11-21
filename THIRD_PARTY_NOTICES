@@ -503,3 +503,35 @@ devices/stringzilla/include, as they are. Not modified.
   Apache License, Version 2.0. The license's text is in
   devices/stringzilla/LICENSE. The files in devices/stringzilla are under
   it and not under the MIT License.
+
+
+12. QuickJS-ng (Fabrice Bellard, Charlie Gordon, Ben Noordhuis, Saúl Ibarra Corretgé)
+--------------------------------------------------------------------------------------
+
+Used in: devices/js.c (the js module's JavaScript), by way of the
+amalgamation of QuickJS-ng v0.17.0 (github.com/quickjs-ng/quickjs) in
+devices/quickjs, as it is (its libc part not compiled). Not modified.
+
+  Copyright (c) 2017-2026 Fabrice Bellard
+  Copyright (c) 2017-2024 Charlie Gordon
+  Copyright (c) 2023-2026 Ben Noordhuis
+  Copyright (c) 2023-2026 Saúl Ibarra Corretgé
+  and the other authors named in devices/quickjs/quickjs-amalgam.c
+
+  Permission is hereby granted, free of charge, to any person obtaining a copy
+  of this software and associated documentation files (the "Software"), to deal
+  in the Software without restriction, including without limitation the rights
+  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, subject to the following conditions:
+
+  The above copyright notice and this permission notice shall be included in
+  all copies or substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  SOFTWARE.

@@ -1,0 +1,86 @@
+// The js device (js_device.test): values and JSON, errors, the limits,
+// calls of the program answered and refused, timers, require, what a
+// script does not have, random bytes, handles. Each said as a line.
+import console
+import text
+import js
+
+unique T { a: i64, b: i64, step: i32, done: bool, started: f64 }
+
+proc say(name: text, got: text) { put("{name}: {got}") }
+
+system first() {
+  let a = js_open(32 * 1024 * 1024, 0.5)
+  let b = js_open(0, 0.0)
+  T.a = a
+  T.b = b
+  say("value", js_eval(a, "1 + 2", "v.js"))
+  say("object", js_eval(a, "(\{x: [1, 'é', null], y: \{z: true\}\})", "v.js"))
+  say("undefined", "[" + js_eval(a, "undefined", "v.js") + "]")
+  let set = js_set(a, "given", "\{\"name\": \"Zoë\", \"n\": [1, 2.5]\}")
+  say("set", "{set} " + js_eval(a, "given.name + given.n.length", "v.js"))
+  say("get", js_get(a, "given"))
+  let bad = js_set(a, "given2", "\{nope")
+  say("set bad", "{bad}")
+  say("syntax", "[" + js_eval(a, "let x = ;", "bad.js") + "] " + js_failed(a))
+  say("thrown", js_eval(a, "function f() \{ null.x \}\nf()", "throw.js") + js_failed(a))
+  say("thrown text", js_eval(a, "throw 'plain'", "t.js") + js_failed(a))
+  say("ok after", js_eval(a, "'fine'", "v.js") + "[" + js_failed(a) + "]")
+  say("loop", "[" + js_eval(a, "for (;;) \{\}", "loop.js") + "] " + js_failed(a))
+  say("loop catch", js_eval(a, "try \{ for (;;) \{\} \} catch (e) \{ 'caught' \}", "loop.js") + " " + js_failed(a))
+  say("after loop", js_eval(a, "40 + 2", "v.js"))
+  say("memory", js_eval(a, "let big = []; for (let i = 0; i < 1e8; i++) big.push('x' + i); 1", "mem.js") + js_failed(a))
+  say("after memory", js_eval(a, "big = null; 'ok'", "v.js"))
+  say("deep", js_eval(a, "function d(n) \{ return d(n + 1) + 1 \}\nd(0)", "deep.js") + js_failed(a))
+  say("no std", js_eval(a, "[typeof std, typeof os, typeof print, typeof scriptArgs].join(' ')", "v.js"))
+  say("import", "[" + js_eval(a, "import('x')", "i.js") + "] " + js_failed(a))
+  say("apart", js_eval(b, "typeof given", "v.js"))
+  say("random", js_eval(a, "const r = crypto.getRandomValues(new Uint8Array(16)); const s = crypto.getRandomValues(new Uint8Array(16)); r.length + ' ' + (r.join() != s.join())", "v.js"))
+  js_module(a, "sum", "let loads = (globalThis.loads || 0) + 1; globalThis.loads = loads; module.exports = (x, y) => x + y; exports.unused = 1")
+  js_module(a, "obj", "exports.k = require('sum')(2, 3)")
+  say("require", js_eval(a, "require('sum')(1, 2) + ' ' + require('obj').k + ' ' + loads", "v.js"))
+  say("require none", js_eval(a, "require('nope')", "v.js") + js_failed(a))
+  say("rejected", "[" + js_eval(a, "Promise.reject(new TypeError('no'))", "r.js") + "] " + js_failed(a))
+  // Calls of the program, timers, await: in b, which has no limits.
+  js_eval(b, "var log = []; const h = host; delete globalThis.host;\n" +
+             "(async () => \{ const v = await h('add', \{a: 2, b: 3\}); log.push('add ' + v);\n" +
+             "  try \{ await h('fail', 1) \} catch (e) \{ log.push('fail ' + e.message) \}\n" +
+             "  log.push('micro'); \})();\n" +
+             "setTimeout(() => log.push('t30'), 30); setTimeout(() => log.push('t10'), 10);\n" +
+             "const gone = setTimeout(() => log.push('never'), 5); clearTimeout(gone);\n" +
+             "let ticks = 0; const iv = setInterval(() => \{ if (++ticks == 3) \{ clearInterval(iv); log.push('ticks 3') \} \}, 50);\n" +
+             "queueMicrotask(() => log.push('queued'));", "calls.js")
+  say("host gone", js_eval(b, "typeof host", "v.js"))
+  say("pending", "{js_pending(b) > 0}")
+  T.started = 0.0
+}
+
+system calls() {
+  let n = js_poll(0.02, JsCalls)
+  for i in 0..n {
+    let kind = js_call_kind(i)
+    let data = js_call_data(i)
+    say("call", kind + " " + data)
+    if kind == "add" { js_answer(JsCalls[i].js, JsCalls[i].call, true, "5") }
+    else { js_answer(JsCalls[i].js, JsCalls[i].call, false, "refused") }
+  }
+  T.step += 1
+  if js_pending(T.b) == 0 || T.step > 500 {
+    say("log", js_get(T.b, "log"))
+    say("pending at end", "{js_pending(T.b)} {T.step < 500}")
+    let b = T.b
+    js_close(b)
+    say("closed", "[" + js_eval(b, "1", "v.js") + "] {js_pending(b)} [" + js_get(b, "log") + "]")
+    let c = js_open(0, 0.0)
+    say("new handle", "{c != b} " + js_eval(c, "typeof log", "v.js"))
+    T.done = true
+  }
+}
+
+schedule start() { first() }
+schedule frame() { calls() }
+
+main {
+  start()
+  loop { frame() } until T.done
+}

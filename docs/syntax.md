@@ -1360,6 +1360,14 @@ component is removed or its entity destroyed.
   `regex_error` (why a pattern is none). It follows every way at once, so
   no pattern takes longer than the text times the pattern; it has no back
   references and no looking ahead or behind.
+- The module `js` (devices/js.ent) runs JavaScript in contexts of
+  QuickJS-ng (devices/quickjs): `js_open(memory, seconds)` (limits on each
+  entry), `js_eval`, `js_failed`, `js_set`/`js_get` (globals as JSON),
+  `js_module` (what `require` gives). A script's `host(kind, data)` is a
+  promise the program answers: `js_poll` hands over the calls (and fires
+  timers), `js_answer` resolves or rejects one, `js_pending` says what is
+  left. Procs only, on the main thread; no files or network but what the
+  program answers (test/Integration/js_device.test).
 - When `main` is done, what fields and uniques still hold is given back.
   (A C host's world keeps what it holds.)
 - A value of it is what a field holds or a literal is, seen, not a

@@ -195,8 +195,10 @@ to take along.
 A program that was built before is not built again while nothing it is
 made of has changed: its files and its modules', what implements them, the
 compiler and the flags. The built programs are kept in $ENT_CACHE, else in
-$XDG_CACHE_HOME/ent or ~/.cache/ent, the 64 that were last used. --no-cache
-builds anew and keeps nothing.
+$XDG_CACHE_HOME/ent or ~/.cache/ent, the 64 that were last used; and in its
+objects/ what the C of modules was compiled to (the 512 used last), so a
+change of the program alone does not compile that again. --no-cache builds
+anew and keeps nothing.
 """
 
 import argparse
@@ -497,6 +499,12 @@ def cache_key(arguments):
         for extension in IMPLEMENTATIONS + (".link", ".emit"):
             if os.path.isfile(stem + extension):
                 note_file(stem + extension)
+                # (And what its C includes: a library it carries in a
+                # folder of its own.)
+                if extension in (".c", ".cpp"):
+                    for included in included_files(stem + extension,
+                                                   VENDORED[1::2]):
+                        note_file(included)
         if os.path.dirname(path) not in directories:
             directories.append(os.path.dirname(path))
     for path in arguments.sources:
@@ -534,7 +542,8 @@ def keep_in_cache(executable, key, stem, limit=64):
         partial = f"{target}.{os.getpid()}"
         shutil.copy2(executable, partial)
         os.replace(partial, target)
-        entries = [os.path.join(root, name) for name in os.listdir(root)]
+        entries = [os.path.join(root, name) for name in os.listdir(root)
+                   if name != "objects"]
         entries = [path for path in entries if os.path.isdir(path)]
         entries.sort(key=os.path.getmtime, reverse=True)
         for path in entries[limit:]:
@@ -543,6 +552,91 @@ def keep_in_cache(executable, key, stem, limit=64):
     except OSError:
         # (A cache that cannot be written is no reason not to run.)
         return executable
+
+
+INCLUDE = re.compile(r'^\s*#\s*include\s*"([^"]+)"', re.MULTILINE)
+
+
+def included_files(path, search):
+    """The files a C or C++ file includes in quotes, and those they
+    include, found next to the file that includes them, else in the
+    folders `search` (as -I has them); <system> headers are the
+    compiler's, which its own identity covers."""
+    found, waiting = [], [os.path.abspath(path)]
+    seen = set(waiting)
+    while waiting:
+        current = waiting.pop()
+        try:
+            with open(current, "rb") as source:
+                text = source.read().decode("utf-8", "replace")
+        except OSError:
+            continue
+        for name in INCLUDE.findall(text):
+            for folder in [os.path.dirname(current)] + list(search):
+                candidate = os.path.abspath(os.path.join(folder, name))
+                if os.path.isfile(candidate):
+                    if candidate not in seen:
+                        seen.add(candidate)
+                        found.append(candidate)
+                        waiting.append(candidate)
+                    break
+    return sorted(found)
+
+
+def compiled_object(command, source, built, search, env, scratch, keep=True):
+    """Compiles `source` to `built` by `command` (which writes `built`),
+    or takes the object a build before made of the same: the same
+    command (bar where it writes), compiler, file and files it includes
+    (kept in the cache's objects/, the 512 used last). A large library
+    of C a module carries (a whole engine, say) is then compiled once,
+    not with every change of the program. (`scratch`, the build's own
+    folder, which differs each time, is not of the key: what of it is
+    included is, by its bytes.)"""
+    if not keep:
+        run(command, env=env)
+        return
+    digest = hashlib.sha256()
+
+    def same(text):
+        return text.replace(os.path.abspath(scratch), "<build>").replace(
+            scratch, "<build>")
+
+    for part in command:
+        part = "<out>" if part == built else same(part)
+        digest.update(part.encode() + b"\0")
+    compiler = shutil.which(command[0]) or command[0]
+    try:
+        status = os.stat(compiler)
+        digest.update(f"{os.path.realpath(compiler)} {status.st_size} "
+                      f"{status.st_mtime_ns}".encode())
+    except OSError:
+        digest.update(compiler.encode())
+    for path in [source] + included_files(source, search):
+        digest.update(same(path).encode() + b"\0")
+        with open(path, "rb") as read:
+            digest.update(hashlib.sha256(read.read()).digest())
+    folder = os.path.join(cache_directory(), "objects")
+    kept = os.path.join(folder, digest.hexdigest()[:32] + ".o")
+    if os.path.isfile(kept):
+        try:
+            shutil.copyfile(kept, built)
+            os.utime(kept)
+            return
+        except OSError:
+            pass
+    run(command, env=env)
+    try:
+        os.makedirs(folder, exist_ok=True)
+        partial = f"{kept}.{os.getpid()}"
+        shutil.copyfile(built, partial)
+        os.replace(partial, kept)
+        objects = [os.path.join(folder, name) for name in os.listdir(folder)
+                   if name.endswith(".o")]
+        objects.sort(key=os.path.getmtime, reverse=True)
+        for old in objects[512:]:
+            os.remove(old)
+    except OSError:
+        pass
 
 
 def instrumented(arguments):
@@ -1460,7 +1554,16 @@ def check_externs(clang, cc, cxx, sources, crates, emits, fns, directory,
     left = dict((cname, (name, where)) for cname, name, where in fns)
     procs = dict((cname, (name, where)) for cname, name, where in distributed)
     readings = []
+    named = set(left) | set(procs)
     for index, source in enumerate(sources):
+        # (A file that names none of them has none: not compiled again.)
+        try:
+            with open(source, "rb") as read:
+                text = read.read().decode("utf-8", "replace")
+        except OSError:
+            text = ""
+        if not any(cname in text for cname in named):
+            continue
         language = "c++" if source.endswith(".cpp") else "c"
         ir_path = os.path.join(directory, "externs.%d.ll" % index)
         compiled = subprocess.run(
@@ -1840,13 +1943,21 @@ def build(arguments, output, directory):
             # code: a device's results are then the same on a processor
             # that has FMA and one that has not.)
             web = ["-I", raylib_web()] if arguments.web else []
-            run([cc, "-O2", "-ffp-contract=off", *cpu_flags(), *pic,
-                 "-I", directory, *VENDORED, *cuda, *web,
-                 *mpi, "-c", path, "-o", built], env=host)
+            command = [cc, "-O2", "-ffp-contract=off", *cpu_flags(), *pic,
+                       "-I", directory, *VENDORED, *cuda, *web,
+                       *mpi, "-c", path, "-o", built]
+            compiled_object(command, path, built,
+                            [arg for flag, arg in zip(command, command[1:])
+                             if flag == "-I"], host, directory,
+                            not arguments.no_cache)
         elif extension == ".cpp":
-            run([cxx, "-O2", "-ffp-contract=off", *cpu_flags(), *pic,
-                 "-I", directory, *VENDORED, "-c",
-                 path, "-o", built], env=host)
+            command = [cxx, "-O2", "-ffp-contract=off", *cpu_flags(), *pic,
+                       "-I", directory, *VENDORED, "-c",
+                       path, "-o", built]
+            compiled_object(command, path, built,
+                            [arg for flag, arg in zip(command, command[1:])
+                             if flag == "-I"], host, directory,
+                            not arguments.no_cache)
         else:
             with open(path) as source:
                 command = source.read().strip()
