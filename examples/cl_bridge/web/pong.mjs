@@ -14,7 +14,10 @@ export function seedOf(text) {
   return Number(h & 0x7fffffffn);
 }
 
-export function makeGame(M, seed, gain, cond = 0, ego = 0) {
+// layout 1: game.c's pong_layout (the sensory rows on the side of the dish
+// they want), for this dish and game (set before making them).
+export function makeGame(M, seed, gain, cond = 0, ego = 0, layout = 0) {
+  M._pong_layout(layout);
   const dish = M._pong_make_dish(BigInt(seed), gain, cond);
   if (!dish) throw new Error("no dish");
   const game = M._pong_create(dish, BigInt(seed), cond, ego);

@@ -96,6 +96,10 @@ code { font: .85em var(--mono); }
       <select id="cond"><option value="0" selected>each move</option><option value="1">hits and misses</option></select>
     </div>
     <div class="field">
+      <label for="code">Ball told as</label>
+      <select id="code"><option value="0" selected>its height on the court</option><option value="1">relative to the paddle, matched electrodes</option></select>
+    </div>
+    <div class="field">
       <label for="speed">Speed</label>
       <select id="speed"><option value="1" selected>real time</option><option value="0">as fast as it goes</option></select>
     </div>
@@ -155,6 +159,7 @@ code { font: .85em var(--mono); }
 
   <div class="notes">
     <p>How it plays: the ball's height is stimulated into one of 8 sensory electrodes, faster as the ball nears the paddle (4 to 40 Hz). The paddle moves towards whichever motor region, up or down, has fired more over the last 0.1 s; the bar under each array shows that balance. Most of the learning happens in the first few minutes.</p>
+    <p>Ball told as: with its height on the court the dish learns the edges but never the middle, where the right way depends on the paddle, which it is not told. Told relative to the paddle, the right way is fixed for each electrode; with those electrodes moved to the side of the dish whose region they should drive (rows above the paddle nearer the up region), the dish learns the whole court, the middle included (zones.py in examples/cl_bridge).</p>
     <p>What it is: a model, not a culture. The dish is a simplified leaky integrate-and-fire network written in ent (examples/cl_bridge in ent-lang), compiled to WebAssembly, not validated against recordings of real cultures. The reward and punish electrodes deliver a dopamine-like signal that no real culture has. The same seed gives the same games here as in <code>dish_pong.py</code> on your own computer, which writes recordings this page replays.</p>
     <p id="msg"></p>
   </div>
@@ -166,9 +171,12 @@ const C = {};
 function colors() { for (const k of ["court","line","ball","paddle","pad","up","down","sense","spike","stim","reward","punish","muted","fg","base","display"]) C[k] = css("--" + k); }
 colors();
 const FS = 0.02, KEEP = 6000;   // frames of 20 ms; the last 2 minutes kept
-const UP = new Set(), DOWN = new Set(), SENSE = [3, 12, 20, 27, 35, 44, 52, 59];
+const UP = new Set(), DOWN = new Set();
+const SENSORY = [[3, 12, 20, 27, 35, 44, 52, 59], [3, 11, 19, 27, 36, 44, 52, 60]];   // game.c's layouts
 for (let r = 0; r < 8; r++) { UP.add(r * 8); UP.add(r * 8 + 1); DOWN.add(r * 8 + 6); DOWN.add(r * 8 + 7); }
-const ROLE = Array.from({ length: 64 }, (_, k) => SENSE.includes(k) ? "sense" : UP.has(k) ? "up" : DOWN.has(k) ? "down" : "pad");
+let ROLE;
+function setRoles(sense) { ROLE = Array.from({ length: 64 }, (_, k) => sense.includes(k) ? "sense" : UP.has(k) ? "up" : DOWN.has(k) ? "down" : "pad"); }
+setRoles(SENSORY[0]);
 
 class Clip {
   constructor(el) {
@@ -260,12 +268,13 @@ function startLive() {
   for (const c of clips) c.reset();
   if (worker) worker.terminate();
   worker = new Worker(new URL("./worker.mjs", import.meta.url), { type: "module" });
-  const text = $("seed").value || "1", cond = +$("cond").value;
+  const text = $("seed").value || "1", cond = +$("cond").value, code = +$("code").value;
+  setRoles(SENSORY[code]);
   $("tag1").textContent = cond ? "reward for hits and misses" : "reward for each move";
   totalFrames = 20 * 60 / FS; doneFrames = 0; $("total").textContent = "20:00"; $("msg").textContent = "";
   worker.onmessage = e => {
     const m = e.data;
-    if (m.type === "started") $("seedno").textContent = `seed ${m.seed} · dish_pong.py 20 "${m.text}"${cond ? " reward" : ""}`;
+    if (m.type === "started") $("seedno").textContent = `seed ${m.seed} · dish_pong.py 20 "${m.text}"${cond ? " reward" : ""}${code ? " ego aligned" : ""}`;
     if (m.type === "frames") {
       m.batch.forEach((b, i) => { for (const fr of b) clips[i].push(fr); mergeRallies(clips[i], m.rallies[i]); clips[i].summary = m.summary[i]; });
       doneFrames = m.done;
@@ -274,7 +283,7 @@ function startLive() {
     if (m.type === "error") { $("msg").innerHTML = ""; const s = document.createElement("span"); s.className = "error"; s.textContent = "The dish could not start: " + m.message; $("msg").append(s); }
   };
   worker.postMessage({ speed: +$("speed").value });
-  worker.postMessage({ start: { text, cond, minutes: 20 } });
+  worker.postMessage({ start: { text, cond, ego: code, layout: code, minutes: 20 } });
 }
 
 function loadRecording(json) {
@@ -289,6 +298,7 @@ function loadRecording(json) {
   });
   replayPos = 0; totalFrames = clips[0].f.length;
   const c0 = list[0];
+  setRoles(c0.sensory || SENSORY[0]);
   $("seedno").textContent = `recording · seed ${c0.seed}${json.seed_text ? ` ("${json.seed_text}")` : ""}`;
   $("msg").textContent = "Replaying the last two minutes of the recording; Start plays live again.";
 }

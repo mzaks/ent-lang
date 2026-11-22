@@ -12,7 +12,13 @@
 // RUN: cd %t.dir && env ENT_DISH_LIBRARY=%t.dir/libdish.so %cl-python %S/../../examples/cl_bridge/dish_pong.py 0.2 "hello dish" %t.dir/native.json record=0 | FileCheck %s
 // RUN: cd %t.dir && %node check.mjs dish.mjs 0.2 "hello dish" 1 > %t.dir/web.json
 // RUN: %cl-python -c "import json,sys; a=json.load(open(sys.argv[1]))['clips'][1]; b=json.load(open(sys.argv[2])); print('same' if a['frames']==b['frames'] and a['rallies']==b['rallies'] and len(a['frames'])==600 else 'differ')" %t.dir/native.json %t.dir/web.json | FileCheck %s --check-prefix=SAME
+// The page's other code: the ball relative to the paddle on the aligned
+// layout (dish_pong.py ego aligned; check.mjs ... 1 1 1).
+// RUN: cd %t.dir && env ENT_DISH_LIBRARY=%t.dir/libdish.so %cl-python %S/../../examples/cl_bridge/dish_pong.py 0.2 "hello dish" %t.dir/native_ego.json ego aligned record=0 | FileCheck %s
+// RUN: cd %t.dir && %node check.mjs dish.mjs 0.2 "hello dish" 1 1 1 > %t.dir/web_ego.json
+// RUN: %cl-python -c "import json,sys; a=json.load(open(sys.argv[1]))['clips'][1]; b=json.load(open(sys.argv[2])); c=json.load(open(sys.argv[3]))['clips'][1]; print('same' if a['frames']==b['frames'] and a['rallies']==b['rallies'] and len(a['frames'])==600 else 'differ', 'other' if a['frames']!=c['frames'] else 'unchanged')" %t.dir/native_ego.json %t.dir/web_ego.json %t.dir/native.json | FileCheck %s --check-prefix=SAME_EGO
 
 // CHECK: seed 945407425 ('hello dish'), gain 0:
 // CHECK: seed 945407425 ('hello dish'), gain 1:
 // SAME: same
+// SAME_EGO: same other
