@@ -1,6 +1,6 @@
 // The page's worker: two dishes of one seed, untrained (reward gain 0) and
 // trained (gain 1), each with its Pong, frame by frame; posts the frames
-// to the page in batches. Messages in: {start: {text, cond, minutes}},
+// to the page in batches. Messages in: {start: {text, cond, ego, layout, minutes}},
 // {speed: 1 | 0 (as fast as it goes)}, {pause: bool}.
 import Dish from "./dish.mjs";
 import { makeGame, seedOf, TICKS, FRAME_TICKS } from "./pong.mjs";
@@ -8,10 +8,10 @@ import { makeGame, seedOf, TICKS, FRAME_TICKS } from "./pong.mjs";
 const FRAME_S = FRAME_TICKS / TICKS;
 let run = null, speed = 1, paused = false;
 
-async function start({ text, cond, minutes }) {
+async function start({ text, cond, ego = 0, layout = 0, minutes }) {
   const seed = seedOf(text);
   const games = [];
-  for (const gain of [0, 1]) games.push(makeGame(await Dish(), seed, gain, cond));
+  for (const gain of [0, 1]) games.push(makeGame(await Dish(), seed, gain, cond, ego, layout));
   run = { games, seed, frames: Math.round(minutes * 60 / FRAME_S), done: 0, began: performance.now(), simAtBegin: 0, id: Symbol() };
   postMessage({ type: "started", seed, text });
   loop(run.id);
