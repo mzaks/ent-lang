@@ -15,12 +15,14 @@ export function seedOf(text) {
 }
 
 // layout 1: game.c's pong_layout (the sensory rows on the side of the dish
-// they want), for this dish and game (set before making them).
-export function makeGame(M, seed, gain, cond = 0, ego = 0, layout = 0) {
+// they want), for this dish and game (set before making them); decoder 1:
+// game.c's pong_decoder, each motor region read against its own background.
+export function makeGame(M, seed, gain, cond = 0, ego = 0, layout = 0, decoder = 0) {
   M._pong_layout(layout);
   const dish = M._pong_make_dish(BigInt(seed), gain, cond);
   if (!dish) throw new Error("no dish");
   const game = M._pong_create(dish, BigInt(seed), cond, ego);
+  M._pong_decoder(game, decoder);
   const spikes = M._malloc(256), stims = M._malloc(256), state = M._malloc(96);
   const rallies = [];
   let seen = 0;
