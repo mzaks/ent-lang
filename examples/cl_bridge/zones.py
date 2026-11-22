@@ -18,6 +18,23 @@ how often each row of the ball's code is used in training, both codes:
 the share of the sensory stims, of the moves judged (the row of the last
 stim before), and of those how many were towards the ball (pong_rows).
 
+    ... zones.py layouts [seeds (16)] [rallies (120)] [out.json]
+
+both codes on the layout as before and the aligned one (game.c's
+pong_layout: rows 0-3 on column 3, nearer the up regions, 4-7 on column
+4), 20 minutes of training, frozen, scored by row. Each result is kept in
+out.jsonl as it comes.
+
+22 November 2026, 16 seeds, the share of balls hit (all rows):
+    height code    layout as before 0.52, aligned 0.52 (no reward 0.43)
+    relative code  layout as before 0.42, aligned 0.54 (no reward 0.42)
+The relative code on the aligned layout hits 0.49-0.70 in every row, the
+middle included (rows 3-4 0.49, 0.51; height code 0.17, 0.14 on either
+layout); better than its old layout for 11 of 16 seeds (+0.12 +- 0.07),
+and than no reward for 6 of 8 (+0.16 +- 0.07): the layout does not hand
+it the game, it lets the reward teach it (row 4, ball just below the
+paddle, down: -0.13 to -0.30). The height code's middle stays unlearnt.
+
     ... zones.py structure [seeds (8)] [minutes (20)] [out.json]
 
 relative code, no and half far serves: each row's use in training, and
@@ -96,12 +113,16 @@ import frozen_eval as fe  # noqa: E402
 
 SERVES, EVAL_SEED = 0x0BADC0DE, 777   # frozen_eval.py's retest serves
 SENSORY = [3, 12, 20, 27, 35, 44, 52, 59]   # game.c's, a row each
+SENSORY_ALIGNED = [3, 11, 19, 27, 36, 44, 52, 60]   # game.c's pong_layout(1)
 POINTS = [(1.0, 0), (1.0, 5), (1.0, 10), (1.0, 20), (0.0, 20)]
 
 
 def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0,
-        far: float = 0.0) -> dict:
+        far: float = 0.0, layout: int = 0) -> dict:
     lib = fe._lib()
+    lib.pong_layout.argtypes = [ctypes.c_int32]
+    lib.pong_layout(layout)
+    electrodes = SENSORY_ALIGNED if layout else SENSORY
     lib.pong_zones.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.dish_paths.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
     state = (ctypes.c_double * 12)()
@@ -119,7 +140,7 @@ def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0,
     n = (ctypes.c_float * 4096)()
     lib.dish_paths(dish, w, n)
     wiring = []
-    for c in SENSORY:
+    for c in electrodes:
         up = sum(w[c * 64 + b] for b in range(64) if b % 8 <= 1)
         down = sum(w[c * 64 + b] for b in range(64) if b % 8 >= 6)
         wiring.append(up - down)
@@ -138,7 +159,7 @@ def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0,
     lib.pong_zones(test, z)
     lib.pong_destroy(test)
     lib.dish_destroy(dish)
-    return {"seed": seed, "gain": gain, "minute": minute, "ego": ego, "far": far,
+    return {"seed": seed, "gain": gain, "minute": minute, "ego": ego, "far": far, "layout": layout,
             "rallies": int(state[4]),
             "seen": list(z[:8]), "hit": list(z[8:]), "wiring": wiring}
 
@@ -304,8 +325,64 @@ def structure_main(args: list[str]) -> int:
     return 0
 
 
+def layouts_main(args: list[str]) -> int:
+    seeds = int(args[0]) if args else 16
+    rallies = int(args[1]) if len(args) > 1 else 120
+    out = args[2] if len(args) > 2 else "build/cl_bridge/layouts.json"
+    done_path = Path(out + "l")
+    results = []
+    if done_path.exists():
+        results = [json.loads(line) for line in done_path.read_text().splitlines() if line]
+    have = {(r["seed"], r["gain"], r["ego"], r["layout"]) for r in results}
+    jobs = [(s, 1.0, 20, rallies, e, 0.0, lay) for e in (0, 1) for lay in (0, 1)
+            for s in range(1, seeds + 1)]
+    # The aligned layout's own map, with no reward, for half the seeds.
+    jobs += [(s, 0.0, 20, rallies, e, 0.0, 1) for e in (0, 1) for s in range(1, seeds // 2 + 1)]
+    jobs = [j for j in jobs if (j[0], j[1], j[4], j[6]) not in have]
+    fe._lib()
+    with ProcessPoolExecutor(10) as pool, done_path.open("a") as log:
+        for f in as_completed([pool.submit(job, *j) for j in jobs]):
+            r = f.result()
+            log.write(json.dumps(r) + "\n")
+            log.flush()
+            results.append(r)
+    Path(out).write_text(json.dumps(results))
+    mean = statistics.mean
+
+    def score(r):
+        return sum(r["hit"]) / sum(r["seen"])
+
+    print(f"20 minutes of training, frozen, {rallies} uniform fixed serves, {seeds} seeds; "
+          "layout 1: rows 0-3 on column 3 (up side), 4-7 on column 4")
+    print("hit rate by court row        " + "  ".join(f" row{k}" for k in range(8)) + "    all  +- s.e.")
+    for ego in (0, 1):
+        for lay, gain in ((0, 1.0), (1, 1.0), (1, 0.0)):
+            rs = [r for r in results if r["ego"] == ego and r["layout"] == lay and r["gain"] == gain]
+            seen = [sum(r["seen"][k] for r in rs) for k in range(8)]
+            hit = [sum(r["hit"][k] for r in rs) for k in range(8)]
+            each = [score(r) for r in rs]
+            se = statistics.stdev(each) / len(each) ** 0.5
+            name = f"{'relative' if ego else 'height'} layout {lay}" + ("" if gain else " no reward")
+            print(f"{name:28s} " + "  ".join(f"{h / s:5.2f}" for h, s in zip(hit, seen)) +
+                  f"   {mean(each):5.2f}  {se:.2f}")
+        a = {r["seed"]: score(r) for r in results if r["ego"] == ego and r["layout"] == 0 and r["gain"]}
+        b = {r["seed"]: score(r) for r in results if r["ego"] == ego and r["layout"] == 1 and r["gain"]}
+        d = [b[s] - a[s] for s in a]
+        print(f"{'  aligned less as before':28s} {mean(d):+.2f} +- {statistics.stdev(d) / len(d) ** 0.5:.2f}, "
+              f"better for {sum(x > 0 for x in d)} of {len(d)} seeds")
+    print("wiring up less down")
+    for ego in (0, 1):
+        for lay, gain in ((0, 1.0), (1, 1.0), (1, 0.0)):
+            rs = [r for r in results if r["ego"] == ego and r["layout"] == lay and r["gain"] == gain]
+            name = f"{'relative' if ego else 'height'} layout {lay}" + ("" if gain else " no reward")
+            print(f"{name:28s} " + "  ".join(f"{mean(r['wiring'][k] for r in rs):5.2f}" for k in range(8)))
+    return 0
+
+
 def main() -> int:
     args = sys.argv[1:]
+    if args and args[0] == "layouts":
+        return layouts_main(args[1:])
     if args and args[0] == "structure":
         return structure_main(args[1:])
     if args and args[0] == "practice":

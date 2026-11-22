@@ -26,6 +26,9 @@
 //       stims (the court's or, ego, against the paddle): the stims (r[0..7]),
 //       the moves judged with that row the last stim (r[8..15]) and of
 //       those the moves towards the ball (r[16..23])
+//   void pong_layout(aligned)   for the dishes and games made after it
+//       (process-wide): 1 the sensory rows on the columns nearer the way
+//       each wants (zones.py layouts), 0 as before
 //   void pong_far_serves(p, share)   from the next serve on, that share of
 //       the serves from the half of the court the paddle is not in, and
 //       flat, a quarter of the usual slope, so that they stay there
@@ -70,6 +73,18 @@ int32_t dish_params_size(void);
 #define QUARTER_PI 0.78539816339744830962
 
 static const int32_t SENSORY[8] = {3, 12, 20, 27, 35, 44, 52, 59};
+// pong_layout(1): the top four rows on column 3, nearer the up regions,
+// the bottom four on column 4, nearer the down ones; the punish channel
+// (dopamine for the whole dish, wherever it is) moves to the 35 that
+// frees, as 36 is a row's.
+static const int32_t SENSORY_ALIGNED[8] = {3, 11, 19, 27, 36, 44, 52, 60};
+static const int32_t *sensory = SENSORY;
+static int32_t punish = PUNISH;
+
+void pong_layout(int32_t aligned) {
+  sensory = aligned ? SENSORY_ALIGNED : SENSORY;
+  punish = aligned ? 35 : PUNISH;
+}
 
 typedef struct pong {
   dish *d;
@@ -157,7 +172,7 @@ static void outcome(pong *p, double got, int move) {
   double err = got - *expect;
   *expect += RPE_RATE * err;
   if (err != 0.0)
-    emit(p, err > 0 ? REWARD : PUNISH, (float)(err > 0 ? err : -err), err > 0 ? 2 : 3);
+    emit(p, err > 0 ? REWARD : punish, (float)(err > 0 ? err : -err), err > 0 ? 2 : 3);
 }
 
 dish *pong_make_dish(int64_t seed, double gain, int32_t cond) {
@@ -170,7 +185,7 @@ dish *pong_make_dish(int64_t seed, double gain, int32_t cond) {
   dish_params_set(params, "hard", 1);
   dish_params_set(params, "modulated", 1);
   dish_params_set(params, "reward_channel", REWARD);
-  dish_params_set(params, "punish_channel", PUNISH);
+  dish_params_set(params, "punish_channel", punish);
   dish_params_set(params, "reward_gain", gain);
   if (cond == 0)
     dish_params_set(params, "tau_elig", 200);
@@ -293,7 +308,7 @@ static void game_tick(pong *p, int32_t up, int32_t down) {
       row = (int32_t)(p->y * 8);
       row = row > 7 ? 7 : row;
     }
-    emit(p, SENSORY[row], 1.0f, 1);
+    emit(p, sensory[row], 1.0f, 1);
     p->last_row = row;
     p->row_sensed[row]++;
     double near = p->x < 0 ? 0 : p->x > 1 ? 1 : p->x;
