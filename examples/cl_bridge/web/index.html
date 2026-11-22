@@ -100,6 +100,10 @@ code { font: .85em var(--mono); }
       <select id="code"><option value="1" selected>relative to the paddle, matched electrodes</option><option value="0">its height on the court</option></select>
     </div>
     <div class="field">
+      <label for="dec">Paddle reads</label>
+      <select id="dec"><option value="1" selected>each region against its background</option><option value="0">the spikes as they come</option></select>
+    </div>
+    <div class="field">
       <label for="speed">Speed</label>
       <select id="speed"><option value="1" selected>real time</option><option value="0">as fast as it goes</option></select>
     </div>
@@ -160,6 +164,7 @@ code { font: .85em var(--mono); }
   <div class="notes">
     <p>How it plays: the ball's place, its height less the paddle's (or, as chosen, its height on the court), is stimulated into one of 8 sensory electrodes, faster as the ball nears the paddle (4 to 40 Hz). The paddle moves towards whichever motor region, up or down, has fired more over the last 0.1 s; the bar under each array shows that balance. Most of the learning happens in the first few minutes.</p>
     <p>Ball told as: with its height on the court the dish learns the edges but never the middle, where the right way depends on the paddle, which it is not told. Told relative to the paddle, the right way is fixed for each electrode; with those electrodes moved to the side of the dish whose region they should drive (rows above the paddle nearer the up region), the dish learns the whole court, the middle included (zones.py in examples/cl_bridge).</p>
+    <p>Paddle reads: the paddle moves towards the motor region that fires more. Read as the spikes come, a region that simply fires more than the other pulls the paddle its way all the time. Read against each region's own background (its average over the last 2 seconds), only a region that fires more than it usually does pulls, so what moves the paddle is the dish's answer to the ball. With the ball relative to the paddle on matched electrodes, the share of balls hit after 20 minutes rises from 0.54 to 0.71, and the reward then adds 0.23 over a dish without it (zones.py decoders).</p>
     <p>What it is: a model, not a culture. The dish is a simplified leaky integrate-and-fire network written in ent (examples/cl_bridge in ent-lang), compiled to WebAssembly, not validated against recordings of real cultures. The reward and punish electrodes deliver a dopamine-like signal that no real culture has. The same seed gives the same games here as in <code>dish_pong.py</code> on your own computer, which writes recordings this page replays.</p>
     <p id="msg"></p>
   </div>
@@ -268,13 +273,13 @@ function startLive() {
   for (const c of clips) c.reset();
   if (worker) worker.terminate();
   worker = new Worker(new URL("./worker.mjs", import.meta.url), { type: "module" });
-  const text = $("seed").value || "1", cond = +$("cond").value, code = +$("code").value;
+  const text = $("seed").value || "1", cond = +$("cond").value, code = +$("code").value, dec = +$("dec").value;
   setRoles(SENSORY[code]);
   $("tag1").textContent = cond ? "reward for hits and misses" : "reward for each move";
   totalFrames = 20 * 60 / FS; doneFrames = 0; $("total").textContent = "20:00"; $("msg").textContent = "";
   worker.onmessage = e => {
     const m = e.data;
-    if (m.type === "started") $("seedno").textContent = `seed ${m.seed} · dish_pong.py 20 "${m.text}"${cond ? " reward" : ""}${code ? " ego aligned" : ""}`;
+    if (m.type === "started") $("seedno").textContent = `seed ${m.seed} · dish_pong.py 20 "${m.text}"${cond ? " reward" : ""}${code ? " ego aligned" : ""}${dec ? " decoder=1" : ""}`;
     if (m.type === "frames") {
       m.batch.forEach((b, i) => { for (const fr of b) clips[i].push(fr); mergeRallies(clips[i], m.rallies[i]); clips[i].summary = m.summary[i]; });
       doneFrames = m.done;
@@ -283,7 +288,7 @@ function startLive() {
     if (m.type === "error") { $("msg").innerHTML = ""; const s = document.createElement("span"); s.className = "error"; s.textContent = "The dish could not start: " + m.message; $("msg").append(s); }
   };
   worker.postMessage({ speed: +$("speed").value });
-  worker.postMessage({ start: { text, cond, ego: code, layout: code, minutes: 20 } });
+  worker.postMessage({ start: { text, cond, ego: code, layout: code, decoder: dec, minutes: 20 } });
 }
 
 function loadRecording(json) {

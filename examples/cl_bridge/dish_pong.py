@@ -5,7 +5,8 @@ the trained one (gain 1) of one seed side by side, and writes a recording
 of both that web/index.html replays.
 
     build/cl_bridge/venv/bin/python examples/cl_bridge/dish_pong.py \\
-        [minutes [seed [out.json]]] [reward] [ego] [aligned] [record=seconds]
+        [minutes [seed [out.json]]] [reward] [ego] [aligned] [decoder=1]
+        [record=seconds]
 
 seed: a number, or any text (hashed to one: ent_dish.seed_of, as the page
 does). reward: the reward for hits and misses instead of for each move;
@@ -14,6 +15,9 @@ aligned: the sensory rows on the side of the dish they want (game.c's
 pong_layout: rows 0-3 nearer the up regions, 4-7 nearer the down ones;
 punish on 35), the page's "relative to the paddle, matched electrodes"
 with ego;
+decoder: how the paddle reads the motor regions (game.c's pong_decoder):
+0 their spikes as they come (the default), 1 each against its own
+background (the page's default), 2 only the spikes just after a ball stim;
 record: the seconds at the end that are recorded (120; 0 for all).
 Prints each dish's hits a rally after the first 5 minutes.
 """
@@ -36,7 +40,7 @@ PUNISH = {0: 36, 1: 35}
 
 
 def play(minutes: float, seed: int, gain: float, cond: int, ego: int, record_s: float,
-         layout: int = 0) -> dict:
+         layout: int = 0, decoder: int = 0) -> dict:
     import ent_dish
     lib = ctypes.CDLL(str(ent_dish.build_library()))
     lib.pong_make_dish.restype = ctypes.c_void_p
@@ -49,6 +53,8 @@ def play(minutes: float, seed: int, gain: float, cond: int, ego: int, record_s: 
     lib.pong_layout(layout)
     dish = lib.pong_make_dish(seed, gain, cond)
     game = lib.pong_create(dish, seed, cond, ego)
+    lib.pong_decoder.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.pong_decoder(game, decoder)
     spikes, stims = (ctypes.c_int32 * 64)(), (ctypes.c_int32 * 64)()
     state = (ctypes.c_double * 12)()
     frames_all = int(round(minutes * 60 * TICKS / FRAME_TICKS))
@@ -71,7 +77,7 @@ def play(minutes: float, seed: int, gain: float, cond: int, ego: int, record_s: 
     late = state[11] / state[10] if state[10] else 0.0
     return {"seed": seed, "gain": gain, "condition": "reward" if cond else "moves",
             "ego": bool(ego), "minutes": minutes, "frame_s": FRAME_TICKS / TICKS,
-            "layout": "aligned" if layout else "columns", "sensory": SENSORY[layout],
+            "layout": "aligned" if layout else "columns", "decoder": decoder, "sensory": SENSORY[layout],
             "up": [r * 8 + c for r in range(8) for c in (0, 1)],
             "down": [r * 8 + c for r in range(8) for c in (6, 7)],
             "reward": 28, "punish": PUNISH[layout], "paddle_h": 0.3,
@@ -92,11 +98,13 @@ def main() -> int:
     cond = 1 if "reward" in sys.argv[1:] else 0
     ego = 1 if "ego" in sys.argv[1:] else 0
     layout = 1 if "aligned" in sys.argv[1:] else 0
+    decoder = next((int(a.split("=", 1)[1]) for a in sys.argv[1:] if a.startswith("decoder=")), 0)
     record_s = next((float(a.split("=", 1)[1]) for a in sys.argv[1:] if a.startswith("record=")), 120.0)
     ent_dish.build_library()
     with ProcessPoolExecutor(2) as pool:
         clips = list(pool.map(play, [minutes] * 2, [seed] * 2, [0.0, 1.0], [cond] * 2,
-                              [ego] * 2, [record_s] * 2, [layout] * 2))
+                              [ego] * 2, [record_s] * 2, [layout] * 2,
+                              [decoder] * 2))
     for c in clips:
         print(f"seed {seed} ({text!r}), gain {c['gain']:g}: {c['late_hits']:.2f} hits a rally "
               f"after 5 minutes, {c['rallies_all']} rallies, moves towards the ball "
