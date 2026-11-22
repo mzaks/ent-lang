@@ -101,7 +101,7 @@ code { font: .85em var(--mono); }
     </div>
     <div class="field">
       <label for="code">Ball told as</label>
-      <select id="code"><option value="0" selected>its height on the court</option><option value="1">relative to the paddle, matched electrodes</option></select>
+      <select id="code"><option value="1" selected>relative to the paddle, matched electrodes</option><option value="0">its height on the court</option></select>
     </div>
     <div class="field">
       <label for="speed">Speed</label>
@@ -162,7 +162,7 @@ code { font: .85em var(--mono); }
   </div>
 
   <div class="notes">
-    <p>How it plays: the ball's height is stimulated into one of 8 sensory electrodes, faster as the ball nears the paddle (4 to 40 Hz). The paddle moves towards whichever motor region, up or down, has fired more over the last 0.1 s; the bar under each array shows that balance. Most of the learning happens in the first few minutes.</p>
+    <p>How it plays: the ball's place, its height less the paddle's (or, as chosen, its height on the court), is stimulated into one of 8 sensory electrodes, faster as the ball nears the paddle (4 to 40 Hz). The paddle moves towards whichever motor region, up or down, has fired more over the last 0.1 s; the bar under each array shows that balance. Most of the learning happens in the first few minutes.</p>
     <p>Ball told as: with its height on the court the dish learns the edges but never the middle, where the right way depends on the paddle, which it is not told. Told relative to the paddle, the right way is fixed for each electrode; with those electrodes moved to the side of the dish whose region they should drive (rows above the paddle nearer the up region), the dish learns the whole court, the middle included (zones.py in examples/cl_bridge).</p>
     <p>What it is: a model, not a culture. The dish is a simplified leaky integrate-and-fire network written in ent (examples/cl_bridge in ent-lang), compiled to WebAssembly, not validated against recordings of real cultures. The reward and punish electrodes deliver a dopamine-like signal that no real culture has. The same seed gives the same games here as in <code>dish_pong.py</code> on your own computer, which writes recordings this page replays.</p>
     <p id="msg"></p>
@@ -180,7 +180,7 @@ const SENSORY = [[3, 12, 20, 27, 35, 44, 52, 59], [3, 11, 19, 27, 36, 44, 52, 60
 for (let r = 0; r < 8; r++) { UP.add(r * 8); UP.add(r * 8 + 1); DOWN.add(r * 8 + 6); DOWN.add(r * 8 + 7); }
 let ROLE;
 function setRoles(sense) { ROLE = Array.from({ length: 64 }, (_, k) => sense.includes(k) ? "sense" : UP.has(k) ? "up" : DOWN.has(k) ? "down" : "pad"); }
-setRoles(SENSORY[0]);
+setRoles(SENSORY[+document.getElementById("code").value]);
 
 class Clip {
   constructor(el) {
