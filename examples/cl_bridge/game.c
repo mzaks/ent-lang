@@ -26,9 +26,14 @@
 //       stims (the court's or, ego, against the paddle): the stims (r[0..7]),
 //       the moves judged with that row the last stim (r[8..15]) and of
 //       those the moves towards the ball (r[16..23])
+//   void pong_decoder(p, d)   how the paddle reads the motor regions: 0 (the
+//       default) their spikes as they come; 1 each against its own
+//       background (a 2 s average), so that a region that only fires more
+//       does not pull; 2 only the spikes of the 30 ms after a ball stim
 //   void pong_layout(aligned)   for the dishes and games made after it
 //       (process-wide): 1 the sensory rows on the columns nearer the way
-//       each wants (zones.py layouts), 0 as before
+//       each wants (zones.py layouts), 2 the same with two electrodes a
+//       row (all of columns 3 and 4), 0 as before
 //   void pong_far_serves(p, share)   from the next serve on, that share of
 //       the serves from the half of the court the paddle is not in, and
 //       flat, a quarter of the usual slope, so that they stay there
@@ -64,6 +69,8 @@ int32_t dish_params_size(void);
 #define PADDLE 0.3
 #define PADDLE_SPEED 1.0
 #define MOTOR_TAU 0.1
+#define BASE_TAU 2.0           // decoder 1: a region's background, s
+#define EVOKED_S 0.03          // decoder 2: the motor spikes this long after a ball stim
 #define DEAD_ZONE 0.1
 #define RPE_RATE 0.05
 #define MOVE_S 0.1
@@ -78,18 +85,28 @@ static const int32_t SENSORY[8] = {3, 12, 20, 27, 35, 44, 52, 59};
 // (dopamine for the whole dish, wherever it is) moves to the 35 that
 // frees, as 36 is a row's.
 static const int32_t SENSORY_ALIGNED[8] = {3, 11, 19, 27, 36, 44, 52, 60};
+// pong_layout(2): as 1 with two electrodes a row, all of columns 3 (rows
+// 0-3, two grid rows each) and 4 (rows 4-7): as far from the motor
+// regions, twice the synapses; reward and punish on 26 and 37.
+static const int32_t SENSORY_TWO[8] = {3, 19, 35, 51, 4, 20, 36, 52};   // and 8 more
+static const int32_t SENSORY_TWO_B[8] = {11, 27, 43, 59, 12, 28, 44, 60};
 static const int32_t *sensory = SENSORY;
-static int32_t punish = PUNISH;
+static const int32_t *sensory_b = 0;
+static int32_t punish = PUNISH, reward = REWARD;
 
 void pong_layout(int32_t aligned) {
-  sensory = aligned ? SENSORY_ALIGNED : SENSORY;
-  punish = aligned ? 35 : PUNISH;
+  sensory = aligned == 2 ? SENSORY_TWO : aligned ? SENSORY_ALIGNED : SENSORY;
+  sensory_b = aligned == 2 ? SENSORY_TWO_B : 0;
+  punish = aligned == 2 ? 37 : aligned ? 35 : PUNISH;
+  reward = aligned == 2 ? 26 : REWARD;
 }
 
 typedef struct pong {
   dish *d;
   uint64_t rng, fixed;
   double far;
+  int32_t decoder;
+  double base_up, base_down, base_decay, last_sense;
   int32_t cond, ego;
   double t, x, y, vx, vy, paddle, up, down, decay;
   double next_sense, judged_at, judged_paddle, expect, expect_move, start;
@@ -172,7 +189,7 @@ static void outcome(pong *p, double got, int move) {
   double err = got - *expect;
   *expect += RPE_RATE * err;
   if (err != 0.0)
-    emit(p, err > 0 ? REWARD : punish, (float)(err > 0 ? err : -err), err > 0 ? 2 : 3);
+    emit(p, err > 0 ? reward : punish, (float)(err > 0 ? err : -err), err > 0 ? 2 : 3);
 }
 
 dish *pong_make_dish(int64_t seed, double gain, int32_t cond) {
@@ -184,7 +201,7 @@ dish *pong_make_dish(int64_t seed, double gain, int32_t cond) {
   dish_params_set(params, "axon", 0.11);
   dish_params_set(params, "hard", 1);
   dish_params_set(params, "modulated", 1);
-  dish_params_set(params, "reward_channel", REWARD);
+  dish_params_set(params, "reward_channel", reward);
   dish_params_set(params, "punish_channel", punish);
   dish_params_set(params, "reward_gain", gain);
   if (cond == 0)
@@ -216,6 +233,11 @@ void pong_fixed_serves(pong *p, int64_t base) { p->fixed = (uint64_t)base; }
 
 void pong_far_serves(pong *p, double share) { p->far = share; }
 
+void pong_decoder(pong *p, int32_t decoder) {
+  p->decoder = decoder;
+  p->base_decay = exp_small(-DT / BASE_TAU);
+}
+
 void pong_zones(pong *p, int32_t *z) {
   for (int k = 0; k < 8; ++k) {
     z[k] = p->zone_seen[k];
@@ -233,13 +255,20 @@ void pong_rows(pong *p, int32_t *r) {
 
 // One tick of the game, with the spikes of the motor regions this tick.
 static void game_tick(pong *p, int32_t up, int32_t down) {
+  if (p->decoder == 2 && p->t - p->last_sense > EVOKED_S) // only what a stim evoked
+    up = down = 0;
   p->up = p->decay * p->up + up;
   p->down = p->decay * p->down + down;
   // The paddle.
   double big = p->up > p->down ? p->up : p->down;
   double gap = p->up - p->down;
+  if (p->decoder == 1) {   // each region against its own background
+    p->base_up = p->base_decay * p->base_up + (1 - p->base_decay) * p->up;
+    p->base_down = p->base_decay * p->base_down + (1 - p->base_decay) * p->down;
+    gap = (p->up - p->base_up) - (p->down - p->base_down);
+  }
   if (big > 0 && (gap < 0 ? -gap : gap) > DEAD_ZONE * big) {
-    double step = PADDLE_SPEED * DT * (p->down > p->up ? 1 : -1);
+    double step = PADDLE_SPEED * DT * (gap < 0 ? 1 : -1);
     double at = p->paddle + step;
     p->paddle = at < PADDLE / 2 ? PADDLE / 2 : at > 1 - PADDLE / 2 ? 1 - PADDLE / 2 : at;
   }
@@ -309,7 +338,10 @@ static void game_tick(pong *p, int32_t up, int32_t down) {
       row = row > 7 ? 7 : row;
     }
     emit(p, sensory[row], 1.0f, 1);
+    if (sensory_b)
+      emit(p, sensory_b[row], 1.0f, 1);
     p->last_row = row;
+    p->last_sense = p->t;
     p->row_sensed[row]++;
     double near = p->x < 0 ? 0 : p->x > 1 ? 1 : p->x;
     p->next_sense = p->t + 1 / (4 + 36 * (1 - near));

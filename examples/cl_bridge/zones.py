@@ -18,6 +18,24 @@ how often each row of the ball's code is used in training, both codes:
 the share of the sensory stims, of the moves judged (the row of the last
 stim before), and of those how many were towards the ball (pong_rows).
 
+    ... zones.py decoders [seeds (16)] [rallies (120)] [out.json] [minute (20)]
+
+the relative code on the aligned layout with game.c's pong_decoder 0, 1
+and 2 (as before; each motor region against its own background; only
+the spikes just after a ball stim), in training and in the test, with
+the reward and (half the seeds) without. Decoder 0 at minute 20 is taken
+from layouts.jsonl where it is there.
+
+22 November 2026, 16 seeds (8 without reward), the share of balls hit:
+    decoder 0  0.54 (no reward 0.42)
+    decoder 1  0.71 (no reward 0.49), rows 3-4 0.82; better than 0 for 11
+               of 16 seeds (+0.17 +- 0.05), than no reward for 8 of 8
+               (+0.23 +- 0.05)
+    decoder 2  0.66 (no reward 0.52)
+Against its background a region's answer to the ball is what moves the
+paddle, not how much it fires anyway; the reward for each move then
+judges the map, and the map learnt is larger.
+
     ... zones.py layouts [seeds (16)] [rallies (120)] [out.json]
 
 both codes on the layout as before and the aligned one (game.c's
@@ -114,15 +132,17 @@ import frozen_eval as fe  # noqa: E402
 SERVES, EVAL_SEED = 0x0BADC0DE, 777   # frozen_eval.py's retest serves
 SENSORY = [3, 12, 20, 27, 35, 44, 52, 59]   # game.c's, a row each
 SENSORY_ALIGNED = [3, 11, 19, 27, 36, 44, 52, 60]   # game.c's pong_layout(1)
+SENSORY_TWO = [[3, 11], [19, 27], [35, 43], [51, 59], [4, 12], [20, 28], [36, 44], [52, 60]]   # (2)
 POINTS = [(1.0, 0), (1.0, 5), (1.0, 10), (1.0, 20), (0.0, 20)]
 
 
 def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0,
-        far: float = 0.0, layout: int = 0) -> dict:
+        far: float = 0.0, layout: int = 0, decoder: int = 0) -> dict:
     lib = fe._lib()
     lib.pong_layout.argtypes = [ctypes.c_int32]
     lib.pong_layout(layout)
-    electrodes = SENSORY_ALIGNED if layout else SENSORY
+    electrodes = (SENSORY_TWO if layout == 2 else
+                  [[c] for c in (SENSORY_ALIGNED if layout else SENSORY)])
     lib.pong_zones.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.dish_paths.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
     state = (ctypes.c_double * 12)()
@@ -131,6 +151,9 @@ def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0,
     if far:
         lib.pong_far_serves.argtypes = [ctypes.c_void_p, ctypes.c_double]
         lib.pong_far_serves(game, far)
+    lib.pong_decoder.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    if decoder:
+        lib.pong_decoder(game, decoder)
     for _ in range(minute):
         if lib.pong_run(game, 60 * fe.TICKS, None, None) < 0:
             raise RuntimeError("the dish had no room for its spikes")
@@ -140,11 +163,13 @@ def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0,
     n = (ctypes.c_float * 4096)()
     lib.dish_paths(dish, w, n)
     wiring = []
-    for c in electrodes:
-        up = sum(w[c * 64 + b] for b in range(64) if b % 8 <= 1)
-        down = sum(w[c * 64 + b] for b in range(64) if b % 8 >= 6)
+    for cs in electrodes:
+        up = sum(w[c * 64 + b] for c in cs for b in range(64) if b % 8 <= 1)
+        down = sum(w[c * 64 + b] for c in cs for b in range(64) if b % 8 >= 6)
         wiring.append(up - down)
     test = lib.pong_create(dish, EVAL_SEED, 0, ego)
+    if decoder:
+        lib.pong_decoder(test, decoder)
     lib.pong_fixed_serves(test, SERVES)
     t0 = None
     while True:
@@ -160,6 +185,7 @@ def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0,
     lib.pong_destroy(test)
     lib.dish_destroy(dish)
     return {"seed": seed, "gain": gain, "minute": minute, "ego": ego, "far": far, "layout": layout,
+            "decoder": decoder,
             "rallies": int(state[4]),
             "seen": list(z[:8]), "hit": list(z[8:]), "wiring": wiring}
 
@@ -379,8 +405,73 @@ def layouts_main(args: list[str]) -> int:
     return 0
 
 
+def decoders_main(args: list[str]) -> int:
+    seeds = int(args[0]) if args else 16
+    rallies = int(args[1]) if len(args) > 1 else 120
+    out = args[2] if len(args) > 2 else "build/cl_bridge/decoders.json"
+    minute = int(args[3]) if len(args) > 3 else 20
+    done_path = Path(out + "l")
+    results = []
+    # Decoder 0 on the aligned layout: what `layouts` found, where it has it.
+    old = Path("build/cl_bridge/layouts.jsonl")
+    if minute == 20 and old.exists():
+        results += [r for r in map(json.loads, old.read_text().splitlines())
+                    if r["ego"] == 1 and r["layout"] == 1]
+    if done_path.exists():
+        results += [json.loads(line) for line in done_path.read_text().splitlines() if line]
+    for r in results:
+        r.setdefault("decoder", 0)
+    have = {(r["seed"], r["gain"], r["decoder"]) for r in results}
+    jobs = [(s, 1.0, minute, rallies, 1, 0.0, 1, d) for d in (0, 1, 2) for s in range(1, seeds + 1)]
+    jobs += [(s, 0.0, minute, rallies, 1, 0.0, 1, d) for d in (0, 1, 2) for s in range(1, seeds // 2 + 1)]
+    jobs = [j for j in jobs if (j[0], j[1], j[7]) not in have]
+    fe._lib()
+    with ProcessPoolExecutor(10) as pool, done_path.open("a") as log:
+        for f in as_completed([pool.submit(job, *j) for j in jobs]):
+            r = f.result()
+            log.write(json.dumps(r) + "\n")
+            log.flush()
+            results.append(r)
+    Path(out).write_text(json.dumps(results))
+    mean = statistics.mean
+
+    def score(r):
+        return sum(r["hit"]) / sum(r["seen"])
+
+    print(f"relative code, aligned layout, {minute} minutes of training, frozen, {rallies} uniform "
+          f"fixed serves; decoder 0 as before, 1 against each region's background, 2 evoked only")
+    print("hit rate by court row     " + "  ".join(f" row{k}" for k in range(8)) + "    all  +- s.e.")
+    for d in (0, 1, 2):
+        for gain in (1.0, 0.0):
+            rs = [r for r in results if r["decoder"] == d and r["gain"] == gain]
+            if not rs:
+                continue
+            seen = [sum(r["seen"][k] for r in rs) for k in range(8)]
+            hit = [sum(r["hit"][k] for r in rs) for k in range(8)]
+            each = [score(r) for r in rs]
+            se = statistics.stdev(each) / len(each) ** 0.5 if len(each) > 1 else 0.0
+            name = f"decoder {d}" + ("" if gain else " no reward")
+            print(f"{name:25s} " + "  ".join(f"{h / s if s else 0:5.2f}" for h, s in zip(hit, seen)) +
+                  f"   {mean(each):5.2f}  {se:.2f}  ({len(rs)})")
+    base = {r["seed"]: score(r) for r in results if r["decoder"] == 0 and r["gain"] == 1.0}
+    for d in (1, 2):
+        got = {r["seed"]: score(r) for r in results if r["decoder"] == d and r["gain"] == 1.0}
+        dd = [got[s] - base[s] for s in got if s in base]
+        if len(dd) > 1:
+            print(f"decoder {d} less decoder 0: {mean(dd):+.2f} +- {statistics.stdev(dd) / len(dd) ** 0.5:.2f}, "
+                  f"better for {sum(x > 0 for x in dd)} of {len(dd)} seeds")
+        nr = {r["seed"]: score(r) for r in results if r["decoder"] == d and r["gain"] == 0.0}
+        dl = [got[s] - nr[s] for s in nr if s in got]
+        if len(dl) > 1:
+            print(f"decoder {d} reward less none: {mean(dl):+.2f} +- {statistics.stdev(dl) / len(dl) ** 0.5:.2f}, "
+                  f"better for {sum(x > 0 for x in dl)} of {len(dl)} seeds")
+    return 0
+
+
 def main() -> int:
     args = sys.argv[1:]
+    if args and args[0] == "decoders":
+        return decoders_main(args[1:])
     if args and args[0] == "layouts":
         return layouts_main(args[1:])
     if args and args[0] == "structure":
