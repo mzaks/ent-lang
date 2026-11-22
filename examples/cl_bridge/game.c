@@ -15,7 +15,12 @@
 //       parameters (learn_study.py ... columns [moves] tau_elig=200
 //       axon=0.11 hard=1): reward_gain = gain
 //   pong *pong_create(dish, seed, cond, ego)  ego: the ball's place
-//       relative to the paddle (pong.py's BALL_EGO)
+//       relative to the paddle (pong.py's BALL_EGO). cond 2-4 are
+//       DishBrain's feedback on a dish with plain STDP (no dopamine; its
+//       reward and punish channels are electrodes like the others):
+//       2 `stim` (a hit: the 8 sensory electrodes at 100 Hz for 100 ms; a
+//       miss: 4 s of stims on random electrodes at 5 Hz, a pause), 3
+//       `silent` (a miss: 4 s with no input), 4 `none`, as pong.py's conditions of those names
 //   int32_t pong_run(p, ticks, spikes, stims)  runs `ticks` ticks; adds
 //       each channel's spikes to spikes[64]; stims[64] the most of each
 //       channel's stims (1 a sensory stim, 2 a reward, 3 a punish pulse)
@@ -77,6 +82,10 @@ int32_t dish_params_size(void);
 #define EARLY_S 300.0
 #define REWARD 28
 #define PUNISH 36
+#define HIT_HZ 100.0           // cond 2: the predictable feedback
+#define HIT_S 0.1
+#define MISS_HZ 5.0            // and the unpredictable one, and the pause
+#define MISS_S 4.0
 #define QUARTER_PI 0.78539816339744830962
 
 static const int32_t SENSORY[8] = {3, 12, 20, 27, 35, 44, 52, 59};
@@ -118,16 +127,22 @@ typedef struct pong {
   // This tick's stims: channel, amount, kind.
   int32_t n_out, out_ch[16], out_kind[16];
   float out_amount[16];
+  // DishBrain's feedback (cond 2, 3): the pulses still to come.
+  uint64_t fb_rng;
+  int32_t hit_left, miss_left;
+  double hit_next, miss_next, paused_until;
 } pong;
 
 // (splitmix64: the same numbers everywhere.)
-static double next_unit(pong *p) {
-  uint64_t z = (p->rng += 0x9E3779B97F4A7C15ull);
+static double unit_of(uint64_t *state) {
+  uint64_t z = (*state += 0x9E3779B97F4A7C15ull);
   z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
   z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
   z ^= z >> 31;
   return (double)(z >> 11) * (1.0 / 9007199254740992.0);
 }
+
+static double next_unit(pong *p) { return unit_of(&p->rng); }
 
 static double uniform(pong *p, double a, double b) { return a + (b - a) * next_unit(p); }
 
@@ -200,9 +215,9 @@ dish *pong_make_dish(int64_t seed, double gain, int32_t cond) {
   dish_params_set(params, "seed", (double)seed);
   dish_params_set(params, "axon", 0.11);
   dish_params_set(params, "hard", 1);
-  dish_params_set(params, "modulated", 1);
-  dish_params_set(params, "reward_channel", reward);
-  dish_params_set(params, "punish_channel", punish);
+  dish_params_set(params, "modulated", cond < 2);
+  dish_params_set(params, "reward_channel", cond < 2 ? reward : -1);
+  dish_params_set(params, "punish_channel", cond < 2 ? punish : -1);
   dish_params_set(params, "reward_gain", gain);
   if (cond == 0)
     dish_params_set(params, "tau_elig", 200);
@@ -220,6 +235,7 @@ pong *pong_create(dish *d, int64_t seed, int32_t cond, int32_t ego) {
   p->rng = (uint64_t)seed * 7919u + 1u;
   p->cond = cond;
   p->ego = ego;
+  p->fb_rng = (uint64_t)seed * 104729u + 7u;
   p->paddle = 0.5;
   p->expect = p->expect_move = 0.5;
   p->decay = exp_small(-DT / MOTOR_TAU);
@@ -255,10 +271,26 @@ void pong_rows(pong *p, int32_t *r) {
 
 // One tick of the game, with the spikes of the motor regions this tick.
 static void game_tick(pong *p, int32_t up, int32_t down) {
+  while (p->hit_left > 0 && p->t >= p->hit_next - 1e-9) {
+    for (int k = 0; k < 8; ++k)
+      emit(p, sensory[k], 1.0f, 1);
+    p->hit_left--;
+    p->hit_next += 1.0 / HIT_HZ;
+  }
+  while (p->miss_left > 0 && p->t >= p->miss_next - 1e-9) {
+    int32_t c = (int32_t)(unit_of(&p->fb_rng) * 64);
+    emit(p, c > 63 ? 63 : c, 1.0f, 1);
+    p->miss_left--;
+    p->miss_next += 1.0 / MISS_HZ;
+  }
   if (p->decoder == 2 && p->t - p->last_sense > EVOKED_S) // only what a stim evoked
     up = down = 0;
   p->up = p->decay * p->up + up;
   p->down = p->decay * p->down + down;
+  if (p->t < p->paused_until) {
+    p->t += DT;
+    return;
+  }
   // The paddle.
   double big = p->up > p->down ? p->up : p->down;
   double gap = p->up - p->down;
@@ -310,6 +342,10 @@ static void game_tick(pong *p, int32_t up, int32_t down) {
       p->vx = -p->vx;
       aim(p);
       p->hits++;
+      if (p->cond == 2) {
+        p->hit_left = (int32_t)(HIT_HZ * HIT_S + 0.5);
+        p->hit_next = p->t;
+      }
       if (p->cond == 1)
         outcome(p, 1.0, 0);
     } else {
@@ -322,8 +358,16 @@ static void game_tick(pong *p, int32_t up, int32_t down) {
       }
       if (p->cond == 1)
         outcome(p, 0.0, 0);
+      if (p->cond == 2) {
+        p->miss_left = (int32_t)(MISS_HZ * MISS_S + 0.5);
+        p->miss_next = p->t;
+      }
+      if (p->cond == 2 || p->cond == 3)
+        p->paused_until = p->t + MISS_S;
       p->t += DT;
       serve(p);
+      if (p->paused_until > p->t)
+        p->start = p->paused_until;
       return;
     }
   }

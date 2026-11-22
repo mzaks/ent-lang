@@ -31,6 +31,41 @@ at 20, 0.64 at 40 (16 seeds), 0.70 at 60 (8). Minute 20 less 10 +0.03 +-
 minute 5 (no reward at 20: 0.49); after that the score drifts around 0.67
 and longer training does not add to it. Every row stays 0.55-0.82.
 
+    ... zones.py dishbrain [seeds (16)] [rallies (120)] [out.json]
+
+DishBrain's feedback (game.c's cond 2 `stim`: a hit, the 8 sensory
+electrodes at 100 Hz for 100 ms; a miss, 4 s of stims on random
+electrodes at 5 Hz and a pause) against its controls (3 `silent`, 4
+`none`) on the best setup (relative code, aligned layout, decoder 1),
+plain STDP (no dopamine, as DishBrain's cultures had no reward channel),
+20 minutes, frozen and scored as above; and the dish untrained.
+(Run with ENT_DISH_LIBRARY while another study holds libdish.so.)
+
+22 November 2026, 16 seeds, 120 serves, all rows: untrained 0.36, stim
+0.60, silent 0.63, none 0.65 (with dopamine, 0.71; no reward, only the
+scaling, 0.49). Plain STDP in the loop learns on this setup whatever the
+feedback (none less untrained +0.28 +- 0.03, 16 of 16 seeds); the
+feedback adds nothing to it: stim less silent -0.03 +- 0.03 (7 of 16),
+less none -0.05 +- 0.03 (5 of 16). As on the old layout (feedback_study.py),
+the model has no term for the feedback's predictability to act on.
+
+    ... zones.py settle [seeds (16)] [rallies (120)] [out.json]
+
+the same setup with the reward gain and the neurons' scaling (home_gain)
+slowed together from the start, no best minute picked (resume.py's "both
+halving", there begun at minute 20): h2 halved every 2 minutes, h4 every
+4, 5h2 the full rate for 5 minutes and then halved every 2; frozen at
+minute 20 (5h2 also 40), against the constant rate (longer.jsonl).
+
+22 November 2026, 16 seeds, 120 serves: all rows h2 0.68, h4 0.70, 5h2
+0.70 at minute 20 and 0.69 at 40, against the constant rate's 0.71 and
+0.64. No schedule beats the constant rate at 20 (h4 and 5h2 -0.00 +-
+0.03, h2 -0.03); what slowing does is hold: 5h2 from minute 20 to 40
+-0.01 +- 0.01 (the constant rate -0.07 +- 0.03), and the seeds closer
+together (s.e. 0.02 against 0.04). The map learnt in the first minutes
+is kept, not bettered: as from the best minute (resume.py), slowing ends
+the drift but does not lift the ceiling.
+
     ... zones.py two [seeds (16)] [rallies (120)] [out.json]
 
 the relative code with decoder 1 on the aligned layout (1, from
@@ -159,9 +194,32 @@ SENSORY_TWO = [[3, 11], [19, 27], [35, 43], [51, 59], [4, 12], [20, 28], [36, 44
 POINTS = [(1.0, 0), (1.0, 5), (1.0, 10), (1.0, 20), (0.0, 20)]
 
 
+def _home_gain() -> float:
+    import ent_dish
+    p = ent_dish.DishParams()
+    ent_dish._load(None).dish_defaults(ctypes.byref(p))
+    return p.home_gain
+
+
+def slowing(schedule: str, m: int) -> float:
+    """The share of the learning rate and of the scaling in minute m:
+    h2 halved every 2 minutes from the start, h4 every 4, 5h2 the full
+    rate for 5 minutes and then halved every 2."""
+    if schedule == "h2":
+        return 0.5 ** (m // 2)
+    if schedule == "h4":
+        return 0.5 ** (m // 4)
+    if schedule == "5h2":
+        return 1.0 if m < 5 else 0.5 ** ((m - 5) // 2 + 1)
+    raise ValueError(schedule)
+
+
 def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0,
-        far: float = 0.0, layout: int = 0, decoder: int = 0) -> dict:
+        far: float = 0.0, layout: int = 0, decoder: int = 0, schedule: str = "", cond: int = 0) -> dict:
     lib = fe._lib()
+    lib.dish_set_reward_gain.argtypes = [ctypes.c_void_p, ctypes.c_float]
+    lib.dish_set_home_gain.argtypes = [ctypes.c_void_p, ctypes.c_float]
+    home = _home_gain() if schedule else 0.0
     lib.pong_layout.argtypes = [ctypes.c_int32]
     lib.pong_layout(layout)
     electrodes = (SENSORY_TWO if layout == 2 else
@@ -169,15 +227,19 @@ def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0,
     lib.pong_zones.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     lib.dish_paths.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
     state = (ctypes.c_double * 12)()
-    dish = lib.pong_make_dish(seed, gain, 0)
-    game = lib.pong_create(dish, seed, 0, ego)
+    dish = lib.pong_make_dish(seed, gain, cond)
+    game = lib.pong_create(dish, seed, cond, ego)
     if far:
         lib.pong_far_serves.argtypes = [ctypes.c_void_p, ctypes.c_double]
         lib.pong_far_serves(game, far)
     lib.pong_decoder.argtypes = [ctypes.c_void_p, ctypes.c_int32]
     if decoder:
         lib.pong_decoder(game, decoder)
-    for _ in range(minute):
+    for m in range(minute):
+        if schedule:
+            f = slowing(schedule, m)
+            lib.dish_set_reward_gain(dish, gain * f)
+            lib.dish_set_home_gain(dish, home * f)
         if lib.pong_run(game, 60 * fe.TICKS, None, None) < 0:
             raise RuntimeError("the dish had no room for its spikes")
     lib.pong_destroy(game)
@@ -190,7 +252,7 @@ def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0,
         up = sum(w[c * 64 + b] for c in cs for b in range(64) if b % 8 <= 1)
         down = sum(w[c * 64 + b] for c in cs for b in range(64) if b % 8 >= 6)
         wiring.append(up - down)
-    test = lib.pong_create(dish, EVAL_SEED, 0, ego)
+    test = lib.pong_create(dish, EVAL_SEED, 4 if cond >= 2 else 0, ego)
     if decoder:
         lib.pong_decoder(test, decoder)
     lib.pong_fixed_serves(test, SERVES)
@@ -208,7 +270,7 @@ def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0,
     lib.pong_destroy(test)
     lib.dish_destroy(dish)
     return {"seed": seed, "gain": gain, "minute": minute, "ego": ego, "far": far, "layout": layout,
-            "decoder": decoder,
+            "decoder": decoder, "schedule": schedule, "cond": cond,
             "rallies": int(state[4]),
             "seen": list(z[:8]), "hit": list(z[8:]), "wiring": wiring}
 
@@ -548,6 +610,116 @@ def two_main(args: list[str]) -> int:
     return 0
 
 
+def dishbrain_main(args: list[str]) -> int:
+    seeds = int(args[0]) if args else 16
+    rallies = int(args[1]) if len(args) > 1 else 120
+    out = args[2] if len(args) > 2 else "build/cl_bridge/dishbrain.json"
+    done_path = Path(out + "l")
+    results = []
+    if done_path.exists():
+        results += [json.loads(line) for line in done_path.read_text().splitlines() if line]
+    have = {(r["seed"], r["minute"], r["cond"]) for r in results}
+    jobs = [(s, 1.0, 20, rallies, 1, 0.0, 1, 1, "", c) for c in (2, 3, 4) for s in range(1, seeds + 1)]
+    jobs += [(s, 1.0, 0, rallies, 1, 0.0, 1, 1, "", 4) for s in range(1, seeds + 1)]
+    jobs = [j for j in jobs if (j[0], j[2], j[9]) not in have]
+    jobs.sort(key=lambda j: -j[2])
+    fe._lib()
+    with ProcessPoolExecutor(8) as pool, done_path.open("a") as log:
+        for f in as_completed([pool.submit(job, *j) for j in jobs]):
+            r = f.result()
+            log.write(json.dumps(r) + "\n")
+            log.flush()
+            results.append(r)
+    Path(out).write_text(json.dumps(results))
+    mean = statistics.mean
+
+    def score(r):
+        return sum(r["hit"]) / sum(r["seen"])
+
+    print(f"DishBrain's feedback, plain STDP: relative code, aligned layout, decoder 1; "
+          f"frozen, {rallies} uniform fixed serves")
+    print("condition        minute  " + "  ".join(f" row{k}" for k in range(8)) + "    all  +- s.e.")
+    names = {2: "stim", 3: "silent", 4: "none"}
+    by = {}
+    for c, m in ((4, 0), (2, 20), (3, 20), (4, 20)):
+        rs = sorted((r for r in results if r["minute"] == m and r["cond"] == c and r["seed"] <= seeds),
+                    key=lambda r: r["seed"])
+        if len(rs) < 2:
+            continue
+        by[c, m] = {r["seed"]: score(r) for r in rs}
+        seen = [sum(r["seen"][k] for r in rs) for k in range(8)]
+        hit = [sum(r["hit"][k] for r in rs) for k in range(8)]
+        each = list(by[c, m].values())
+        print(f"{'untrained' if m == 0 else names[c]:14s} {m:6d}  " +
+              "  ".join(f"{h / s if s else 0:5.2f}" for h, s in zip(hit, seen)) +
+              f"   {mean(each):5.2f}  {statistics.stdev(each) / len(each) ** 0.5:.2f}  ({len(rs)})")
+    for a, b in (((4, 0), (2, 20)), ((3, 20), (2, 20)), ((4, 20), (2, 20)), ((4, 0), (4, 20))):
+        if a in by and b in by:
+            d = [by[b][s] - by[a][s] for s in by[b] if s in by[a]]
+            la = "untrained" if a[1] == 0 else names[a[0]]
+            print(f"{names[b[0]]} m{b[1]} less {la}: {mean(d):+.2f} +- "
+                  f"{statistics.stdev(d) / len(d) ** 0.5:.2f}, better for {sum(x > 0 for x in d)} of {len(d)} seeds")
+    return 0
+
+
+def settle_main(args: list[str]) -> int:
+    seeds = int(args[0]) if args else 16
+    rallies = int(args[1]) if len(args) > 1 else 120
+    out = args[2] if len(args) > 2 else "build/cl_bridge/settle.json"
+    done_path = Path(out + "l")
+    results = []
+    for old in ("build/cl_bridge/decoders.jsonl", "build/cl_bridge/longer.jsonl"):
+        if Path(old).exists():
+            results += [r for r in map(json.loads, Path(old).read_text().splitlines())
+                        if r.get("decoder") == 1 and r["gain"] == 1.0 and r.get("layout", 1) == 1
+                        and r.get("ego", 1) == 1]
+    for r in results:
+        r["schedule"] = ""
+    if done_path.exists():
+        results += [json.loads(line) for line in done_path.read_text().splitlines() if line]
+    have = {(r["seed"], r["minute"], r["schedule"]) for r in results}
+    jobs = [(s, 1.0, 20, rallies, 1, 0.0, 1, 1, sc) for sc in ("h2", "h4", "5h2")
+            for s in range(1, seeds + 1)]
+    jobs += [(s, 1.0, 40, rallies, 1, 0.0, 1, 1, "5h2") for s in range(1, seeds + 1)]
+    jobs = [j for j in jobs if (j[0], j[2], j[8]) not in have]
+    jobs.sort(key=lambda j: -j[2])
+    fe._lib()
+    with ProcessPoolExecutor(10) as pool, done_path.open("a") as log:
+        for f in as_completed([pool.submit(job, *j) for j in jobs]):
+            r = f.result()
+            log.write(json.dumps(r) + "\n")
+            log.flush()
+            results.append(r)
+    Path(out).write_text(json.dumps(results))
+    mean = statistics.mean
+
+    def score(r):
+        return sum(r["hit"]) / sum(r["seen"])
+
+    print(f"relative code, aligned layout, decoder 1; reward gain and scaling slowed together "
+          f"from the start; frozen, {rallies} uniform fixed serves")
+    print("schedule     minute  " + "  ".join(f" row{k}" for k in range(8)) + "    all  +- s.e.")
+    by = {}
+    for sc, m in (("", 5), ("", 20), ("", 40), ("h2", 20), ("h4", 20), ("5h2", 20), ("5h2", 40)):
+        rs = {r["seed"]: r for r in results if r["minute"] == m and r["schedule"] == sc}
+        rs = [rs[s] for s in sorted(rs) if s <= seeds]
+        if len(rs) < 2:
+            continue
+        by[sc, m] = {r["seed"]: score(r) for r in rs}
+        seen = [sum(r["seen"][k] for r in rs) for k in range(8)]
+        hit = [sum(r["hit"][k] for r in rs) for k in range(8)]
+        each = list(by[sc, m].values())
+        print(f"{sc or 'constant':10s} {m:6d}  " + "  ".join(f"{h / s if s else 0:5.2f}" for h, s in zip(hit, seen)) +
+              f"   {mean(each):5.2f}  {statistics.stdev(each) / len(each) ** 0.5:.2f}  ({len(rs)})")
+    for a, b in ((("", 20), ("h2", 20)), (("", 20), ("h4", 20)), (("", 20), ("5h2", 20)),
+                 (("", 5), ("5h2", 20)), (("", 40), ("5h2", 40)), (("5h2", 20), ("5h2", 40))):
+        if a in by and b in by:
+            d = [by[b][s] - by[a][s] for s in by[b] if s in by[a]]
+            print(f"{b[0] or 'constant'} m{b[1]} less {a[0] or 'constant'} m{a[1]}: {mean(d):+.2f} +- "
+                  f"{statistics.stdev(d) / len(d) ** 0.5:.2f}, better for {sum(x > 0 for x in d)} of {len(d)} seeds")
+    return 0
+
+
 def longer_main(args: list[str]) -> int:
     seeds = int(args[0]) if args else 16
     rallies = int(args[1]) if len(args) > 1 else 120
@@ -603,6 +775,10 @@ def longer_main(args: list[str]) -> int:
 
 def main() -> int:
     args = sys.argv[1:]
+    if args and args[0] == "dishbrain":
+        return dishbrain_main(args[1:])
+    if args and args[0] == "settle":
+        return settle_main(args[1:])
     if args and args[0] == "longer":
         return longer_main(args[1:])
     if args and args[0] == "two":
