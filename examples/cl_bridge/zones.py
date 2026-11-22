@@ -18,6 +18,16 @@ how often each row of the ball's code is used in training, both codes:
 the share of the sensory stims, of the moves judged (the row of the last
 stim before), and of those how many were towards the ball (pong_rows).
 
+    ... zones.py two [seeds (16)] [rallies (120)] [out.json]
+
+the relative code with decoder 1 on the aligned layout (1, from
+decoders.jsonl) and on the same with two electrodes a row (2).
+
+22 November 2026, 16 seeds: one electrode a row 0.71 (no reward 0.49),
+two 0.64 (no reward 0.57); worse for 11 of 16 seeds (-0.07 +- 0.05).
+The two give a stronger map from the start (wiring up less down about
+1.3 times one's) but the reward adds only +0.08 to it.
+
     ... zones.py decoders [seeds (16)] [rallies (120)] [out.json] [minute (20)]
 
 the relative code on the aligned layout with game.c's pong_decoder 0, 1
@@ -468,8 +478,67 @@ def decoders_main(args: list[str]) -> int:
     return 0
 
 
+def two_main(args: list[str]) -> int:
+    seeds = int(args[0]) if args else 16
+    rallies = int(args[1]) if len(args) > 1 else 120
+    out = args[2] if len(args) > 2 else "build/cl_bridge/two.json"
+    done_path = Path(out + "l")
+    results = []
+    old = Path("build/cl_bridge/decoders.jsonl")
+    if old.exists():
+        results += [r for r in map(json.loads, old.read_text().splitlines()) if r["decoder"] == 1]
+    if done_path.exists():
+        results += [json.loads(line) for line in done_path.read_text().splitlines() if line]
+    have = {(r["seed"], r["gain"], r["layout"]) for r in results}
+    jobs = [(s, 1.0, 20, rallies, 1, 0.0, lay, 1) for lay in (1, 2) for s in range(1, seeds + 1)]
+    jobs += [(s, 0.0, 20, rallies, 1, 0.0, lay, 1) for lay in (1, 2) for s in range(1, seeds // 2 + 1)]
+    jobs = [j for j in jobs if (j[0], j[1], j[6]) not in have]
+    fe._lib()
+    with ProcessPoolExecutor(10) as pool, done_path.open("a") as log:
+        for f in as_completed([pool.submit(job, *j) for j in jobs]):
+            r = f.result()
+            log.write(json.dumps(r) + "\n")
+            log.flush()
+            results.append(r)
+    Path(out).write_text(json.dumps(results))
+    mean = statistics.mean
+
+    def score(r):
+        return sum(r["hit"]) / sum(r["seen"])
+
+    print(f"relative code, decoder 1, 20 minutes of training, frozen, {rallies} uniform fixed serves; "
+          "layout 1 an electrode a row, 2 two")
+    print("hit rate by court row     " + "  ".join(f" row{k}" for k in range(8)) + "    all  +- s.e.")
+    for lay in (1, 2):
+        for gain in (1.0, 0.0):
+            rs = [r for r in results if r["layout"] == lay and r["gain"] == gain]
+            seen = [sum(r["seen"][k] for r in rs) for k in range(8)]
+            hit = [sum(r["hit"][k] for r in rs) for k in range(8)]
+            each = [score(r) for r in rs]
+            se = statistics.stdev(each) / len(each) ** 0.5
+            name = f"layout {lay}" + ("" if gain else " no reward")
+            print(f"{name:25s} " + "  ".join(f"{h / s if s else 0:5.2f}" for h, s in zip(hit, seen)) +
+                  f"   {mean(each):5.2f}  {se:.2f}  ({len(rs)})")
+    a = {r["seed"]: score(r) for r in results if r["layout"] == 1 and r["gain"] == 1.0}
+    b = {r["seed"]: score(r) for r in results if r["layout"] == 2 and r["gain"] == 1.0}
+    n = {r["seed"]: score(r) for r in results if r["layout"] == 2 and r["gain"] == 0.0}
+    d = [b[s] - a[s] for s in b if s in a]
+    print(f"two less one: {mean(d):+.2f} +- {statistics.stdev(d) / len(d) ** 0.5:.2f}, better for "
+          f"{sum(x > 0 for x in d)} of {len(d)} seeds")
+    d = [b[s] - n[s] for s in n if s in b]
+    print(f"two, reward less none: {mean(d):+.2f} +- {statistics.stdev(d) / len(d) ** 0.5:.2f}, better for "
+          f"{sum(x > 0 for x in d)} of {len(d)} seeds")
+    print("wiring up less down")
+    for lay in (1, 2):
+        rs = [r for r in results if r["layout"] == lay and r["gain"] == 1.0]
+        print(f"layout {lay:<18d} " + "  ".join(f"{mean(r['wiring'][k] for r in rs):5.2f}" for k in range(8)))
+    return 0
+
+
 def main() -> int:
     args = sys.argv[1:]
+    if args and args[0] == "two":
+        return two_main(args[1:])
     if args and args[0] == "decoders":
         return decoders_main(args[1:])
     if args and args[0] == "layouts":
