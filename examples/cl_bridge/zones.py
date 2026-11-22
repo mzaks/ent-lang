@@ -18,6 +18,19 @@ how often each row of the ball's code is used in training, both codes:
 the share of the sensory stims, of the moves judged (the row of the last
 stim before), and of those how many were towards the ball (pong_rows).
 
+    ... zones.py longer [seeds (16)] [rallies (120)] [out.json]
+
+the relative code, aligned layout, decoder 1 frozen after 5, 10, 20 and
+40 minutes of training (16 seeds) and 60 (half of them): does it go on
+learning after 20?
+
+22 November 2026, 120 serves: all rows 0.65 at minute 5, 0.67 at 10, 0.71
+at 20, 0.64 at 40 (16 seeds), 0.70 at 60 (8). Minute 20 less 10 +0.03 +-
+0.03 (10 of 16 better), 40 less 20 -0.07 +- 0.03 (5 of 16), 60 less 40
++0.04 +- 0.04, 60 less 20 -0.02 +- 0.03 (3 of 8). Most is learnt by
+minute 5 (no reward at 20: 0.49); after that the score drifts around 0.67
+and longer training does not add to it. Every row stays 0.55-0.82.
+
     ... zones.py two [seeds (16)] [rallies (120)] [out.json]
 
 the relative code with decoder 1 on the aligned layout (1, from
@@ -535,8 +548,63 @@ def two_main(args: list[str]) -> int:
     return 0
 
 
+def longer_main(args: list[str]) -> int:
+    seeds = int(args[0]) if args else 16
+    rallies = int(args[1]) if len(args) > 1 else 120
+    out = args[2] if len(args) > 2 else "build/cl_bridge/longer.json"
+    done_path = Path(out + "l")
+    results = []
+    old = Path("build/cl_bridge/decoders.jsonl")
+    if old.exists():
+        results += [r for r in map(json.loads, old.read_text().splitlines())
+                    if r["decoder"] == 1 and r["gain"] == 1.0]
+    if done_path.exists():
+        results += [json.loads(line) for line in done_path.read_text().splitlines() if line]
+    have = {(r["seed"], r["minute"]) for r in results}
+    jobs = [(s, 1.0, m, rallies, 1, 0.0, 1, 1) for m in (5, 10, 20, 40) for s in range(1, seeds + 1)]
+    jobs += [(s, 1.0, 60, rallies, 1, 0.0, 1, 1) for s in range(1, seeds // 2 + 1)]
+    jobs = [j for j in jobs if (j[0], j[2]) not in have]
+    jobs.sort(key=lambda j: -j[2])
+    fe._lib()
+    with ProcessPoolExecutor(10) as pool, done_path.open("a") as log:
+        for f in as_completed([pool.submit(job, *j) for j in jobs]):
+            r = f.result()
+            log.write(json.dumps(r) + "\n")
+            log.flush()
+            results.append(r)
+    Path(out).write_text(json.dumps(results))
+    mean = statistics.mean
+
+    def score(r):
+        return sum(r["hit"]) / sum(r["seen"])
+
+    print(f"relative code, aligned layout, decoder 1: frozen after so many minutes of training, "
+          f"{rallies} uniform fixed serves")
+    print("minute  hit rate by court row  " + "  ".join(f" row{k}" for k in range(8)) + "    all  +- s.e.")
+    by = {}
+    for m in (5, 10, 20, 40, 60):
+        rs = [r for r in results if r["minute"] == m]
+        if not rs:
+            continue
+        by[m] = {r["seed"]: score(r) for r in rs}
+        seen = [sum(r["seen"][k] for r in rs) for k in range(8)]
+        hit = [sum(r["hit"][k] for r in rs) for k in range(8)]
+        each = list(by[m].values())
+        se = statistics.stdev(each) / len(each) ** 0.5
+        print(f"{m:6d}  {'':22s} " + "  ".join(f"{h / s if s else 0:5.2f}" for h, s in zip(hit, seen)) +
+              f"   {mean(each):5.2f}  {se:.2f}  ({len(rs)})")
+    for a, b in ((10, 20), (20, 40), (40, 60), (20, 60)):
+        if a in by and b in by:
+            d = [by[b][s] - by[a][s] for s in by[b] if s in by[a]]
+            print(f"minute {b} less {a}: {mean(d):+.2f} +- {statistics.stdev(d) / len(d) ** 0.5:.2f}, "
+                  f"better for {sum(x > 0 for x in d)} of {len(d)} seeds")
+    return 0
+
+
 def main() -> int:
     args = sys.argv[1:]
+    if args and args[0] == "longer":
+        return longer_main(args[1:])
     if args and args[0] == "two":
         return two_main(args[1:])
     if args and args[0] == "decoders":
