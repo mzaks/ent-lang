@@ -35,6 +35,11 @@
 //       default) their spikes as they come; 1 each against its own
 //       background (a 2 s average), so that a region that only fires more
 //       does not pull; 2 only the spikes of the 30 ms after a ball stim
+//   void pong_oracle(p, o)   the paddle steered by the host, not the dish
+//       (which still runs): 1 towards the ball's height now, 2 to where it
+//       will cross the paddle's line, 3 by the last sensory stim's row
+//       alone (ego: up for rows 0-3, down for 4-7), what the code tells;
+//       each at the paddle's speed. 0 the dish (the default)
 //   void pong_motor(p, m)   which electrodes the motor regions are: 0 (the
 //       default) columns 0-1 up and 6-7 down, 1 only the inner ones (1 and
 //       6, nearer the sensory electrodes), 2 only the outer (0 and 7)
@@ -117,7 +122,7 @@ typedef struct pong {
   dish *d;
   uint64_t rng, fixed;
   double far;
-  int32_t decoder, motor;
+  int32_t decoder, motor, oracle;
   double base_up, base_down, base_decay, last_sense;
   int32_t cond, ego;
   double t, x, y, vx, vy, paddle, up, down, decay;
@@ -254,6 +259,19 @@ void pong_far_serves(pong *p, double share) { p->far = share; }
 
 void pong_motor(pong *p, int32_t m) { p->motor = m; }
 
+void pong_oracle(pong *p, int32_t o) { p->oracle = o; }
+
+// Where the ball will cross the paddle's line, with its bounces.
+static double arrival(const pong *p) {
+  double speed = p->vx < 0 ? -p->vx : p->vx;
+  double t = p->vx < 0 ? p->x / speed : (2 - p->x) / speed;
+  double y = p->y + p->vy * t;
+  y -= 2.0 * (double)(int64_t)(y / 2.0);
+  if (y < 0)
+    y += 2;
+  return y > 1 ? 2 - y : y;
+}
+
 void pong_decoder(pong *p, int32_t decoder) {
   p->decoder = decoder;
   p->base_decay = exp_small(-DT / BASE_TAU);
@@ -304,7 +322,18 @@ static void game_tick(pong *p, int32_t up, int32_t down) {
     p->base_down = p->base_decay * p->base_down + (1 - p->base_decay) * p->down;
     gap = (p->up - p->base_up) - (p->down - p->base_down);
   }
-  if (big > 0 && (gap < 0 ? -gap : gap) > DEAD_ZONE * big) {
+  if (p->oracle) {
+    double want = 0;
+    if (p->oracle == 3) {
+      want = p->last_row < 0 ? 0 : p->last_row < 4 ? -1 : 1;
+    } else {
+      double target = p->oracle == 2 ? arrival(p) : p->y;
+      double off = target - p->paddle;
+      want = off > 0.02 ? 1 : off < -0.02 ? -1 : 0;
+    }
+    double at = p->paddle + PADDLE_SPEED * DT * want;
+    p->paddle = at < PADDLE / 2 ? PADDLE / 2 : at > 1 - PADDLE / 2 ? 1 - PADDLE / 2 : at;
+  } else if (big > 0 && (gap < 0 ? -gap : gap) > DEAD_ZONE * big) {
     double step = PADDLE_SPEED * DT * (gap < 0 ? 1 : -1);
     double at = p->paddle + step;
     p->paddle = at < PADDLE / 2 ? PADDLE / 2 : at > 1 - PADDLE / 2 ? 1 - PADDLE / 2 : at;

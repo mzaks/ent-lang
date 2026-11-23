@@ -31,6 +31,27 @@ at 20, 0.64 at 40 (16 seeds), 0.70 at 60 (8). Minute 20 less 10 +0.03 +-
 minute 5 (no reward at 20: 0.49); after that the score drifts around 0.67
 and longer training does not add to it. Every row stays 0.55-0.82.
 
+    ... zones.py autopsy [seeds (16)] [rallies (120)] [out.json]
+
+what limits the best setup: the same serves steered by game.c's
+pong_oracle (1 a perfect follower of the ball's height, 2 a perfect
+predictor of where it arrives, 3 the last stim's row alone, what the
+relative code tells) as ceilings, and the dish trained 20 minutes and
+untrained, each miss sorted by what the paddle did in its last second:
+parked at an edge, still, dithering (4 or more turns), the wrong way, the
+right way but the ball bounced off a wall, the right way but too late.
+
+23 November 2026: every oracle hits every ball (half an hour of the
+serves each, 4 seeds), the rows-only one too: the code, the paddle's
+speed and the stims' timing allow it all; the gap is the dish's
+steering. The dish trained 20 minutes hits 0.71 (16 seeds), untrained
+0.34 (8); its misses: dithering 0.63 (untrained 0.52), parked 0.13
+(0.01), still 0.12 (0.10), wrong way 0.08 (0.24), late 0.04, bounce
+0.01. A dithering miss turns 7.3 times in its last second, gets 0.17
+of the way, and the ball arrives 0.37 from the paddle (more than a row
+of the code away, so the stims all said the same way). Training cuts
+the wrong way; it leaves the paddle unable to hold a way.
+
     ... zones.py yoked [seeds (16)] [rallies (120)] [out.json]
 
 the open-loop control for plain STDP (dishbrain's `none`, which learns:
@@ -646,6 +667,132 @@ def two_main(args: list[str]) -> int:
     return 0
 
 
+CAUSES = ("parked", "still", "dithering", "wrong way", "bounce", "late")
+
+
+def autopsy_job(seed: int, minute: int, rallies: int, oracle: int = 0) -> dict:
+    """The best setup (relative code, aligned layout, decoder 1, the reward
+    for each move), trained `minute` minutes, frozen, played on the fixed
+    serves tick by tick; each miss sorted by what the paddle did in the
+    last second before it (CAUSES). oracle: game.c's pong_oracle steers in
+    the test instead of the dish."""
+    lib = fe._lib()
+    lib.pong_layout.argtypes = [ctypes.c_int32]
+    lib.pong_layout(1)
+    lib.pong_decoder.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.pong_oracle.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.pong_zones.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    dish = lib.pong_make_dish(seed, 1.0, 0)
+    game = lib.pong_create(dish, seed, 0, 1)
+    lib.pong_decoder(game, 1)
+    for _ in range(minute):
+        if lib.pong_run(game, 60 * fe.TICKS, None, None) < 0:
+            raise RuntimeError("the dish had no room for its spikes")
+    lib.pong_destroy(game)
+    lib.dish_set_stdp(dish, 0)
+    test = lib.pong_create(dish, EVAL_SEED, 0, 1)
+    lib.pong_decoder(test, 1)
+    lib.pong_oracle(test, oracle)
+    lib.pong_fixed_serves(test, SERVES)
+    state = (ctypes.c_double * 12)()
+    window = fe.TICKS            # a second
+    trail: list[tuple[float, float]] = []
+    causes = dict.fromkeys(CAUSES, 0)
+    misses = []
+    edge_lo, edge_hi = 0.15 + 1e-6, 0.85 - 1e-6
+    lib.pong_state(test, state)
+    seen = int(state[4])
+    while seen < rallies and state[0] < 1800:
+        if lib.pong_run(test, 1, None, None) < 0:
+            raise RuntimeError("the dish had no room for its spikes")
+        lib.pong_state(test, state)
+        if int(state[4]) > seen:
+            seen = int(state[4])
+            w = trail[-window:]
+            ys, ps = [a for a, _ in w], [b for _, b in w]
+            y_end, p0, p1 = ys[-1], ps[0], ps[-1]
+            moves = [b - a for a, b in zip(ps, ps[1:]) if abs(b - a) > 1e-9]
+            flips = sum((a > 0) != (b > 0) for a, b in zip(moves, moves[1:]))
+            dys = [b - a for a, b in zip(ys, ys[1:]) if abs(b - a) > 1e-9]
+            bounced = any((a > 0) != (b > 0) for a, b in zip(dys, dys[1:]))
+            dp, need = p1 - p0, y_end - p0
+            if all(q <= edge_lo for q in ps) or all(q >= edge_hi for q in ps):
+                cause = "parked"
+            elif abs(dp) < 0.05 and flips < 4:
+                cause = "still"
+            elif flips >= 4:
+                cause = "dithering"
+            elif abs(y_end - p1) > abs(need):   # ended further from where it arrived
+                cause = "wrong way"
+            elif bounced:
+                cause = "bounce"
+            else:
+                cause = "late"
+            causes[cause] += 1
+            misses.append({"cause": cause, "off": y_end - p1, "flips": flips, "moved": dp})
+            trail = []
+            continue
+        trail.append((state[2], state[3]))
+    z = (ctypes.c_int32 * 16)()
+    lib.pong_zones(test, z)
+    lib.pong_destroy(test)
+    lib.dish_destroy(dish)
+    return {"seed": seed, "minute": minute, "oracle": oracle, "rallies": seen,
+            "seen": list(z[:8]), "hit": list(z[8:]), "causes": causes, "misses": misses}
+
+
+def autopsy_main(args: list[str]) -> int:
+    seeds = int(args[0]) if args else 16
+    rallies = int(args[1]) if len(args) > 1 else 120
+    out = args[2] if len(args) > 2 else "build/cl_bridge/autopsy.json"
+    done_path = Path(out + "l")
+    results = []
+    if done_path.exists():
+        results += [json.loads(line) for line in done_path.read_text().splitlines() if line]
+    have = {(r["seed"], r["minute"], r["oracle"]) for r in results}
+    jobs = [(s, 0, rallies, o) for o in (1, 2, 3) for s in range(1, 5)]
+    jobs += [(s, 20, rallies, 0) for s in range(1, seeds + 1)]
+    jobs += [(s, 0, rallies, 0) for s in range(1, seeds // 2 + 1)]
+    jobs = [j for j in jobs if (j[0], j[1], j[3]) not in have]
+    jobs.sort(key=lambda j: -j[1])
+    fe._lib()
+    with ProcessPoolExecutor(10) as pool, done_path.open("a") as log:
+        for f in as_completed([pool.submit(autopsy_job, *j) for j in jobs]):
+            r = f.result()
+            log.write(json.dumps(r) + "\n")
+            log.flush()
+            results.append(r)
+    Path(out).write_text(json.dumps(results))
+    mean = statistics.mean
+
+    def score(r):
+        return sum(r["hit"]) / sum(r["seen"])
+
+    print(f"relative code, aligned layout, decoder 1; {rallies} uniform fixed serves. Misses by what "
+          f"the paddle did in the last second")
+    print(f"{'who steers':34s} {'hit':>5s}  " + "  ".join(f"{c:>9s}" for c in CAUSES) + "   (share of misses)")
+    rows = (("perfect predictor (oracle 2)", 0, 2), ("perfect follower (oracle 1)", 0, 1),
+            ("rows only, as told (oracle 3)", 0, 3), ("dish, trained 20 min", 20, 0),
+            ("dish, untrained", 0, 0))
+    for label, m, o in rows:
+        rs = [r for r in results if r["minute"] == m and r["oracle"] == o and r["seed"] <= seeds]
+        if not rs:
+            continue
+        total = sum(sum(r["causes"].values()) for r in rs)
+        share = [sum(r["causes"][c] for r in rs) / total if total else 0 for c in CAUSES]
+        print(f"{label:34s} {mean(score(r) for r in rs):5.2f}  " +
+              "  ".join(f"{x:9.2f}" for x in share) + f"   ({len(rs)})")
+    rs = [r for r in results if r["minute"] == 20 and r["oracle"] == 0]
+    if rs:
+        print("dish, trained: by cause, mean |ball less paddle| at the miss, flips, |moved| in the last second")
+        for c in CAUSES:
+            ms = [m for r in rs for m in r["misses"] if m["cause"] == c]
+            if ms:
+                print(f"  {c:10s} {len(ms):5d}  off {mean(abs(m['off']) for m in ms):.2f}  "
+                      f"flips {mean(m['flips'] for m in ms):5.1f}  moved {mean(abs(m['moved']) for m in ms):.2f}")
+    return 0
+
+
 def yoked_job(seed: int, minute: int, rallies: int, yoke: int = 1000) -> dict:
     """Plain STDP (cond 4, `none`) on the best setup, open loop: dish `seed`
     gets, tick by tick, the very stims that the closed-loop game of dish
@@ -980,6 +1127,8 @@ def longer_main(args: list[str]) -> int:
 
 def main() -> int:
     args = sys.argv[1:]
+    if args and args[0] == "autopsy":
+        return autopsy_main(args[1:])
     if args and args[0] == "yoked":
         return yoked_main(args[1:])
     if args and args[0] == "motor":
