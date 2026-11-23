@@ -1446,7 +1446,7 @@ system key_ring() {
 component Access { role: i32, label: text, flags: i32, order: i32, id: i32, said: text, up: i32 }
 component AccessValue { value: text, caret: i32, anchor: i32 }
 component AccessItem { box: entity, item: i32, role: i32, label: text, x: f32, y: f32,
-                       w: f32, h: f32, flags: i32, id: i32 } capacity 1024
+                       w: f32, h: f32, flags: i32, id: i32 } capacity 8192
 component Live { seen: text, said: text, quiet: f32 }
 unique AccessState { on: bool, next: i32, focus: i32, at: i32, item: i32, told: bool, again: bool,
                      count: i32, items: i32, forced: bool }

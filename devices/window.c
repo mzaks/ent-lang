@@ -3074,7 +3074,8 @@ enum {
 };
 enum { ENT_ACCESS_SELECTED = 1, ENT_ACCESS_DISABLED = 2, ENT_ACCESS_EXPANDED = 4,
        ENT_ACCESS_COLLAPSED = 8, ENT_ACCESS_READONLY = 16 };
-enum { ENT_ACCESS_PRESS = 1, ENT_ACCESS_FOCUS = 2, ENT_ACCESS_VALUE = 3, ENT_ACCESS_SELECT = 4 };
+enum { ENT_ACCESS_PRESS = 1, ENT_ACCESS_FOCUS = 2, ENT_ACCESS_VALUE = 3, ENT_ACCESS_SELECT = 4,
+       ENT_ACCESS_SHOW = 5 };
 
 typedef struct {
   int32_t id, kind, from, to;
@@ -3287,6 +3288,9 @@ static id ent_access_children_of(int32_t parent) {
 }
 
 // The element's answers to the reader.
+static const char *ent_access_utf8_of(id s) {
+  return s ? ((const char *(*)(id, SEL))objc_msgSend)(s, ent_window_sel("UTF8String")) : 0;
+}
 static id ent_access_m_role(id self, SEL s) {
   ent_access_node *n = ent_access_of(self);
   return ent_window_ns_text(ent_access_role_name(n ? n->role : 0));
@@ -3309,7 +3313,7 @@ static id ent_access_m_value(id self, SEL s) {
     return ((id(*)(id, SEL, int))objc_msgSend)(ent_window_class("NSNumber"),
                                                ent_window_sel("numberWithInt:"),
                                                (n->flags & ENT_ACCESS_SELECTED) ? 1 : 0);
-  if (n->role == ENT_ACCESS_TEXT || n->role == ENT_ACCESS_ROW || n->role == ENT_ACCESS_HEADING)
+  if (n->role == ENT_ACCESS_TEXT || n->role == ENT_ACCESS_ROW)
     return n->value_length ? n->ns_value : n->ns_label;
   return ent_access_texty(n) ? n->ns_value : (id)0;
 }
@@ -3334,6 +3338,32 @@ static signed char ent_access_m_press(id self, SEL s) {
   if (n)
     ent_access_queue(n->id, ENT_ACCESS_PRESS, 0, 0, 0);
   return n != 0;
+}
+// The actions, by name (the older way, which VoiceOver uses to have an
+// element out of sight shown: AXScrollToVisible).
+static bool ent_access_pressable(ent_access_node *n) {
+  return n && (n->role == ENT_ACCESS_BUTTON || n->role == ENT_ACCESS_ROW || n->role == ENT_ACCESS_TAB ||
+               n->role == ENT_ACCESS_LINK);
+}
+static id ent_access_m_actions(id self, SEL s) {
+  ent_access_node *n = ent_access_of(self);
+  id names[2];
+  unsigned long k = 0;
+  if (ent_access_pressable(n))
+    names[k++] = ent_window_ns_text("AXPress");
+  names[k++] = ent_window_ns_text("AXScrollToVisible");
+  return ((id(*)(id, SEL, const id *, unsigned long))objc_msgSend)(
+      ent_window_class("NSArray"), ent_window_sel("arrayWithObjects:count:"), names, k);
+}
+static void ent_access_m_perform(id self, SEL s, id name) {
+  ent_access_node *n = ent_access_of(self);
+  const char *said = ent_access_utf8_of(name);
+  if (!n || !said)
+    return;
+  if (strcmp(said, "AXPress") == 0 && ent_access_pressable(n))
+    ent_access_queue(n->id, ENT_ACCESS_PRESS, 0, 0, 0);
+  else if (strcmp(said, "AXScrollToVisible") == 0)
+    ent_access_queue(n->id, ENT_ACCESS_SHOW, 0, 0, 0);
 }
 static signed char ent_access_m_focused(id self, SEL s) {
   ent_access_node *n = ent_access_of(self);
@@ -3487,7 +3517,12 @@ static id ent_access_v_hit(id self, SEL s, ent_window_ns_point at) {
   for (int i = 0; i < ent_access_count; ++i) {
     ent_access_node *n = &ent_access_nodes[i];
     ent_access_rect r = ent_access_screen(n->x, n->y, n->w, n->h);
+    // (Inside what it is in, too: a page's part scrolled out of it is not
+    // where the page is not.)
+    ent_access_node *up = n->parent ? ent_access_find(n->parent) : 0;
+    ent_access_rect u = up ? ent_access_screen(up->x, up->y, up->w, up->h) : r;
     if (at.x >= r.x && at.x < r.x + r.w && at.y >= r.y && at.y < r.y + r.h &&
+        at.x >= u.x && at.x < u.x + u.w && at.y >= u.y && at.y < u.y + u.h &&
         (!best || r.w * r.h <= best_area)) {
       best = n;
       best_area = r.w * r.h;
@@ -3528,6 +3563,8 @@ static bool ent_access_ready(void) {
     ENT_ACCESS_ADD("accessibilityFrame", ent_access_m_frame, t);
     ENT_ACCESS_ADD("accessibilityPerformPress", ent_access_m_press, "c@:");
     ENT_ACCESS_ADD("isAccessibilityFocused", ent_access_m_focused, "c@:");
+    ENT_ACCESS_ADD("accessibilityActionNames", ent_access_m_actions, "@@:");
+    ENT_ACCESS_ADD("accessibilityPerformAction:", ent_access_m_perform, "v@:@");
     ENT_ACCESS_ADD("setAccessibilityFocused:", ent_access_m_set_focused, "v@:c");
     ENT_ACCESS_ADD("isAccessibilityEnabled", ent_access_m_enabled, "c@:");
     ENT_ACCESS_ADD("isAccessibilitySelected", ent_access_m_selected, "c@:");
@@ -3765,6 +3802,15 @@ static void ent_access_dump(id element, int depth) {
   ent_access_rect r = ((ent_access_rect(*)(id, SEL))objc_msgSend)(element, ent_window_sel("accessibilityFrame"));
   char shown[64];
   snprintf(shown, sizeof shown, "%.40s", v);
+  // (Not cut inside a character.)
+  size_t cut = strlen(shown);
+  if (cut == 40) {
+    while (cut > 0 && ((unsigned char)shown[cut - 1] & 0xC0) == 0x80)
+      --cut;
+    if (cut > 0 && ((unsigned char)shown[cut - 1] & 0xC0) == 0xC0)
+      --cut;
+    shown[cut] = 0;
+  }
   for (char *c = shown; *c; ++c)
     if (*c == '\n')
       *c = ' ';
