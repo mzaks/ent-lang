@@ -1,0 +1,20 @@
+// Tab through the stops (round again after the last; a box with no room
+// passed over), Shift+Tab back, the arrows through a list's items (not
+// past its last), and Space or Enter: the box with the focus is the one
+// hovered and the pointer let go over it, as a click.
+// RUN: sh %S/Inputs/headless.sh %t.dir
+// RUN: %ent run -I %t.dir %S/Inputs/layout_keys.ent \
+// RUN:     2>/dev/null | FileCheck %s --match-full-lines
+
+// CHECK:      1: at 0 item 0 ring false, hovered 0
+// CHECK-NEXT: 2: at 1 item 0 ring true, hovered 0
+// CHECK-NEXT: 3: at 2 item 0 ring true, hovered 0
+// CHECK-NEXT: 4: at 2 item 1 ring true, hovered 0
+// CHECK-NEXT: 5: at 2 item 2 ring true, hovered 0
+// CHECK-NEXT: 6: at 2 item 2 ring true, hovered 0
+// CHECK-NEXT: 7: at 2 item 1 ring true, hovered 0
+// CHECK-NEXT: 8: at 4 item 0 ring true, hovered 0
+// CHECK-NEXT: 9: at 1 item 0 ring true, hovered 0
+// CHECK-NEXT: 10: at 4 item 0 ring true, hovered 0
+// CHECK-NEXT: 11: at 2 item 0 ring true, hovered 0
+// CHECK-NEXT: 12: at 2 item 0 ring true, hovered 1 pressed

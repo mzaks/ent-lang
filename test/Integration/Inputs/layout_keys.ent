@@ -1,0 +1,67 @@
+// Keys through boxes (lib/layout_window.ent: `KeyOrder`, `KeyFocus`,
+// `KeyMove`, `key_focus`, `key_press`): Tab to the next stop and round,
+// Shift+Tab back, the arrows through a list's items, a box with no room
+// passed over, and Space or Enter a click on the box with the focus.
+import console
+import window
+import layout
+import layout_window
+
+unique Frame: i32
+default_capacity 16
+
+world {
+  Window.width = 400
+  Window.height = 100
+  let root = spawn {
+    Box { x: 0.0, y: 0.0, w: 400.0, h: 100.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }
+  }
+  let a = spawn {
+    Box { x: 0.0, y: 0.0, w: 50.0, h: 20.0 }, Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, KeyOrder { at: 1, item: 0 }
+  }
+  connect (a)-[Inside]->(root)
+  for i in 0..3 {
+    let row = spawn {
+      Box { x: 0.0, y: 0.0, w: 50.0, h: 20.0 }, Size { w: Sizing.Fixed, h: Sizing.Fixed },
+      Stack { row: true, pad: 0.0, gap: 0.0 }, KeyOrder { at: 2, item: i }
+    }
+    connect (row)-[Inside]->(root)
+  }
+  let none = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 20.0 }, Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, KeyOrder { at: 3, item: 0 }
+  }
+  connect (none)-[Inside]->(root)
+  let c = spawn {
+    Box { x: 0.0, y: 0.0, w: 50.0, h: 20.0 }, Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }, KeyOrder { at: 4, item: 0 }
+  }
+  connect (c)-[Inside]->(root)
+}
+
+// What the keys ask, frame by frame.
+system keys() {
+  Frame += 1
+  Pointer.x = -10.0
+  Pointer.y = -10.0
+  if Frame == 2 || Frame == 3 || Frame == 8 || Frame == 9 { KeyMove.step = 1 }
+  if Frame == 10 || Frame == 11 { KeyMove.step = -1 }
+  if Frame == 4 || Frame == 5 || Frame == 6 { KeyMove.item = 1 }
+  if Frame == 7 { KeyMove.item = -1 }
+  if Frame == 12 { KeyMove.press = true }
+}
+
+system show() {
+  let hovered = for k: KeyOrder with Hovered { }
+  let said = "{Frame}: at {KeyAt.at} item {KeyAt.item} ring {KeyAt.shown}, hovered {hovered}"
+  if PointerTouch == Touch.ReleasedNow { put(said + " pressed") } else { put(said) }
+}
+
+schedule frame() {
+  keys()  measure()  layout_widths()  wrap()  layout_heights()  point()
+  key_focus()  key_press()  show()
+}
+main { loop { frame() } until Frame == 12 }

@@ -1274,7 +1274,144 @@ system tip_draw() {
 }
 
 // The whole of it, between the window's `begin` and `present`.
+// Keys go through the boxes as the pointer does. A box with `KeyOrder` is
+// one Tab comes to, by its `at` (from 1; Shift+Tab goes back); boxes with
+// the same `at` are one stop, a list, whose `item`s the up and down arrows
+// go through. The box with `KeyFocus` has the keys: Space or Enter
+// presses it, which is a click on it (in that frame it is the one box
+// `Hovered`, and the pointer `ReleasedNow`), so what a click does, the key
+// does. A box not seen (no room, clipped away) is passed over. A box with
+// a `KeyOrder` pressed with the pointer gets the focus. `key_ring` draws a
+// ring around the box with the focus while the keys moved it last (the
+// pointer pressed hides it), in `KeyAt.colour` (0: a blue).
+//
+// `KeyMove` is what the keys asked for in this frame: `step` 1 the next
+// stop, -1 the one before; `item` 1 the next item of the list, -1 the one
+// before; `press`. `key_keys` reads Tab, Shift+Tab, the arrows, Space and
+// Enter into it; a program with keys of its own among those (a text
+// field's Tab, its Enter) sets it instead. `KeyAt` says where the focus
+// is (`at` 0: nowhere), and `moved` that the keys moved it in this frame.
+component KeyOrder { at: i32, item: i32 }
+tag KeyFocus
+unique KeyMove { step: i32, item: i32, press: bool }
+unique KeyAt { at: i32, item: i32, shown: bool, moved: bool, colour: i32,
+               found: i32, next: i32 }
+
+system key_keys() {
+  let shift = key_down(340) || key_down(344)
+  KeyMove.step = if key_pressed(258) { if shift { -1 } else { 1 } } else { 0 }
+  KeyMove.item = if key_pressed(264) { 1 } else if key_pressed(265) { -1 } else { 0 }
+  KeyMove.press = key_pressed(32) || key_pressed(257) || key_pressed(335)
+}
+
+fn key_most() -> i32 { 2147483647 }
+// (A box with room, and some of it in sight.)
+fn key_seen(x: f32, y: f32, w: f32, h: f32, vx: f32, vy: f32, vw: f32, vh: f32) -> bool {
+  w > 0.0 && h > 0.0 && min(x + w, vx + vw) > max(x, vx) && min(y + h, vy + vh) > max(y, vy)
+}
+
+// (After `point`: where the pointer pressed, then what the keys asked.)
+system key_focus() {
+  KeyAt.moved = false
+  if PointerTouch == Touch.PressedNow {
+    KeyAt.shown = false
+    KeyAt.found = 0
+    KeyAt.next = 0
+    for k: KeyOrder with Hovered { KeyAt.found max= k.at }
+    for k: KeyOrder with Hovered where k.at == KeyAt.found { KeyAt.next max= k.item }
+    if KeyAt.found > 0 {
+      KeyAt.at = KeyAt.found
+      KeyAt.item = KeyAt.next
+    }
+  }
+  if KeyMove.step > 0 {
+    KeyAt.next = key_most()
+    KeyAt.found = key_most()
+    for k: KeyOrder, b: Box, v: Seen where key_seen(b.x, b.y, b.w, b.h, v.x, v.y, v.w, v.h) {
+      if k.at > KeyAt.at { KeyAt.next min= k.at }
+      KeyAt.found min= k.at
+    }
+    let to = if KeyAt.next < key_most() { KeyAt.next } else { KeyAt.found }
+    if to < key_most() {
+      KeyAt.at = to
+      KeyAt.next = key_most()
+      for k: KeyOrder, b: Box, v: Seen where k.at == to && key_seen(b.x, b.y, b.w, b.h, v.x, v.y, v.w, v.h) { KeyAt.next min= k.item }
+      KeyAt.item = KeyAt.next
+      KeyAt.shown = true
+      KeyAt.moved = true
+    }
+  } else if KeyMove.step < 0 {
+    KeyAt.next = 0
+    KeyAt.found = 0
+    for k: KeyOrder, b: Box, v: Seen where key_seen(b.x, b.y, b.w, b.h, v.x, v.y, v.w, v.h) {
+      if k.at < KeyAt.at || KeyAt.at == 0 { KeyAt.next max= k.at }
+      KeyAt.found max= k.at
+    }
+    let to = if KeyAt.next > 0 { KeyAt.next } else { KeyAt.found }
+    if to > 0 {
+      KeyAt.at = to
+      KeyAt.next = key_most()
+      for k: KeyOrder, b: Box, v: Seen where k.at == to && key_seen(b.x, b.y, b.w, b.h, v.x, v.y, v.w, v.h) { KeyAt.next min= k.item }
+      KeyAt.item = KeyAt.next
+      KeyAt.shown = true
+      KeyAt.moved = true
+    }
+  }
+  if KeyMove.item != 0 && KeyAt.at > 0 {
+    let at = KeyAt.at
+    let was = KeyAt.item
+    KeyAt.next = key_most()
+    KeyAt.found = -key_most()
+    for k: KeyOrder, b: Box, v: Seen where k.at == at && key_seen(b.x, b.y, b.w, b.h, v.x, v.y, v.w, v.h) {
+      if k.item > was { KeyAt.next min= k.item }
+      if k.item < was { KeyAt.found max= k.item }
+    }
+    let to = if KeyMove.item > 0 { KeyAt.next } else { KeyAt.found }
+    if to != key_most() && to != -key_most() {
+      KeyAt.item = to
+      KeyAt.moved = true
+    }
+    KeyAt.shown = true
+  }
+  for e, k: KeyOrder {
+    let on = KeyAt.at > 0 && k.at == KeyAt.at && k.item == KeyAt.item
+    if on != e.has(KeyFocus) {
+      if on { e.add(KeyFocus) } else { e.remove(KeyFocus) }
+    }
+  }
+}
+
+// (After `key_focus`.)
+system key_press() {
+  if KeyMove.press && KeyAt.at > 0 {
+    for e with Hovered without KeyFocus { e.remove(Hovered) }
+    for e with KeyFocus without Hovered { e.add(Hovered) }
+    PointerTouch = Touch.ReleasedNow
+    KeyAt.shown = true
+  }
+  KeyMove.step = 0
+  KeyMove.item = 0
+  KeyMove.press = false
+}
+
+system key_ring() {
+  if KeyAt.shown {
+    let c = if KeyAt.colour != 0 { KeyAt.colour } else { 0x3a7bd5 }
+    for b: Box, v: Seen with KeyFocus where key_seen(b.x, b.y, b.w, b.h, v.x, v.y, v.w, v.h) {
+      let x = max(b.x, v.x) - 3.0
+      let y = max(b.y, v.y) - 3.0
+      let w = min(b.x + b.w, v.x + v.w) + 3.0 - x
+      let h = min(b.y + b.h, v.y + v.h) + 3.0 - y
+      rect(x, y, w, 2.0, c)
+      rect(x, y + h - 2.0, w, 2.0, c)
+      rect(x, y, 2.0, h, c)
+      rect(x + w - 2.0, y, 2.0, h, c)
+    }
+  }
+}
+
 schedule ui() {
+  key_keys()
   pointer()
   scroll()
   measure()
@@ -1282,6 +1419,8 @@ schedule ui() {
   wrap()
   layout_heights()
   point()
+  key_focus()
+  key_press()
   animate()
   reach()
   // (Again, for what is inside the boxes that are on their way to
@@ -1292,6 +1431,7 @@ schedule ui() {
   settle()
   tips()
   draw(0, 8)
+  key_ring()
   tip_draw()
   inspect()
 }
@@ -1306,6 +1446,7 @@ schedule ui() {
 //
 //   schedule frame() { begin()  ui_base()  draw_board()  ui_top()  present() }
 schedule ui_base() {
+  key_keys()
   pointer()
   scroll()
   measure()
@@ -1313,6 +1454,8 @@ schedule ui_base() {
   wrap()
   layout_heights()
   point()
+  key_focus()
+  key_press()
   animate()
   reach()
   layout_widths()
@@ -1324,6 +1467,7 @@ schedule ui_base() {
 }
 schedule ui_top() {
   draw(1, 8)
+  key_ring()
   tip_draw()
   inspect()
 }
