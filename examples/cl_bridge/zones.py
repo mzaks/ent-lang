@@ -224,6 +224,72 @@ the time. The dish's map is good; the stream of stims wears its answer
 down when the ball is near, when it counts most. With no reward, STDP
 alone wires every row up (bursts on rows 4-7 lean up).
 
+    ... zones.py trains [seeds (16)] [out.json]
+
+does a stream of stims wear the answer down? The frozen best setup (20
+minutes), rows 2-5's electrodes given trains of 8 pulses at 5, 10, 20, 40
+Hz and of 8 bursts of 3 at 10 Hz; each pulse's answer, the motor spikes
+in the 20 ms after it.
+
+23 November 2026, 16 seeds: the first pulse gets 25 spikes (0.82 lean
+the right way), the 8th 4-7 at every rate, 5 Hz too (6.8; 40 Hz 5.0), and
+0.70-0.77 right. Short-term depression (network.ent: depress 0.231 a
+spike, tau_recover 1.07 s, the calibration's) drains the paths under any
+stream faster than about 1 Hz; a burst's extra spikes are gone by the
+5th. In play the dish lives in that worn state.
+
+    ... zones.py rate [seeds (16)] [rallies (120)] [out.json]
+
+the ball's stims at a constant rate (game.c's pong_rate: 10 or 20 Hz,
+single pulses or bursts of 3) instead of 4-40 Hz by distance, trained 20
+minutes, frozen, scored with the autopsy's causes.
+
+23 November 2026, 16 seeds: 10 Hz 0.63, 20 Hz 0.64, 10 Hz bursts 0.57,
+20 Hz bursts 0.61, against 0.71 (paired -0.07, -0.06, -0.14, -0.09);
+dithering stays 0.57-0.68 of the misses. Fresher answers do not make up
+for fewer votes and for losing the distance the rate tells.
+
+    ... zones.py match [seeds (16)] [out.json]
+
+our dish in DishBrain's game (game.c's pong_geometry 1, from the timings
+in their OSF data 5u6qv: ball across in 2.95 s, served from 0.4 of the
+way out going away, 8 s pause after a miss, paddle 0.4 of the court) and
+scored with their measure: hits a rally, per-minute means, T1 minutes 0-5
+and T2 6-20; with their real groups from main_df.csv beside it.
+
+23 November 2026, 16 seeds (random paddle 8), rally length T1 -> T2 and
+balls hit T2: real CTL 0.90 -> 0.87 (0.43), IS 0.83 -> 0.80 (0.43), MCC
+0.78 -> 1.02 (0.47), HCC 0.67 -> 1.13 (0.47); ours with their feedback
+(plain STDP) 0.78 -> 0.97 (+0.19 +- 0.14, 0.44), silent and none 0.80 ->
+0.84 (0.41; the same runs: the 8 s pause is the silence), our best
+(reward) 3.17 -> 3.04 (0.71), random paddle 0.91 -> 0.94 (0.44). With
+their feedback our dish learns about as much as their mouse cells; with
+the reward it plays far above any real group.
+
+    ... zones.py depression [seeds (16)] [rallies (120)] [out.json]
+
+short-term depression swept (game.c's pong_dish_param: depress, a spike's
+share of the resources, and tau_recover; calibrated 0.231, 1070 ms): the
+untrained dish's spontaneous activity (culture/stats.py, 3 min, 4 seeds)
+and the best setup's frozen score after 20 minutes.
+
+23 November 2026, 16 seeds: less depression gives fewer, longer bursts
+(0.231: 2.7 a minute, 91% of spikes in them; 0.1: 1.2, 95%; 0: 0.3 a
+minute, 99%, 10 Hz a channel, a seizing dish) and scores 0.71 (calibrated),
+0.77 (0.1; +0.07 +- 0.03, 10 of 16), 0.73 (0.05), 0.75 (0); faster
+recovery (300 ms) 0.75 and 0.76. Dithering grows to 0.65-0.79 of the
+misses. A little more Pong for a dish less like a culture: depression is
+not what holds the score down.
+
+    ... zones.py more [workers (12)] [out.json]
+
+the open questions in DishBrain's game, 32 seeds paired, rows kept in
+match.jsonl: their feedback against none; a stronger jolt after a miss
+(game.c's pong_miss_stims: 8 or 64 electrodes a pulse); on the best
+setup the hit/miss reward, plain STDP with and without their feedback,
+and the dopamine of a host world model of the dish (game.c's cond 5,
+its control 6). (Running.)
+
     ... zones.py practice [seeds (16)] [rallies (120)] [out.json] [ego (1)]
 
 weak-spot practice: 20 minutes of training with no, half or all of the
@@ -712,13 +778,16 @@ CAUSES = ("parked", "still", "dithering", "wrong way", "bounce", "late")
 
 
 def autopsy_job(seed: int, minute: int, rallies: int, oracle: int = 0, decoder: int = 1,
-                hold: float = 0.0) -> dict:
+                hold: float = 0.0, rate: float = 0, burst: int = 1, params=()) -> dict:
     """The best setup (relative code, aligned layout, decoder 1, the reward
     for each move), trained `minute` minutes, frozen, played on the fixed
     serves tick by tick; each miss sorted by what the paddle did in the
     last second before it (CAUSES). oracle: game.c's pong_oracle steers in
     the test instead of the dish."""
     lib = fe._lib()
+    lib.pong_dish_param.argtypes = [ctypes.c_char_p, ctypes.c_double]
+    for name, value in params:
+        lib.pong_dish_param(name.encode(), value)
     lib.pong_layout.argtypes = [ctypes.c_int32]
     lib.pong_layout(1)
     lib.pong_decoder.argtypes = [ctypes.c_void_p, ctypes.c_int32]
@@ -729,6 +798,8 @@ def autopsy_job(seed: int, minute: int, rallies: int, oracle: int = 0, decoder: 
     game = lib.pong_create(dish, seed, 0, 1)
     lib.pong_decoder(game, decoder)
     lib.pong_hold(game, hold)
+    lib.pong_rate.argtypes = [ctypes.c_void_p, ctypes.c_double, ctypes.c_int32]
+    lib.pong_rate(game, rate, burst)
     for _ in range(minute):
         if lib.pong_run(game, 60 * fe.TICKS, None, None) < 0:
             raise RuntimeError("the dish had no room for its spikes")
@@ -738,6 +809,7 @@ def autopsy_job(seed: int, minute: int, rallies: int, oracle: int = 0, decoder: 
     lib.pong_decoder(test, decoder)
     lib.pong_hold(test, hold)
     lib.pong_oracle(test, oracle)
+    lib.pong_rate(test, rate, burst)
     lib.pong_fixed_serves(test, SERVES)
     state = (ctypes.c_double * 12)()
     window = fe.TICKS            # a second
@@ -783,6 +855,8 @@ def autopsy_job(seed: int, minute: int, rallies: int, oracle: int = 0, decoder: 
     lib.pong_destroy(test)
     lib.dish_destroy(dish)
     return {"seed": seed, "minute": minute, "oracle": oracle, "decoder": decoder, "hold": hold,
+            "rate": rate, "burst": burst,
+            **({"depress": dict(params)["depress"], "tau": dict(params)["tau_recover"]} if params else {}),
             "rallies": seen,
             "seen": list(z[:8]), "hit": list(z[8:]), "causes": causes, "misses": misses}
 
@@ -1023,8 +1097,9 @@ def motor_main(args: list[str]) -> int:
     if done_path.exists():
         results += [json.loads(line) for line in done_path.read_text().splitlines() if line]
     have = {(r["seed"], r["gain"], r["motor"]) for r in results}
-    jobs = [(s, 1.0, 20, rallies, 1, 0.0, 1, 1, "", 0, m) for m in (1, 2) for s in range(1, seeds + 1)]
+    jobs = [(s, 1.0, 20, rallies, 1, 0.0, 1, 1, "", 0, m) for m in (1, 2, 3, 4) for s in range(1, seeds + 1)]
     jobs += [(s, 0.0, 20, rallies, 1, 0.0, 1, 1, "", 0, m) for m in (1, 2) for s in range(1, seeds // 2 + 1)]
+    jobs += [(s, 0.0, 20, rallies, 1, 0.0, 1, 1, "", 0, m) for m in (3, 4) for s in range(1, seeds + 1)]
     jobs = [j for j in jobs if (j[0], j[1], j[10]) not in have]
     fe._lib()
     with ProcessPoolExecutor(10) as pool, done_path.open("a") as log:
@@ -1042,9 +1117,9 @@ def motor_main(args: list[str]) -> int:
     print(f"motor regions: relative code, aligned layout, decoder 1, 20 minutes; frozen, "
           f"{rallies} uniform fixed serves")
     print("motor regions          " + "  ".join(f" row{k}" for k in range(8)) + "    all  +- s.e.")
-    names = {0: "columns 0-1, 6-7", 1: "inner 1, 6", 2: "outer 0, 7"}
+    names = {0: "columns 0-1, 6-7", 1: "inner 1, 6", 2: "outer 0, 7", 3: "next 2, 5", 4: "columns 1-2, 5-6"}
     by = {}
-    for m in (0, 1, 2):
+    for m in (0, 1, 2, 3, 4):
         for g in (1.0, 0.0):
             rs = sorted((r for r in results if r["motor"] == m and r["gain"] == g and r["seed"] <= seeds),
                         key=lambda r: r["seed"])
@@ -1058,7 +1133,8 @@ def motor_main(args: list[str]) -> int:
             print(f"{label:22s} " + "  ".join(f"{h / s if s else 0:5.2f}" for h, s in zip(hit, seen)) +
                   f"   {mean(each):5.2f}  {statistics.stdev(each) / len(each) ** 0.5:.2f}  ({len(rs)})")
     for a, b in (((0, 1.0), (1, 1.0)), ((0, 1.0), (2, 1.0)), ((1, 0.0), (1, 1.0)), ((2, 0.0), (2, 1.0)),
-                 ((0, 0.0), (0, 1.0))):
+                 ((0, 0.0), (0, 1.0)), ((0, 1.0), (3, 1.0)), ((0, 1.0), (4, 1.0)), ((3, 0.0), (3, 1.0)),
+                 ((4, 0.0), (4, 1.0))):
         if a in by and b in by:
             d = [by[b][s] - by[a][s] for s in by[b] if s in by[a]]
             print(f"{names[b[0]]}{'' if b[1] else ' no reward'} less {names[a[0]]}"
@@ -1425,8 +1501,452 @@ def evoked_main(args: list[str]) -> int:
     return 0
 
 
+TRAINS = ((5, 1), (10, 1), (20, 1), (40, 1), (10, 3))   # Hz, pulses a burst (5 ms apart)
+TRAIN_N, ANSWER = 8, 20          # bursts a train; the ms after each that count
+
+
+def trains_job(seed: int, minute: int = 20, trials: int = 15) -> dict:
+    """Does a stream of stims wear the dish's answer down? The best setup
+    trained `minute` minutes, frozen; rows 2-5's electrodes each given
+    trains of TRAIN_N pulses (or bursts) at each of TRAINS' rates, 600-800
+    ms apart in a shuffled order; for each pulse of a train, the up and
+    the down regions' spikes in the ANSWER ms after it."""
+    import random
+    lib = fe._lib()
+    lib.pong_layout.argtypes = [ctypes.c_int32]
+    lib.pong_layout(1)
+    lib.pong_decoder.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.dish_stimulate.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_float]
+    lib.dish_step.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.dish_step.restype = ctypes.c_int64
+    lib.dish_spikes.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
+    lib.dish_spikes.restype = ctypes.c_int64
+    lib.dish_tick.argtypes = [ctypes.c_void_p]
+    lib.dish_tick.restype = ctypes.c_int32
+    dish = lib.pong_make_dish(seed, 1.0, 0)
+    game = lib.pong_create(dish, seed, 0, 1)
+    lib.pong_decoder(game, 1)
+    for _ in range(minute):
+        if lib.pong_run(game, 60 * fe.TICKS, None, None) < 0:
+            raise RuntimeError("the dish had no room for its spikes")
+    lib.pong_destroy(game)
+    lib.dish_set_stdp(dish, 0)
+    ch = (ctypes.c_int32 * 65536)()
+    st = (ctypes.c_int32 * 65536)()
+    up_at: dict[int, int] = {}
+    down_at: dict[int, int] = {}
+
+    def run(n):
+        if n <= 0:
+            return
+        if lib.dish_step(dish, n) < 0:
+            raise RuntimeError("the dish had no room for its spikes")
+        while (k := lib.dish_spikes(dish, ch, st, 65536)) > 0:
+            for i in range(k):
+                col = ch[i] % 8
+                if col <= 1:
+                    up_at[st[i]] = up_at.get(st[i], 0) + 1
+                elif col >= 6:
+                    down_at[st[i]] = down_at.get(st[i], 0) + 1
+
+    run(2000)
+    rng = random.Random(seed * 37 + minute)
+    order = [(k, row) for k in range(len(TRAINS)) for row in (2, 3, 4, 5) for _ in range(trials)]
+    rng.shuffle(order)
+    starts = []                    # kind, row, the steps of each burst's first pulse
+    for k, row in order:
+        run(rng.randint(600, 800))
+        hz, n = TRAINS[k]
+        period = round(1000 / hz)
+        at = []
+        for _ in range(TRAIN_N):
+            at.append(lib.dish_tick(dish))
+            for _ in range(n):
+                lib.dish_stimulate(dish, SENSORY_ALIGNED[row], 1.0)
+                run(5)
+            run(period - 5 * n)
+        starts.append((k, row, at))
+    run(200)
+
+    def count(at, a, b):
+        return sum(at.get(s, 0) for s in range(a, b))
+
+    out = {}
+    for k, (hz, n) in enumerate(TRAINS):
+        rows = {}
+        for row in (2, 3, 4, 5):
+            rows[row] = [[[count(up_at, s, s + ANSWER), count(down_at, s, s + ANSWER)] for s in at]
+                         for kk, r, at in starts if kk == k and r == row]
+        out[f"{hz}x{n}"] = rows
+    lib.dish_destroy(dish)
+    return {"seed": seed, "minute": minute, "trains": out}
+
+
+def trains_main(args: list[str]) -> int:
+    seeds = int(args[0]) if args else 16
+    out = args[1] if len(args) > 1 else "build/cl_bridge/trains.json"
+    done_path = Path(out + "l")
+    results = []
+    if done_path.exists():
+        results += [json.loads(line) for line in done_path.read_text().splitlines() if line]
+    have = {r["seed"] for r in results}
+    jobs = [s for s in range(1, seeds + 1) if s not in have]
+    fe._lib()
+    with ProcessPoolExecutor(8) as pool, done_path.open("a") as log:
+        for f in as_completed([pool.submit(trains_job, s) for s in jobs]):
+            r = f.result()
+            log.write(json.dumps(r) + "\n")
+            log.flush()
+            results.append(r)
+    Path(out).write_text(json.dumps(results))
+    mean = statistics.mean
+    print(f"trains of {TRAIN_N} pulses (or bursts) on rows 2-5's electrodes, the frozen best setup trained 20 "
+          f"minutes ({len(results)} seeds); each pulse's answer: motor spikes in the {ANSWER} ms after it")
+    for what in ("spikes", "right"):
+        print(f"\n{what}: " + {"spikes": "up + down, by the pulse's place in the train",
+                               "right": "share leaning the way the row wants (ties half)"}[what])
+        print(f"{'train':12s}" + "  ".join(f"{'p' + str(i + 1):>5s}" for i in range(TRAIN_N)))
+        for hz, n in TRAINS:
+            key = f"{hz}x{n}"
+            cells = []
+            for i in range(TRAIN_N):
+                xs = []
+                for r in results:
+                    for row, trs in r["trains"][key].items():
+                        sign = 1 if int(row) < 4 else -1
+                        for tr in trs:
+                            u, d = tr[i]
+                            xs.append(u + d if what == "spikes" else
+                                      (1.0 if sign * (u - d) > 0 else 0.5 if u == d else 0.0))
+                cells.append(mean(xs))
+            name = f"{hz} Hz" + (f", bursts of {n}" if n > 1 else "")
+            print(f"{name:12s}" + "  ".join(f"{c:5.2f}" for c in cells))
+    return 0
+
+
+def rate_main(args: list[str]) -> int:
+    seeds = int(args[0]) if args else 16
+    rallies = int(args[1]) if len(args) > 1 else 120
+    out = args[2] if len(args) > 2 else "build/cl_bridge/rate.json"
+    done_path = Path(out + "l")
+    results = []
+    old = Path("build/cl_bridge/autopsy.jsonl")
+    if old.exists():
+        results += [r for r in map(json.loads, old.read_text().splitlines())
+                    if r["minute"] == 20 and r["oracle"] == 0]
+    for r in results:
+        r.setdefault("rate", 0)
+        r.setdefault("burst", 1)
+    if done_path.exists():
+        results += [json.loads(line) for line in done_path.read_text().splitlines() if line]
+    ways = [(0, 1), (10, 1), (20, 1), (10, 3), (20, 3)]
+    have = {(r["seed"], r["rate"], r["burst"]) for r in results}
+    jobs = [(s, 20, rallies, 0, 1, 0.0, hz, n) for hz, n in ways[1:] for s in range(1, seeds + 1)
+            if (s, hz, n) not in have]
+    fe._lib()
+    with ProcessPoolExecutor(10) as pool, done_path.open("a") as log:
+        for f in as_completed([pool.submit(autopsy_job, *j) for j in jobs]):
+            r = f.result()
+            log.write(json.dumps(r) + "\n")
+            log.flush()
+            results.append(r)
+    Path(out).write_text(json.dumps(results))
+    mean = statistics.mean
+
+    def score(r):
+        return sum(r["hit"]) / sum(r["seen"])
+
+    print(f"the ball's stims at a constant rate: relative code, aligned layout, decoder 1, trained 20 "
+          f"minutes with the reward; frozen, {rallies} uniform fixed serves; misses by cause (share)")
+    print(f"{'stims':24s} {'hit':>5s} {'s.e.':>5s}  " + "  ".join(f"{c:>9s}" for c in CAUSES) + "  turns/s")
+    names = {(0, 1): "4-40 Hz by distance", (10, 1): "10 Hz", (20, 1): "20 Hz",
+             (10, 3): "10 Hz, bursts of 3", (20, 3): "20 Hz, bursts of 3"}
+    by = {}
+    for w in ways:
+        rs = sorted((r for r in results if (r["rate"], r["burst"]) == w and r["seed"] <= seeds),
+                    key=lambda r: r["seed"])
+        if len(rs) < 2:
+            continue
+        by[w] = {r["seed"]: score(r) for r in rs}
+        total = sum(sum(r["causes"].values()) for r in rs)
+        share = [sum(r["causes"][c] for r in rs) / total if total else 0 for c in CAUSES]
+        each = list(by[w].values())
+        flips = [m["flips"] for r in rs for m in r["misses"]]
+        print(f"{names[w]:24s} {mean(each):5.2f} {statistics.stdev(each) / len(each) ** 0.5:5.2f}  " +
+              "  ".join(f"{x:9.2f}" for x in share) + f"  {mean(flips) if flips else 0:7.1f}  ({len(rs)})")
+    for w in ways[1:]:
+        if w in by and (0, 1) in by:
+            d = [by[w][s] - by[0, 1][s] for s in by[w] if s in by[0, 1]]
+            print(f"{names[w]} less 4-40 Hz: {mean(d):+.2f} +- {statistics.stdev(d) / len(d) ** 0.5:.2f}, "
+                  f"better for {sum(x > 0 for x in d)} of {len(d)} seeds")
+    return 0
+
+
+# DishBrain's groups from their per-rally data (OSF 5u6qv, main_df.csv),
+# the paper's measure: rally length (hits a rally) T1 0-5 min, T2 6-20;
+# and the share of the balls hit, hits / (hits + misses).
+THEIRS = (("media only (CTL)", 80, 0.90, 0.87, 0.440, 0.428), ("in-silico (IS)", 38, 0.83, 0.80, 0.441, 0.431),
+          ("rest (RST)", 42, 0.64, 0.79, 0.372, 0.421), ("mouse cells (MCC)", 101, 0.78, 1.02, 0.406, 0.465),
+          ("human cells (HCC)", 138, 0.67, 1.13, 0.370, 0.471))
+MATCH = {   # name: cond, ego, layout, decoder, oracle[, a miss's electrodes a pulse]
+    "stim": (2, 1, 0, 0, 0), "silent": (3, 1, 0, 0, 0), "none": (4, 1, 0, 0, 0),
+    "ours": (0, 1, 1, 1, 0), "random": (4, 1, 0, 0, 4),
+    # zones.py more: the jolt (their setup), and on the best setup the
+    # hit/miss reward, plain STDP with and without their feedback, and
+    # the world model's dopamine with its control
+    "jolt8": (2, 1, 0, 0, 0, 8), "jolt64": (2, 1, 0, 0, 0, 64),
+    "hitmiss": (1, 1, 1, 1, 0), "none best": (4, 1, 1, 1, 0), "stim best": (2, 1, 1, 1, 0),
+    "world": (5, 1, 1, 1, 0), "world quiet": (6, 1, 1, 1, 0)}
+
+
+def match_job(seed: int, name: str, minutes: int = 20) -> dict:
+    """A live session in DishBrain's game (game.c's pong_geometry 1): the
+    dish from scratch, `minutes` of play; each rally's end (s) and hits."""
+    cond, ego, layout, decoder, oracle, *more = MATCH[name]
+    lib = fe._lib()
+    lib.pong_layout.argtypes = [ctypes.c_int32]
+    lib.pong_layout(layout)
+    lib.pong_decoder.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.pong_oracle.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.pong_geometry.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    dish = lib.pong_make_dish(seed, 1.0, cond)
+    game = lib.pong_create(dish, seed, cond, ego)
+    lib.pong_geometry(game, 1)
+    lib.pong_decoder(game, decoder)
+    lib.pong_oracle(game, oracle)
+    if more:
+        lib.pong_miss_stims.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+        lib.pong_miss_stims(game, more[0])
+    state = (ctypes.c_double * 12)()
+    rallies = []
+    seen = 0
+    for _ in range(minutes * 60):
+        if lib.pong_run(game, fe.TICKS, None, None) < 0:
+            raise RuntimeError("the dish had no room for its spikes")
+        lib.pong_state(game, state)
+        if int(state[4]) > seen:
+            seen = int(state[4])
+            rallies.append((round(state[0], 3), int(state[6])))
+    out = {"seed": seed, "name": name, "rallies": rallies}
+    if cond >= 5:
+        lib.pong_world_state.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        world = (ctypes.c_double * 6)()
+        lib.pong_world_state(game, world)
+        out["world"] = list(world)
+    lib.pong_destroy(game)
+    lib.dish_destroy(dish)
+    return out
+
+
+def _their_measure(rallies):
+    """Per half (T1: ends by 300 s), the mean of the per-minute mean hits
+    a rally, and hits / (hits + misses)."""
+    out = []
+    for half in (0, 1):
+        rs = [(t, h) for t, h in rallies if (t > 300) == half]
+        if not rs:
+            out.append((float("nan"), float("nan")))
+            continue
+        per = {}
+        for t, h in rs:
+            per.setdefault(int(t / 60), []).append(h)
+        hits = sum(h for _, h in rs)
+        out.append((statistics.mean(statistics.mean(v) for v in per.values()), hits / (hits + len(rs))))
+    return out
+
+
+def match_main(args: list[str]) -> int:
+    seeds = int(args[0]) if args else 16
+    out = args[1] if len(args) > 1 else "build/cl_bridge/match.json"
+    done_path = Path(out + "l")
+    results = []
+    if done_path.exists():
+        results += [json.loads(line) for line in done_path.read_text().splitlines() if line]
+    plan = [("stim", seeds), ("silent", seeds), ("none", seeds), ("ours", seeds), ("random", seeds // 2)]
+    have = {(r["seed"], r["name"]) for r in results}
+    jobs = [(s, n) for n, k in plan for s in range(1, k + 1) if (s, n) not in have]
+    fe._lib()
+    with ProcessPoolExecutor(10) as pool, done_path.open("a") as log:
+        for f in as_completed([pool.submit(match_job, *j) for j in jobs]):
+            r = f.result()
+            log.write(json.dumps(r) + "\n")
+            log.flush()
+            results.append(r)
+    Path(out).write_text(json.dumps(results))
+    mean = statistics.mean
+    print("DishBrain's game (their data: ball across in 2.95 s, served from 0.4 going away, 8 s after a "
+          "miss; paddle 0.4 of the court), live 20-minute sessions; their measure: rally length (hits a "
+          "rally), T1 minutes 0-5, T2 6-20; and the share of balls hit")
+    print(f"{'':34s} {'sessions':>8s}  {'rally T1':>8s} {'rally T2':>8s} {'T2 - T1':>13s}   {'hit T1':>6s} {'hit T2':>6s}")
+    for label, n, t1, t2, h1, h2 in THEIRS:
+        print(f"{'DishBrain, ' + label:34s} {n:8d}  {t1:8.2f} {t2:8.2f} {t2 - t1:+13.2f}   {h1:6.3f} {h2:6.3f}")
+    names = {"stim": "our dish, their feedback (stim)", "silent": "our dish, silent", "none": "our dish, no feedback",
+             "ours": "our dish, our best (reward)", "random": "random paddle (as IS)"}
+    for n, k in plan:
+        rs = [r for r in results if r["name"] == n and r["seed"] <= k]
+        if not rs:
+            continue
+        m = [_their_measure(r["rallies"]) for r in rs]
+        d = [b[0] - a[0] for a, b in m]
+        print(f"{names[n]:34s} {len(rs):8d}  {mean(a[0] for a, _ in m):8.2f} {mean(b[0] for _, b in m):8.2f} "
+              f"{mean(d):+7.2f}+-{statistics.stdev(d) / len(d) ** 0.5:.2f}   "
+              f"{mean(a[1] for a, _ in m):6.3f} {mean(b[1] for _, b in m):6.3f}")
+    return 0
+
+
+
+MORE = {   # name: label, seeds
+    "stim": ("their setup, their feedback (stim)", 32), "none": ("their setup, no feedback", 32),
+    "jolt8": ("their setup, miss jolt 8 electrodes", 32), "jolt64": ("their setup, miss jolt 64 electrodes", 32),
+    "none best": ("best setup, plain STDP, no feedback", 32), "stim best": ("best setup, plain STDP, their feedback", 32),
+    "hitmiss": ("best setup, hit/miss reward", 32), "ours": ("best setup, per-move reward", 32),
+    "world": ("best setup, world-model dopamine", 32), "world quiet": ("best setup, world model, no feedback", 32)}
+MORE_PAIRS = (("none", "stim"), ("stim", "jolt8"), ("stim", "jolt64"), ("none", "jolt64"),
+              ("none best", "stim best"), ("none best", "hitmiss"), ("hitmiss", "ours"),
+              ("stim best", "world"), ("world quiet", "world"), ("none best", "world"))
+
+
+def more_main(args: list[str]) -> int:
+    """The open Pong questions in DishBrain's game, live 20-minute sessions
+    in match.jsonl (its rows reused), paired by seed."""
+    workers = int(args[0]) if args else 12
+    out = args[1] if len(args) > 1 else "build/cl_bridge/match.json"
+    done_path = Path(out + "l")
+    results = []
+    if done_path.exists():
+        results += [json.loads(line) for line in done_path.read_text().splitlines() if line]
+    have = {(r["seed"], r["name"]) for r in results}
+    jobs = [(s, n) for s in range(1, 33) for n, (_, k) in MORE.items() if s <= k and (s, n) not in have]
+    fe._lib()
+    with ProcessPoolExecutor(workers) as pool, done_path.open("a") as log:
+        for f in as_completed([pool.submit(match_job, *j) for j in jobs]):
+            r = f.result()
+            log.write(json.dumps(r) + "\n")
+            log.flush()
+            results.append(r)
+    Path(out).write_text(json.dumps(results))
+    mean = statistics.mean
+
+    def se(xs):
+        return statistics.stdev(xs) / len(xs) ** 0.5
+
+    print("DishBrain's game, live 20-minute sessions, their measure (rally length T1 0-5 min, T2 6-20) "
+          "and the share of balls hit; their setup = relative code, their layout, raw decoder; best setup "
+          "= relative code, aligned layout, decoder 1")
+    print(f"{'':42s} {'n':>3s}  {'rally T1':>8s} {'rally T2':>8s} {'T2 - T1':>13s}   {'hit T1':>6s} {'hit T2':>6s}")
+    m = {}
+    for n, (label, k) in MORE.items():
+        rs = [r for r in results if r["name"] == n and r["seed"] <= k]
+        if len(rs) < 2:
+            continue
+        m[n] = {r["seed"]: _their_measure(r["rallies"]) for r in rs}
+        v = list(m[n].values())
+        d = [b[0] - a[0] for a, b in v]
+        print(f"{label:42s} {len(rs):3d}  {mean(a[0] for a, _ in v):8.2f} {mean(b[0] for _, b in v):8.2f} "
+              f"{mean(d):+7.2f}+-{se(d):.2f}   {mean(a[1] for a, _ in v):6.3f} {mean(b[1] for _, b in v):6.3f}")
+    print("\npaired by seed (b less a): T2 rally length, T2 - T1, T2 share hit")
+    for a, b in MORE_PAIRS:
+        if a not in m or b not in m:
+            continue
+        common = sorted(set(m[a]) & set(m[b]))
+        t2 = [m[b][s][1][0] - m[a][s][1][0] for s in common]
+        gain = [(m[b][s][1][0] - m[b][s][0][0]) - (m[a][s][1][0] - m[a][s][0][0]) for s in common]
+        hit = [m[b][s][1][1] - m[a][s][1][1] for s in common]
+        print(f"{b + ' less ' + a:28s} rally T2 {mean(t2):+.2f} +- {se(t2):.2f} ({sum(x > 0 for x in t2)}/{len(t2)}), "
+              f"T2-T1 {mean(gain):+.2f} +- {se(gain):.2f}, hit T2 {mean(hit):+.3f} +- {se(hit):.3f}")
+    ws = [r for r in results if r["name"] in ("world", "world quiet") and "world" in r]
+    if ws:
+        print("\nthe world model's dopamine (+ reward, - punish, a 100 ms pulse): mean in the second after "
+              "a hit, after a miss; its mean error a window")
+        for n in ("world", "world quiet"):
+            w = [r["world"] for r in ws if r["name"] == n]
+            if not w:
+                continue
+            after_hit = [x[0] / x[1] for x in w if x[1]]
+            after_miss = [x[2] / x[3] for x in w if x[3]]
+            print(f"{n:12s} after a hit {mean(after_hit):+.3f}  after a miss {mean(after_miss):+.3f}  "
+                  f"error {mean(x[4] for x in w):.4f}  ({len(w)})")
+    return 0
+
+DEPRESSION = [(0.231, 1070.0), (0.1, 1070.0), (0.05, 1070.0), (0.0, 1070.0), (0.231, 300.0), (0.1, 300.0)]
+
+
+def culture_job(seed: int, depress: float, tau: float, minutes: float = 3.0) -> dict:
+    """The untrained Pong dish's spontaneous activity (culture/stats.py's
+    statistics, as the calibration compared with Wagenaar's cultures)."""
+    fe._lib()                      # (built if missing)
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "culture"))
+    import dish_stats
+    import stats
+    s = stats.stats(*dish_stats.record(minutes, seed=seed, axon=0.11, hard=1, depress=depress,
+                                       tau_recover=tau), duration=minutes * 60)
+    return {"seed": seed, "depress": depress, "tau": tau, "stats": s}
+
+
+def depression_main(args: list[str]) -> int:
+    seeds = int(args[0]) if args else 16
+    rallies = int(args[1]) if len(args) > 1 else 120
+    out = args[2] if len(args) > 2 else "build/cl_bridge/depression.json"
+    done_path = Path(out + "l")
+    results = []
+    old = Path("build/cl_bridge/autopsy.jsonl")
+    if old.exists():
+        results += [dict(r, depress=0.231, tau=1070.0) for r in map(json.loads, old.read_text().splitlines())
+                    if r["minute"] == 20 and r["oracle"] == 0]
+    if done_path.exists():
+        results += [json.loads(line) for line in done_path.read_text().splitlines() if line]
+    have = {(r["seed"], r["depress"], r["tau"], "stats" in r) for r in results}
+    culture = [(s, d, t) for d, t in DEPRESSION for s in range(1, 5) if (s, d, t, True) not in have]
+    games = [(s, d, t) for d, t in DEPRESSION[1:] for s in range(1, seeds + 1) if (s, d, t, False) not in have]
+    fe._lib()
+    with ProcessPoolExecutor(8) as pool, done_path.open("a") as log:
+        fs = [pool.submit(culture_job, *j) for j in culture]
+        fs += [pool.submit(autopsy_job, s, 20, rallies, 0, 1, 0.0, 0, 1, [("depress", d), ("tau_recover", t)])
+               for s, d, t in games]
+        for f in as_completed(fs):
+            r = f.result()
+            log.write(json.dumps(r) + "\n")
+            log.flush()
+            results.append(r)
+    Path(out).write_text(json.dumps(results))
+    mean = statistics.mean
+    print("short-term depression (network.ent's depress, a spike's share, and tau_recover, ms; calibrated "
+          "0.231, 1070): the untrained dish's spontaneous activity (3 min, 4 seeds, median), then the best "
+          f"setup trained 20 minutes, frozen, {rallies} uniform fixed serves")
+    keys = ["rate_hz", "bursts_per_min", "burst_ms", "in_bursts", "recruited"]
+    print(f"{'depress, tau':16s}" + " ".join(f"{k[:10]:>10s}" for k in keys) +
+          f"  {'hit':>5s} {'s.e.':>5s}  {'dithering':>9s}  less 0.231, 1070")
+    base = {r["seed"]: sum(r["hit"]) / sum(r["seen"]) for r in results
+            if "hit" in r and (r["depress"], r["tau"]) == DEPRESSION[0] and r["seed"] <= seeds}
+    for d, t in DEPRESSION:
+        cs = [r["stats"] for r in results if "stats" in r and (r["depress"], r["tau"]) == (d, t)]
+        gs = [r for r in results if "hit" in r and (r["depress"], r["tau"]) == (d, t) and r["seed"] <= seeds]
+        line = f"{d:5.3f}, {t:6.0f}   " + " ".join(
+            f"{statistics.median(c[k] for c in cs):10.3g}" if cs else f"{'':10s}" for k in keys)
+        if len(gs) > 1:
+            sc = {r["seed"]: sum(r["hit"]) / sum(r["seen"]) for r in gs}
+            total = sum(sum(r["causes"].values()) for r in gs)
+            dith = sum(r["causes"]["dithering"] for r in gs) / total if total else 0
+            line += f"  {mean(sc.values()):5.2f} {statistics.stdev(sc.values()) / len(sc) ** 0.5:5.2f}  {dith:9.2f}"
+            if (d, t) != DEPRESSION[0]:
+                dd = [sc[s] - base[s] for s in sc if s in base]
+                line += f"  {mean(dd):+.2f} +- {statistics.stdev(dd) / len(dd) ** 0.5:.2f} ({sum(x > 0 for x in dd)} of {len(dd)})"
+        print(line)
+    return 0
+
+
 def main() -> int:
     args = sys.argv[1:]
+    if args and args[0] == "depression":
+        return depression_main(args[1:])
+    if args and args[0] == "more":
+        return more_main(args[1:])
+    if args and args[0] == "match":
+        return match_main(args[1:])
+    if args and args[0] == "trains":
+        return trains_main(args[1:])
+    if args and args[0] == "rate":
+        return rate_main(args[1:])
     if args and args[0] == "evoked":
         return evoked_main(args[1:])
     if args and args[0] == "steady":
