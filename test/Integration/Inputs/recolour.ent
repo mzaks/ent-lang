@@ -1,0 +1,26 @@
+// A palette (devices/window.ent: `recolour`, `recolour_none`, `drawn_as`),
+// without opening the window: colours drawn as others, their AA kept,
+// taken out one by one and all at once; `system_dark` answers.
+import console
+import window
+
+
+system go() {
+  put("none: {drawn_as(0x101418) == 0x101418}")
+  recolour(0x101418, 0xf6f8fa)
+  recolour(0xe0e6ec, 0x1f2328)
+  recolour(0x3a7bd5, 0x0969da)
+  put("set: {drawn_as(0x101418) == 0xf6f8fa} {drawn_as(0xe0e6ec) == 0x1f2328} {drawn_as(0x123456) == 0x123456}")
+  put("alpha kept: {drawn_as(0x703a7bd5) == 0x700969da}")
+  recolour(0x101418, 0xffffff)
+  put("again: {drawn_as(0x101418) == 0xffffff}")
+  recolour(0xe0e6ec, 0xe0e6ec)
+  put("taken out: {drawn_as(0xe0e6ec) == 0xe0e6ec} {drawn_as(0x3a7bd5) == 0x0969da}")
+  recolour_none()
+  put("none again: {drawn_as(0x101418) == 0x101418} {drawn_as(0x3a7bd5) == 0x3a7bd5}")
+  let dark = system_dark()
+  put("asked: {dark || !dark}")
+}
+
+schedule run() { go() }
+main { run() }

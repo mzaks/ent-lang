@@ -1,0 +1,10 @@
+// A palette of colours drawn as others, and the system's dark asked.
+// RUN: %ent run %S/Inputs/recolour.ent 2>&1 | FileCheck %s --match-full-lines
+
+// CHECK: none: true
+// CHECK-NEXT: set: true true true
+// CHECK-NEXT: alpha kept: true
+// CHECK-NEXT: again: true
+// CHECK-NEXT: taken out: true true
+// CHECK-NEXT: none again: true true
+// CHECK-NEXT: asked: true

@@ -35,7 +35,62 @@ __declspec(dllimport) void __stdcall Sleep(unsigned long milliseconds);
 static Color ent_window_shading;
 static float ent_window_shading_part;
 
+// A palette (`recolour`): colours drawn as others, by their 0xRRGGBB (the
+// AA a colour is given with kept), sorted for looking up.
+enum { ent_window_palette_room = 1024 };
+static uint32_t ent_window_palette_from[ent_window_palette_room];
+static uint32_t ent_window_palette_to[ent_window_palette_room];
+static int ent_window_palette_count;
+
+static int ent_window_palette_at(uint32_t rgb) {
+  int low = 0, high = ent_window_palette_count;
+  while (low < high) {
+    int mid = (low + high) / 2;
+    if (ent_window_palette_from[mid] < rgb)
+      low = mid + 1;
+    else
+      high = mid;
+  }
+  return low;
+}
+
+int32_t ent_window_drawn_as(int32_t color) {
+  uint32_t rgb = (uint32_t)color & 0xffffff;
+  if (ent_window_palette_count == 0)
+    return color;
+  int at = ent_window_palette_at(rgb);
+  if (at < ent_window_palette_count && ent_window_palette_from[at] == rgb)
+    rgb = ent_window_palette_to[at];
+  return (int32_t)(((uint32_t)color & 0xff000000u) | rgb);
+}
+
+void ent_window_recolour(int32_t from, int32_t to) {
+  uint32_t key = (uint32_t)from & 0xffffff, value = (uint32_t)to & 0xffffff;
+  int at = ent_window_palette_at(key);
+  int there = at < ent_window_palette_count && ent_window_palette_from[at] == key;
+  if (there && key == value) {
+    memmove(&ent_window_palette_from[at], &ent_window_palette_from[at + 1],
+            sizeof(uint32_t) * (size_t)(ent_window_palette_count - at - 1));
+    memmove(&ent_window_palette_to[at], &ent_window_palette_to[at + 1],
+            sizeof(uint32_t) * (size_t)(ent_window_palette_count - at - 1));
+    --ent_window_palette_count;
+  } else if (there) {
+    ent_window_palette_to[at] = value;
+  } else if (key != value && ent_window_palette_count < ent_window_palette_room) {
+    memmove(&ent_window_palette_from[at + 1], &ent_window_palette_from[at],
+            sizeof(uint32_t) * (size_t)(ent_window_palette_count - at));
+    memmove(&ent_window_palette_to[at + 1], &ent_window_palette_to[at],
+            sizeof(uint32_t) * (size_t)(ent_window_palette_count - at));
+    ent_window_palette_from[at] = key;
+    ent_window_palette_to[at] = value;
+    ++ent_window_palette_count;
+  }
+}
+
+void ent_window_recolour_none(void) { ent_window_palette_count = 0; }
+
 static Color ent_window_color(int32_t rgb) {
+  rgb = ent_window_drawn_as(rgb);
   unsigned char alpha = (unsigned char)((uint32_t)rgb >> 24);
   Color color = {(unsigned char)(rgb >> 16), (unsigned char)(rgb >> 8),
                  (unsigned char)rgb, alpha ? alpha : 255};
@@ -2893,6 +2948,49 @@ bool ent_window_open_url(const ent_text *url) {
 
 // Whether the window is the one the user works in (the keys go to it).
 bool ent_window_window_focused(void) { return IsWindowReady() && IsWindowFocused(); }
+
+// The system's light or dark: a Mac's appearance (the app's, which follows
+// System Settings); a browser's prefers-color-scheme; on Linux GTK_THEME's
+// ":dark", else GNOME's color-scheme (asked at most every 5 seconds).
+bool ent_window_system_dark(void) {
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+  void *pool = objc_autoreleasePoolPush();
+  id app = ent_window_send(ent_window_class("NSApplication"), "sharedApplication");
+  id look = app ? ent_window_send(app, "effectiveAppearance") : 0;
+  id name = look ? ent_window_send(look, "name") : 0;
+  const char *said =
+      name ? ((const char *(*)(id, SEL))objc_msgSend)(name, ent_window_sel("UTF8String")) : 0;
+  bool dark = said && strstr(said, "Dark");
+  objc_autoreleasePoolPop(pool);
+  return dark;
+#elif defined(__EMSCRIPTEN__)
+  return EM_ASM_INT({
+    return typeof window != 'undefined' && window.matchMedia &&
+           window.matchMedia('(prefers-color-scheme: dark)').matches ? 1 : 0;
+  });
+#elif defined(_WIN32)
+  return false;
+#else
+  const char *theme = getenv("GTK_THEME");
+  if (theme && strstr(theme, ":dark"))
+    return true;
+  static time_t asked;
+  static bool dark;
+  time_t now = time(NULL);
+  if (asked == 0 || now - asked >= 5) {
+    asked = now;
+    dark = false;
+    FILE *said = popen("gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null", "r");
+    if (said) {
+      char line[64] = {0};
+      if (fgets(line, sizeof line, said))
+        dark = strstr(line, "dark") != NULL;
+      pclose(said);
+    }
+  }
+  return dark;
+#endif
+}
 
 int32_t ent_window_alert(const ent_text *message, const ent_text *detail,
                          const ent_text *buttons) {
