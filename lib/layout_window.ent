@@ -1287,13 +1287,14 @@ system tip_draw() {
 //
 // `KeyMove` is what the keys asked for in this frame: `step` 1 the next
 // stop, -1 the one before; `item` 1 the next item of the list, -1 the one
-// before; `press`. `key_keys` reads Tab, Shift+Tab, the arrows, Space and
+// before; `press`; `to` (and `to_item`) a stop to go to (0: none), as a
+// reader of the screen asks. `key_keys` reads Tab, Shift+Tab, the arrows, Space and
 // Enter into it; a program with keys of its own among those (a text
 // field's Tab, its Enter) sets it instead. `KeyAt` says where the focus
 // is (`at` 0: nowhere), and `moved` that the keys moved it in this frame.
 component KeyOrder { at: i32, item: i32 }
 tag KeyFocus
-unique KeyMove { step: i32, item: i32, press: bool }
+unique KeyMove { step: i32, item: i32, press: bool, to: i32, to_item: i32 }
 unique KeyAt { at: i32, item: i32, shown: bool, moved: bool, colour: i32,
                found: i32, next: i32 }
 
@@ -1323,6 +1324,12 @@ system key_focus() {
       KeyAt.at = KeyAt.found
       KeyAt.item = KeyAt.next
     }
+  }
+  if KeyMove.to > 0 {
+    KeyAt.at = KeyMove.to
+    KeyAt.item = KeyMove.to_item
+    KeyAt.shown = true
+    KeyAt.moved = true
   }
   if KeyMove.step > 0 {
     KeyAt.next = key_most()
@@ -1392,6 +1399,8 @@ system key_press() {
   KeyMove.step = 0
   KeyMove.item = 0
   KeyMove.press = false
+  KeyMove.to = 0
+  KeyMove.to_item = 0
 }
 
 system key_ring() {
@@ -1410,8 +1419,168 @@ system key_ring() {
   }
 }
 
+// What assistive apps are told (VoiceOver: the window device's access_*).
+// A box with `Access` is an element of the tree a reader sees: `role` one
+// of the device's (`access_button()` ...), `label` what it is called
+// (none: the box's `Text`; one that ends in ":" has the `Text` after it:
+// "Method: GET"), `flags` (`access_selected()` ...). It comes
+// among the others by `order` (0: by its `KeyOrder`, so as Tab goes), in
+// the element of the nearest box around it with an `Access` (none: the
+// window). `id`, `said` and `up` are the tree's (`said`: the label it was
+// told; `up`: the id of the element it is in).
+// A box out of sight (no room, clipped away) is not told.
+// `AccessValue` is a text's value and its caret and selection's other end
+// (bytes), which the program keeps as the text is. An `AccessItem` is an
+// element a box draws itself (a list's rows drawn in one box): in that
+// box's element, where it is. A box with `Live` has the reader say its
+// `Text` when that changes (an answer came), once it has stayed so for a
+// moment (figures going up are not each said; where they stop, they are):
+// `Live { seen: "", said: "", quiet: 0.0 }`, the rest its own. What the reader did comes
+// back: a press is a click on the element (its `KeyOrder`: the keys'
+// focus goes there and presses it), a focus moves the keys' focus there;
+// on an item, `AccessItemAsk` says which (`kind`: the device's
+// `access_press()` ...); a value or a selection set, `AccessAsk` (the box,
+// its `value`, or `from` and `to`), for the program to do. (Only while
+// `access_on`, or `AccessState.forced`: nothing is told, nor costs
+// anything, without a reader.)
+component Access { role: i32, label: text, flags: i32, order: i32, id: i32, said: text, up: i32 }
+component AccessValue { value: text, caret: i32, anchor: i32 }
+component AccessItem { box: entity, item: i32, role: i32, label: text, x: f32, y: f32,
+                       w: f32, h: f32, flags: i32, id: i32 } capacity 1024
+component Live { seen: text, said: text, quiet: f32 }
+unique AccessState { on: bool, next: i32, focus: i32, at: i32, item: i32, told: bool, again: bool,
+                     count: i32, items: i32, forced: bool }
+unique AccessAsk { box: entity, kind: i32, from: i32, to: i32, value: text }
+unique AccessItemAsk { box: entity, item: i32, kind: i32 }
+
+fn access_said(label: text, words: text) -> text {
+  if len(label) == 0 { words }
+  else if label[len(label) - 1] == ':' && len(words) > 0 { label + " " + words }
+  else { label }
+}
+
+// (Before `key_focus`.)
+system access_asks() {
+  AccessState.on = access_on() || AccessState.forced
+  AccessAsk.kind = 0
+  AccessItemAsk.kind = 0
+  let n = if AccessState.on { access_asked() } else { 0 }
+  for i in 0..n {
+    let id = access_ask_id(i)
+    let kind = access_ask_kind(i)
+    for a: Access, k: KeyOrder where a.id == id && (kind == access_press() || kind == access_focus()) {
+      KeyMove.to = k.at
+      KeyMove.to_item = k.item
+      KeyMove.press = kind == access_press()
+    }
+    for e, a: Access where a.id == id && (kind == access_set_value() || kind == access_set_selection()) {
+      AccessAsk.box = e
+      AccessAsk.kind = kind
+      AccessAsk.from = access_ask_from(i)
+      AccessAsk.to = access_ask_to(i)
+    }
+    if kind == access_set_value() { AccessAsk.value = access_ask_value(i) }
+    for it: AccessItem where it.id == id {
+      AccessItemAsk.box = it.box
+      AccessItemAsk.item = it.item
+      AccessItemAsk.kind = kind
+    }
+  }
+}
+
+// (After the layout.) The tree told again where something in it changed.
+system access_publish() {
+  if AccessState.on {
+    for a: mut Access in turn by a.order where a.id == 0 {
+      AccessState.next += 1
+      a.id = AccessState.next
+    }
+    for it: mut AccessItem in turn by it.item where it.id == 0 {
+      AccessState.next += 1
+      it.id = AccessState.next
+    }
+    for a: mut Access, k: KeyOrder where a.order == 0 { a.order = k.at * 65536 + k.item + 1 }
+    let accesses = for a: Access on changed a { }
+    let boxes = for b: Box with Access on changed b { }
+    let seen = for v: Seen with Access on changed v { }
+    let texts = for t: Text with Access on changed t { }
+    let values = for v: AccessValue on changed v { }
+    let items = for it: AccessItem on changed it { }
+    // (Some gone: fewer.)
+    let count = for a: Access { }
+    let item_count = for it: AccessItem { }
+    let fewer = count != AccessState.count || item_count != AccessState.items
+    AccessState.count = count
+    AccessState.items = item_count
+    let moved = KeyAt.at != AccessState.at || KeyAt.item != AccessState.item
+    if accesses + boxes + seen + texts + values + items > 0 || fewer || moved ||
+       !AccessState.told || AccessState.again {
+      AccessState.told = true
+      AccessState.again = false
+      AccessState.at = KeyAt.at
+      AccessState.item = KeyAt.item
+      AccessState.focus = 0
+      for (e, a: mut Access), optional (e)-[Inside*]->(pa: Access) {
+        var up = 0
+        if let p = pa.id { up = p }
+        if a.up != up { a.up = up }
+      }
+      access_begin()
+      for e, a: mut Access, b: Box, v: Seen, optional t: Text, optional av: AccessValue
+          in turn by a.order {
+        if key_seen(b.x, b.y, b.w, b.h, v.x, v.y, v.w, v.h) {
+          let x = max(b.x, v.x)
+          let y = max(b.y, v.y)
+          let w = min(b.x + b.w, v.x + v.w) - x
+          let h = min(b.y + b.h, v.y + v.h) - y
+          var words = ""
+          if let said = t.text { words = said }
+          var value = ""
+          var caret = 0
+          var anchor = 0
+          var valued = false
+          if let held = av.value, let c = av.caret, let o = av.anchor {
+            valued = true
+            value = held
+            caret = c
+            anchor = o
+          }
+          let parent = a.up
+          a.said = access_said(a.label, if valued { "" } else { words })
+          access_node(a.id, parent, a.role, a.said, value, x, y, w, h, a.flags)
+          if valued { access_text(a.id, caret, anchor) }
+          if e.has(KeyFocus) { AccessState.focus = a.id }
+        }
+      }
+      for it: AccessItem in turn by it.item {
+        if let parent = Access(it.box).id {
+          access_node(it.id, parent, it.role, it.label, "", it.x, it.y, it.w, it.h, it.flags)
+        }
+      }
+      access_end(AccessState.focus)
+    }
+  }
+}
+
+// A `Live` box's text said where it changed.
+system access_live() {
+  for t: Text, l: mut Live {
+    if t.text != l.seen {
+      l.seen = t.text
+      l.quiet = 0.0
+    } else {
+      l.quiet += Window.dt
+    }
+    if l.quiet >= 0.4 && l.seen != l.said {
+      l.said = l.seen
+      if AccessState.on && len(l.said) > 0 { access_announce(l.said) }
+    }
+  }
+}
+
 schedule ui() {
   key_keys()
+  access_asks()
   pointer()
   scroll()
   measure()
@@ -1430,6 +1599,8 @@ schedule ui() {
   layout_heights()
   settle()
   tips()
+  access_publish()
+  access_live()
   draw(0, 8)
   key_ring()
   tip_draw()
@@ -1447,6 +1618,7 @@ schedule ui() {
 //   schedule frame() { begin()  ui_base()  draw_board()  ui_top()  present() }
 schedule ui_base() {
   key_keys()
+  access_asks()
   pointer()
   scroll()
   measure()
@@ -1463,6 +1635,8 @@ schedule ui_base() {
   layout_heights()
   settle()
   tips()
+  access_publish()
+  access_live()
   draw(0, 1)
 }
 schedule ui_top() {

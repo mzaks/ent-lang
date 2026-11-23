@@ -1,0 +1,89 @@
+// What a reader of the screen is told (lib/layout_window.ent: `Access`,
+// `access_publish`): each element an id, in Tab's order (a `KeyOrder`) or
+// its own; the element it is in (the nearest box around it with an
+// `Access`); what it is called (its label, its `Text` after it where that
+// says something else; a text's value not in it); the focus; a box with no
+// room not told; and a stop a program goes to (`KeyMove.to`).
+import console
+import text
+import window
+import layout
+import layout_window
+
+unique Frame: i32
+default_capacity 16
+
+world {
+  AccessState.forced = true
+  Window.width = 400
+  Window.height = 100
+  let root = spawn {
+    Box { x: 0.0, y: 0.0, w: 400.0, h: 100.0 },
+    Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 }
+  }
+  let list = spawn {
+    Box { x: 0.0, y: 0.0, w: 100.0, h: 100.0 }, Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: false, pad: 0.0, gap: 0.0 },
+    Access { role: access_list(), label: "Requests", flags: 0, order: 3 * 65536, id: 0, said: "", up: 0 }
+  }
+  connect (list)-[Inside]->(root)
+  for i in 0..2 {
+    let row = spawn {
+      Box { x: 0.0, y: 0.0, w: 100.0, h: 20.0 }, Size { w: Sizing.Fixed, h: Sizing.Fixed },
+      Stack { row: true, pad: 0.0, gap: 0.0 },
+      Text { text: "row {i}", size: 12.0, colour: 0xffffff },
+      KeyOrder { at: 3, item: i },
+      Access { role: access_row(), label: "", flags: 0, order: 0, id: 0, said: "", up: 0 }
+    }
+    connect (row)-[Inside]->(list)
+  }
+  let method = spawn {
+    Box { x: 0.0, y: 0.0, w: 60.0, h: 20.0 }, Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "GET", size: 12.0, colour: 0xffffff },
+    KeyOrder { at: 1, item: 0 },
+    Access { role: access_button(), label: "Method:", flags: 0, order: 0, id: 0, said: "", up: 0 }
+  }
+  connect (method)-[Inside]->(root)
+  let url = spawn {
+    Box { x: 0.0, y: 0.0, w: 100.0, h: 20.0 }, Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Text { text: "https://a", size: 12.0, colour: 0xffffff },
+    KeyOrder { at: 2, item: 0 },
+    Access { role: access_field(), label: "URL", flags: 0, order: 0, id: 0, said: "", up: 0 },
+    AccessValue { value: "https://a", caret: 9, anchor: 9 }
+  }
+  connect (url)-[Inside]->(root)
+  let hidden = spawn {
+    Box { x: 0.0, y: 0.0, w: 0.0, h: 20.0 }, Size { w: Sizing.Fixed, h: Sizing.Fixed },
+    Stack { row: true, pad: 0.0, gap: 0.0 },
+    Access { role: access_static(), label: "Not shown", flags: 0, order: 99, id: 0, said: "", up: 0 }
+  }
+  connect (hidden)-[Inside]->(root)
+}
+
+system keys() {
+  Frame += 1
+  Pointer.x = -10.0
+  Pointer.y = -10.0
+  if Frame == 2 {
+    KeyMove.to = 3
+    KeyMove.to_item = 1
+  }
+}
+
+system show() {
+  if Frame <= 2 {
+    for a: Access in turn by a.order {
+      put("{Frame}: {a.id} in {a.up} \"" + a.said + "\"")
+    }
+    put("{Frame}: focus {AccessState.focus}")
+  }
+}
+
+schedule frame() {
+  keys()  access_asks()  measure()  layout_widths()  wrap()  layout_heights()  point()
+  key_focus()  key_press()  access_publish()  show()
+}
+main { loop { frame() } until Frame == 2 }

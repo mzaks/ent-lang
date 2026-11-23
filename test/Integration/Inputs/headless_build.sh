@@ -2,9 +2,9 @@
 # Builds the window device without a window: headless_window.c, and for
 # every proc and fn the device declares that it does not define, one that
 # does nothing and gives nought, written from the generated declarations.
-grep -E '^[A-Za-z_0-9]+ \*?ent_window_[a-z_0-9]+\(' "$ENT_INCLUDE/ent_extern.h" |
+grep -E '^(const )?[A-Za-z_0-9]+ \*? ?ent_window_[a-z_0-9]+\(' "$ENT_INCLUDE/ent_extern.h" |
 while read -r line; do
-  name=$(echo "$line" | sed -E 's/^[A-Za-z_0-9]+ \*?(ent_window_[a-z_0-9]+)\(.*/\1/')
+  name=$(echo "$line" | sed -E 's/^(const )?[A-Za-z_0-9]+ \*? ?(ent_window_[a-z_0-9]+)\(.*/\2/')
   grep -q "$name(" headless_window.c && continue
   case "$line" in
   void*) echo "${line%;} {}" ;;

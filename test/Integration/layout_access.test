@@ -1,0 +1,16 @@
+// The elements a reader of the screen is told: ids in Tab's order (the
+// list's own order before its rows), the element each is in, labels (one ending in ":"
+// with the box's text after it) (not a field's value), a box with no room not
+// told (it keeps no label), and the focus where a program sent it.
+// RUN: sh %S/Inputs/headless.sh %t.dir
+// RUN: %ent run -I %t.dir %S/Inputs/layout_access.ent \
+// RUN:     2>/dev/null | FileCheck %s --match-full-lines
+
+// CHECK:      1: 5 in 0 ""
+// CHECK-NEXT: 1: 3 in 0 "Method: GET"
+// CHECK-NEXT: 1: 4 in 0 "URL"
+// CHECK-NEXT: 1: 6 in 0 "Requests"
+// CHECK-NEXT: 1: 1 in 6 "row 0"
+// CHECK-NEXT: 1: 2 in 6 "row 1"
+// CHECK-NEXT: 1: focus 0
+// CHECK:      2: focus 2
