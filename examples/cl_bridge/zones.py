@@ -202,6 +202,28 @@ raises a row's up and down weights together (row 3: 0.32 to 0.80 and
 0.77 of w_max; none at the bound), shifting the balance by a few per cent,
 too little to undo a count of 2 to 1.
 
+    ... zones.py evoked [seeds (16)] [out.json]
+
+the dish's answer to one ball stim, after the steady study blamed it:
+the best setup trained 20 minutes (16 seeds; untrained 16, no reward 8),
+frozen, each row's sensory electrode pulsed alone (250-400 ms apart, 40
+times a row) as a single pulse, one of twice the strength and a burst of
+three 5 ms apart; up less down in the 50 ms after a pulse less the 50
+before, signed so + is the way the row wants. Then a minute of play, the
+same for each ball stim.
+
+23 November 2026: alone, a trained dish answers a pulse fast (within
+10 ms) and big (15 motor spikes against 1.1 of background); rows 3 and
+4 lean the right way 0.87 and 0.90 of single pulses (d' 3.6, 2.8), rows
+2 and 5 0.76, 0.75, the edge rows 0.59-0.62 (d' 0.3). Untrained: no
+answer (0.4 spikes, right 0.52). Twice the strength adds nothing; a burst
+raises the edges (d' 0.3 to 1.0, right 0.67-0.72). In play the answer
+shrinks: rows 3 and 4 (85% of the stims, at up to 40 Hz) give about 5
+motor spikes a pulse, not 15, and lean the right way 0.72 and 0.65 of
+the time. The dish's map is good; the stream of stims wears its answer
+down when the ball is near, when it counts most. With no reward, STDP
+alone wires every row up (bursts on rows 4-7 lean up).
+
     ... zones.py practice [seeds (16)] [rallies (120)] [out.json] [ego (1)]
 
 weak-spot practice: 20 minutes of training with no, half or all of the
@@ -1208,8 +1230,205 @@ def longer_main(args: list[str]) -> int:
     return 0
 
 
+PROBES = (("single", 1.0, 1), ("strong", 2.0, 1), ("burst", 1.0, 3))   # name, amount, pulses 5 ms apart
+PRE, POST, WIN = 50, 150, 50     # ms: before a pulse, kept after it, the window that counts
+
+
+def evoked_job(seed: int, minute: int, gain: float = 1.0, trials: int = 40) -> dict:
+    """The best setup (relative code, aligned layout, decoder 1) trained
+    `minute` minutes with reward gain `gain`, frozen, then probed: each
+    row's sensory electrode pulsed alone, 250-400 ms apart in a shuffled
+    order, with each of PROBES; for each pulse the up and the down
+    regions' spikes (columns 0-1, 6-7) in the WIN ms before it and after
+    it, and their mean time course in 5 ms bins. Then the same dish plays
+    the fixed serves for a minute; for each ball stim, the same windows
+    (in ticks: 10 before, the stim's and 9 after)."""
+    import random
+    lib = fe._lib()
+    lib.pong_layout.argtypes = [ctypes.c_int32]
+    lib.pong_layout(1)
+    lib.pong_decoder.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.dish_stimulate.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_float]
+    lib.dish_step.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.dish_step.restype = ctypes.c_int64
+    lib.dish_spikes.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
+    lib.dish_spikes.restype = ctypes.c_int64
+    lib.dish_tick.argtypes = [ctypes.c_void_p]
+    lib.dish_tick.restype = ctypes.c_int32
+    dish = lib.pong_make_dish(seed, gain, 0)
+    game = lib.pong_create(dish, seed, 0, 1)
+    lib.pong_decoder(game, 1)
+    for _ in range(minute):
+        if lib.pong_run(game, 60 * fe.TICKS, None, None) < 0:
+            raise RuntimeError("the dish had no room for its spikes")
+    lib.pong_destroy(game)
+    lib.dish_set_stdp(dish, 0)
+    ch = (ctypes.c_int32 * 65536)()
+    st = (ctypes.c_int32 * 65536)()
+    up_at: dict[int, int] = {}
+    down_at: dict[int, int] = {}
+
+    def run(n):
+        if lib.dish_step(dish, n) < 0:
+            raise RuntimeError("the dish had no room for its spikes")
+        while (k := lib.dish_spikes(dish, ch, st, 65536)) > 0:
+            for i in range(k):
+                col = ch[i] % 8
+                if col <= 1:
+                    up_at[st[i]] = up_at.get(st[i], 0) + 1
+                elif col >= 6:
+                    down_at[st[i]] = down_at.get(st[i], 0) + 1
+
+    run(2000)                      # 2 s without the game first
+    rng = random.Random(seed * 31 + minute)
+    order = [(kind, row) for kind in range(len(PROBES)) for row in range(8) for _ in range(trials)]
+    rng.shuffle(order)
+    pulses = []                    # kind, row, the step that takes the first pulse
+    for kind, row in order:
+        run(rng.randint(250, 400))
+        _, amount, n = PROBES[kind]
+        pulses.append((kind, row, lib.dish_tick(dish)))
+        for _ in range(n):
+            lib.dish_stimulate(dish, SENSORY_ALIGNED[row], amount)
+            run(5)
+    run(POST + 10)
+
+    def count(at, a, b):
+        return sum(at.get(s, 0) for s in range(a, b))
+
+    probes = {}
+    for kind, (name, _, _) in enumerate(PROBES):
+        rows = []
+        for row in range(8):
+            ps = [s for k, r, s in pulses if k == kind and r == row]
+            tr = [[count(up_at, s - WIN, s), count(down_at, s - WIN, s),
+                   count(up_at, s, s + WIN), count(down_at, s, s + WIN)] for s in ps]
+            course = [[sum(count(up_at, s + b, s + b + 5) for s in ps) / len(ps),
+                       sum(count(down_at, s + b, s + b + 5) for s in ps) / len(ps)]
+                      for b in range(-PRE, POST, 5)]
+            rows.append({"trials": tr, "course": course})
+        probes[name] = rows
+    # In play: the frozen dish on the fixed serves for a minute.
+    test = lib.pong_create(dish, EVAL_SEED, 0, 1)
+    lib.pong_decoder(test, 1)
+    lib.pong_fixed_serves(test, SERVES)
+    spikes = (ctypes.c_int32 * 64)()
+    stims = (ctypes.c_int32 * 64)()
+    row_of = {c: r for r, c in enumerate(SENSORY_ALIGNED)}
+    ticks = []                     # up, down, the row stimulated this tick (-1)
+    for _ in range(60 * fe.TICKS):
+        ctypes.memset(spikes, 0, 256)
+        ctypes.memset(stims, 0, 256)
+        if lib.pong_run(test, 1, spikes, stims) < 0:
+            raise RuntimeError("the dish had no room for its spikes")
+        rs = [row_of[c] for c in row_of if stims[c] == 1]
+        ticks.append((sum(spikes[c] for c in range(64) if c % 8 <= 1),
+                      sum(spikes[c] for c in range(64) if c % 8 >= 6), rs[0] if rs else -1))
+    play = [[] for _ in range(8)]
+    for t in range(10, len(ticks) - 10):
+        r = ticks[t][2]
+        if r >= 0:
+            pre, post = ticks[t - 10:t], ticks[t:t + 10]
+            play[r].append([sum(a for a, _, _ in pre), sum(b for _, b, _ in pre),
+                            sum(a for a, _, _ in post), sum(b for _, b, _ in post)])
+    lib.pong_destroy(test)
+    lib.dish_destroy(dish)
+    return {"seed": seed, "minute": minute, "gain": gain, "probes": probes, "play": play}
+
+
+def _lean(tr, row):
+    """Per pulse: how far up less down after it leans the way the row wants
+    (rows 0-3 up), less the same before it."""
+    sign = 1 if row < 4 else -1
+    return [sign * ((u1 - d1) - (u0 - d0)) for u0, d0, u1, d1 in tr]
+
+
+def _dprime(xs):
+    sd = statistics.pstdev(xs)
+    return statistics.mean(xs) / sd if sd else 0.0
+
+
+def _right(xs):
+    return (sum(x > 0 for x in xs) + 0.5 * sum(x == 0 for x in xs)) / len(xs)
+
+
+def evoked_main(args: list[str]) -> int:
+    seeds = int(args[0]) if args else 16
+    out = args[1] if len(args) > 1 else "build/cl_bridge/evoked.json"
+    done_path = Path(out + "l")
+    results = []
+    if done_path.exists():
+        results += [json.loads(line) for line in done_path.read_text().splitlines() if line]
+    points = [(20, 1.0, seeds), (0, 1.0, seeds), (20, 0.0, seeds // 2)]
+    have = {(r["seed"], r["minute"], r["gain"]) for r in results}
+    jobs = [(s, m, g) for m, g, n in points for s in range(1, n + 1) if (s, m, g) not in have]
+    jobs.sort(key=lambda j: -j[1])
+    fe._lib()
+    with ProcessPoolExecutor(10) as pool, done_path.open("a") as log:
+        for f in as_completed([pool.submit(evoked_job, *j) for j in jobs]):
+            r = f.result()
+            log.write(json.dumps(r) + "\n")
+            log.flush()
+            results.append(r)
+    Path(out).write_text(json.dumps(results))
+    mean = statistics.mean
+    names = {(20, 1.0): "trained m20", (0, 1.0): "untrained", (20, 0.0): "m20 no reward"}
+    print("the dish's answer to one ball stim: relative code, aligned layout; frozen. Per row, up less "
+          f"down in the {WIN} ms after a pulse less the {WIN} ms before, signed so + is the way the "
+          "row wants (rows 0-3 up)")
+    for what in ("lean", "d'", "right"):
+        print(f"\n{what}: " + {"lean": "mean spikes the right way a pulse",
+                               "d'": "lean / its s.d. over pulses (each seed, then the mean)",
+                               "right": "share of single pulses leaning the right way"}[what])
+        print(f"{'':28s}" + "  ".join(f"  row{k}" for k in range(8)) + "    all")
+        for (m, g, n) in points:
+            rs = [r for r in results if r["minute"] == m and r["gain"] == g and r["seed"] <= n]
+            if not rs:
+                continue
+            sources = [(p, lambda r, p=p, k=0: r["probes"][p]) for p, _, _ in PROBES]
+            sources.append(("in play", lambda r: [{"trials": t} for t in r["play"]]))
+            for label, get in sources:
+                cells = []
+                for row in range(8 + 1):
+                    vals = []
+                    for r in rs:
+                        rows = range(8) if row == 8 else [row]
+                        xs = [x for k in rows for x in _lean(get(r)[k]["trials"], k)]
+                        if len(xs) < 3:
+                            continue
+                        vals.append({"lean": mean(xs), "d'": _dprime(xs), "right": _right(xs)}[what])
+                    cells.append(mean(vals) if vals else float("nan"))
+                print(f"{names[m, g] + ', ' + label:28s}" + "  ".join(f"{c:6.2f}" for c in cells))
+    print("\nsize: motor spikes (up + down) in the window, before and after a single pulse, and "
+          "the s.d. of up less down before it")
+    for (m, g, n) in points:
+        rs = [r for r in results if r["minute"] == m and r["gain"] == g and r["seed"] <= n]
+        if not rs:
+            continue
+        for p, _, _ in PROBES:
+            tr = [t for r in rs for row in r["probes"][p] for t in row["trials"]]
+            print(f"{names[m, g] + ', ' + p:28s} before {mean(a + b for a, b, _, _ in tr):6.2f}  "
+                  f"after {mean(c + d for _, _, c, d in tr):6.2f}  "
+                  f"noise s.d. {statistics.pstdev([a - b for a, b, _, _ in tr]):5.2f}")
+    print("\ntime course, single pulse, trained m20: up and down spikes in 5 ms bins after the pulse, "
+          "rows 0-3 and 4-7 (mean of rows and seeds)")
+    rs = [r for r in results if r["minute"] == 20 and r["gain"] == 1.0]
+    if rs:
+        nb = len(rs[0]["probes"]["single"][0]["course"])
+        for half, rows in (("rows 0-3 (want up)", range(4)), ("rows 4-7 (want down)", range(4, 8))):
+            ups = [mean(r["probes"]["single"][k]["course"][b][0] for r in rs for k in rows) for b in range(nb)]
+            downs = [mean(r["probes"]["single"][k]["course"][b][1] for r in rs for k in rows) for b in range(nb)]
+            show = range(PRE // 5 - 2, min(nb, PRE // 5 + 16))
+            print(f"  {half}: ms " + " ".join(f"{(b * 5 - PRE):5d}" for b in show))
+            print(f"  {'up':20s}    " + " ".join(f"{ups[b]:5.2f}" for b in show))
+            print(f"  {'down':20s}    " + " ".join(f"{downs[b]:5.2f}" for b in show))
+    return 0
+
+
 def main() -> int:
     args = sys.argv[1:]
+    if args and args[0] == "evoked":
+        return evoked_main(args[1:])
     if args and args[0] == "steady":
         return steady_main(args[1:])
     if args and args[0] == "autopsy":
