@@ -103,6 +103,13 @@ adds the same to each (+0.23, +0.25, +0.23). The inner one leans: the
 rows above the paddle 0.70-0.85, those well below 0.46-0.63. The size of
 the motor regions is not what limits the dish.
 
+Next to the sensory electrodes (pong_motor 3: columns 2 up, 5 down; 4:
+columns 1-2, 5-6), 24 November 2026, 16 seeds: 0.93 and 0.90 (+0.23,
++0.19 over 0-1/6-7, 14 of 16), but with no reward already 0.89 and 0.85:
+the reward adds only +0.05, +0.04. A stim's own reach and a few synapses
+carry each row to the region beside it, a reflex the host's choice of
+electrodes builds; the dish need not learn.
+
     ... zones.py dishbrain [seeds (16)] [rallies (120)] [out.json]
 
 DishBrain's feedback (game.c's cond 2 `stim`: a hit, the 8 sensory
@@ -288,7 +295,23 @@ match.jsonl: their feedback against none; a stronger jolt after a miss
 (game.c's pong_miss_stims: 8 or 64 electrodes a pulse); on the best
 setup the hit/miss reward, plain STDP with and without their feedback,
 and the dopamine of a host world model of the dish (game.c's cond 5,
-its control 6). (Running.)
+its control 6).
+
+24 November 2026, 32 seeds, T2 balls hit (paired, b less a):
+their setup: their feedback 0.434, none 0.417 (+0.017 +- 0.011, rally
+T2 +0.08 +- 0.05: the +0.19 of 16 seeds shrinks; real cultures gain
+about +0.04 over their controls); the jolt changes nothing (8 electrodes
+0.446, 64 0.412; -0.022 +- 0.017 against 1).
+Best setup: plain STDP without feedback 0.623 (rally 1.63 -> 2.20, the
+most growth), with their feedback 0.607 (-0.017 +- 0.013); the hit/miss
+reward 0.621 (= plain STDP, -0.003 +- 0.016); the per-move reward 0.699
+(+0.078 +- 0.014 over hit/miss, 27 of 32 rallies longer).
+World model: its dopamine is the wrong way round: after a miss +0.11, after
+a hit -0.05 (with no feedback +0.63 and +0.08): the pause after a miss is
+the dish's most predictable time, so predictability rewards missing (the
+dark room). World 0.572, below plain STDP (-0.052 +- 0.016) and their
+feedback (-0.035 +- 0.014), above its no-feedback control (+0.033 +-
+0.014), whose quiet pause rewards misses more still.
 
     ... zones.py practice [seeds (16)] [rallies (120)] [out.json] [ego (1)]
 
