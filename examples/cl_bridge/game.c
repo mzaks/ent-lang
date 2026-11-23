@@ -34,7 +34,12 @@
 //   void pong_decoder(p, d)   how the paddle reads the motor regions: 0 (the
 //       default) their spikes as they come; 1 each against its own
 //       background (a 2 s average), so that a region that only fires more
-//       does not pull; 2 only the spikes of the 30 ms after a ball stim
+//       does not pull; 2 only the spikes of the 30 ms after a ball stim;
+//       3 as 1, but only what each fires above its background counts
+//       (a burst fading below it pulls nowhere)
+//   void pong_hold(p, h)   hysteresis: the paddle turns back only when the
+//       other region leads by h of the larger (not DEAD_ZONE); 0 off (the
+//       default)
 //   void pong_oracle(p, o)   the paddle steered by the host, not the dish
 //       (which still runs): 1 towards the ball's height now, 2 to where it
 //       will cross the paddle's line, 3 by the last sensory stim's row
@@ -122,7 +127,8 @@ typedef struct pong {
   dish *d;
   uint64_t rng, fixed;
   double far;
-  int32_t decoder, motor, oracle;
+  int32_t decoder, motor, oracle, last_way;
+  double hold;
   double base_up, base_down, base_decay, last_sense;
   int32_t cond, ego;
   double t, x, y, vx, vy, paddle, up, down, decay;
@@ -261,6 +267,8 @@ void pong_motor(pong *p, int32_t m) { p->motor = m; }
 
 void pong_oracle(pong *p, int32_t o) { p->oracle = o; }
 
+void pong_hold(pong *p, double h) { p->hold = h; }
+
 // Where the ball will cross the paddle's line, with its bounces.
 static double arrival(const pong *p) {
   double speed = p->vx < 0 ? -p->vx : p->vx;
@@ -317,10 +325,15 @@ static void game_tick(pong *p, int32_t up, int32_t down) {
   // The paddle.
   double big = p->up > p->down ? p->up : p->down;
   double gap = p->up - p->down;
-  if (p->decoder == 1) {   // each region against its own background
+  if (p->decoder == 1 || p->decoder == 3) {   // each region against its own background
     p->base_up = p->base_decay * p->base_up + (1 - p->base_decay) * p->up;
     p->base_down = p->base_decay * p->base_down + (1 - p->base_decay) * p->down;
-    gap = (p->up - p->base_up) - (p->down - p->base_down);
+    double eu = p->up - p->base_up, ed = p->down - p->base_down;
+    if (p->decoder == 3) {   // only what is above it: a burst fading pulls nowhere
+      eu = eu > 0 ? eu : 0;
+      ed = ed > 0 ? ed : 0;
+    }
+    gap = eu - ed;
   }
   if (p->oracle) {
     double want = 0;
@@ -333,7 +346,10 @@ static void game_tick(pong *p, int32_t up, int32_t down) {
     }
     double at = p->paddle + PADDLE_SPEED * DT * want;
     p->paddle = at < PADDLE / 2 ? PADDLE / 2 : at > 1 - PADDLE / 2 ? 1 - PADDLE / 2 : at;
-  } else if (big > 0 && (gap < 0 ? -gap : gap) > DEAD_ZONE * big) {
+  } else if (big > 0 && (gap < 0 ? -gap : gap) > DEAD_ZONE * big &&
+             !(p->hold > 0 && (gap < 0 ? 1 : -1) == -p->last_way &&
+               (gap < 0 ? -gap : gap) <= p->hold * big)) {
+    p->last_way = gap < 0 ? 1 : -1;
     double step = PADDLE_SPEED * DT * (gap < 0 ? 1 : -1);
     double at = p->paddle + step;
     p->paddle = at < PADDLE / 2 ? PADDLE / 2 : at > 1 - PADDLE / 2 ? 1 - PADDLE / 2 : at;

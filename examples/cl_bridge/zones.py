@@ -52,6 +52,25 @@ of the way, and the ball arrives 0.37 from the paddle (more than a row
 of the code away, so the stims all said the same way). Training cuts
 the wrong way; it leaves the paddle unable to hold a way.
 
+    ... zones.py steady [seeds (16)] [rallies (120)] [out.json]
+
+against the dithering the autopsy found: decoder 3 (game.c: decoder 1,
+but only what each region fires above its background counts) and
+hysteresis (pong_hold 0.3: the paddle turns back only when the other
+region leads by 0.3 of the larger, not 0.1), alone and together, in
+training and in the test; the autopsy's decoder 1 dishes for comparison.
+
+23 November 2026, 16 seeds, 120 serves: decoder 1 0.71 (dithering 0.63
+of the misses, 5.0 turns a second in a miss's last), decoder 3 0.65
+(dithering 0.28; still 0.26, late 0.22), hold 0.3 0.66 (dithering 0.20;
+wrong way 0.32, parked 0.21), both 0.55 (dithering 0.04; late 0.25,
+still 0.26, wrong way 0.26). Each takes the dithering away and scores
+worse (-0.05, -0.04, -0.16 +- 0.05): the misses move to a paddle that
+holds the wrong way or does not go. The turning was not the flaw but
+the sign of one: the dish's answer to a stim is too weak against its
+noise to give a way for long, and turning often was what let it still
+get there.
+
     ... zones.py yoked [seeds (16)] [rallies (120)] [out.json]
 
 the open-loop control for plain STDP (dishbrain's `none`, which learns:
@@ -670,7 +689,8 @@ def two_main(args: list[str]) -> int:
 CAUSES = ("parked", "still", "dithering", "wrong way", "bounce", "late")
 
 
-def autopsy_job(seed: int, minute: int, rallies: int, oracle: int = 0) -> dict:
+def autopsy_job(seed: int, minute: int, rallies: int, oracle: int = 0, decoder: int = 1,
+                hold: float = 0.0) -> dict:
     """The best setup (relative code, aligned layout, decoder 1, the reward
     for each move), trained `minute` minutes, frozen, played on the fixed
     serves tick by tick; each miss sorted by what the paddle did in the
@@ -681,17 +701,20 @@ def autopsy_job(seed: int, minute: int, rallies: int, oracle: int = 0) -> dict:
     lib.pong_layout(1)
     lib.pong_decoder.argtypes = [ctypes.c_void_p, ctypes.c_int32]
     lib.pong_oracle.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.pong_hold.argtypes = [ctypes.c_void_p, ctypes.c_double]
     lib.pong_zones.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     dish = lib.pong_make_dish(seed, 1.0, 0)
     game = lib.pong_create(dish, seed, 0, 1)
-    lib.pong_decoder(game, 1)
+    lib.pong_decoder(game, decoder)
+    lib.pong_hold(game, hold)
     for _ in range(minute):
         if lib.pong_run(game, 60 * fe.TICKS, None, None) < 0:
             raise RuntimeError("the dish had no room for its spikes")
     lib.pong_destroy(game)
     lib.dish_set_stdp(dish, 0)
     test = lib.pong_create(dish, EVAL_SEED, 0, 1)
-    lib.pong_decoder(test, 1)
+    lib.pong_decoder(test, decoder)
+    lib.pong_hold(test, hold)
     lib.pong_oracle(test, oracle)
     lib.pong_fixed_serves(test, SERVES)
     state = (ctypes.c_double * 12)()
@@ -737,8 +760,68 @@ def autopsy_job(seed: int, minute: int, rallies: int, oracle: int = 0) -> dict:
     lib.pong_zones(test, z)
     lib.pong_destroy(test)
     lib.dish_destroy(dish)
-    return {"seed": seed, "minute": minute, "oracle": oracle, "rallies": seen,
+    return {"seed": seed, "minute": minute, "oracle": oracle, "decoder": decoder, "hold": hold,
+            "rallies": seen,
             "seen": list(z[:8]), "hit": list(z[8:]), "causes": causes, "misses": misses}
+
+
+def steady_main(args: list[str]) -> int:
+    seeds = int(args[0]) if args else 16
+    rallies = int(args[1]) if len(args) > 1 else 120
+    out = args[2] if len(args) > 2 else "build/cl_bridge/steady.json"
+    done_path = Path(out + "l")
+    results = []
+    old = Path("build/cl_bridge/autopsy.jsonl")
+    if old.exists():
+        results += [r for r in map(json.loads, old.read_text().splitlines())
+                    if r["minute"] == 20 and r["oracle"] == 0]
+    for r in results:
+        r.setdefault("decoder", 1)
+        r.setdefault("hold", 0.0)
+    if done_path.exists():
+        results += [json.loads(line) for line in done_path.read_text().splitlines() if line]
+    ways = [(1, 0.0), (3, 0.0), (1, 0.3), (3, 0.3)]
+    have = {(r["seed"], r["decoder"], r["hold"]) for r in results}
+    jobs = [(s, 20, rallies, 0, d, h) for d, h in ways[1:] for s in range(1, seeds + 1)
+            if (s, d, h) not in have]
+    fe._lib()
+    with ProcessPoolExecutor(10) as pool, done_path.open("a") as log:
+        for f in as_completed([pool.submit(autopsy_job, *j) for j in jobs]):
+            r = f.result()
+            log.write(json.dumps(r) + "\n")
+            log.flush()
+            results.append(r)
+    Path(out).write_text(json.dumps(results))
+    mean = statistics.mean
+
+    def score(r):
+        return sum(r["hit"]) / sum(r["seen"])
+
+    print(f"the dish's steering: relative code, aligned layout, 20 minutes with the reward; frozen, "
+          f"{rallies} uniform fixed serves; misses by cause (share)")
+    print(f"{'decoder, hold':24s} {'hit':>5s} {'s.e.':>5s}  " + "  ".join(f"{c:>9s}" for c in CAUSES) +
+          "  turns/s")
+    names = {(1, 0.0): "1 (background)", (3, 0.0): "3 (rectified)", (1, 0.3): "1, hold 0.3",
+             (3, 0.3): "3, hold 0.3"}
+    by = {}
+    for w in ways:
+        rs = sorted((r for r in results if (r["decoder"], r["hold"]) == w and r["seed"] <= seeds),
+                    key=lambda r: r["seed"])
+        if len(rs) < 2:
+            continue
+        by[w] = {r["seed"]: score(r) for r in rs}
+        total = sum(sum(r["causes"].values()) for r in rs)
+        share = [sum(r["causes"][c] for r in rs) / total if total else 0 for c in CAUSES]
+        each = list(by[w].values())
+        flips = [m["flips"] for r in rs for m in r["misses"]]
+        print(f"{names[w]:24s} {mean(each):5.2f} {statistics.stdev(each) / len(each) ** 0.5:5.2f}  " +
+              "  ".join(f"{x:9.2f}" for x in share) + f"  {mean(flips) if flips else 0:7.1f}  ({len(rs)})")
+    for w in ways[1:]:
+        if w in by and (1, 0.0) in by:
+            d = [by[w][s] - by[1, 0.0][s] for s in by[w] if s in by[1, 0.0]]
+            print(f"{names[w]} less decoder 1: {mean(d):+.2f} +- {statistics.stdev(d) / len(d) ** 0.5:.2f}, "
+                  f"better for {sum(x > 0 for x in d)} of {len(d)} seeds")
+    return 0
 
 
 def autopsy_main(args: list[str]) -> int:
@@ -1127,6 +1210,8 @@ def longer_main(args: list[str]) -> int:
 
 def main() -> int:
     args = sys.argv[1:]
+    if args and args[0] == "steady":
+        return steady_main(args[1:])
     if args and args[0] == "autopsy":
         return autopsy_main(args[1:])
     if args and args[0] == "yoked":
