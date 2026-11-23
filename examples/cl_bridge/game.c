@@ -35,6 +35,9 @@
 //       default) their spikes as they come; 1 each against its own
 //       background (a 2 s average), so that a region that only fires more
 //       does not pull; 2 only the spikes of the 30 ms after a ball stim
+//   void pong_motor(p, m)   which electrodes the motor regions are: 0 (the
+//       default) columns 0-1 up and 6-7 down, 1 only the inner ones (1 and
+//       6, nearer the sensory electrodes), 2 only the outer (0 and 7)
 //   void pong_layout(aligned)   for the dishes and games made after it
 //       (process-wide): 1 the sensory rows on the columns nearer the way
 //       each wants (zones.py layouts), 2 the same with two electrodes a
@@ -114,7 +117,7 @@ typedef struct pong {
   dish *d;
   uint64_t rng, fixed;
   double far;
-  int32_t decoder;
+  int32_t decoder, motor;
   double base_up, base_down, base_decay, last_sense;
   int32_t cond, ego;
   double t, x, y, vx, vy, paddle, up, down, decay;
@@ -248,6 +251,8 @@ void pong_destroy(pong *p) { free(p); }
 void pong_fixed_serves(pong *p, int64_t base) { p->fixed = (uint64_t)base; }
 
 void pong_far_serves(pong *p, double share) { p->far = share; }
+
+void pong_motor(pong *p, int32_t m) { p->motor = m; }
 
 void pong_decoder(pong *p, int32_t decoder) {
   p->decoder = decoder;
@@ -415,9 +420,11 @@ int32_t pong_run(pong *p, int32_t ticks, int32_t *spikes, int32_t *stims) {
         int32_t c = p->channel[i], column = c % 8;
         if (spikes)
           spikes[c]++;
-        if (column <= 1)
+        int lo = p->motor == 2 ? 0 : p->motor == 1 ? 1 : 0;
+        int hi = p->motor == 1 ? 1 : p->motor == 2 ? 0 : 1;
+        if (column >= lo && column <= hi)
           up++;
-        else if (column >= 6)
+        else if (column >= 7 - hi && column <= 7 - lo)
           down++;
       }
     game_tick(p, up, down);

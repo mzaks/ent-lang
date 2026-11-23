@@ -31,6 +31,38 @@ at 20, 0.64 at 40 (16 seeds), 0.70 at 60 (8). Minute 20 less 10 +0.03 +-
 minute 5 (no reward at 20: 0.49); after that the score drifts around 0.67
 and longer training does not add to it. Every row stays 0.55-0.82.
 
+    ... zones.py yoked [seeds (16)] [rallies (120)] [out.json]
+
+the open-loop control for plain STDP (dishbrain's `none`, which learns:
+0.36 to 0.65): each dish gets, tick by tick, the very stims a closed-loop
+dish of another seed (seed + 1000) gets while it plays, so the same kind
+of input, but its own spikes move nothing; frozen at minute 20 and scored
+against dishbrain.jsonl's closed loop and untrained. Does plain STDP
+learn from the loop, or from the input and the layout alone?
+
+23 November 2026, 16 seeds, 120 serves, all rows: untrained 0.36, open
+loop 0.61, closed loop 0.65. Open loop less untrained +0.25 +- 0.03 (16 of
+16 seeds); closed less open +0.03 +- 0.04 (10 of 16). Plain STDP learns
+from the input on the aligned layout, nearly as much without the loop as
+with it: it strengthens what each sensory electrode already reaches (the
+layout puts the right region nearer), not what worked. The loop adds
+little if anything; the reward (0.71) a little more.
+
+    ... zones.py motor [seeds (16)] [rallies (120)] [out.json]
+
+the motor regions one column each instead of two (game.c's pong_motor):
+1 the inner columns (1 up, 6 down, nearer the sensory electrodes), 2 the
+outer (0, 7), against both (decoders.jsonl), on the best setup (relative
+code, aligned layout, decoder 1), with the reward and without (half the
+seeds).
+
+23 November 2026, 16 seeds, 120 serves, all rows: both columns 0.71
+(no reward 0.49), inner 0.68 (0.43), outer 0.66 (0.44). One column is
+no better, inner or outer (-0.03 +- 0.04, -0.05 +- 0.04), and the reward
+adds the same to each (+0.23, +0.25, +0.23). The inner one leans: the
+rows above the paddle 0.70-0.85, those well below 0.46-0.63. The size of
+the motor regions is not what limits the dish.
+
     ... zones.py dishbrain [seeds (16)] [rallies (120)] [out.json]
 
 DishBrain's feedback (game.c's cond 2 `stim`: a hit, the 8 sensory
@@ -215,7 +247,8 @@ def slowing(schedule: str, m: int) -> float:
 
 
 def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0,
-        far: float = 0.0, layout: int = 0, decoder: int = 0, schedule: str = "", cond: int = 0) -> dict:
+        far: float = 0.0, layout: int = 0, decoder: int = 0, schedule: str = "", cond: int = 0,
+        motor: int = 0) -> dict:
     lib = fe._lib()
     lib.dish_set_reward_gain.argtypes = [ctypes.c_void_p, ctypes.c_float]
     lib.dish_set_home_gain.argtypes = [ctypes.c_void_p, ctypes.c_float]
@@ -233,8 +266,10 @@ def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0,
         lib.pong_far_serves.argtypes = [ctypes.c_void_p, ctypes.c_double]
         lib.pong_far_serves(game, far)
     lib.pong_decoder.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.pong_motor.argtypes = [ctypes.c_void_p, ctypes.c_int32]
     if decoder:
         lib.pong_decoder(game, decoder)
+    lib.pong_motor(game, motor)
     for m in range(minute):
         if schedule:
             f = slowing(schedule, m)
@@ -255,6 +290,7 @@ def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0,
     test = lib.pong_create(dish, EVAL_SEED, 4 if cond >= 2 else 0, ego)
     if decoder:
         lib.pong_decoder(test, decoder)
+    lib.pong_motor(test, motor)
     lib.pong_fixed_serves(test, SERVES)
     t0 = None
     while True:
@@ -270,7 +306,7 @@ def job(seed: int, gain: float, minute: int, rallies: int, ego: int = 0,
     lib.pong_destroy(test)
     lib.dish_destroy(dish)
     return {"seed": seed, "gain": gain, "minute": minute, "ego": ego, "far": far, "layout": layout,
-            "decoder": decoder, "schedule": schedule, "cond": cond,
+            "decoder": decoder, "schedule": schedule, "cond": cond, "motor": motor,
             "rallies": int(state[4]),
             "seen": list(z[:8]), "hit": list(z[8:]), "wiring": wiring}
 
@@ -610,6 +646,175 @@ def two_main(args: list[str]) -> int:
     return 0
 
 
+def yoked_job(seed: int, minute: int, rallies: int, yoke: int = 1000) -> dict:
+    """Plain STDP (cond 4, `none`) on the best setup, open loop: dish `seed`
+    gets, tick by tick, the very stims that the closed-loop game of dish
+    seed + yoke gets while it plays, and its own spikes move nothing. Then
+    frozen and scored as job() does."""
+    lib = fe._lib()
+    lib.pong_layout.argtypes = [ctypes.c_int32]
+    lib.pong_layout(1)
+    lib.pong_decoder.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.pong_zones.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    lib.dish_stimulate.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_float]
+    lib.dish_step.restype = ctypes.c_int64
+    lib.dish_step.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.dish_spikes.restype = ctypes.c_int64
+    lib.dish_spikes.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
+    leader_dish = lib.pong_make_dish(seed + yoke, 1.0, 4)
+    leader = lib.pong_create(leader_dish, seed + yoke, 4, 1)
+    lib.pong_decoder(leader, 1)
+    dish = lib.pong_make_dish(seed, 1.0, 4)
+    stims = (ctypes.c_int32 * 64)()
+    ch, st = (ctypes.c_int32 * 4096)(), (ctypes.c_int32 * 4096)()
+    sent = 0
+    for _ in range(minute * 60 * fe.TICKS):
+        ctypes.memset(stims, 0, 256)
+        if lib.pong_run(leader, 1, None, stims) < 0:
+            raise RuntimeError("the dish had no room for its spikes")
+        for c in range(64):
+            if stims[c]:
+                lib.dish_stimulate(dish, c, 1.0)
+                sent += 1
+        if lib.dish_step(dish, 5) < 0:
+            raise RuntimeError("the dish had no room for its spikes")
+        while lib.dish_spikes(dish, ch, st, 4096) > 0:
+            pass
+    lib.pong_destroy(leader)
+    lib.dish_destroy(leader_dish)
+    lib.dish_set_stdp(dish, 0)
+    state = (ctypes.c_double * 12)()
+    test = lib.pong_create(dish, EVAL_SEED, 4, 1)
+    lib.pong_decoder(test, 1)
+    lib.pong_fixed_serves(test, SERVES)
+    t0 = None
+    while True:
+        if lib.pong_run(test, fe.CHUNK, None, None) < 0:
+            raise RuntimeError("the dish had no room for its spikes")
+        lib.pong_state(test, state)
+        if t0 is None:
+            t0 = state[0]
+        if state[4] >= rallies or state[0] - t0 > 1800:
+            break
+    z = (ctypes.c_int32 * 16)()
+    lib.pong_zones(test, z)
+    lib.pong_destroy(test)
+    lib.dish_destroy(dish)
+    return {"seed": seed, "minute": minute, "yoke": yoke, "stims": sent, "rallies": int(state[4]),
+            "seen": list(z[:8]), "hit": list(z[8:])}
+
+
+def yoked_main(args: list[str]) -> int:
+    seeds = int(args[0]) if args else 16
+    rallies = int(args[1]) if len(args) > 1 else 120
+    out = args[2] if len(args) > 2 else "build/cl_bridge/yoked.json"
+    done_path = Path(out + "l")
+    results = []
+    if done_path.exists():
+        results += [json.loads(line) for line in done_path.read_text().splitlines() if line]
+    have = {r["seed"] for r in results}
+    jobs = [(s, 20, rallies) for s in range(1, seeds + 1) if s not in have]
+    fe._lib()
+    with ProcessPoolExecutor(6) as pool, done_path.open("a") as log:
+        for f in as_completed([pool.submit(yoked_job, *j) for j in jobs]):
+            r = f.result()
+            log.write(json.dumps(r) + "\n")
+            log.flush()
+            results.append(r)
+    Path(out).write_text(json.dumps(results))
+    closed = {}
+    old = Path("build/cl_bridge/dishbrain.jsonl")
+    if old.exists():
+        closed = [r for r in map(json.loads, old.read_text().splitlines()) if r["cond"] == 4]
+    mean = statistics.mean
+
+    def score(r):
+        return sum(r["hit"]) / sum(r["seen"])
+
+    print(f"plain STDP, best setup: closed loop against open loop (yoked to seed + 1000's stims); "
+          f"frozen, {rallies} uniform fixed serves")
+    print("                       " + "  ".join(f" row{k}" for k in range(8)) + "    all  +- s.e.")
+    by = {}
+    for label, rs in (("untrained", [r for r in closed if r["minute"] == 0]),
+                      ("closed loop m20", [r for r in closed if r["minute"] == 20]),
+                      ("open loop m20", results)):
+        rs = sorted((r for r in rs if r["seed"] <= seeds), key=lambda r: r["seed"])
+        if len(rs) < 2:
+            continue
+        by[label] = {r["seed"]: score(r) for r in rs}
+        seen = [sum(r["seen"][k] for r in rs) for k in range(8)]
+        hit = [sum(r["hit"][k] for r in rs) for k in range(8)]
+        each = list(by[label].values())
+        print(f"{label:22s} " + "  ".join(f"{h / s if s else 0:5.2f}" for h, s in zip(hit, seen)) +
+              f"   {mean(each):5.2f}  {statistics.stdev(each) / len(each) ** 0.5:.2f}  ({len(rs)})")
+    for a, b in (("untrained", "open loop m20"), ("open loop m20", "closed loop m20")):
+        if a in by and b in by:
+            d = [by[b][s] - by[a][s] for s in by[b] if s in by[a]]
+            print(f"{b} less {a}: {mean(d):+.2f} +- {statistics.stdev(d) / len(d) ** 0.5:.2f}, "
+                  f"better for {sum(x > 0 for x in d)} of {len(d)} seeds")
+    print(f"stims a minute, open loop: {mean(r['stims'] for r in results) / 20:.0f}")
+    return 0
+
+
+def motor_main(args: list[str]) -> int:
+    seeds = int(args[0]) if args else 16
+    rallies = int(args[1]) if len(args) > 1 else 120
+    out = args[2] if len(args) > 2 else "build/cl_bridge/motor.json"
+    done_path = Path(out + "l")
+    results = []
+    old = Path("build/cl_bridge/decoders.jsonl")
+    if old.exists():
+        results += [r for r in map(json.loads, old.read_text().splitlines())
+                    if r["decoder"] == 1 and r["layout"] == 1 and r["ego"] == 1 and r["minute"] == 20]
+    for r in results:
+        r["motor"] = 0
+    if done_path.exists():
+        results += [json.loads(line) for line in done_path.read_text().splitlines() if line]
+    have = {(r["seed"], r["gain"], r["motor"]) for r in results}
+    jobs = [(s, 1.0, 20, rallies, 1, 0.0, 1, 1, "", 0, m) for m in (1, 2) for s in range(1, seeds + 1)]
+    jobs += [(s, 0.0, 20, rallies, 1, 0.0, 1, 1, "", 0, m) for m in (1, 2) for s in range(1, seeds // 2 + 1)]
+    jobs = [j for j in jobs if (j[0], j[1], j[10]) not in have]
+    fe._lib()
+    with ProcessPoolExecutor(10) as pool, done_path.open("a") as log:
+        for f in as_completed([pool.submit(job, *j) for j in jobs]):
+            r = f.result()
+            log.write(json.dumps(r) + "\n")
+            log.flush()
+            results.append(r)
+    Path(out).write_text(json.dumps(results))
+    mean = statistics.mean
+
+    def score(r):
+        return sum(r["hit"]) / sum(r["seen"])
+
+    print(f"motor regions: relative code, aligned layout, decoder 1, 20 minutes; frozen, "
+          f"{rallies} uniform fixed serves")
+    print("motor regions          " + "  ".join(f" row{k}" for k in range(8)) + "    all  +- s.e.")
+    names = {0: "columns 0-1, 6-7", 1: "inner 1, 6", 2: "outer 0, 7"}
+    by = {}
+    for m in (0, 1, 2):
+        for g in (1.0, 0.0):
+            rs = sorted((r for r in results if r["motor"] == m and r["gain"] == g and r["seed"] <= seeds),
+                        key=lambda r: r["seed"])
+            if len(rs) < 2:
+                continue
+            by[m, g] = {r["seed"]: score(r) for r in rs}
+            seen = [sum(r["seen"][k] for r in rs) for k in range(8)]
+            hit = [sum(r["hit"][k] for r in rs) for k in range(8)]
+            each = list(by[m, g].values())
+            label = names[m] + ("" if g else " no reward")
+            print(f"{label:22s} " + "  ".join(f"{h / s if s else 0:5.2f}" for h, s in zip(hit, seen)) +
+                  f"   {mean(each):5.2f}  {statistics.stdev(each) / len(each) ** 0.5:.2f}  ({len(rs)})")
+    for a, b in (((0, 1.0), (1, 1.0)), ((0, 1.0), (2, 1.0)), ((1, 0.0), (1, 1.0)), ((2, 0.0), (2, 1.0)),
+                 ((0, 0.0), (0, 1.0))):
+        if a in by and b in by:
+            d = [by[b][s] - by[a][s] for s in by[b] if s in by[a]]
+            print(f"{names[b[0]]}{'' if b[1] else ' no reward'} less {names[a[0]]}"
+                  f"{'' if a[1] else ' no reward'}: {mean(d):+.2f} +- "
+                  f"{statistics.stdev(d) / len(d) ** 0.5:.2f}, better for {sum(x > 0 for x in d)} of {len(d)} seeds")
+    return 0
+
+
 def dishbrain_main(args: list[str]) -> int:
     seeds = int(args[0]) if args else 16
     rallies = int(args[1]) if len(args) > 1 else 120
@@ -775,6 +980,10 @@ def longer_main(args: list[str]) -> int:
 
 def main() -> int:
     args = sys.argv[1:]
+    if args and args[0] == "yoked":
+        return yoked_main(args[1:])
+    if args and args[0] == "motor":
+        return motor_main(args[1:])
     if args and args[0] == "dishbrain":
         return dishbrain_main(args[1:])
     if args and args[0] == "settle":
