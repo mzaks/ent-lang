@@ -3,7 +3,9 @@
 // lines where the box is narrower, a table's cells in columns as wide as
 // their widest (the second, :---:, in the middle); and what is selected
 // copied as text (cells with a tab, items a line each, other blocks a
-// line left empty between them; a part from inside a word).
+// line left empty between them; a part from inside a word); and what a
+// screen reader is told (md_say): a row a block, a heading's level, an
+// item's number, a table's cells, each link after its block.
 // RUN: env MD_FILE=%S/Inputs/markdown/sample.md %ent run %S/Inputs/markdown/layout.ent 2>/dev/null > %t.out
 // RUN: FileCheck %s --input-file=%t.out --strict-whitespace
 
@@ -69,3 +71,24 @@
 // CHECK-EMPTY:
 // CHECK-NEXT: Code across two lines and on.
 // CHECK-NEXT: part: [tle o]
+// CHECK-NEXT: said 1 1 at 7.2: Title one
+// CHECK-NEXT: said 0 0 at 41.075001: A paragraph with bold, italic, code | pipe, a link and snake_case_name, 2 * 3, and *not italic*. Keys: ⌘⇧N and ✓.
+// CHECK-NEXT: said 8 0 at 55.575001: link
+// CHECK-NEXT: said 1 2 at 115.074997: Second part
+// CHECK-NEXT: said 2 0 at 143.875: one
+// CHECK-NEXT: said 2 0 at 161.375: two bold across lines
+// CHECK-NEXT: said 2 0 at 178.875: nested, see https://example.org/x more of nested
+// CHECK-NEXT: said 8 0 at 193.375: https://example.org/x
+// CHECK-NEXT: said 2 0 at 225.375: three
+// CHECK-NEXT: said 2 0 at 242.875: 1. first
+// CHECK-NEXT: said 2 0 at 260.375: 2. second
+// CHECK-NEXT: said 0 0 at 282.375: Inside the second.
+// CHECK-NEXT: said 0 0 at 304.375: Not in the list.
+// CHECK-NEXT: said 3 0 at 326.375: quoted line and more
+// CHECK-NEXT: said 4 0 at 354.375: curl -X GET 'x' | jq '.a * 2'//done
+// CHECK-NEXT: said 6 0 at 410.524963: Keys|Does
+// CHECK-NEXT: said 6 1 at 432.024963: ⌘S|save | keep
+// CHECK-NEXT: said 6 2 at 453.524963: a|b|go
+// CHECK-NEXT: said 8 0 at 453.524963: go
+// CHECK-NEXT: said 1 2 at 508.524963: Second part
+// CHECK-NEXT: said 0 0 at 537.324951: Code across two lines and on.

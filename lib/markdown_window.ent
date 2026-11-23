@@ -27,6 +27,8 @@
 //   then `Md.step` 1 or -1 for the next match or the one before;
 //   `MdState.count` says how many there are, `MdState.current` which one
 //   is shown (from 0).
+// - `Md.follow` and `Md.follow_run` to follow a link as a click on it
+//   does (a run of `MdSaid`'s links: a screen reader pressed it).
 // It reads `MdState.link`: a link clicked that is no heading's and not
 // on the web (http, https, mailto: those are opened), and
 // `MdState.linked` that it is new.
@@ -35,6 +37,11 @@
 // signs of keys are found where machines have them (`md_fonts`); the
 // program may set `MdFonts` first (and `found`) for its own. Colours:
 // `MdLook` (a dark look where the program sets none).
+//
+// What the page says, for a screen reader: `MdSaid`, made with the
+// layout (`MdState.said` is the text its rows point into), a row a block
+// as plain text (a table's row its cells, with tabs; an item with its
+// number), then a row each of its links; where each is on the page.
 //
 // One document at a time, for now.
 import window
@@ -45,7 +52,8 @@ unique Md {
   text: text, base: text, fresh: bool, size: f32,
   x: f32, y: f32, w: f32, h: f32, shown: bool, no_bar: bool,
   go: text, back: bool,
-  sought: text, sought_fresh: bool, step: i32
+  sought: text, sought_fresh: bool, step: i32,
+  follow: bool, follow_run: i32
 }
 unique MdState {
   laid_w: f32, laid_size: f32, height: f32, scroll: f32,
@@ -53,7 +61,7 @@ unique MdState {
   hover: i32, link: text, linked: bool,
   count: i32, current: i32, dragging: bool, drag_from: f32, pressed: i32,
   anchor: i32, caret: i32, selecting: bool, focused: bool, over: bool, unit: i32,
-  unit_from: i32, unit_to: i32
+  unit_from: i32, unit_to: i32, said: text
 }
 unique MdFonts { found: bool, bold: i32, italic: i32, mono: i32, symbols: i32 }
 unique MdLook {
@@ -75,6 +83,11 @@ buffer MdPieces { word: i32, x: f32, y: f32, h: f32 } capacity 4194304
 buffer MdPlaced { kind: i32, x: f32, y: f32, w: f32, h: f32, value: i32 } capacity 1048576
 // Where each block starts.
 buffer MdTops { y: f32 } capacity 1048576
+// What the page says: `kind` the block's (MD_HEADING ...; MD_LINK: a
+// link, of run `run`), a heading's `level`, the bytes of `MdState.said`
+// it is, where it is on the page (from its top).
+buffer MdSaid { kind: i32, level: i32, run: i32, start: i32, end: i32, y: f32, h: f32 }
+  capacity 1048576
 // The matches of a search: bytes of the text.
 buffer MdFound { start: i32, end: i32 } capacity 1048576
 
@@ -580,6 +593,55 @@ proc md_copy(t: text, blocks: MdBlocks, words: MdWords, pieces: MdPieces, from: 
   out
 }
 
+// What the page says (MdSaid), in one pass over the words set: each
+// block's words as text, a row made where it starts, and after it a row
+// each of its links (their bytes inside the block's); the text.
+proc md_say(t: text, blocks: MdBlocks, runs: MdRuns, words: MdWords, pieces: MdPieces,
+            said: mut MdSaid) -> text {
+  said = []
+  var out = ""
+  var block = -1
+  var row = -1
+  var last = -1
+  var link = -1
+  var link_row = -1
+  for p in 0..len(pieces) {
+    let w = pieces[p].word
+    let b = words[w].block
+    let r = words[w].run
+    if r != link { link = -1 }
+    if b != block {
+      block = b
+      last = -1
+      said += { kind: blocks[b].kind, level: blocks[b].level, run: -1, start: len(out),
+                end: len(out), y: pieces[p].y, h: pieces[p].h }
+      row = len(said) - 1
+      if blocks[b].kind == MD_ITEM && blocks[b].number > 0 { out += "{blocks[b].number}. " }
+    }
+    if !words[w].picture {
+      if last >= 0 {
+        if words[w].cell != words[last].cell { out += "\t" }
+        else if blocks[b].kind == MD_CODE && pieces[p].y > pieces[p - 1].y { out += "\n" }
+        else if words[w].gap > 0.0 { out += " " }
+      }
+      if (runs[r].style & MD_LINK) != 0 && link < 0 {
+        link = r
+        said += { kind: MD_LINK, level: 0, run: r, start: len(out), end: len(out),
+                  y: pieces[p].y, h: pieces[p].h }
+        link_row = len(said) - 1
+      }
+      out += slice(t, words[w].start, words[w].end)
+      if link >= 0 { said[link_row].end = len(out) }
+      said[row].end = len(out)
+      let bottom = max(said[row].y + said[row].h, pieces[p].y + pieces[p].h)
+      said[row].y = min(said[row].y, pieces[p].y)
+      said[row].h = bottom - said[row].y
+      last = w
+    }
+  }
+  out
+}
+
 // --- Systems. ---
 
 system md_fonts() {
@@ -641,6 +703,7 @@ system md_layout() {
     let into = if top < len(MdTops) { MdState.scroll - MdTops[top].y } else { 0.0 }
     MdState.height = md_lay(MdBlocks, MdWords, MdPieces, MdPlaced, MdTops, Md.w - 12.0, Md.size, window_scale())
     MdState.laid_w = Md.w
+    MdState.said = md_say(Md.text, MdBlocks, MdRuns, MdWords, MdPieces, MdSaid)
     if MdState.scroll > 0.0 && top < len(MdTops) { MdState.scroll = MdTops[top].y + max(into, 0.0) }
     MdState.scroll = max(min(MdState.scroll, MdState.height - Md.h), 0.0)
   }
@@ -695,24 +758,30 @@ system md_input() {
         if Mouse.clicks > 0 { MdState.pressed = MdState.hover }
         if !Mouse.left && MdState.pressed == MdState.hover && MdState.anchor == MdState.caret {
           MdState.pressed = -1
-          let r = MdState.hover
-          let to = slice(Md.text, MdRuns[r].link_start, MdRuns[r].link_end) as text[2048]
-          if len(to) > 0 && to[0] == '#' {
-            let y = md_goto(MdTops, md_anchor(Md.text, MdBlocks, MdRuns, to))
-            if y >= 0.0 {
-              MdState.back_to = MdState.scroll
-              MdState.can_back = true
-              MdState.scroll = min(y, most)
-            }
-          } else if md_web(to) { let opened = open_url(to) }
-          else {
-            MdState.link = to
-            MdState.linked = true
-          }
+          Md.follow = true
+          Md.follow_run = MdState.hover
         }
       }
     }
   }
+  // A link followed: clicked, or as the program asked.
+  if Md.follow && Md.follow_run >= 0 && Md.follow_run < len(MdRuns) {
+    let r = Md.follow_run
+    let to = slice(Md.text, MdRuns[r].link_start, MdRuns[r].link_end) as text[2048]
+    if len(to) > 0 && to[0] == '#' {
+      let y = md_goto(MdTops, md_anchor(Md.text, MdBlocks, MdRuns, to))
+      if y >= 0.0 {
+        MdState.back_to = MdState.scroll
+        MdState.can_back = true
+        MdState.scroll = min(y, most)
+      }
+    } else if md_web(to) { let opened = open_url(to) }
+    else if len(to) > 0 {
+      MdState.link = to
+      MdState.linked = true
+    }
+  }
+  Md.follow = false
 }
 
 // Selecting: pressed and dragged over the words (two clicks a word, three

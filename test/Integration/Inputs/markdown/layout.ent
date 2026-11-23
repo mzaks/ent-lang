@@ -50,6 +50,17 @@ system go() {
   put("copied:")
   put(all)
   put("part: [" + md_copy(doc, MdBlocks, MdWords, MdPieces, 4, 10) + "]")
+  // What a screen reader is told: a row a block, its links after it.
+  let said = md_say(doc, MdBlocks, MdRuns, MdWords, MdPieces, MdSaid)
+  for i in 0..len(MdSaid) {
+    var words = ""
+    for c in MdSaid[i].start..MdSaid[i].end {
+      if said[c] == '\n' { words += "/" }
+      else if said[c] == '\t' { words += "|" }
+      else { words += slice(said, c, c + 1) }
+    }
+    put("said {MdSaid[i].kind} {MdSaid[i].level} at {MdSaid[i].y}: " + words)
+  }
 }
 schedule t() { go() }
 main { t() }
