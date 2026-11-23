@@ -3,7 +3,8 @@
 // its own; the element it is in (the nearest box around it with an
 // `Access`); what it is called (its label, its `Text` after it where that
 // says something else; a text's value not in it); the focus; a box with no
-// room not told; and a stop a program goes to (`KeyMove.to`).
+// room not told; a stop a program goes to (`KeyMove.to`), and a menu
+// asked for there (`KeyMenu`).
 import console
 import text
 import window
@@ -70,6 +71,7 @@ system keys() {
   if Frame == 2 {
     KeyMove.to = 3
     KeyMove.to_item = 1
+    KeyMenu.wanted = true
   }
 }
 
@@ -79,11 +81,12 @@ system show() {
       put("{Frame}: {a.id} in {a.up} \"" + a.said + "\"")
     }
     put("{Frame}: focus {AccessState.focus}")
+    if KeyMenu.asked { for a: Access with KeyFocus { put("{Frame}: menu of \"" + a.said + "\"") } }
   }
 }
 
 schedule frame() {
   keys()  access_asks()  measure()  layout_widths()  wrap()  layout_heights()  point()
-  key_focus()  key_press()  access_publish()  show()
+  key_focus()  key_menu()  key_press()  access_publish()  show()
 }
 main { loop { frame() } until Frame == 2 }

@@ -2149,6 +2149,7 @@ __declspec(dllimport) int __stdcall TrackPopupMenu(void *menu, unsigned int flag
                                                    void *window, const void *rect);
 __declspec(dllimport) int __stdcall DestroyMenu(void *menu);
 __declspec(dllimport) int __stdcall GetCursorPos(void *point);
+__declspec(dllimport) int __stdcall ClientToScreen(void *window, void *point);
 __declspec(dllimport) int __stdcall PostMessageW(void *window, unsigned int message,
                                                  unsigned long long w, long long l);
 __declspec(dllimport) int __stdcall MultiByteToWideChar(unsigned int page,
@@ -2252,6 +2253,16 @@ static bool ent_window_menu_split(const ent_text *items, ent_window_menu_items *
   return true;
 }
 
+// Where the next menu opens (the window's points), where the program
+// said (`menu_place`: at what has the keys' focus): not at the pointer.
+static bool ent_window_menu_placed;
+static float ent_window_menu_place_x, ent_window_menu_place_y;
+void ent_window_menu_place(float x, float y) {
+  ent_window_menu_placed = true;
+  ent_window_menu_place_x = x;
+  ent_window_menu_place_y = y;
+}
+
 // A menu the window draws itself, where the system has none to give (or
 // ENT_WINDOW_MENU=drawn asks for it): over the picture that is shown,
 // until an item is chosen or it is let go (Escape, a click outside). It
@@ -2275,6 +2286,10 @@ static int32_t ent_window_menu_drawn(ent_window_menu_items *m) {
     w = 120;
   float room_w = GetScreenWidth() / more, room_h = GetScreenHeight() / more;
   float x = GetMouseX() / more, y = GetMouseY() / more;
+  if (ent_window_menu_placed) {
+    x = ent_window_menu_place_x * ent_window_zoom_now() / more;
+    y = ent_window_menu_place_y * ent_window_zoom_now() / more;
+  }
   if (x + w > room_w)
     x = x - w > 0 ? x - w : room_w - w;
   if (y + h > room_h)
@@ -2476,6 +2491,20 @@ static int32_t ent_window_menu_native(ent_window_menu_items *m) {
       window, ent_window_sel("mouseLocationOutsideOfEventStream"));
   at = ((ent_window_ns_point(*)(id, SEL, ent_window_ns_point, id))objc_msgSend)(
       view, ent_window_sel("convertPoint:fromView:"), at, (id)0);
+  if (ent_window_menu_placed) {
+    // (The view's points, from its bottom unless it is flipped.)
+    typedef struct { double x, y, w, h; } rect;
+    rect bounds;
+#if defined(__x86_64__)
+    ((void (*)(rect *, id, SEL))objc_msgSend_stret)(&bounds, view, ent_window_sel("bounds"));
+#else
+    bounds = ((rect(*)(id, SEL))objc_msgSend)(view, ent_window_sel("bounds"));
+#endif
+    bool flipped = ((signed char (*)(id, SEL))objc_msgSend)(view, ent_window_sel("isFlipped"));
+    double z = ent_window_zoom_now();
+    at.x = ent_window_menu_place_x * z;
+    at.y = flipped ? ent_window_menu_place_y * z : bounds.h - ent_window_menu_place_y * z;
+  }
   bool left = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
   bool right = IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
   ent_window_menu_pick = -1;
@@ -2505,6 +2534,11 @@ static int32_t ent_window_menu_native(ent_window_menu_items *m) {
   }
   struct { long x, y; } at;
   GetCursorPos(&at);
+  if (ent_window_menu_placed) {
+    at.x = (long)(ent_window_menu_place_x * ent_window_zoom_now());
+    at.y = (long)(ent_window_menu_place_y * ent_window_zoom_now());
+    ClientToScreen(window, &at);
+  }
   bool left = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
   bool right = IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
   // TPM_RETURNCMD | TPM_RIGHTBUTTON
@@ -2540,6 +2574,7 @@ int32_t ent_window_context_menu(const ent_text *items) {
   chosen = ent_window_menu_drawn(&m);
 #endif
   free(m.held);
+  ent_window_menu_placed = false;
   return chosen;
 }
 
@@ -3073,9 +3108,9 @@ enum {
   ENT_ACCESS_LINK, ENT_ACCESS_HEADING, ENT_ACCESS_IMAGE
 };
 enum { ENT_ACCESS_SELECTED = 1, ENT_ACCESS_DISABLED = 2, ENT_ACCESS_EXPANDED = 4,
-       ENT_ACCESS_COLLAPSED = 8, ENT_ACCESS_READONLY = 16 };
+       ENT_ACCESS_COLLAPSED = 8, ENT_ACCESS_READONLY = 16, ENT_ACCESS_MENU_HELD = 32 };
 enum { ENT_ACCESS_PRESS = 1, ENT_ACCESS_FOCUS = 2, ENT_ACCESS_VALUE = 3, ENT_ACCESS_SELECT = 4,
-       ENT_ACCESS_SHOW = 5 };
+       ENT_ACCESS_SHOW = 5, ENT_ACCESS_MENU = 6 };
 
 typedef struct {
   int32_t id, kind, from, to;
@@ -3347,10 +3382,12 @@ static bool ent_access_pressable(ent_access_node *n) {
 }
 static id ent_access_m_actions(id self, SEL s) {
   ent_access_node *n = ent_access_of(self);
-  id names[2];
+  id names[3];
   unsigned long k = 0;
   if (ent_access_pressable(n))
     names[k++] = ent_window_ns_text("AXPress");
+  if (n && (n->flags & ENT_ACCESS_MENU_HELD))
+    names[k++] = ent_window_ns_text("AXShowMenu");
   names[k++] = ent_window_ns_text("AXScrollToVisible");
   return ((id(*)(id, SEL, const id *, unsigned long))objc_msgSend)(
       ent_window_class("NSArray"), ent_window_sel("arrayWithObjects:count:"), names, k);
@@ -3364,6 +3401,15 @@ static void ent_access_m_perform(id self, SEL s, id name) {
     ent_access_queue(n->id, ENT_ACCESS_PRESS, 0, 0, 0);
   else if (strcmp(said, "AXScrollToVisible") == 0)
     ent_access_queue(n->id, ENT_ACCESS_SHOW, 0, 0, 0);
+  else if (strcmp(said, "AXShowMenu") == 0 && (n->flags & ENT_ACCESS_MENU_HELD))
+    ent_access_queue(n->id, ENT_ACCESS_MENU, 0, 0, 0);
+}
+static signed char ent_access_m_show_menu(id self, SEL s) {
+  ent_access_node *n = ent_access_of(self);
+  if (!n || !(n->flags & ENT_ACCESS_MENU_HELD))
+    return 0;
+  ent_access_queue(n->id, ENT_ACCESS_MENU, 0, 0, 0);
+  return 1;
 }
 static signed char ent_access_m_focused(id self, SEL s) {
   ent_access_node *n = ent_access_of(self);
@@ -3565,6 +3611,7 @@ static bool ent_access_ready(void) {
     ENT_ACCESS_ADD("isAccessibilityFocused", ent_access_m_focused, "c@:");
     ENT_ACCESS_ADD("accessibilityActionNames", ent_access_m_actions, "@@:");
     ENT_ACCESS_ADD("accessibilityPerformAction:", ent_access_m_perform, "v@:@");
+    ENT_ACCESS_ADD("accessibilityPerformShowMenu", ent_access_m_show_menu, "c@:");
     ENT_ACCESS_ADD("setAccessibilityFocused:", ent_access_m_set_focused, "v@:c");
     ENT_ACCESS_ADD("isAccessibilityEnabled", ent_access_m_enabled, "c@:");
     ENT_ACCESS_ADD("isAccessibilitySelected", ent_access_m_selected, "c@:");
