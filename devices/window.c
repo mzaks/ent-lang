@@ -3059,3 +3059,751 @@ void ent_window_window_title(const ent_text *title) {
     SetWindowTitle(t);
   free(t);
 }
+
+// ---- What the window shows, for assistive apps (VoiceOver on a Mac): a
+// tree the program describes (`access_begin`, `access_node` for each
+// element, `access_text` for a text's caret, `access_end`), kept from one
+// description to the next by the program's ids, so that a reader keeps its
+// place. What the reader did (pressed, focused, set a value or a
+// selection) is queued for `access_asked`. Elsewhere: nothing, and
+// `access_on` false.
+enum {
+  ENT_ACCESS_GROUP, ENT_ACCESS_BUTTON, ENT_ACCESS_FIELD, ENT_ACCESS_AREA,
+  ENT_ACCESS_TEXT, ENT_ACCESS_LIST, ENT_ACCESS_ROW, ENT_ACCESS_TAB,
+  ENT_ACCESS_LINK, ENT_ACCESS_HEADING, ENT_ACCESS_IMAGE
+};
+enum { ENT_ACCESS_SELECTED = 1, ENT_ACCESS_DISABLED = 2, ENT_ACCESS_EXPANDED = 4,
+       ENT_ACCESS_COLLAPSED = 8, ENT_ACCESS_READONLY = 16 };
+enum { ENT_ACCESS_PRESS = 1, ENT_ACCESS_FOCUS = 2, ENT_ACCESS_VALUE = 3, ENT_ACCESS_SELECT = 4 };
+
+typedef struct {
+  int32_t id, kind, from, to;
+  char *value;
+} ent_access_ask;
+static ent_access_ask *ent_access_queued, *ent_access_taken;
+static int ent_access_queued_n, ent_access_queued_room, ent_access_taken_n;
+
+static void ent_access_queue(int32_t id, int32_t kind, int32_t from, int32_t to,
+                             const char *value) {
+  if (ent_access_queued_n == ent_access_queued_room) {
+    int room = ent_access_queued_room ? ent_access_queued_room * 2 : 16;
+    ent_access_ask *more = realloc(ent_access_queued, sizeof(ent_access_ask) * (size_t)room);
+    if (!more)
+      return;
+    ent_access_queued = more;
+    ent_access_queued_room = room;
+  }
+  ent_access_queued[ent_access_queued_n++] =
+      (ent_access_ask){id, kind, from, to, value ? strdup(value) : 0};
+}
+
+int32_t ent_window_access_asked(void) {
+  for (int i = 0; i < ent_access_taken_n; ++i)
+    free(ent_access_taken[i].value);
+  free(ent_access_taken);
+  ent_access_taken = ent_access_queued;
+  ent_access_taken_n = ent_access_queued_n;
+  ent_access_queued = 0;
+  ent_access_queued_n = ent_access_queued_room = 0;
+  return ent_access_taken_n;
+}
+static ent_access_ask *ent_access_ask_at(int32_t i) {
+  return i >= 0 && i < ent_access_taken_n ? &ent_access_taken[i] : 0;
+}
+int32_t ent_window_access_ask_id(int32_t i) {
+  ent_access_ask *a = ent_access_ask_at(i);
+  return a ? a->id : 0;
+}
+int32_t ent_window_access_ask_kind(int32_t i) {
+  ent_access_ask *a = ent_access_ask_at(i);
+  return a ? a->kind : 0;
+}
+int32_t ent_window_access_ask_from(int32_t i) {
+  ent_access_ask *a = ent_access_ask_at(i);
+  return a ? a->from : 0;
+}
+int32_t ent_window_access_ask_to(int32_t i) {
+  ent_access_ask *a = ent_access_ask_at(i);
+  return a ? a->to : 0;
+}
+const ent_text *ent_window_access_ask_value(int32_t i) {
+  ent_access_ask *a = ent_access_ask_at(i);
+  return ent_window_ent_text(a && a->value ? a->value : "");
+}
+
+// UTF-8 bytes and the UTF-16 units a reader counts in.
+static uint32_t ent_access_units(const char *s, size_t bytes) {
+  uint32_t units = 0;
+  for (size_t i = 0; i < bytes; ++i) {
+    unsigned char b = (unsigned char)s[i];
+    if ((b & 0xC0) != 0x80)
+      units += b >= 0xF0 ? 2 : 1;
+  }
+  return units;
+}
+static int32_t ent_access_bytes(const char *s, size_t length, uint32_t units) {
+  uint32_t seen = 0;
+  size_t i = 0;
+  while (i < length && seen < units) {
+    unsigned char b = (unsigned char)s[i];
+    seen += b >= 0xF0 ? 2 : 1;
+    ++i;
+    while (i < length && ((unsigned char)s[i] & 0xC0) == 0x80)
+      ++i;
+  }
+  return (int32_t)i;
+}
+
+#if defined(__APPLE__) && !defined(__EMSCRIPTEN__)
+typedef struct {
+  unsigned long location, length;
+} ent_access_range;
+typedef struct {
+  double x, y, w, h;
+} ent_access_rect;
+
+typedef struct {
+  int32_t id, parent, role, flags, order;
+  float x, y, w, h;
+  char *label, *value;
+  size_t value_length;
+  int32_t caret, anchor;
+  uint32_t length16, *lines, line_count;
+  id element, ns_label, ns_value;
+  bool seen;
+} ent_access_node;
+static ent_access_node *ent_access_nodes;
+static int ent_access_count, ent_access_room;
+static int32_t ent_access_focus, ent_access_order;
+static bool ent_access_wanted, ent_access_changed;
+static Class ent_access_class;
+static ptrdiff_t ent_access_id_at;
+
+extern void NSAccessibilityPostNotification(id element, id notification);
+extern void NSAccessibilityPostNotificationWithUserInfo(id element, id notification,
+                                                        id info);
+
+static ent_access_node *ent_access_find(int32_t id) {
+  for (int i = 0; i < ent_access_count; ++i)
+    if (ent_access_nodes[i].id == id)
+      return &ent_access_nodes[i];
+  return 0;
+}
+static ent_access_node *ent_access_of(id self) {
+  return self ? ent_access_find(*(int32_t *)((char *)self + ent_access_id_at)) : 0;
+}
+static id ent_access_view(void) {
+  id window = (id)GetWindowHandle();
+  return window ? ent_window_send(window, "contentView") : 0;
+}
+static id ent_access_retained_text(const char *s, size_t n) {
+  id made = ((id(*)(id, SEL, const void *, unsigned long, unsigned long))objc_msgSend)(
+      ent_window_send(ent_window_class("NSString"), "alloc"),
+      ent_window_sel("initWithBytes:length:encoding:"), s ? s : "", s ? n : 0, 4);
+  if (!made)
+    made = ent_window_send(ent_window_send(ent_window_class("NSString"), "alloc"), "init");
+  return made;
+}
+static const char *ent_access_role_name(int32_t role) {
+  switch (role) {
+  case ENT_ACCESS_BUTTON: return "AXButton";
+  case ENT_ACCESS_FIELD: return "AXTextField";
+  case ENT_ACCESS_AREA: return "AXTextArea";
+  case ENT_ACCESS_TEXT: return "AXStaticText";
+  case ENT_ACCESS_LIST: return "AXList";
+  case ENT_ACCESS_ROW: return "AXStaticText";
+  case ENT_ACCESS_TAB: return "AXRadioButton";
+  case ENT_ACCESS_LINK: return "AXLink";
+  case ENT_ACCESS_HEADING: return "AXHeading";
+  case ENT_ACCESS_IMAGE: return "AXImage";
+  default: return "AXGroup";
+  }
+}
+static bool ent_access_texty(ent_access_node *n) {
+  return n && (n->role == ENT_ACCESS_FIELD || n->role == ENT_ACCESS_AREA);
+}
+
+// Where an element is on the screen (the screen's points, from its bottom
+// left), from where it is in the window's points (from its top left).
+static ent_access_rect ent_access_screen(float x, float y, float w, float h) {
+  ent_access_rect r = {0, 0, 0, 0};
+  id window = (id)GetWindowHandle();
+  id view = ent_access_view();
+  if (!window || !view)
+    return r;
+  double z = ent_window_zoom_now();
+  bool flipped = ((signed char (*)(id, SEL))objc_msgSend)(view, ent_window_sel("isFlipped"));
+  ent_access_rect bounds;
+#if defined(__x86_64__)
+  ((void (*)(ent_access_rect *, id, SEL))objc_msgSend_stret)(&bounds, view, ent_window_sel("bounds"));
+#else
+  bounds = ((ent_access_rect(*)(id, SEL))objc_msgSend)(view, ent_window_sel("bounds"));
+#endif
+  r.x = x * z;
+  r.w = w * z;
+  r.h = h * z;
+  r.y = flipped ? y * z : bounds.h - (y + h) * z;
+#if defined(__x86_64__)
+  ((void (*)(ent_access_rect *, id, SEL, ent_access_rect, id))objc_msgSend_stret)(
+      &r, view, ent_window_sel("convertRect:toView:"), r, (id)0);
+  ((void (*)(ent_access_rect *, id, SEL, ent_access_rect))objc_msgSend_stret)(
+      &r, window, ent_window_sel("convertRectToScreen:"), r);
+#else
+  r = ((ent_access_rect(*)(id, SEL, ent_access_rect, id))objc_msgSend)(
+      view, ent_window_sel("convertRect:toView:"), r, (id)0);
+  r = ((ent_access_rect(*)(id, SEL, ent_access_rect))objc_msgSend)(
+      window, ent_window_sel("convertRectToScreen:"), r);
+#endif
+  return r;
+}
+
+static id ent_access_children_of(int32_t parent) {
+  int n = 0;
+  for (int i = 0; i < ent_access_count; ++i)
+    if (ent_access_nodes[i].parent == parent)
+      ++n;
+  id *them = n ? malloc(sizeof(id) * (size_t)n) : 0;
+  int k = 0;
+  // (In the order described.)
+  for (int32_t o = 0, left = n; left > 0 && them; ++o) {
+    bool any = false;
+    for (int i = 0; i < ent_access_count; ++i)
+      if (ent_access_nodes[i].parent == parent && ent_access_nodes[i].order >= o) {
+        any = true;
+        break;
+      }
+    if (!any)
+      break;
+    for (int i = 0; i < ent_access_count; ++i)
+      if (ent_access_nodes[i].parent == parent && ent_access_nodes[i].order == o) {
+        them[k++] = ent_access_nodes[i].element;
+        --left;
+      }
+  }
+  id list = ((id(*)(id, SEL, const id *, unsigned long))objc_msgSend)(
+      ent_window_class("NSArray"), ent_window_sel("arrayWithObjects:count:"), them, (unsigned long)k);
+  free(them);
+  return list;
+}
+
+// The element's answers to the reader.
+static id ent_access_m_role(id self, SEL s) {
+  ent_access_node *n = ent_access_of(self);
+  return ent_window_ns_text(ent_access_role_name(n ? n->role : 0));
+}
+static id ent_access_m_subrole(id self, SEL s) {
+  ent_access_node *n = ent_access_of(self);
+  return n && n->role == ENT_ACCESS_TAB ? ent_window_ns_text("AXTabButton") : (id)0;
+}
+static id ent_access_m_label(id self, SEL s) {
+  ent_access_node *n = ent_access_of(self);
+  if (!n || n->role == ENT_ACCESS_TEXT || n->role == ENT_ACCESS_ROW)
+    return (id)0;
+  return n->ns_label;
+}
+static id ent_access_m_value(id self, SEL s) {
+  ent_access_node *n = ent_access_of(self);
+  if (!n)
+    return (id)0;
+  if (n->role == ENT_ACCESS_TAB)
+    return ((id(*)(id, SEL, int))objc_msgSend)(ent_window_class("NSNumber"),
+                                               ent_window_sel("numberWithInt:"),
+                                               (n->flags & ENT_ACCESS_SELECTED) ? 1 : 0);
+  if (n->role == ENT_ACCESS_TEXT || n->role == ENT_ACCESS_ROW || n->role == ENT_ACCESS_HEADING)
+    return n->value_length ? n->ns_value : n->ns_label;
+  return ent_access_texty(n) ? n->ns_value : (id)0;
+}
+static signed char ent_access_m_yes(id self, SEL s) { return 1; }
+static id ent_access_m_children(id self, SEL s) {
+  ent_access_node *n = ent_access_of(self);
+  return ent_access_children_of(n ? n->id : -1);
+}
+static id ent_access_m_parent(id self, SEL s) {
+  ent_access_node *n = ent_access_of(self);
+  ent_access_node *p = n && n->parent ? ent_access_find(n->parent) : 0;
+  return p ? p->element : ent_access_view();
+}
+static id ent_access_m_window(id self, SEL s) { return (id)GetWindowHandle(); }
+static ent_access_rect ent_access_m_frame(id self, SEL s) {
+  ent_access_node *n = ent_access_of(self);
+  ent_access_rect none = {0, 0, 0, 0};
+  return n ? ent_access_screen(n->x, n->y, n->w, n->h) : none;
+}
+static signed char ent_access_m_press(id self, SEL s) {
+  ent_access_node *n = ent_access_of(self);
+  if (n)
+    ent_access_queue(n->id, ENT_ACCESS_PRESS, 0, 0, 0);
+  return n != 0;
+}
+static signed char ent_access_m_focused(id self, SEL s) {
+  ent_access_node *n = ent_access_of(self);
+  return n && n->id == ent_access_focus;
+}
+static void ent_access_m_set_focused(id self, SEL s, signed char on) {
+  ent_access_node *n = ent_access_of(self);
+  if (n && on)
+    ent_access_queue(n->id, ENT_ACCESS_FOCUS, 0, 0, 0);
+}
+static signed char ent_access_m_enabled(id self, SEL s) {
+  ent_access_node *n = ent_access_of(self);
+  return !n || !(n->flags & ENT_ACCESS_DISABLED);
+}
+static signed char ent_access_m_selected(id self, SEL s) {
+  ent_access_node *n = ent_access_of(self);
+  return n && (n->flags & ENT_ACCESS_SELECTED);
+}
+static signed char ent_access_m_expanded(id self, SEL s) {
+  ent_access_node *n = ent_access_of(self);
+  return n && (n->flags & ENT_ACCESS_EXPANDED);
+}
+static void ent_access_m_set_value(id self, SEL s, id value) {
+  ent_access_node *n = ent_access_of(self);
+  if (!ent_access_texty(n) || (n->flags & ENT_ACCESS_READONLY))
+    return;
+  const char *bytes =
+      value ? ((const char *(*)(id, SEL))objc_msgSend)(value, ent_window_sel("UTF8String")) : "";
+  ent_access_queue(n->id, ENT_ACCESS_VALUE, 0, 0, bytes ? bytes : "");
+}
+static long ent_access_m_count(id self, SEL s) {
+  ent_access_node *n = ent_access_of(self);
+  return n ? (long)n->length16 : 0;
+}
+static ent_access_range ent_access_selection(ent_access_node *n) {
+  ent_access_range r = {0, 0};
+  if (!n)
+    return r;
+  int32_t from = n->caret < n->anchor ? n->caret : n->anchor;
+  int32_t to = n->caret < n->anchor ? n->anchor : n->caret;
+  if (from < 0)
+    from = 0;
+  if ((size_t)to > n->value_length)
+    to = (int32_t)n->value_length;
+  if (from > to)
+    from = to;
+  uint32_t a = ent_access_units(n->value, (size_t)from);
+  uint32_t b = a + ent_access_units(n->value + from, (size_t)(to - from));
+  r.location = a;
+  r.length = b - a;
+  return r;
+}
+static ent_access_range ent_access_m_selected_range(id self, SEL s) {
+  return ent_access_selection(ent_access_of(self));
+}
+static void ent_access_m_set_selected_range(id self, SEL s, ent_access_range r) {
+  ent_access_node *n = ent_access_of(self);
+  if (!ent_access_texty(n))
+    return;
+  int32_t from = ent_access_bytes(n->value, n->value_length, (uint32_t)r.location);
+  int32_t to = ent_access_bytes(n->value, n->value_length, (uint32_t)(r.location + r.length));
+  ent_access_queue(n->id, ENT_ACCESS_SELECT, from, to, 0);
+}
+static id ent_access_substring(ent_access_node *n, ent_access_range r) {
+  if (!n || !n->ns_value)
+    return (id)0;
+  if (r.location > n->length16)
+    r.location = n->length16;
+  if (r.location + r.length > n->length16)
+    r.length = n->length16 - r.location;
+  return ((id(*)(id, SEL, ent_access_range))objc_msgSend)(
+      n->ns_value, ent_window_sel("substringWithRange:"), r);
+}
+static id ent_access_m_selected_text(id self, SEL s) {
+  ent_access_node *n = ent_access_of(self);
+  return ent_access_substring(n, ent_access_selection(n));
+}
+static long ent_access_line_of(ent_access_node *n, unsigned long at) {
+  if (!n || n->line_count == 0)
+    return 0;
+  long low = 0, high = (long)n->line_count - 1;
+  while (low < high) {
+    long mid = (low + high + 1) / 2;
+    if (n->lines[mid] <= at)
+      low = mid;
+    else
+      high = mid - 1;
+  }
+  return low;
+}
+static long ent_access_m_caret_line(id self, SEL s) {
+  ent_access_node *n = ent_access_of(self);
+  ent_access_range r = ent_access_selection(n);
+  return ent_access_line_of(n, r.location + r.length);
+}
+static long ent_access_m_line_for(id self, SEL s, long at) {
+  return ent_access_line_of(ent_access_of(self), at < 0 ? 0 : (unsigned long)at);
+}
+static ent_access_range ent_access_m_range_for_line(id self, SEL s, long line) {
+  ent_access_node *n = ent_access_of(self);
+  ent_access_range r = {0, 0};
+  if (!n || line < 0 || (uint32_t)line >= n->line_count)
+    return r;
+  r.location = n->lines[line];
+  r.length = ((uint32_t)line + 1 < n->line_count ? n->lines[line + 1] : n->length16) - r.location;
+  return r;
+}
+static ent_access_range ent_access_m_range_for_index(id self, SEL s, long at) {
+  ent_access_node *n = ent_access_of(self);
+  ent_access_range r = {at < 0 ? 0 : (unsigned long)at, 1};
+  if (n && r.location >= n->length16)
+    r.length = 0;
+  return r;
+}
+static id ent_access_m_string_for(id self, SEL s, ent_access_range r) {
+  return ent_access_substring(ent_access_of(self), r);
+}
+static id ent_access_m_attributed_for(id self, SEL s, ent_access_range r) {
+  id plain = ent_access_substring(ent_access_of(self), r);
+  if (!plain)
+    return (id)0;
+  id made = ((id(*)(id, SEL, id))objc_msgSend)(
+      ent_window_send(ent_window_class("NSAttributedString"), "alloc"),
+      ent_window_sel("initWithString:"), plain);
+  return ent_window_send(made, "autorelease");
+}
+static ent_access_range ent_access_m_visible(id self, SEL s) {
+  ent_access_node *n = ent_access_of(self);
+  ent_access_range r = {0, n ? n->length16 : 0};
+  return r;
+}
+static ent_access_rect ent_access_m_frame_for(id self, SEL s, ent_access_range r) {
+  return ent_access_m_frame(self, s);
+}
+
+// The window's view: what it holds, what has the focus, what is at a
+// point of the screen (the deepest element there).
+static id ent_access_v_children(id self, SEL s) {
+  ent_access_wanted = true;
+  return ent_access_children_of(0);
+}
+static id ent_access_v_focused(id self, SEL s) {
+  ent_access_wanted = true;
+  ent_access_node *n = ent_access_focus ? ent_access_find(ent_access_focus) : 0;
+  return n ? n->element : self;
+}
+static id ent_access_v_hit(id self, SEL s, ent_window_ns_point at) {
+  ent_access_wanted = true;
+  ent_access_node *best = 0;
+  double best_area = 0;
+  for (int i = 0; i < ent_access_count; ++i) {
+    ent_access_node *n = &ent_access_nodes[i];
+    ent_access_rect r = ent_access_screen(n->x, n->y, n->w, n->h);
+    if (at.x >= r.x && at.x < r.x + r.w && at.y >= r.y && at.y < r.y + r.h &&
+        (!best || r.w * r.h <= best_area)) {
+      best = n;
+      best_area = r.w * r.h;
+    }
+  }
+  return best ? best->element : self;
+}
+static signed char ent_access_v_no(id self, SEL s) { return 0; }
+
+static const char *ent_access_rect_type = "{CGRect={CGPoint=dd}{CGSize=dd}}";
+static bool ent_access_ready(void) {
+  static int state; // 0 not yet, 1 ready, -1 could not be
+  if (state)
+    return state == 1;
+  id view = ent_access_view();
+  if (!view)
+    return false;
+  state = -1;
+  Class base = objc_getClass("NSAccessibilityElement");
+  if (!base)
+    return false;
+  ent_access_class = objc_getClass("EntAccessElement");
+  if (!ent_access_class) {
+    Class c = objc_allocateClassPair(base, "EntAccessElement", 0);
+    class_addIvar(c, "entAccessId", sizeof(int32_t), 2, "i");
+    char t[96];
+#define ENT_ACCESS_ADD(sel, imp, types) class_addMethod(c, ent_window_sel(sel), (IMP)(imp), types)
+    ENT_ACCESS_ADD("accessibilityRole", ent_access_m_role, "@@:");
+    ENT_ACCESS_ADD("accessibilitySubrole", ent_access_m_subrole, "@@:");
+    ENT_ACCESS_ADD("accessibilityLabel", ent_access_m_label, "@@:");
+    ENT_ACCESS_ADD("accessibilityValue", ent_access_m_value, "@@:");
+    ENT_ACCESS_ADD("isAccessibilityElement", ent_access_m_yes, "c@:");
+    ENT_ACCESS_ADD("accessibilityChildren", ent_access_m_children, "@@:");
+    ENT_ACCESS_ADD("accessibilityParent", ent_access_m_parent, "@@:");
+    ENT_ACCESS_ADD("accessibilityWindow", ent_access_m_window, "@@:");
+    ENT_ACCESS_ADD("accessibilityTopLevelUIElement", ent_access_m_window, "@@:");
+    snprintf(t, sizeof t, "%s@:", ent_access_rect_type);
+    ENT_ACCESS_ADD("accessibilityFrame", ent_access_m_frame, t);
+    ENT_ACCESS_ADD("accessibilityPerformPress", ent_access_m_press, "c@:");
+    ENT_ACCESS_ADD("isAccessibilityFocused", ent_access_m_focused, "c@:");
+    ENT_ACCESS_ADD("setAccessibilityFocused:", ent_access_m_set_focused, "v@:c");
+    ENT_ACCESS_ADD("isAccessibilityEnabled", ent_access_m_enabled, "c@:");
+    ENT_ACCESS_ADD("isAccessibilitySelected", ent_access_m_selected, "c@:");
+    ENT_ACCESS_ADD("isAccessibilityExpanded", ent_access_m_expanded, "c@:");
+    ENT_ACCESS_ADD("setAccessibilityValue:", ent_access_m_set_value, "v@:@");
+    ENT_ACCESS_ADD("accessibilityNumberOfCharacters", ent_access_m_count, "q@:");
+    ENT_ACCESS_ADD("accessibilitySelectedTextRange", ent_access_m_selected_range, "{_NSRange=QQ}@:");
+    ENT_ACCESS_ADD("setAccessibilitySelectedTextRange:", ent_access_m_set_selected_range,
+                   "v@:{_NSRange=QQ}");
+    ENT_ACCESS_ADD("accessibilitySelectedText", ent_access_m_selected_text, "@@:");
+    ENT_ACCESS_ADD("accessibilityInsertionPointLineNumber", ent_access_m_caret_line, "q@:");
+    ENT_ACCESS_ADD("accessibilityLineForIndex:", ent_access_m_line_for, "q@:q");
+    ENT_ACCESS_ADD("accessibilityRangeForLine:", ent_access_m_range_for_line, "{_NSRange=QQ}@:q");
+    ENT_ACCESS_ADD("accessibilityRangeForIndex:", ent_access_m_range_for_index, "{_NSRange=QQ}@:q");
+    ENT_ACCESS_ADD("accessibilityStringForRange:", ent_access_m_string_for, "@@:{_NSRange=QQ}");
+    ENT_ACCESS_ADD("accessibilityAttributedStringForRange:", ent_access_m_attributed_for,
+                   "@@:{_NSRange=QQ}");
+    ENT_ACCESS_ADD("accessibilityVisibleCharacterRange", ent_access_m_visible, "{_NSRange=QQ}@:");
+    snprintf(t, sizeof t, "%s@:{_NSRange=QQ}", ent_access_rect_type);
+    ENT_ACCESS_ADD("accessibilityFrameForRange:", ent_access_m_frame_for, t);
+#undef ENT_ACCESS_ADD
+    objc_registerClassPair(c);
+    ent_access_class = c;
+  }
+  Ivar ivar = class_getInstanceVariable(ent_access_class, "entAccessId");
+  if (!ivar)
+    return false;
+  ent_access_id_at = ivar_getOffset(ivar);
+  Class v = object_getClass(view);
+  class_replaceMethod(v, ent_window_sel("accessibilityChildren"), (IMP)ent_access_v_children, "@@:");
+  class_replaceMethod(v, ent_window_sel("accessibilityFocusedUIElement"), (IMP)ent_access_v_focused,
+                      "@@:");
+  class_replaceMethod(v, ent_window_sel("accessibilityHitTest:"), (IMP)ent_access_v_hit,
+                      "@@:{CGPoint=dd}");
+  class_replaceMethod(v, ent_window_sel("isAccessibilityElement"), (IMP)ent_access_v_no, "c@:");
+  state = 1;
+  return true;
+}
+
+bool ent_window_access_on(void) {
+  if (!ent_access_ready())
+    return false;
+  static int forced = -1;
+  if (forced < 0)
+    forced = getenv("ENT_ACCESS") && strcmp(getenv("ENT_ACCESS"), "1") == 0;
+  if (forced || ent_access_wanted)
+    return true;
+  // (VoiceOver on: asked at most each second.)
+  static double asked;
+  static bool voice;
+  double now = GetTime();
+  if (asked == 0 || now - asked >= 1) {
+    asked = now;
+    id workspace = ent_window_send(ent_window_class("NSWorkspace"), "sharedWorkspace");
+    voice = ((signed char (*)(id, SEL))objc_msgSend)(workspace,
+                                                     ent_window_sel("isVoiceOverEnabled"));
+  }
+  return voice;
+}
+
+void ent_window_access_begin(void) {
+  for (int i = 0; i < ent_access_count; ++i)
+    ent_access_nodes[i].seen = false;
+  ent_access_order = 0;
+  ent_access_changed = false;
+}
+
+static void ent_access_set_value(ent_access_node *n, const ent_text *value) {
+  uint32_t length = value ? value->length : 0;
+  if (n->value && n->value_length == length &&
+      (length == 0 || memcmp(n->value, value->bytes, length) == 0))
+    return;
+  free(n->value);
+  n->value = malloc((size_t)length + 1);
+  if (length)
+    memcpy(n->value, value->bytes, length);
+  n->value[length] = 0;
+  n->value_length = length;
+  if (n->ns_value)
+    ent_window_send(n->ns_value, "release");
+  n->ns_value = ent_access_retained_text(n->value, length);
+  // The line starts, in UTF-16 units.
+  free(n->lines);
+  uint32_t lines = 1;
+  for (uint32_t i = 0; i < length; ++i)
+    if (n->value[i] == '\n')
+      ++lines;
+  n->lines = malloc(sizeof(uint32_t) * lines);
+  n->line_count = 0;
+  uint32_t units = 0;
+  if (n->lines)
+    n->lines[n->line_count++] = 0;
+  for (uint32_t i = 0; i < length; ++i) {
+    unsigned char b = (unsigned char)n->value[i];
+    if ((b & 0xC0) != 0x80)
+      units += b >= 0xF0 ? 2 : 1;
+    if (b == '\n' && n->lines)
+      n->lines[n->line_count++] = units;
+  }
+  n->length16 = units;
+  if (n->element && ent_access_texty(n))
+    NSAccessibilityPostNotification(n->element, ent_window_ns_text("AXValueChanged"));
+}
+
+void ent_window_access_node(int32_t key, int32_t parent, int32_t role, const ent_text *label,
+                            const ent_text *value, float x, float y, float w, float h,
+                            int32_t flags) {
+  if (!ent_access_ready() || key == 0)
+    return;
+  ent_access_node *n = ent_access_find(key);
+  if (!n) {
+    if (ent_access_count == ent_access_room) {
+      int room = ent_access_room ? ent_access_room * 2 : 64;
+      ent_access_node *more = realloc(ent_access_nodes, sizeof(ent_access_node) * (size_t)room);
+      if (!more)
+        return;
+      ent_access_nodes = more;
+      ent_access_room = room;
+    }
+    n = &ent_access_nodes[ent_access_count++];
+    memset(n, 0, sizeof *n);
+    n->id = key;
+    n->element = ent_window_send(ent_window_send((id)ent_access_class, "alloc"), "init");
+    *(int32_t *)((char *)n->element + ent_access_id_at) = key;
+    ent_access_changed = true;
+  }
+  if (n->parent != parent || n->role != role)
+    ent_access_changed = true;
+  n->parent = parent;
+  n->role = role;
+  n->flags = flags;
+  n->x = x;
+  n->y = y;
+  n->w = w;
+  n->h = h;
+  n->order = ent_access_order++;
+  n->seen = true;
+  uint32_t ln = label ? label->length : 0;
+  if (!n->label || strlen(n->label) != ln || (ln && memcmp(n->label, label->bytes, ln) != 0)) {
+    free(n->label);
+    n->label = malloc((size_t)ln + 1);
+    if (ln)
+      memcpy(n->label, label->bytes, ln);
+    n->label[ln] = 0;
+    if (n->ns_label)
+      ent_window_send(n->ns_label, "release");
+    n->ns_label = ent_access_retained_text(n->label, ln);
+  }
+  ent_access_set_value(n, value);
+}
+
+void ent_window_access_text(int32_t key, int32_t caret, int32_t anchor) {
+  ent_access_node *n = ent_access_find(key);
+  if (!n || (n->caret == caret && n->anchor == anchor))
+    return;
+  n->caret = caret;
+  n->anchor = anchor;
+  if (n->element && key == ent_access_focus)
+    NSAccessibilityPostNotification(n->element, ent_window_ns_text("AXSelectedTextChanged"));
+}
+
+static void ent_access_dump(id element, int depth);
+void ent_window_access_end(int32_t focus) {
+  if (!ent_access_ready())
+    return;
+  void *pool = objc_autoreleasePoolPush();
+  // What was not described again is gone.
+  int kept = 0;
+  for (int i = 0; i < ent_access_count; ++i) {
+    ent_access_node *n = &ent_access_nodes[i];
+    if (n->seen) {
+      ent_access_nodes[kept++] = *n;
+      continue;
+    }
+    NSAccessibilityPostNotification(n->element, ent_window_ns_text("AXUIElementDestroyed"));
+    ent_window_send(n->element, "release");
+    if (n->ns_label)
+      ent_window_send(n->ns_label, "release");
+    if (n->ns_value)
+      ent_window_send(n->ns_value, "release");
+    free(n->label);
+    free(n->value);
+    free(n->lines);
+    ent_access_changed = true;
+  }
+  ent_access_count = kept;
+  id window = (id)GetWindowHandle();
+  if (ent_access_changed && window)
+    NSAccessibilityPostNotification(window, ent_window_ns_text("AXLayoutChanged"));
+  bool refocused = focus != ent_access_focus;
+  if (refocused) {
+    ent_access_focus = focus;
+    ent_access_node *n = ent_access_find(focus);
+    if (n)
+      NSAccessibilityPostNotification(n->element, ent_window_ns_text("AXFocusedUIElementChanged"));
+  }
+  const char *dump = getenv("ENT_ACCESS_DUMP");
+  if (dump && *dump && !ent_access_changed && refocused) {
+    ent_access_node *n = ent_access_find(focus);
+    fprintf(stderr, "access: focused: %s\n", n && n->label ? n->label : "(the view)");
+  }
+  if (dump && *dump && ent_access_changed) {
+    fprintf(stderr, "access: the window's view holds\n");
+    id view = ent_access_view();
+    id children = view ? ((id(*)(id, SEL))objc_msgSend)(view, ent_window_sel("accessibilityChildren")) : 0;
+    unsigned long count = children ? ((unsigned long (*)(id, SEL))objc_msgSend)(children, ent_window_sel("count")) : 0;
+    for (unsigned long i = 0; i < count; ++i)
+      ent_access_dump(((id(*)(id, SEL, unsigned long))objc_msgSend)(children, ent_window_sel("objectAtIndex:"), i), 1);
+    id focused = view ? ((id(*)(id, SEL))objc_msgSend)(view, ent_window_sel("accessibilityFocusedUIElement")) : 0;
+    id label = focused ? ((id(*)(id, SEL))objc_msgSend)(focused, ent_window_sel("accessibilityLabel")) : 0;
+    fprintf(stderr, "access: focused: %s\n",
+            label ? ((const char *(*)(id, SEL))objc_msgSend)(label, ent_window_sel("UTF8String")) : "(the view)");
+  }
+  objc_autoreleasePoolPop(pool);
+}
+
+// The tree as the elements' own methods answer it (ENT_ACCESS_DUMP).
+static const char *ent_access_utf8(id s) {
+  return s ? ((const char *(*)(id, SEL))objc_msgSend)(s, ent_window_sel("UTF8String")) : "";
+}
+static void ent_access_dump(id element, int depth) {
+  id role = ((id(*)(id, SEL))objc_msgSend)(element, ent_window_sel("accessibilityRole"));
+  id label = ((id(*)(id, SEL))objc_msgSend)(element, ent_window_sel("accessibilityLabel"));
+  id value = ((id(*)(id, SEL))objc_msgSend)(element, ent_window_sel("accessibilityValue"));
+  const char *v = "";
+  char number[32];
+  if (value && ((signed char (*)(id, SEL, Class))objc_msgSend)(value, ent_window_sel("isKindOfClass:"),
+                                                               objc_getClass("NSString")))
+    v = ent_access_utf8(value);
+  else if (value) {
+    snprintf(number, sizeof number, "%d",
+             ((int (*)(id, SEL))objc_msgSend)(value, ent_window_sel("intValue")));
+    v = number;
+  }
+  ent_access_rect r = ((ent_access_rect(*)(id, SEL))objc_msgSend)(element, ent_window_sel("accessibilityFrame"));
+  char shown[64];
+  snprintf(shown, sizeof shown, "%.40s", v);
+  for (char *c = shown; *c; ++c)
+    if (*c == '\n')
+      *c = ' ';
+  fprintf(stderr, "access: %*s%s \"%s\" value \"%s\" at %.0f,%.0f %.0fx%.0f\n", depth * 2, "",
+          ent_access_utf8(role), ent_access_utf8(label), shown, r.x, r.y, r.w, r.h);
+  id children = ((id(*)(id, SEL))objc_msgSend)(element, ent_window_sel("accessibilityChildren"));
+  unsigned long count = children ? ((unsigned long (*)(id, SEL))objc_msgSend)(children, ent_window_sel("count")) : 0;
+  for (unsigned long i = 0; i < count && depth < 8; ++i)
+    ent_access_dump(((id(*)(id, SEL, unsigned long))objc_msgSend)(children, ent_window_sel("objectAtIndex:"), i),
+                    depth + 1);
+}
+
+void ent_window_access_announce(const ent_text *t) {
+  char *said = ent_window_c_text(t);
+  if (said && *said && ent_access_ready()) {
+    void *pool = objc_autoreleasePoolPush();
+    id keys[2] = {ent_window_ns_text("AXAnnouncementKey"), ent_window_ns_text("AXPriorityKey")};
+    id values[2] = {ent_window_ns_text(said),
+                    ((id(*)(id, SEL, int))objc_msgSend)(ent_window_class("NSNumber"),
+                                                        ent_window_sel("numberWithInt:"), 90)};
+    id info = ((id(*)(id, SEL, const id *, const id *, unsigned long))objc_msgSend)(
+        ent_window_class("NSDictionary"), ent_window_sel("dictionaryWithObjects:forKeys:count:"),
+        values, keys, 2);
+    id app = ent_window_send(ent_window_class("NSApplication"), "sharedApplication");
+    NSAccessibilityPostNotificationWithUserInfo(app, ent_window_ns_text("AXAnnouncementRequested"),
+                                                info);
+    if (getenv("ENT_ACCESS_DUMP"))
+      fprintf(stderr, "access: announced: %s\n", said);
+    objc_autoreleasePoolPop(pool);
+  }
+  free(said);
+}
+#else
+bool ent_window_access_on(void) { return false; }
+void ent_window_access_begin(void) {}
+void ent_window_access_node(int32_t id, int32_t parent, int32_t role, const ent_text *label,
+                            const ent_text *value, float x, float y, float w, float h,
+                            int32_t flags) {}
+void ent_window_access_text(int32_t id, int32_t caret, int32_t anchor) {}
+void ent_window_access_end(int32_t focus) {}
+void ent_window_access_announce(const ent_text *t) {}
+#endif
