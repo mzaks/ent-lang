@@ -6,6 +6,12 @@
 // say (0 right, 1 down, 2 left, 3 up, 4 none). pilot_activity gives a
 // channel's recent spikes, for drawing.
 extern proc pilot_begin()
+// The maze, once a level: whether he can be on a tile (then pilot_at
+// each frame, before the pellets and ghosts, says where he is and the
+// way he goes, 4 none, and they are told by the shortest way to them
+// through it).
+extern proc pilot_open(col: i32, row: i32, open: bool)
+extern proc pilot_at(col: i32, row: i32, dir: i32)
 extern proc pilot_pellet(dc: i32, dr: i32)
 extern proc pilot_ghost(dc: i32, dr: i32, scared: bool)
 extern proc pilot_step(ms: f32) -> i32

@@ -33,8 +33,8 @@
 // starts, and called through the functions below, which copy the spikes
 // from its memory into the game's. The URL's ?seed= (any text, hashed as
 // ent_dish.seed_of does), ?stim=0, ?ghosts=, ?motor=, ?decoder= and
-// ?prey=, ?pick= stand for DISH_SEED, DISH_STIM, DISH_GHOSTS, DISH_MOTOR,
-// DISH_DECODER, DISH_PREY and DISH_PICK.
+// ?prey=, ?pick=, ?path= stand for DISH_SEED, DISH_STIM, DISH_GHOSTS, DISH_MOTOR,
+// DISH_DECODER, DISH_PREY, DISH_PICK and DISH_PATH.
 #define _GNU_SOURCE
 #ifndef __EMSCRIPTEN__
 #include <dlfcn.h>
@@ -270,18 +270,97 @@ static void open_dish(void) {
   }
 }
 
+// The maze, when the game gives it (pilot_open): then where something is
+// is told as the first step of the shortest way to it through the maze
+// and how many steps that is, not as the crow flies, which sent him to
+// and fro past the turn up to a pellet behind a wall. DISH_PATH: 1 (the
+// default) the pellets and frightened ghosts so, 3 the other ghosts too
+// (they then warn him later: worse), 0 all as the crow flies.
+#define COLS 28
+#define ROWS 31
+static unsigned char open_tile[ROWS][COLS];
+static int have_maze, by_path = -1, pac_col, pac_row, pac_dir = 4;
+static int dist[ROWS][COLS], came[ROWS][COLS];
+static const int DX[4] = {1, 0, -1, 0}, DY[4] = {0, 1, 0, -1};
+
+void ent_dishpilot_pilot_open(int32_t col, int32_t row, bool open) {
+  if (col >= 0 && col < COLS && row >= 0 && row < ROWS) {
+    open_tile[row][col] = open;
+    have_maze = 1;
+  }
+}
+
+// Each frame, where he is: the steps from there to every tile, and the
+// first of them, breadth first (the tunnel wraps).
+void ent_dishpilot_pilot_at(int32_t col, int32_t row, int32_t dir) {
+  pac_dir = dir;
+  if (by_path < 0) {
+    const char *p = getenv("DISH_PATH");
+    by_path = p ? atoi(p) : 1;
+  }
+  pac_col = col;
+  pac_row = row;
+  if (!have_maze || !by_path || col < 0 || col >= COLS || row < 0 || row >= ROWS) return;
+  static int queue[ROWS * COLS];
+  for (int r = 0; r < ROWS; ++r)
+    for (int c = 0; c < COLS; ++c) dist[r][c] = -1;
+  int head = 0, tail = 0;
+  dist[row][col] = 0;
+  came[row][col] = -1;
+  queue[tail++] = row * COLS + col;
+  while (head < tail) {
+    int at = queue[head++], r = at / COLS, c = at % COLS;
+    for (int w = 0; w < 4; ++w) {
+      int nr = r + DY[w], nc = (c + DX[w] + COLS) % COLS;
+      if (nr < 0 || nr >= ROWS || !open_tile[nr][nc] || dist[nr][nc] >= 0) continue;
+      dist[nr][nc] = dist[r][c] + 1;
+      came[nr][nc] = w;   // the last step to it
+      queue[tail++] = nr * COLS + nc;
+    }
+  }
+}
+
+// Where something is from him, as (dc, dr) whose larger part is the way
+// to go and whose size is the steps: by the maze when it is known.
+static int locate(int32_t *dc, int32_t *dr, int what) {
+  if (!have_maze || !(by_path & what)) return abs(*dc) + abs(*dr);
+  int c = ((pac_col + *dc) % COLS + COLS) % COLS, r = pac_row + *dr;
+  if (r < 0 || r >= ROWS || dist[r][c] < 0) return -1;   // not reachable
+  int d = dist[r][c];
+  if (d == 0) return 0;
+  // The steps there, walked back from it.
+  int steps[ROWS * COLS], n = 0;
+  while (came[r][c] >= 0) {
+    int w = came[r][c];
+    steps[n++] = w;
+    r -= DY[w];
+    c = (c - DX[w] + COLS) % COLS;
+  }
+  // Going that way already: the next turn on it, told early, for the game
+  // keeps a way asked for until it opens (the dish answers in about the
+  // time he takes a tile); else the first step.
+  int w = steps[n - 1];
+  if (w == pac_dir)
+    for (int k = n - 2; k >= 0; --k)
+      if (steps[k] != w) { w = steps[k]; break; }
+  *dc = DX[w] * d;
+  *dr = DY[w] * d;
+  return d;
+}
+
 void ent_dishpilot_pilot_begin(void) {
   open_dish();
   food_d = ghost_d = prey_d = 1 << 30;
 }
 
 void ent_dishpilot_pilot_pellet(int32_t dc, int32_t dr) {
-  int d = abs(dc) + abs(dr);
-  if (d < food_d) { food_d = d; food_dc = dc; food_dr = dr; }
+  int d = locate(&dc, &dr, 1);
+  if (d > 0 && d < food_d) { food_d = d; food_dc = dc; food_dr = dr; }
 }
 
 void ent_dishpilot_pilot_ghost(int32_t dc, int32_t dr, bool scared) {
-  int d = abs(dc) + abs(dr);
+  int d = locate(&dc, &dr, scared ? 1 : 2);
+  if (d < 0) return;
   if (!scared && d < ghost_d) { ghost_d = d; ghost_dc = dc; ghost_dr = dr; }
   if (scared && d < prey_d) { prey_d = d; prey_dc = dc; prey_dr = dr; }
 }

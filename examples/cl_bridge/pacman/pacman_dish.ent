@@ -25,7 +25,8 @@
 // him to them), DISH_MOTOR=0 the motor regions two electrodes deep (1, the
 // default: only the ring touching the sensory electrodes), DISH_DECODER=0
 // the regions read as they fire (1: each against its own background),
-// DISH_PREY=0 frightened ghosts left out (1: the nearest within 12 tiles
+// DISH_PATH=0 where things are as the crow flies (1: by the shortest way
+// through the maze), DISH_PREY=0 frightened ghosts left out (1: the nearest within 12 tiles
 // told as food, ahead of the pellets), PACMAN_FAST=1 runs the game
 // as fast as it can (a 60th of a second of it a frame, not waiting).
 //
@@ -333,6 +334,7 @@ system flow() {
 // What the dish is told: where each pellet and each ghost is from him.
 system sense() {
   pilot_begin()
+  pilot_at(Pac.col, Pac.row, Pac.dir as i32)
   for p: Pellet { pilot_pellet(p.col - Pac.col, p.row - Pac.row) }
   // (Only those out in the maze: in the house or as eyes none can catch
   // him or be eaten.)
@@ -349,6 +351,7 @@ system unload() {
 system fill() {
   for i in 0..868 {
     let tile = Maze[i]
+    pilot_open(i % 28, i / 28, tile != '#' && tile != '-')
     if tile == '.' || tile == 'o' {
       spawn { Pellet { col: i % 28, row: i / 28, power: tile == 'o' } }
     }
