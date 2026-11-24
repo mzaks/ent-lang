@@ -108,6 +108,10 @@ code { font: .85em var(--mono); }
       <select id="dec"><option value="1" selected>each region against its background</option><option value="0">the spikes as they come</option></select>
     </div>
     <div class="field">
+      <label for="motor">Motor regions</label>
+      <select id="motor"><option value="0" selected>the outer columns</option><option value="3">next to the ball's electrodes</option></select>
+    </div>
+    <div class="field">
       <label for="speed">Speed</label>
       <select id="speed"><option value="1" selected>real time</option><option value="0">as fast as it goes</option></select>
     </div>
@@ -169,6 +173,7 @@ code { font: .85em var(--mono); }
     <p>How it plays: the ball's place, its height less the paddle's (or, as chosen, its height on the court), is stimulated into one of 8 sensory electrodes, faster as the ball nears the paddle (4 to 40 Hz). The paddle moves towards whichever motor region, up or down, has fired more over the last 0.1 s; the bar under each array shows that balance. Most of the learning happens in the first few minutes.</p>
     <p>Ball told as: with its height on the court the dish learns the edges but never the middle, where the right way depends on the paddle, which it is not told. Told relative to the paddle, the right way is fixed for each electrode; with those electrodes moved to the side of the dish whose region they should drive (rows above the paddle nearer the up region), the dish learns the whole court, the middle included (zones.py in examples/cl_bridge).</p>
     <p>Paddle reads: the paddle moves towards the motor region that fires more. Read as the spikes come, a region that simply fires more than the other pulls the paddle its way all the time. Read against each region's own background (its average over the last 2 seconds), only a region that fires more than it usually does pulls, so what moves the paddle is the dish's answer to the ball. With the ball relative to the paddle on matched electrodes, the share of balls hit after 20 minutes rises from 0.54 to 0.71, and the reward then adds 0.23 over a dish without it (zones.py decoders).</p>
+    <p>Motor regions: the paddle's two regions are normally the outer columns, far from the ball's electrodes, so a stim reaches them only through synapses the dish has to tune. Put them next to the ball's electrodes (column 2 up, column 5 down) and each electrode's answer lands in the region beside it: the untrained dish already hits about 0.89 of the balls after 20 minutes and the trained one 0.93, the reward adding only 0.05 (zones.py motor). The best Pong of any setup, and almost none of it learnt: a reflex built by the choice of electrodes. Watch the untrained dish on the left.</p>
     <p>What it is: a model, not a culture. The dish is a simplified leaky integrate-and-fire network written in ent (examples/cl_bridge in ent-lang), compiled to WebAssembly, not validated against recordings of real cultures. The reward and punish electrodes deliver a dopamine-like signal that no real culture has. The same seed gives the same games here as in <code>dish_pong.py</code> on your own computer, which writes recordings this page replays.</p>
     <p id="msg"></p>
   </div>
@@ -180,9 +185,19 @@ const C = {};
 function colors() { for (const k of ["court","line","ball","paddle","pad","up","down","sense","spike","stim","reward","punish","muted","fg","base","display"]) C[k] = css("--" + k); }
 colors();
 const FS = 0.02, KEEP = 6000;   // frames of 20 ms; the last 2 minutes kept
+// The page's choices from its address too (?motor=3&seed=...), so that a
+// link can open one setup.
+const query = new URLSearchParams(location.search);
+for (const id of ["seed", "cond", "code", "dec", "motor", "speed"])
+  if (query.has(id)) document.getElementById(id).value = query.get(id);
 const UP = new Set(), DOWN = new Set();
+const MOTOR = { 0: [[0, 1], [6, 7]], 3: [[2], [5]] };   // game.c's pong_motor: up and down columns
+function setMotor(up, down) {
+  UP.clear(); DOWN.clear();
+  for (let r = 0; r < 8; r++) { for (const c of up) UP.add(r * 8 + c); for (const c of down) DOWN.add(r * 8 + c); }
+}
 const SENSORY = [[3, 12, 20, 27, 35, 44, 52, 59], [3, 11, 19, 27, 36, 44, 52, 60]];   // game.c's layouts
-for (let r = 0; r < 8; r++) { UP.add(r * 8); UP.add(r * 8 + 1); DOWN.add(r * 8 + 6); DOWN.add(r * 8 + 7); }
+setMotor(...MOTOR[+document.getElementById("motor").value]);
 let ROLE;
 function setRoles(sense) { ROLE = Array.from({ length: 64 }, (_, k) => sense.includes(k) ? "sense" : UP.has(k) ? "up" : DOWN.has(k) ? "down" : "pad"); }
 setRoles(SENSORY[+document.getElementById("code").value]);
@@ -278,12 +293,14 @@ function startLive() {
   if (worker) worker.terminate();
   worker = new Worker(new URL("./worker.mjs", import.meta.url), { type: "module" });
   const text = $("seed").value || "1", cond = +$("cond").value, code = +$("code").value, dec = +$("dec").value;
+  const motor = +$("motor").value;
+  setMotor(...MOTOR[motor]);
   setRoles(SENSORY[code]);
   $("tag1").textContent = cond ? "reward for hits and misses" : "reward for each move";
   totalFrames = 20 * 60 / FS; doneFrames = 0; $("total").textContent = "20:00"; $("msg").textContent = "";
   worker.onmessage = e => {
     const m = e.data;
-    if (m.type === "started") $("seedno").textContent = `seed ${m.seed} · dish_pong.py 20 "${m.text}"${cond ? " reward" : ""}${code ? " ego aligned" : ""}${dec ? " decoder=1" : ""}`;
+    if (m.type === "started") $("seedno").textContent = `seed ${m.seed} · dish_pong.py 20 "${m.text}"${cond ? " reward" : ""}${code ? " ego aligned" : ""}${dec ? " decoder=1" : ""}${motor ? " motor=" + motor : ""}`;
     if (m.type === "frames") {
       m.batch.forEach((b, i) => { for (const fr of b) clips[i].push(fr); mergeRallies(clips[i], m.rallies[i]); clips[i].summary = m.summary[i]; });
       doneFrames = m.done;
@@ -292,7 +309,7 @@ function startLive() {
     if (m.type === "error") { $("msg").innerHTML = ""; const s = document.createElement("span"); s.className = "error"; s.textContent = "The dish could not start: " + m.message; $("msg").append(s); }
   };
   worker.postMessage({ speed: +$("speed").value });
-  worker.postMessage({ start: { text, cond, ego: code, layout: code, decoder: dec, minutes: 20 } });
+  worker.postMessage({ start: { text, cond, ego: code, layout: code, decoder: dec, motor, minutes: 20 } });
 }
 
 function loadRecording(json) {
@@ -307,6 +324,8 @@ function loadRecording(json) {
   });
   replayPos = 0; totalFrames = clips[0].f.length;
   const c0 = list[0];
+  if (c0.up && c0.down) { UP.clear(); DOWN.clear(); c0.up.forEach(k => UP.add(k)); c0.down.forEach(k => DOWN.add(k)); }
+  else setMotor(...MOTOR[0]);
   setRoles(c0.sensory || SENSORY[0]);
   $("seedno").textContent = `recording · seed ${c0.seed}${json.seed_text ? ` ("${json.seed_text}")` : ""}`;
   $("msg").textContent = "Replaying the last two minutes of the recording; Start plays live again.";
@@ -327,12 +346,21 @@ $("file").addEventListener("change", async e => {
 function chart() {
   const cv = $("chart"), g = cv.getContext("2d"), W = cv.width, H = cv.height, L = 40, B = 24, T = 10, R = 10;
   g.clearRect(0, 0, W, H);
-  const minutes = 20, ymax = 2;
+  const minutes = 20;
+  const pers = clips.map(c => {
+    const per = [];
+    for (const [t, h] of c.rallies) { const m = Math.floor(t / 60); if (m < minutes) { (per[m] ||= [0, 0]); per[m][0] += h; per[m][1]++; } }
+    return per;
+  });
+  // (The scale grows with the dishes: 2 hits a rally, or what the best minute reached.)
+  const top = Math.max(0, ...pers.flat().filter(Boolean).map(v => v[0] / v[1]));
+  const step = top <= 2 ? 0.5 : top <= 8 ? 2 : top <= 20 ? 5 : 10;
+  const ymax = Math.max(2, Math.ceil(top / step) * step);
   g.strokeStyle = C.line; g.lineWidth = 1; g.fillStyle = C.muted; g.font = `12px ${css("--mono")}`;
-  for (let y = 0; y <= ymax; y += 0.5) {
+  for (let y = 0; y <= ymax; y += step) {
     const py = T + (H - T - B) * (1 - y / ymax);
     g.globalAlpha = y === 0 ? 1 : 0.5; g.beginPath(); g.moveTo(L, py); g.lineTo(W - R, py); g.stroke(); g.globalAlpha = 1;
-    g.textAlign = "right"; g.fillText(y.toFixed(1), L - 6, py + 4);
+    g.textAlign = "right"; g.fillText(step < 1 ? y.toFixed(1) : String(y), L - 6, py + 4);
   }
   g.textAlign = "center";
   for (let m = 0; m <= minutes; m += 5) {
@@ -340,8 +368,7 @@ function chart() {
     g.fillText(m + " min", L + (W - L - R) * m / minutes, H - 6);
   }
   clips.forEach((c, i) => {
-    const per = [];
-    for (const [t, h] of c.rallies) { const m = Math.floor(t / 60); if (m < minutes) { (per[m] ||= [0, 0]); per[m][0] += h; per[m][1]++; } }
+    const per = pers[i];
     g.strokeStyle = i ? C.paddle : C.base; g.fillStyle = g.strokeStyle; g.lineWidth = i ? 3 : 2; g.beginPath();
     let first = true;
     per.forEach((v, m) => {
