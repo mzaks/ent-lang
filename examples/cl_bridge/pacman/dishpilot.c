@@ -12,7 +12,10 @@
 // reads the regions as they fire, 1 (the default) each against its own
 // background (its average over 2 s), as Pong's paddle does. DISH_PREY=0
 // leaves frightened ghosts out; 1 (the default) tells the nearest within
-// 12 tiles as food, ahead of the pellets. DISH_PICK=0 keeps the sensory
+// 12 tiles as food, ahead of the pellets. DISH_FLEE=1 tells the way out
+// when a ghost is near (plan_escape; 2 only when the food's way is not
+// safe). DISH_ORACLE=1, a test, takes the way told at once (no dish
+// in the loop). DISH_PICK=0 keeps the sensory
 // electrodes below; 1 (the default) picks them by how the dish answers
 // (pick_electrodes).
 //
@@ -33,8 +36,8 @@
 // starts, and called through the functions below, which copy the spikes
 // from its memory into the game's. The URL's ?seed= (any text, hashed as
 // ent_dish.seed_of does), ?stim=0, ?ghosts=, ?motor=, ?decoder= and
-// ?prey=, ?pick=, ?path= stand for DISH_SEED, DISH_STIM, DISH_GHOSTS, DISH_MOTOR,
-// DISH_DECODER, DISH_PREY, DISH_PICK and DISH_PATH.
+// ?prey=, ?pick=, ?path=, ?flee= stand for DISH_SEED, DISH_STIM, DISH_GHOSTS,
+// DISH_MOTOR, DISH_DECODER, DISH_PREY, DISH_PICK, DISH_PATH and DISH_FLEE.
 #define _GNU_SOURCE
 #ifndef __EMSCRIPTEN__
 #include <dlfcn.h>
@@ -280,7 +283,7 @@ static void open_dish(void) {
 #define ROWS 31
 static unsigned char open_tile[ROWS][COLS];
 static int have_maze, by_path = -1, pac_col, pac_row, pac_dir = 4;
-static int dist[ROWS][COLS], came[ROWS][COLS];
+static int dist[ROWS][COLS], came[ROWS][COLS], first[ROWS][COLS];
 static const int DX[4] = {1, 0, -1, 0}, DY[4] = {0, 1, 0, -1};
 
 void ent_dishpilot_pilot_open(int32_t col, int32_t row, bool open) {
@@ -315,6 +318,7 @@ void ent_dishpilot_pilot_at(int32_t col, int32_t row, int32_t dir) {
       if (nr < 0 || nr >= ROWS || !open_tile[nr][nc] || dist[nr][nc] >= 0) continue;
       dist[nr][nc] = dist[r][c] + 1;
       came[nr][nc] = w;   // the last step to it
+      first[nr][nc] = at == row * COLS + col ? w : first[r][c];   // and the first
       queue[tail++] = nr * COLS + nc;
     }
   }
@@ -322,9 +326,14 @@ void ent_dishpilot_pilot_at(int32_t col, int32_t row, int32_t dir) {
 
 // Where something is from him, as (dc, dr) whose larger part is the way
 // to go and whose size is the steps: by the maze when it is known.
+static int path_to(int r, int c, int32_t *dc, int32_t *dr);
 static int locate(int32_t *dc, int32_t *dr, int what) {
   if (!have_maze || !(by_path & what)) return abs(*dc) + abs(*dr);
   int c = ((pac_col + *dc) % COLS + COLS) % COLS, r = pac_row + *dr;
+  return path_to(r, c, dc, dr);
+}
+
+static int path_to(int r, int c, int32_t *dc, int32_t *dr) {
   if (r < 0 || r >= ROWS || dist[r][c] < 0) return -1;   // not reachable
   int d = dist[r][c];
   if (d == 0) return 0;
@@ -348,21 +357,116 @@ static int locate(int32_t *dc, int32_t *dr, int what) {
   return d;
 }
 
+// Self-preservation (DISH_FLEE=1; 0, the default, leaves it out): with a ghost within
+// FLEE_RANGE steps, the food told is not the nearest pellet but the way
+// out. The tiles he reaches before any ghost can (by the maze, ghosts
+// free to turn) are safe; of his first steps the one that opens onto the
+// most of them is the escape, and he is told the way to the nearest
+// pellet on it, or, with none there, to its tile the ghosts reach last
+// after him. Greedy alone, he ran from a ghost only where a pellet lay.
+// Measured (24 Nov, 20 min, 8 seeds, paired): played by the host
+// (DISH_ORACLE=1) fleeing lifts the score 2520 -> 3081, but with the dish
+// it is a wash (3266 -> 3261, +31 +- 214; DISH_FLEE=2 +38 +- 167): the
+// ghost stims' turn-away already gives most of it (the dish beats the
+// host's greedy play, 3266 vs 2520), and a way out told three tiles from
+// a ghost comes about a tile too late from the dish.
+// DISH_MARGIN: the steps he must be ahead by (1; 2 and 3 were worse).
+#define FLEE_RANGE 8
+#define ROOM_MIN 12
+static int flee = -1, n_hunters, n_pellets;
+static int hunter[4 * 4], pellet_at[ROWS * COLS];
+static int keep_r = -1, keep_c;
+static int flee_d, flee_dc, flee_dr, fleeing, prey_r, prey_c, food_r = -1, food_c;
+
 void ent_dishpilot_pilot_begin(void) {
   open_dish();
   food_d = ghost_d = prey_d = 1 << 30;
+  n_hunters = n_pellets = 0;
+  food_r = -1;
+}
+
+static void plan_escape(void) {
+  int was = fleeing;
+  fleeing = 0;
+  if (flee < 0) {
+    const char *f = getenv("DISH_FLEE");
+    flee = f ? atoi(f) : 0;
+  }
+  static int margin = -1;
+  if (margin < 0) { const char *m = getenv("DISH_MARGIN"); margin = m ? atoi(m) : 1; }
+  if (!flee || !have_maze || !by_path || ghost_d > FLEE_RANGE || !n_hunters) return;
+  static int gdist[ROWS][COLS], queue[ROWS * COLS];
+  int head = 0, tail = 0;
+  for (int r = 0; r < ROWS; ++r)
+    for (int c = 0; c < COLS; ++c) gdist[r][c] = -1;
+  for (int i = 0; i < n_hunters; ++i) {
+    int at = hunter[i], r = at / COLS, c = at % COLS;
+    if (r < 0 || r >= ROWS || gdist[r][c] >= 0) continue;
+    gdist[r][c] = 0;
+    queue[tail++] = at;
+  }
+  while (head < tail) {
+    int at = queue[head++], r = at / COLS, c = at % COLS;
+    for (int w = 0; w < 4; ++w) {
+      int nr = r + DY[w], nc = (c + DX[w] + COLS) % COLS;
+      if (nr < 0 || nr >= ROWS || !open_tile[nr][nc] || gdist[nr][nc] >= 0) continue;
+      gdist[nr][nc] = gdist[r][c] + 1;
+      queue[tail++] = nr * COLS + nc;
+    }
+  }
+#define SAFE(r, c) (dist[r][c] > 0 && (gdist[r][c] < 0 || dist[r][c] + margin < gdist[r][c]))
+  int room[4] = {0, 0, 0, 0};
+  for (int r = 0; r < ROWS; ++r)
+    for (int c = 0; c < COLS; ++c)
+      if (SAFE(r, c)) room[first[r][c]]++;
+  int b = 0;
+  for (int w = 1; w < 4; ++w) if (room[w] > room[b]) b = w;
+  if (!room[b]) return;   // nowhere safe: as before
+  // DISH_FLEE=2: the nearest pellet still, while he gets there first and
+  // its way opens onto room enough (ROOM_MIN safe tiles); once fleeing,
+  // he flees on until his way out is no longer safe.
+  if (flee == 2 && !was && food_r >= 0 && SAFE(food_r, food_c) && room[first[food_r][food_c]] >= ROOM_MIN) return;
+  // A frightened ghost he reaches first, on the way out: still the food.
+  if (prey && prey_d <= PREY_RANGE && SAFE(prey_r, prey_c) && first[prey_r][prey_c] == b) return;
+  int tr = -1, tc = -1, best = -1;
+  // The way out once chosen is kept while it stays safe (chosen afresh
+  // each frame, as the ghosts move, he turned to and fro between two).
+  if (was && keep_r >= 0 && SAFE(keep_r, keep_c) && 2 * room[first[keep_r][keep_c]] >= room[b]) { tr = keep_r; tc = keep_c; }
+  else for (int i = 0; i < n_pellets; ++i) {
+    int r = pellet_at[i] / COLS, c = pellet_at[i] % COLS;
+    if (SAFE(r, c) && first[r][c] == b && (best < 0 || dist[r][c] < best)) { best = dist[r][c]; tr = r; tc = c; }
+  }
+  if (tr < 0)
+    for (int r = 0; r < ROWS; ++r)
+      for (int c = 0; c < COLS; ++c) {
+        if (!SAFE(r, c) || first[r][c] != b) continue;
+        int lead = gdist[r][c] < 0 ? 1000 : gdist[r][c] - dist[r][c];
+        if (lead > best) { best = lead; tr = r; tc = c; }
+      }
+#undef SAFE
+  int32_t dc, dr;
+  int d = path_to(tr, tc, &dc, &dr);
+  keep_r = -1;
+  if (d <= 0) return;
+  keep_r = tr; keep_c = tc;
+  fleeing = 1;
+  flee_d = d; flee_dc = dc; flee_dr = dr;
 }
 
 void ent_dishpilot_pilot_pellet(int32_t dc, int32_t dr) {
+  int at = (pac_row + dr) * COLS + ((pac_col + dc) % COLS + COLS) % COLS;
+  if (n_pellets < ROWS * COLS && pac_row + dr >= 0 && pac_row + dr < ROWS) pellet_at[n_pellets++] = at;
   int d = locate(&dc, &dr, 1);
-  if (d > 0 && d < food_d) { food_d = d; food_dc = dc; food_dr = dr; }
+  if (d > 0 && d < food_d) { food_d = d; food_dc = dc; food_dr = dr; food_r = at / COLS; food_c = at % COLS; }
 }
 
 void ent_dishpilot_pilot_ghost(int32_t dc, int32_t dr, bool scared) {
+  int at = (pac_row + dr) * COLS + ((pac_col + dc) % COLS + COLS) % COLS;
+  if (!scared && n_hunters < 16) hunter[n_hunters++] = at;
   int d = locate(&dc, &dr, scared ? 1 : 2);
   if (d < 0) return;
   if (!scared && d < ghost_d) { ghost_d = d; ghost_dc = dc; ghost_dr = dr; }
-  if (scared && d < prey_d) { prey_d = d; prey_dc = dc; prey_dr = dr; }
+  if (scared && d < prey_d) { prey_d = d; prey_dc = dc; prey_dr = dr; prey_r = at / COLS; prey_c = at % COLS; }
 }
 
 static int way(int dc, int dr) {
@@ -383,6 +487,8 @@ int32_t ent_dishpilot_pilot_step(float ms) {
   // A frightened ghost near enough is the food, ahead of the pellets.
   int hunt = prey && prey_d <= PREY_RANGE;
   int fd = hunt ? prey_d : food_d, fdc = hunt ? prey_dc : food_dc, fdr = hunt ? prey_dr : food_dr;
+  plan_escape();   // a frame's: sense told where all is
+  if (fleeing) { fd = flee_d; fdc = flee_dc; fdr = flee_dr; }
   for (int i = 0; i < n; ++i) {
     now_ms += 1.0;
     if (!quiet && fd < (1 << 30) && now_ms >= food_due) {
@@ -418,11 +524,15 @@ int32_t ent_dishpilot_pilot_step(float ms) {
   for (int k = 1; k < 4; ++k) if (pull[k] > pull[best]) best = k;
   for (int k = 0; k < 4; ++k) if (k != best && (second < 0 || pull[k] > pull[second])) second = k;
   int out = (big <= 0.0f || pull[best] <= 0.0f || pull[best] - pull[second] < 0.1f * big) ? 4 : best;
+  // DISH_ORACLE=1 (a test, not the dish): the way told, taken at once.
+  static int oracle = -1;
+  if (oracle < 0) { const char *o = getenv("DISH_ORACLE"); oracle = o && atoi(o); }
+  if (oracle) out = fd < (1 << 30) ? way(fdc, fdr) : 4;
   static double next_log;
   if (getenv("DISH_DEBUG") && now_ms >= next_log) {
     next_log = now_ms + 250;
-    fprintf(stderr, "t %.2f food %d,%d d%d way%d hunt%d ghost d%d | raw %.1f %.1f %.1f %.1f | pull %.1f %.1f %.1f %.1f -> %d\n",
-            now_ms / 1000, fdc, fdr, fd, way(fdc, fdr), hunt, ghost_d, motor[0], motor[1], motor[2], motor[3],
+    fprintf(stderr, "t %.2f food %d,%d d%d way%d hunt%d flee%d ghost d%d | raw %.1f %.1f %.1f %.1f | pull %.1f %.1f %.1f %.1f -> %d\n",
+            now_ms / 1000, fdc, fdr, fd, way(fdc, fdr), hunt, fleeing, ghost_d, motor[0], motor[1], motor[2], motor[3],
             pull[0], pull[1], pull[2], pull[3], out);
   }
   return out;
