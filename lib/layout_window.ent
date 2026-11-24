@@ -1300,14 +1300,13 @@ unique KeyAt { at: i32, item: i32, shown: bool, moved: bool, colour: i32,
 
 // A box's menu asked for without the pointer: Shift+F10 or the menu key
 // (the box with the keys' focus), or a screen reader (an element with
-// `access_has_menu()`, which gets the focus): `wanted` (with `named`, of
-// `wanted_box`; else of the box with the focus; a program's own keys may
-// want it too).
+// `access_has_menu()`, which gets the focus): `wanted` (of `wanted_box`;
+// none: of the box with the focus; a program's own keys may want it too).
 // `key_menu` (after `key_focus`) then says `asked` and which `box`, and
 // places the menu at it (`menu_place`); the program opens that box's
 // menu, as a secondary click on it would. `asked` holds until the next
 // `key_menu`: each system sees it once.
-unique KeyMenu { box: entity, asked: bool, wanted: bool, named: bool, wanted_box: entity }
+unique KeyMenu { box: entity, asked: bool, wanted: bool, wanted_box: entity }
 
 system key_keys() {
   let shift = key_down(340) || key_down(344)
@@ -1421,14 +1420,12 @@ system key_menu() {
   KeyMenu.asked = false
   KeyMenu.box = none
   if KeyMenu.wanted {
-    // (An entity a unique holds starts as the first entity, not none: hence
-    // `named`.)
-    if !KeyMenu.named { for e with KeyFocus { KeyMenu.wanted_box = e } }
+    if KeyMenu.wanted_box == none { for e with KeyFocus { KeyMenu.wanted_box = e } }
     let placed = for e, b: Box where e == KeyMenu.wanted_box { menu_place(b.x + 8.0, b.y + min(b.h, 28.0)) }
     KeyMenu.asked = placed > 0
     KeyMenu.box = KeyMenu.wanted_box
     KeyMenu.wanted = false
-    KeyMenu.named = false
+    KeyMenu.wanted_box = none
   }
 }
 
@@ -1506,7 +1503,6 @@ system access_asks() {
       KeyMove.to = k.at
       KeyMove.to_item = k.item
       KeyMenu.wanted = true
-      KeyMenu.named = true
       KeyMenu.wanted_box = e
     }
     for e, a: Access where a.id == id && (kind == access_set_value() || kind == access_set_selection()) {

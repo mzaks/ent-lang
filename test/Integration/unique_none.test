@@ -1,0 +1,9 @@
+// A unique's entity field starts as none (its numbers as 0), not as the
+// first entity: a field asked whether it says one yet is set once.
+// RUN: %ent run %S/Inputs/unique_none.ent 2>/dev/null | FileCheck %s --match-full-lines
+
+// CHECK:      Pick.box starts as none
+// CHECK-NEXT: One starts as none
+// CHECK-NEXT: Pick.count starts as 0
+// CHECK-NEXT: picked x=4
+// CHECK-NOT:  One is

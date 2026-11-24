@@ -27382,6 +27382,18 @@ static LogicalResult lowerMain(IRRewriter &rewriter, MainOp main,
           scf::YieldOp::create(builder, loc);
         });
   rewriter.setInsertionPointAfter(fromHeap);
+  // The uniques' entity fields: none, not the first entity (heap or not).
+  Value allOnes = arith::ConstantIntOp::create(rewriter, loc, 0xff, 8);
+  for (auto [offset, bytes] : layout.nobodies)
+    scf::ForOp::create(
+        rewriter, loc, arith::ConstantIndexOp::create(rewriter, loc, offset),
+        arith::ConstantIndexOp::create(rewriter, loc, offset + bytes), one,
+        ValueRange{},
+        [&](OpBuilder &builder, Location loc, Value index, ValueRange) {
+          memref::StoreOp::create(builder, loc, allOnes, created,
+                                  ValueRange{index});
+          scf::YieldOp::create(builder, loc);
+        });
   // (On many ranks, MPI around it all: devices/ranks.c. Until they are
   // placed, every row of a distributed archetype is every rank's.)
   if (ranksMode) {

@@ -587,6 +587,10 @@ static LogicalResult emitHeader(ModuleOp module, raw_ostream &os) {
   for (auto [offset, bytes] : layout->zeroed)
     os << llvm::formatv("  memset((char *)arena + {0}, 0, {1});\n", offset,
                         bytes);
+  // The uniques' entity fields: none (all ones), not the first entity.
+  for (auto [offset, bytes] : layout->nobodies)
+    os << llvm::formatv("  memset((char *)arena + {0}, 0xff, {1});\n", offset,
+                        bytes);
   os << "  return (ent_world *)arena;\n}\n\n";
   // A world is given back with the texts of any length its fields hold:
   // each a block of its own (as a program's `main` gives them back at

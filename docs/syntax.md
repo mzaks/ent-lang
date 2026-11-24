@@ -144,7 +144,8 @@ capacity Inside 4096                        // another capacity for one declared
   numbers wrap, and a shift is by the amount's low bits.
 - `none`, where an entity is expected, is no entity: the same as itself
   (`target == none`) and as no other; what is sent to it goes nowhere,
-  and what is looked up of it is not found.
+  and what is looked up of it is not found. A unique's entity field
+  starts as `none` (its numbers start as 0).
 - `capacity` on a component bounds how many entities can have it; an
   archetype the compiler infers from spawns takes the smallest capacity
   among its required components, or `default_capacity`.

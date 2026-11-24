@@ -1,0 +1,40 @@
+// A unique's entity field starts as none, not as the first entity: so a
+// field that is to say which entity, once one is found, is asked whether
+// it says one yet.
+import console
+
+component A { x: i32 }
+component B { y: i32 }
+tag T
+unique Pick { box: entity, count: i32 }
+unique One: entity
+unique Step: i32
+default_capacity 16
+
+world {
+  let a1 = spawn { A { x: 1 } }
+  let a2 = spawn { A { x: 2 } }
+  let b1 = spawn { A { x: 3 }, B { y: 10 } }
+  let b2 = spawn { A { x: 4 }, B { y: 20 } }
+}
+
+system tag_it() {
+  Step += 1
+  if Step == 1 {
+    if Pick.box == none { put("Pick.box starts as none") }
+    if One == none { put("One starts as none") }
+    put("Pick.count starts as {Pick.count}")
+    for e, b: B where b.y == 20 { e.add(T) }
+  }
+}
+
+system pick() {
+  if Step == 2 {
+    if Pick.box == none { for e with T { Pick.box = e } }
+    for e, a: A where e == Pick.box { put("picked x={a.x}") }
+    for e, a: A where e == One { put("One is x={a.x}") }
+  }
+}
+
+schedule run() { tag_it()  pick() }
+main { loop { run() } until Step == 2 }

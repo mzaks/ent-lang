@@ -777,6 +777,10 @@ struct WorldLayout {
   /// memory a world is given need not be zero, and what it holds could be
   /// taken for the edges of entities that exist.
   SmallVector<std::pair<uint64_t, uint64_t>, 0> zeroed;
+  /// What a new world sets to no entity (all ones, as `ent.nobody` is),
+  /// as (offset, bytes): the uniques' entity fields, which start as
+  /// `none`, not as the first entity.
+  SmallVector<std::pair<uint64_t, uint64_t>, 0> nobodies;
   /// Total size of the arena.
   uint64_t totalBytes = 0;
   /// Where what a saved world holds ends: the uniques and buffers that

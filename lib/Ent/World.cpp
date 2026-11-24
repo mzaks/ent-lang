@@ -467,6 +467,8 @@ FailureOr<WorldLayout> WorldLayout::compute(ModuleOp module) {
                << ", which world storage does not support";
       uint64_t offset = llvm::alignTo(end, bytes);
       entry.fields.push_back({cast<StringAttr>(name), type, offset});
+      if (isa<EntityType>(type))
+        layout.nobodies.push_back({offset, bytes});
       end = offset + bytes;
     }
     return success();
