@@ -3900,3 +3900,59 @@ void ent_window_access_text(int32_t id, int32_t caret, int32_t anchor) {}
 void ent_window_access_end(int32_t focus) {}
 void ent_window_access_announce(const ent_text *t) {}
 #endif
+
+// The room the screen the window is on gives a window's content, in the
+// window's points (as `resize_window` takes them): on a Mac what is left
+// by the menu bar and the Dock, less the window's title bar; elsewhere
+// the screen less a margin for the system's bars. 0 where it is not
+// known (no window yet; a web page, which is as big as its tab).
+static void ent_window_room(int32_t *width, int32_t *height) {
+  *width = 0;
+  *height = 0;
+#if defined(__EMSCRIPTEN__)
+  return;
+#else
+  if (!IsWindowReady())
+    return;
+#if defined(__APPLE__)
+  id window = (id)GetWindowHandle();
+  id screen = window ? ent_window_send(window, "screen") : 0;
+  if (screen) {
+    typedef struct { double x, y, w, h; } rect;
+    rect room, frame, content;
+#if defined(__x86_64__)
+    ((void (*)(rect *, id, SEL))objc_msgSend_stret)(&room, screen, ent_window_sel("visibleFrame"));
+    ((void (*)(rect *, id, SEL))objc_msgSend_stret)(&frame, window, ent_window_sel("frame"));
+    ((void (*)(rect *, id, SEL))objc_msgSend_stret)(
+        &content, ent_window_send(window, "contentView"), ent_window_sel("frame"));
+#else
+    room = ((rect(*)(id, SEL))objc_msgSend)(screen, ent_window_sel("visibleFrame"));
+    frame = ((rect(*)(id, SEL))objc_msgSend)(window, ent_window_sel("frame"));
+    content = ((rect(*)(id, SEL))objc_msgSend)(ent_window_send(window, "contentView"),
+                                               ent_window_sel("frame"));
+#endif
+    double bar = frame.h - content.h;
+    *width = (int32_t)(room.w / ent_window_more);
+    *height = (int32_t)((room.h - (bar > 0 ? bar : 0)) / ent_window_more);
+    return;
+  }
+#endif
+  int monitor = GetCurrentMonitor();
+  int w = GetMonitorWidth(monitor), h = GetMonitorHeight(monitor);
+  if (w <= 0 || h <= 0)
+    return;
+  // (The system's bars and the window's title: a margin.)
+  *width = (int32_t)(w / ent_window_more);
+  *height = (int32_t)((h - 96) / ent_window_more);
+#endif
+}
+int32_t ent_window_screen_room_width(void) {
+  int32_t w, h;
+  ent_window_room(&w, &h);
+  return w;
+}
+int32_t ent_window_screen_room_height(void) {
+  int32_t w, h;
+  ent_window_room(&w, &h);
+  return h;
+}
