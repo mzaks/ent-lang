@@ -42,6 +42,13 @@ transient buffer Balls { x: f32, y: f32, z: f32, r: f32, color: i32, wire: bool 
 // mouse is followed onto the ground (the plane y = 0) as seen so.
 extern proc begin_scene(eye_x: f32, eye_y: f32, eye_z: f32, at_x: f32, at_y: f32, at_z: f32,
                         fov: f32, ortho: bool)
+// The same in a part of the window only (x, y, width, height in the
+// window's points; for a picture in a page, a comic's panel): that part
+// filled with `back` first (0xRRGGBB), the scene fitted to it; the
+// mouse on the ground and `screen_x`/`screen_y` as seen there.
+extern proc begin_scene_in(x: f32, y: f32, width: f32, height: f32, back: i32,
+                           eye_x: f32, eye_y: f32, eye_z: f32, at_x: f32, at_y: f32, at_z: f32,
+                           fov: f32, ortho: bool)
 extern proc draw_boxes(them: Boxes)
 extern proc draw_rays(them: Rays)
 extern proc draw_balls(them: Balls)
