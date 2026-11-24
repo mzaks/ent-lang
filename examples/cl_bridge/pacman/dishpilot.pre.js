@@ -2,8 +2,9 @@
 // module (dish.mjs and dish.wasm, next to the page: examples/cl_bridge/web/
 // build.sh) is loaded as Module.dish, and the URL's ?seed= (any text,
 // hashed as ent_dish.seed_of does: FNV-1a of its UTF-8, its low 31 bits),
-// ?stim=0 and ?ghosts= are put where dishpilot.c reads DISH_SEED,
-// DISH_STIM and DISH_GHOSTS.
+// ?stim=0, ?ghosts=, ?motor=, ?decoder= and ?prey= are put where
+// dishpilot.c reads DISH_SEED, DISH_STIM, DISH_GHOSTS, DISH_MOTOR,
+// DISH_DECODER and DISH_PREY.
 Module.preRun = Module.preRun || [];
 Module.preRun.push(function () {
   var query = new URLSearchParams(location.search);
@@ -20,6 +21,8 @@ Module.preRun.push(function () {
   }
   if (query.get("stim") !== null) ENV.DISH_STIM = query.get("stim");
   if (query.get("ghosts") !== null) ENV.DISH_GHOSTS = query.get("ghosts");
+  for (var name of ["motor", "decoder", "prey"])
+    if (query.get(name) !== null) ENV["DISH_" + name.toUpperCase()] = query.get(name);
   addRunDependency("dish");
   import(new URL("dish.mjs", document.baseURI).href)
     .then(function (made) { return made.default(); })

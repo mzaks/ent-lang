@@ -22,7 +22,11 @@
 // sensory stims drive the motor regions directly), DISH_STIM=0 leaves the
 // stims out (the dish's own activity alone), DISH_GHOSTS=0 the ghosts'
 // (-1: their electrodes beside the region of their own way, which draws
-// him to them), PACMAN_FAST=1 runs the game
+// him to them), DISH_MOTOR=0 the motor regions two electrodes deep (1, the
+// default: only the ring touching the sensory electrodes), DISH_DECODER=0
+// the regions read as they fire (1: each against its own background),
+// DISH_PREY=0 frightened ghosts left out (1: the nearest within 12 tiles
+// told as food, ahead of the pellets), PACMAN_FAST=1 runs the game
 // as fast as it can (a 60th of a second of it a frame, not waiting).
 //
 // The game below is examples/pacman.ent's, but for the pilot: `sense`,
@@ -330,7 +334,11 @@ system flow() {
 system sense() {
   pilot_begin()
   for p: Pellet { pilot_pellet(p.col - Pac.col, p.row - Pac.row) }
-  for g: Ghost { pilot_ghost(g.col - Pac.col, g.row - Pac.row, g.scared) }
+  // (Only those out in the maze: in the house or as eyes none can catch
+  // him or be eaten.)
+  for g: Ghost {
+    if g.mode == Mode.Roaming { pilot_ghost(g.col - Pac.col, g.row - Pac.row, g.scared) }
+  }
 }
 
 system unload() {
