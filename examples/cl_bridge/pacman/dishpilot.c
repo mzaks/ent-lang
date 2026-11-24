@@ -12,7 +12,9 @@
 // reads the regions as they fire, 1 (the default) each against its own
 // background (its average over 2 s), as Pong's paddle does. DISH_PREY=0
 // leaves frightened ghosts out; 1 (the default) tells the nearest within
-// 12 tiles as food, ahead of the pellets.
+// 12 tiles as food, ahead of the pellets. DISH_PICK=0 keeps the sensory
+// electrodes below; 1 (the default) picks them by how the dish answers
+// (pick_electrodes).
 //
 // Layout on the 8 x 8 grid (channel = row * 8 + col):
 //   motor up    rows 0-1, cols 2-5      motor down  rows 6-7, cols 2-5
@@ -31,8 +33,8 @@
 // starts, and called through the functions below, which copy the spikes
 // from its memory into the game's. The URL's ?seed= (any text, hashed as
 // ent_dish.seed_of does), ?stim=0, ?ghosts=, ?motor=, ?decoder= and
-// ?prey= stand for DISH_SEED, DISH_STIM, DISH_GHOSTS, DISH_MOTOR,
-// DISH_DECODER and DISH_PREY.
+// ?prey=, ?pick= stand for DISH_SEED, DISH_STIM, DISH_GHOSTS, DISH_MOTOR,
+// DISH_DECODER, DISH_PREY and DISH_PICK.
 #define _GNU_SOURCE
 #ifndef __EMSCRIPTEN__
 #include <dlfcn.h>
@@ -120,21 +122,95 @@ static int64_t web_spikes(void *d, int32_t *channel, int32_t *step, int64_t max)
 }
 #endif
 
-static const int FOOD[4] = {37, 44, 26, 19};    // right, down, left, up
+static int FOOD[4] = {37, 44, 26, 19};    // right, down, left, up
 // A ghost's way is stimulated beside the motor region of the opposite way
 // (a ghost on the right, the electrode next to the left region), so the
 // layout itself turns him away: the dish is not taught what a ghost is.
-static const int DANGER[4] = {34, 20, 29, 43};
+static int DANGER[4] = {34, 20, 29, 43};
 // DISH_GHOSTS=-1: beside the same way's region instead (towards him),
 // 0: no ghost stims.
 static const int TOWARDS[4] = {29, 43, 34, 20};
-static int ghosts = 1, inner = 1, decoder = 1, prey = 1;
+static int ghosts = 1, inner = 1, decoder = 1, prey = 1, pick = 1;
 #define PREY_RANGE 12
 static int role[64];
 static float motor[4], base[4], activity[64];
 static int food_dc, food_dr, food_d, ghost_dc, ghost_dr, ghost_d, prey_dc, prey_dr, prey_d;
 static double food_due, danger_due, now_ms;
 static int quiet;  // DISH_STIM=0: no stims, the dish's own activity alone
+
+// The motor spikes of each region in the `ms` milliseconds to come.
+static void count_motor(int ms, float out[4]) {
+  int32_t ch[4096], st[4096];
+  for (int k = 0; k < 4; ++k) out[k] = 0;
+  for (int i = 0; i < ms; ++i) {
+    step(dish, 1);
+    int64_t got;
+    while ((got = spikes(dish, ch, st, 4096)) > 0)
+      for (int64_t j = 0; j < got; ++j)
+        if (role[ch[j]] >= 0 && role[ch[j]] < 4) out[role[ch[j]]] += 1.0f;
+  }
+}
+
+// DISH_PICK=1 (the default): which sensory electrode says what, from how
+// this dish answers. Each of the middle 16 is pulsed alone PICK_PULSES
+// times, PICK_GAP ms apart, and the motor spikes of each region in the
+// 20 ms after are counted, less those of the 20 ms before; an electrode's
+// lean to a region is its answer there less its mean answer in the
+// others. Then, strongest lean first, each of the 8 roles takes an
+// electrode on its side of the middle: the food of a way one on that
+// way's side leaning to that way's region, a ghost's one on the opposite
+// side leaning away from him. (Giving the weakest role the best it can
+// get instead scored no better: 1871 against 1955 a game, 8 seeds.) The dish is not taught; the host chooses where
+// to say things, as it chose the electrodes in Pong (zones.py layouts).
+#define PICK_PULSES 4
+#define PICK_GAP 100
+static void pick_electrodes(void) {
+  float lean[64][4] = {{0}};
+  for (int p = 0; p < PICK_PULSES; ++p)
+    for (int r = 2; r <= 5; ++r)
+      for (int c = 2; c <= 5; ++c) {
+        int e = r * 8 + c;
+        float before[4], after[4];
+        count_motor(PICK_GAP - 20, before);
+        count_motor(20, before);
+        stimulate(dish, e, 1.0f);
+        count_motor(20, after);
+        float sum = 0;
+        for (int k = 0; k < 4; ++k) sum += after[k] - before[k];
+        for (int k = 0; k < 4; ++k) {
+          float a = after[k] - before[k];
+          lean[e][k] += a - (sum - a) / 3;
+        }
+      }
+  int used[64] = {0}, done[8] = {0};
+  for (int round = 0; round < 8; ++round) {
+    int best_slot = -1, best_e = -1;
+    float best = -1e30f;
+    for (int slot = 0; slot < 8; ++slot) {
+      if (done[slot]) continue;
+      int w = slot % 4, toward = slot < 4 ? w : (w + 2) % 4;   // food: its way; danger: away
+      for (int r = 2; r <= 5; ++r)
+        for (int c = 2; c <= 5; ++c) {
+          int e = r * 8 + c;
+          int side = toward == 0 ? c == 5 : toward == 1 ? r == 5 : toward == 2 ? c == 2 : r == 2;
+          if (!side || used[e]) continue;
+          if (lean[e][toward] > best) { best = lean[e][toward]; best_slot = slot; best_e = e; }
+        }
+    }
+    if (best_slot < 0) break;
+    done[best_slot] = used[best_e] = 1;
+    if (best_slot < 4) FOOD[best_slot] = best_e;
+    else DANGER[best_slot - 4] = best_e;
+  }
+  if (getenv("DISH_DEBUG")) {
+    fprintf(stderr, "picked food %d %d %d %d danger %d %d %d %d\n", FOOD[0], FOOD[1], FOOD[2], FOOD[3],
+            DANGER[0], DANGER[1], DANGER[2], DANGER[3]);
+    for (int e = 0; e < 64; ++e)
+      if (lean[e][0] || lean[e][1] || lean[e][2] || lean[e][3])
+        fprintf(stderr, "  e%d lean R %.1f D %.1f L %.1f U %.1f\n", e, lean[e][0] / PICK_PULSES,
+                lean[e][1] / PICK_PULSES, lean[e][2] / PICK_PULSES, lean[e][3] / PICK_PULSES);
+  }
+}
 
 static void open_dish(void) {
   if (dish)
@@ -172,6 +248,8 @@ static void open_dish(void) {
   inner = m ? atoi(m) : 1;
   decoder = dec ? atoi(dec) : 1;
   prey = pr ? atoi(pr) : 1;
+  const char *pk = getenv("DISH_PICK");
+  pick = pk ? atoi(pk) : 1;
   int lo = inner ? 1 : 0, hi = inner ? 6 : 7;   // the rows and columns the regions take
   for (int c = 0; c < 64; ++c) {
     int r = c / 8, k = c % 8;
@@ -181,13 +259,15 @@ static void open_dish(void) {
     if (k >= lo && k <= 1 && r >= 2 && r <= 5) role[c] = 2;
     if (k >= 6 && k <= hi && r >= 2 && r <= 5) role[c] = 0;
   }
+  step(dish, 2000);  // two seconds to settle
+  int32_t ch[4096], st[4096];
+  while (spikes(dish, ch, st, 4096) == 4096) {}
+  if (pick)
+    pick_electrodes();
   for (int i = 0; i < 4; ++i) {
     role[FOOD[i]] = 4;
     role[DANGER[i]] = 5;
   }
-  step(dish, 2000);  // two seconds to settle
-  int32_t ch[4096], st[4096];
-  while (spikes(dish, ch, st, 4096) == 4096) {}
 }
 
 void ent_dishpilot_pilot_begin(void) {
@@ -258,8 +338,15 @@ int32_t ent_dishpilot_pilot_step(float ms) {
   int best = 0, second = -1;
   for (int k = 1; k < 4; ++k) if (pull[k] > pull[best]) best = k;
   for (int k = 0; k < 4; ++k) if (k != best && (second < 0 || pull[k] > pull[second])) second = k;
-  if (big <= 0.0f || pull[best] <= 0.0f || pull[best] - pull[second] < 0.1f * big) return 4;
-  return best;
+  int out = (big <= 0.0f || pull[best] <= 0.0f || pull[best] - pull[second] < 0.1f * big) ? 4 : best;
+  static double next_log;
+  if (getenv("DISH_DEBUG") && now_ms >= next_log) {
+    next_log = now_ms + 250;
+    fprintf(stderr, "t %.2f food %d,%d d%d way%d hunt%d ghost d%d | raw %.1f %.1f %.1f %.1f | pull %.1f %.1f %.1f %.1f -> %d\n",
+            now_ms / 1000, fdc, fdr, fd, way(fdc, fdr), hunt, ghost_d, motor[0], motor[1], motor[2], motor[3],
+            pull[0], pull[1], pull[2], pull[3], out);
+  }
+  return out;
 }
 
 float ent_dishpilot_pilot_activity(int32_t channel) {
