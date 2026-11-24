@@ -2108,9 +2108,11 @@ def build(arguments, output, directory):
     objects += others
     # Where the program's source and its modules' are, written into it:
     # the files they name are looked for there last (devices/ent_files.h).
-    # (Not into one for Windows: they are this machine's.)
+    # (Not into one for Windows, nor one built --portable: they are this
+    # machine's.)
     folders = []
-    for path in [] if arguments.windows or arguments.web else files:
+    mine = arguments.windows or arguments.web or getattr(arguments, "portable", False)
+    for path in [] if mine else files:
         if os.path.dirname(path) not in folders:
             folders.append(os.path.dirname(path))
     written = os.path.join(directory, "ent_folders.c")
@@ -2834,6 +2836,10 @@ def main():
     parser.add_argument("--partitions", action="store_true",
                         help="with --ranks: place entities where they are "
                         "spawned, a partition for each rank")
+    parser.add_argument("--portable", action="store_true",
+                        help="build to give to others: this machine's "
+                        "folders (where the sources are, where files are "
+                        "looked for last) are not written into the program")
     parser.add_argument("--embed", action="store_true",
                         help="put the files the program declares (`asset`) "
                         "into the program itself, not next to it")

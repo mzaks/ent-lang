@@ -399,7 +399,8 @@ come with the compiler, in `devices/`, and two more that need
   build`): a program and a module find the files next to them wherever
   the program is run from (`devices/ent_files.h`). A built program also
   knows the folders it was built from and looks there last, so it runs
-  on the machine it was built on as it is. The files a program
+  on the machine it was built on as it is. `ent build --portable` leaves
+  them out, for a program to give to others (they are this machine's). The files a program
   needs are declared where they are used (`asset face = "name.ttf"`, or
   `asset walk = "walk/*.png"` for a list of all there are; checked when
   it is built): `ent build` copies them to where it writes the
