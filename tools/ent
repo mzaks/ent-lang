@@ -2331,8 +2331,10 @@ def build(arguments, output, directory):
     # there: a weak symbol, which macOS's linker takes only when told it
     # may be missing. So does every program's main for the status the
     # console's exit_status gave, devices/console.c's, which is not
-    # linked into a program without the console: main then ends with 0.)
-    if sys.platform == "darwin" and not arguments.windows:
+    # linked into a program without the console: main then ends with 0.
+    # Not for a web page made on a Mac: that is linked by wasm-ld, which
+    # has no -U and takes a weak symbol missing as it is.)
+    if sys.platform == "darwin" and not arguments.windows and not arguments.web:
         maths += ["-Wl,-U,_omp_in_parallel", "-Wl,-U,_ent_console_exit_code"]
     if arguments.web and arguments.shared:
         # A library for a page's JavaScript (or Node.js's): output.mjs, an
