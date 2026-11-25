@@ -344,7 +344,17 @@ sides. Keep the default reach with many neurons and every neuron has
 thousands: the synapses outgrow the relation's capacity (8,388,608) and
 the program stops, saying so. The other lengths (`axon`, `stim_reach`,
 `hear_reach`) are not scaled, so a bigger dish has more neurons an
-electrode hears and a stim reaches; it was not calibrated.
+electrode hears and a stim reaches; it was not calibrated. Measured
+(`zones.py size`): its neurons fire as at 1,024 (1.3 to 1.5 Hz), but an
+electrode hears ~46 neurons at 16,384 (3 at 1,024), so the channels'
+statistics are 16 times the culture's, and the short reach makes the
+wiring local (a burst on 0.14 of the channels, not 0.73). The 1,024
+culture with more neurons is `reach` kept at 0.2, `density` 0.3 * 1024 /
+n and `hear_reach` 0.03 * sqrt(1024 / n) (`zones.py size tuned`): its
+spontaneous statistics and its answers to stims (evoked.py) are the
+1,024 dish's, the stims unchanged (a stim reaches 16 times the axons,
+an electrode hears 1/16 of the neurons). Wiring then searches the whole
+square for each neuron: slower to make, as fast to run.
 
 Seed 1, native builds (`ENT_CFLAGS=-march=native`), on mains power; a
 step is 1 ms of the dish, from the difference of an 11 s and a 1 s run:
@@ -1040,6 +1050,28 @@ An answer is some 26 spikes, not a few; a stronger stim hardly adds to
 it (with axons of 0.11 it reaches few motor neurons) and a longer window
 adds spikes but not learning. `stim=3` may help a little (+0.06, about
 two standard errors). Where the learning stops stays open.
+
+**Against the grown wiring.** Pong's best setup on the one-stim task
+(`conditioning.py rpe 20 0,1,10,100 8 axon=0.11 hard=1 tau_elig=200
+layout=L flip=F`; `layout=1` puts the sensory electrodes as Pong's
+aligned layout does, `flip=1` asks for the map turned over), score of
+minutes 10 to 20, best gain:
+
+| | gain 0 | best gain | less gain 0 |
+|---|---|---|---|
+| `columns`, top up | -0.02 | +0.34 (gain 1) | +0.37 ± 0.05 |
+| `columns`, top down | +0.02 | +0.36 (gain 10) | +0.34 ± 0.03 |
+| aligned, the map the wiring leans to | +0.38 | +0.64 (gain 10) | +0.25 ± 0.01 |
+| aligned, against it | -0.38 | +0.17 (gain 10) | +0.55 ± 0.04 |
+
+The reward moves the answer a bounded way (+0.25 to +0.55) from where the
+grown wiring puts it, and does not turn the wiring over: with no
+paddle, no stream of stims and the outcome 100 ms after the one stim,
+the dish stops where it stops in Pong (about two answers in three
+right on a neutral layout, 0.82 with the wiring's help). So Pong's
+ceiling of about 0.7 balls hit is the dish's and its rule's, not the
+game's. (Neither the size of the dish, zones.py size tuned, nor
+short-term depression, zones.py depression, moves it.)
 
 With plain STDP (`modulated` off, as the calibration ran), `hard=1`
 keeps the dish where the calibration put it: `validate.py ... 6

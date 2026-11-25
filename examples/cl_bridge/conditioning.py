@@ -16,8 +16,13 @@ channel. Modes:
     build/cl_bridge/venv/bin/python examples/cl_bridge/conditioning.py \\
         mode [minutes [gains [seeds [name=value ...]]]]
 
-name=value sets a dish parameter, but for two of the loop's own: stim,
-the sensory stim's size (1), and answer, the answer window in ms (100).
+name=value sets a dish parameter, but for four of the loop's own: stim,
+the sensory stim's size (1), answer, the answer window in ms (100),
+layout (0 pong.py's `columns`; 1 game.c's pong_layout(1), the best Pong
+setup's: the top half's sensory electrodes on column 3, nearer the up
+region, the bottom half's on column 4, reward 28, punish 35) and flip (1:
+the map turned over, down for the top half, against what the aligned
+layout's wiring leans to).
 
 Prints, for each gain (reward_gain; 0: nothing learnt), the share of
 right answers in each 2-minute window, mean over seeds (map, rpe: the top
@@ -49,10 +54,14 @@ def run(job):
     extra = dict(extra)
     size = extra.pop("stim", 1.0)
     answer = int(extra.pop("answer", ANSWER))
+    layout = int(extra.pop("layout", 0))
+    flip = int(extra.pop("flip", 0))
     os.environ["OMP_NUM_THREADS"] = "1"
     import ent_dish
     import pong
     sensory, up, down, reward, punish = pong.LAYOUTS["columns"]
+    if layout == 1:
+        sensory, reward, punish = [3, 11, 19, 27, 36, 44, 52, 60], 28, 35
     up, down = set(up), set(down)
     dish = ent_dish.Dish(seed=seed, modulated=1, reward_channel=reward,
                          punish_channel=punish, reward_gain=gain, **extra)
@@ -70,7 +79,7 @@ def run(job):
         said += u + d
         trials += 1
         half = 0 if mode == "bias" or i < 4 else 1
-        want, other = (u, d) if half == 0 else (d, u)
+        want, other = (u, d) if (half == 0) != bool(flip) else (d, u)
         if want != other:
             ok = want > other
             right[half][0 if ok else 1] += 1
