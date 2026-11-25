@@ -1,0 +1,49 @@
+import console
+import text
+import pairs
+
+fn shown(t: text) -> text {
+  var out = ""
+  for i in 0..len(t) {
+    if t[i] == '\n' { out += "|" } else { out += slice(t, i, i + 1) }
+  }
+  out
+}
+fn replaced(t: text) -> text {
+  var out = ""
+  for i in 0..len(t) {
+    if t[i] == '\r' { out += "\\r" } else { out += slice(t, i, i + 1) }
+  }
+  out
+}
+proc rows(name: text, t: text, sep: text) {
+  put(name + ": {pair_count(t, sep)} rows")
+  for r in 0..pair_count(t, sep) {
+    let on = if pair_on(t, sep, r) { "on" } else { "off" }
+    let bare = if pair_has_sep(t, sep, r) { "" } else { " bare" }
+    put("  {r} " + on + bare + " [" + pair_key(t, sep, r) + "] [" + pair_value(t, sep, r) + "]")
+  }
+}
+
+system run() {
+  let env = "# dev: lines are name = value\nhost = https://a.example/x?y=1\n\n  user=ann  \n#port = 8080\n## notes\n// old\nsecret api_key\n#\n"
+  rows("env", env, "=")
+  put("set 1: " + shown(pair_set(env, "=", 1, "user", "bob", true)))
+  put("off 0: " + shown(pair_set(env, "=", 0, "host", "https://a.example/x?y=1", false)))
+  put("on 2: " + shown(pair_set(env, "=", 2, "port", "8080", true)))
+  put("bare 3: " + shown(pair_set(env, "=", 3, "secret api_key", "", true)))
+  put("bare given 3: " + shown(pair_set(env, "=", 3, "secret api_key", "k1", true)))
+  put("none 9: " + shown(pair_set(env, "=", 9, "a", "b", true)))
+  put("add: " + shown(pair_add(env, "=", "token", "")))
+  put("remove 0: " + shown(pair_remove(env, "=", 0)))
+  let headers = "Accept: application/json\nAuthorization: Bearer t0k3n\n#X-Debug: 1\n# a comment: not a row"
+  rows("headers", headers, ":")
+  put("add: " + shown(pair_add(headers, ":", "X-Ts", "1700000000")))
+  put("remove last: " + shown(pair_remove("A: 1\nB: 2", ":", 1)))
+  put("remove only: [" + shown(pair_remove("A: 1", ":", 0)) + "]")
+  put("add to none: [" + pair_add("", ":", "A", "1") + "]")
+  put("crlf: " + shown(replaced(pair_set("A: 1\r\nB: 2\r\n", ":", 0, "A", "9", true))))
+}
+
+schedule once() { run() }
+main { once() }

@@ -1,0 +1,161 @@
+// Pairs: a text of lines that say a name and a value ("host = example.org",
+// "Accept: text/html"), read as rows, and changed a row at a time with
+// every other byte of the text left as it was (comments, blank lines,
+// the order, how each line is spaced).
+//
+//   import pairs
+//   pair_count(t, "=")                  how many rows
+//   pair_key(t, "=", 2), pair_value(t, "=", 2), pair_on(t, "=", 2)
+//   pair_set(t, "=", 2, "host", "example.org", true)   the text, row 2 so
+//   pair_add(t, "=", "port", "8080"), pair_remove(t, "=", 2)
+//
+// `sep` is what parts a name from its value ("=", ":"); a line is cut at
+// the first. A row is a line that is not blank and not a comment. A
+// comment starts with "//", or with "#" and then a space, another "#" or
+// nothing. A row that is off starts with "#" and the name right after it
+// ("#host = example.org"); a "#" line that has no `sep` is a comment. A
+// row may have no `sep` (a bare line: "secret api_key"): its name is the
+// whole line, its value "".
+// Rows written are "name = value" (`sep` with a space each side), or
+// "Name: value" where `sep` is ":".
+import text
+
+fn pair_line_end(t: text, at: i32) -> i32 {
+  let n = find(t, "\n", at)
+  if n < 0 { len(t) } else { n }
+}
+fn pair_space(c: i8) -> bool { c == ' ' || c == '\t' || c == '\r' }
+// `t` from `from` to `to`, without the spaces at either end.
+fn pair_trimmed(t: text, from: i32, to: i32) -> text {
+  var a = from
+  var z = to
+  while a < z && pair_space(t[a]) { a += 1 }
+  while z > a && pair_space(t[z - 1]) { z -= 1 }
+  slice(t, a, z)
+}
+// Where the line from `at` to `end` starts, after its spaces.
+fn pair_first(t: text, at: i32, end: i32) -> i32 {
+  var a = at
+  while a < end && pair_space(t[a]) { a += 1 }
+  a
+}
+// Whether the line is a row that is off ("#name = value").
+fn pair_line_off(t: text, at: i32, end: i32, sep: text) -> bool {
+  let a = pair_first(t, at, end)
+  a + 1 < end && t[a] == '#' && !pair_space(t[a + 1]) && t[a + 1] != '#' &&
+    find(slice(t, a, end), sep, 0) > 1
+}
+// Whether the line is a row (on or off).
+fn pair_line_row(t: text, at: i32, end: i32, sep: text) -> bool {
+  let a = pair_first(t, at, end)
+  if a >= end { false }
+  else if a + 1 < end && t[a] == '/' && t[a + 1] == '/' { false }
+  else if t[a] == '#' { pair_line_off(t, at, end, sep) }
+  else { true }
+}
+
+// How many rows the text has.
+fn pair_count(t: text, sep: text) -> i32 {
+  var n = 0
+  var at = 0
+  while at < len(t) {
+    let end = pair_line_end(t, at)
+    if pair_line_row(t, at, end, sep) { n += 1 }
+    at = end + 1
+  }
+  n
+}
+// Where row `row` (0 the first) starts; -1 where there is none.
+fn pair_at(t: text, sep: text, row: i32) -> i32 {
+  var n = 0
+  var found = -1
+  var at = 0
+  while at < len(t) && found < 0 {
+    let end = pair_line_end(t, at)
+    if pair_line_row(t, at, end, sep) {
+      if n == row { found = at }
+      n += 1
+    }
+    at = end + 1
+  }
+  found
+}
+// Whether the row is on (not "#name = value").
+fn pair_on(t: text, sep: text, row: i32) -> bool {
+  let at = pair_at(t, sep, row)
+  at >= 0 && !pair_line_off(t, at, pair_line_end(t, at), sep)
+}
+// Where the row's name starts (after a "#" of one that is off).
+fn pair_name_start(t: text, sep: text, at: i32) -> i32 {
+  let end = pair_line_end(t, at)
+  let a = pair_first(t, at, end)
+  if pair_line_off(t, at, end, sep) { a + 1 } else { a }
+}
+// Whether the row has `sep` (is not a bare line).
+fn pair_has_sep(t: text, sep: text, row: i32) -> bool {
+  let at = pair_at(t, sep, row)
+  if at < 0 { false } else {
+    let s = find(t, sep, at)
+    s >= 0 && s < pair_line_end(t, at)
+  }
+}
+// The row's name and value, without spaces at their ends ("" where the
+// row is not there).
+fn pair_key(t: text, sep: text, row: i32) -> text {
+  let at = pair_at(t, sep, row)
+  if at < 0 { "" } else {
+    let end = pair_line_end(t, at)
+    let s = find(t, sep, at)
+    pair_trimmed(t, pair_name_start(t, sep, at), if s >= 0 && s < end { s } else { end })
+  }
+}
+fn pair_value(t: text, sep: text, row: i32) -> text {
+  let at = pair_at(t, sep, row)
+  if at < 0 { "" } else {
+    let end = pair_line_end(t, at)
+    let s = find(t, sep, at)
+    if s >= 0 && s < end { pair_trimmed(t, s + len(sep), end) } else { "" }
+  }
+}
+
+// `sep` as it ends a row with no value ("name =", "Name:").
+fn pair_bare_sep(sep: text) -> text { if sep == ":" { ":" } else { " " + sep } }
+// A row's line as it is written: off ones with "#" first; a bare one
+// (`bare`, no value) as its name alone.
+fn pair_written(sep: text, key: text, value: text, on: bool, bare: bool) -> text {
+  let mark = if on { "" } else { "#" }
+  let between = if sep == ":" { ": " } else { " " + sep + " " }
+  if bare && len(value) == 0 { mark + key }
+  else if len(value) == 0 { mark + key + pair_bare_sep(sep) }
+  else { mark + key + between + value }
+}
+// The text with row `row` said anew (the text as it was, where the row is
+// not there). A bare row stays bare while it is given no value.
+fn pair_set(t: text, sep: text, row: i32, key: text, value: text, on: bool) -> text {
+  let at = pair_at(t, sep, row)
+  if at < 0 { t } else {
+    let end = pair_line_end(t, at)
+    // (A "\r" before the line break stays.)
+    let cr = if end > at && t[end - 1] == '\r' { "\r" } else { "" }
+    let line = pair_written(sep, key, value, on, !pair_has_sep(t, sep, row))
+    slice(t, 0, at) + line + cr + slice(t, end, len(t))
+  }
+}
+// The text with a row added after the rest (on a line of its own; ending
+// with a line break where the text did).
+fn pair_add(t: text, sep: text, key: text, value: text) -> text {
+  let line = pair_written(sep, key, value, true, false)
+  if len(t) == 0 { line }
+  else if t[len(t) - 1] == '\n' { t + line + "\n" }
+  else { t + "\n" + line }
+}
+// The text without row `row`'s line.
+fn pair_remove(t: text, sep: text, row: i32) -> text {
+  let at = pair_at(t, sep, row)
+  if at < 0 { t } else {
+    let end = pair_line_end(t, at)
+    if end < len(t) { slice(t, 0, at) + slice(t, end + 1, len(t)) }
+    else if at > 0 { slice(t, 0, at - 1) }
+    else { "" }
+  }
+}

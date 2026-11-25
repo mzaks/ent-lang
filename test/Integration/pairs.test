@@ -1,0 +1,28 @@
+// lib/pairs.ent: lines of names and values read as rows (comments, blank
+// lines and "#" lines that are not rows left out; a "#name = value" row
+// off; a line with no `sep` bare), and a row set, turned off or on,
+// added and taken out, with every other byte of the text as it was.
+// RUN: %ent run %S/Inputs/pairs_rows.ent 2>/dev/null | FileCheck %s --match-full-lines
+
+// CHECK:      env: 4 rows
+// CHECK-NEXT:   0 on [host] [https://a.example/x?y=1]
+// CHECK-NEXT:   1 on [user] [ann]
+// CHECK-NEXT:   2 off [port] [8080]
+// CHECK-NEXT:   3 on bare [secret api_key] []
+// CHECK-NEXT: set 1: # dev: lines are name = value|host = https://a.example/x?y=1||user = bob|#port = 8080|## notes|// old|secret api_key|#|
+// CHECK-NEXT: off 0: # dev: lines are name = value|#host = https://a.example/x?y=1||  user=ann  |#port = 8080|## notes|// old|secret api_key|#|
+// CHECK-NEXT: on 2: # dev: lines are name = value|host = https://a.example/x?y=1||  user=ann  |port = 8080|## notes|// old|secret api_key|#|
+// CHECK-NEXT: bare 3: # dev: lines are name = value|host = https://a.example/x?y=1||  user=ann  |#port = 8080|## notes|// old|secret api_key|#|
+// CHECK-NEXT: bare given 3: # dev: lines are name = value|host = https://a.example/x?y=1||  user=ann  |#port = 8080|## notes|// old|secret api_key = k1|#|
+// CHECK-NEXT: none 9: # dev: lines are name = value|host = https://a.example/x?y=1||  user=ann  |#port = 8080|## notes|// old|secret api_key|#|
+// CHECK-NEXT: add: # dev: lines are name = value|host = https://a.example/x?y=1||  user=ann  |#port = 8080|## notes|// old|secret api_key|#|token =|
+// CHECK-NEXT: remove 0: # dev: lines are name = value||  user=ann  |#port = 8080|## notes|// old|secret api_key|#|
+// CHECK-NEXT: headers: 3 rows
+// CHECK-NEXT:   0 on [Accept] [application/json]
+// CHECK-NEXT:   1 on [Authorization] [Bearer t0k3n]
+// CHECK-NEXT:   2 off [X-Debug] [1]
+// CHECK-NEXT: add: Accept: application/json|Authorization: Bearer t0k3n|#X-Debug: 1|# a comment: not a row|X-Ts: 1700000000
+// CHECK-NEXT: remove last: A: 1
+// CHECK-NEXT: remove only: []
+// CHECK-NEXT: add to none: [A: 1]
+// CHECK-NEXT: crlf: A: 9\r|B: 2\r|

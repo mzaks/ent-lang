@@ -375,7 +375,11 @@ come with the compiler, in `devices/`, and two more that need
   and runs, `lib/markdown_window.ent` sets them in lines as wide as the
   window: headings, lists, quotes, code, tables, pictures, links that go
   to their headings, search): `tools/ent run examples/markdown_view.ent --
-  README.md`; `examples/swarm/swarm.ent` is a shoot-'em-up on a field bigger than
+  README.md`; `lib/pairs.ent` reads lines of names and values
+  ("host = example.org", "Accept: text/html") as rows, some of them off
+  ("#host = ..."), and sets, adds or takes out one with every other byte
+  of the text as it was (comments, blank lines, the order): for a table
+  of them that edits the text under it; `examples/swarm/swarm.ent` is a shoot-'em-up on a field bigger than
   the window with foes, shots and sparks in their hundreds of thousands
   (its B key fills the field to what it holds; `bench/swarm/run.py`
   plays it by itself and says how long a frame takes), all of them drawn
