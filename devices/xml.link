@@ -1,0 +1,4 @@
+# The xml device reads documents and runs XPath through libxml2
+# (https://gitlab.gnome.org/GNOME/libxml2), which macOS and most Linux
+# systems carry.
+-lxml2

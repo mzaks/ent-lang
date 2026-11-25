@@ -1,0 +1,16 @@
+// The hashes of test/Integration/hashes.test.
+import console
+import text
+import hashes
+default_capacity 16
+system run() {
+  put(sha256_hex("abc"))
+  put(sha256_hex(""))
+  put(sha256_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"))
+  put(sha1_hex("abc"))
+  put(md5_hex("abc"))
+  put(md5_hex(""))
+  put(md5_hex("12345678901234567890123456789012345678901234567890123456789012345678901234567890"))
+}
+schedule once() { run() }
+main { once() }

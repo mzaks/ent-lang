@@ -1,0 +1,15 @@
+// The http device's http_start_with options and http_facts against a local
+// server (Inputs/http/serve.py): see Inputs/http/options.ent. Needs
+// libcurl and no network beyond 127.0.0.1.
+// RUN: rm -rf %t && mkdir -p %t
+// RUN: %python %S/Inputs/http/serve.py %t -- %ent run %S/Inputs/http/options.ent > %t.out
+// RUN: FileCheck %s --input-file=%t.out --match-full-lines
+
+// CHECK: follow 200 redirects=2 auth=false subject=false expires=false version=HTTP/1.1
+// CHECK-NEXT: resolve 200 redirects=- auth=false subject=false expires=false version=HTTP/1.1
+// CHECK-NEXT: basic 200 redirects=- auth=true subject=false expires=false version=HTTP/1.1
+// CHECK-NEXT: refused 0 redirects=- auth=false subject=false expires=false version=-
+// CHECK-NEXT: insecure 200 redirects=- auth=false subject=true expires=true version=HTTP/1.1
+// CHECK-NEXT: cacert 200 redirects=- auth=false subject=true expires=true version=HTTP/1.1
+// CHECK-NEXT: http10 200 redirects=- auth=false subject=false expires=false version=HTTP/1.1
+// CHECK-NEXT: unknown 200 redirects=- auth=false subject=false expires=false version=HTTP/1.1

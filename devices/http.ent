@@ -82,6 +82,25 @@ extern proc http_on_thread(session: i64) -> bool
 extern proc http_start(session: i64, method: text, url: text, headers: text,
                        body: text, timeout: f64, max_body: i64,
                        follow: i32) -> i64
+// The same with options of its own, a line each ("name value"; those not
+// known are passed over), over the session's:
+//   insecure                     no check of the server's certificate
+//   cacert path, cert path, key path, cert_password p, pinned_public_key h
+//   proxy url, no_proxy hosts
+//   http_version 1.0 | 1.1 | 2 | 2-prior | 3, tls_min 1.2, tls_max 1.3
+//   connect_timeout seconds
+//   resolve host:port:address, connect_to host:port:host2:port2 (each
+//     may be given more than once)
+//   unix_socket path, limit_rate bytes-a-second, path_as_is, ipv4, ipv6
+//   user name:password, auth basic | digest | ntlm | negotiate | any
+//   aws_sigv4 provider1[:provider2[:region[:service]]] (with user
+//     key:secret)
+//   netrc required | optional, netrc_file path
+//   location_trusted             credentials sent on to another host
+//   certinfo                     the server's certificate kept (http_facts)
+extern proc http_start_with(session: i64, method: text, url: text, headers: text,
+                            body: text, timeout: f64, max_body: i64,
+                            follow: i32, options: text) -> i64
 
 // Stops a request that is not answered yet; it is not answered then.
 extern proc http_cancel(handle: i64)
@@ -116,6 +135,13 @@ extern proc http_body(handle: i64) -> text
 extern proc http_headers(handle: i64) -> text
 extern proc http_url(handle: i64) -> text
 extern proc http_location(handle: i64) -> text
+// What else is known of an answered request, a line each: "redirects: 1"
+// (how many were followed), "ip: 93.184.215.14", "port: 443", "version:
+// HTTP/2"; with the option certinfo, the server's certificate as
+// "certificate Subject: ...", "certificate Issuer: ...", "certificate
+// Start date: ...", "certificate Expire date: ...", "certificate Serial
+// Number: ..." (as the TLS library names them).
+extern proc http_facts(handle: i64) -> text
 
 // Forgets an answered request (polled or not): its body and headers are
 // given back, and its handle is none from then on.

@@ -1,0 +1,12 @@
+// Hashes of a text's bytes, as lower-case hex: SHA-256 (FIPS 180-4), SHA-1
+// (the same standard) and MD5 (RFC 1321). SHA-1 and MD5 are broken for
+// signing; they are here to check what other programs give (a download's
+// sum, an answer's ETag, a test of a body).
+//
+//   import hashes
+//   sha256_hex("abc")   "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+import text
+
+extern fn sha256_hex(t: text) -> text
+extern fn sha1_hex(t: text) -> text
+extern fn md5_hex(t: text) -> text

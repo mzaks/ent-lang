@@ -1,0 +1,40 @@
+// What test/Integration/processes.test checks: devices/processes.
+import console
+import text
+import processes
+default_capacity 16
+proc wait_for(h: i64) -> text {
+  var out = ""
+  var status = -1
+  while status < 0 {
+    out = out + process_output(h)
+    status = process_status(h)
+  }
+  out = out + process_output(h)
+  let errs = process_errors(h)
+  process_forget(h)
+  "status {status} out [" + out + "] err [" + errs + "]"
+}
+system run() {
+  put(wait_for(process_start("/bin/sh", "-c\necho one; echo two >&2; exit 3\n", "")))
+  put(wait_for(process_start("pwd", "", "/tmp")))
+  let a = process_start("/no/such/program", "", "")
+  let b = process_start("pwd", "", "/no/such/folder")
+  put("none {a} badfolder {b}")
+  let h = process_start("/bin/sleep", "5", "")
+  process_stop(h)
+  put(wait_for(h))
+  let big = process_start("/bin/sh", "-c\nhead -c 300000 /dev/zero | tr '\\\\0' 'x'\n", "")
+  var all = ""
+  var st = -1
+  while st < 0 {
+    all = all + process_output(big)
+    st = process_status(big)
+  }
+  all = all + process_output(big)
+  put("big {len(all)} status {st}")
+  let me = program_file()
+  put("me {len(me) > 0}")
+}
+schedule once() { run() }
+main { once() }

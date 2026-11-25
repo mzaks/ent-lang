@@ -1,0 +1,17 @@
+// regex_group, as test/Integration/regex_groups.test checks it.
+import console
+import text
+import regex
+default_capacity 16
+system run() {
+  put("[" + regex_group("id=42&x=7", "id=(\\d+)", "", 0, 1) + "]")
+  put("[" + regex_group("id=42&x=7", "id=(\\d+)", "", 0, 0) + "]")
+  put("[" + regex_group("a-b", "(x)?(a)-(b)", "", 0, 1) + "|" + regex_group("a-b", "(x)?(a)-(b)", "", 0, 2) + "|" + regex_group("a-b", "(x)?(a)-(b)", "", 0, 3) + "]")
+  put("[" + regex_group("Name: Ann Lee", "(?<who>[A-Z]\\w+) (\\w+)", "", 0, 2) + "]")
+  put("[" + regex_group("aaa", "(a+?)", "", 0, 1) + "|" + regex_group("aaa", "(a+)", "", 0, 1) + "]")
+  put("[" + regex_group("abcabc", "(?:a(b)c)+", "", 0, 1) + "]")
+  put("[" + regex_group("xyz", "(q)", "", 0, 1) + "|" + regex_group("xyz", "(y)", "", 0, 5) + "]")
+  put("[" + regex_group("ABC", "(b)", "i", 0, 1) + "]")
+}
+schedule once() { run() }
+main { once() }

@@ -1,0 +1,17 @@
+// devices/processes: a program's exit status, its output and errors
+// apart, a folder to start in, a program and a folder that are not there
+// (no handle), one stopped (128 + SIGTERM), 300,000 bytes read as they
+// come without the pipe filling, and the program's own file.
+// UNSUPPORTED: system-windows
+// RUN: %ent run %S/Inputs/processes/started.ent 2>/dev/null > %t.out
+// RUN: FileCheck %s --input-file=%t.out --match-full-lines
+
+// CHECK: status 3 out [one
+// CHECK-NEXT: ] err [two
+// CHECK-NEXT: ]
+// CHECK-NEXT: status 0 out [{{.*}}tmp
+// CHECK-NEXT: ] err []
+// CHECK-NEXT: none 0 badfolder 0
+// CHECK-NEXT: status 143 out [] err []
+// CHECK-NEXT: big 300000 status 0
+// CHECK-NEXT: me true

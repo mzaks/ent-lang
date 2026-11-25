@@ -1,0 +1,12 @@
+// devices/hashes: SHA-256, SHA-1 and MD5 of the test vectors of FIPS
+// 180-4 and RFC 1321 (a message of one block, none, of two blocks).
+// RUN: %ent run %S/Inputs/hashes/vectors.ent 2>/dev/null > %t.out
+// RUN: FileCheck %s --input-file=%t.out --match-full-lines
+
+// CHECK: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+// CHECK-NEXT: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+// CHECK-NEXT: 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+// CHECK-NEXT: a9993e364706816aba3e25717850c26c9cd0d89d
+// CHECK-NEXT: 900150983cd24fb0d6963f7d28e17f72
+// CHECK-NEXT: d41d8cd98f00b204e9800998ecf8427e
+// CHECK-NEXT: 57edf4a22be3c955ac49da2e2107b67a

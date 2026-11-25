@@ -15,6 +15,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -68,6 +69,10 @@ typedef struct {
   uint8_t failure;
   double first_byte, total;
   char *url, *location;
+  // What curl tells of it once answered (http_facts), and the lists its
+  // options gave curl (kept while it runs).
+  char *facts;
+  struct curl_slist *resolve, *connect_to;
 } http_request;
 
 // Sessions, each made where it stays; rows in blocks of 1024 that stay.
@@ -223,6 +228,65 @@ static char *info_text(CURL *easy, CURLINFO what) {
   return strdup(at);
 }
 
+// What curl knows of a request done, a line each: "redirects: 1",
+// "ip: 93.184.215.14", "port: 443", "version: HTTP/2", and where it was
+// asked for (the option certinfo) the server's certificate:
+// "certificate Subject: ...", "certificate Expire date: ...".
+static void facts_add(http_bytes *to, const char *line) {
+  bytes_add(to, line, strlen(line));
+}
+static char *facts_of(CURL *easy) {
+  http_bytes out = {0};
+  char line[512];
+  long redirects = 0, port = 0, version = 0;
+  curl_easy_getinfo(easy, CURLINFO_REDIRECT_COUNT, &redirects);
+  snprintf(line, sizeof line, "redirects: %ld\n", redirects);
+  facts_add(&out, line);
+  char *ip = NULL;
+  if (curl_easy_getinfo(easy, CURLINFO_PRIMARY_IP, &ip) == CURLE_OK && ip && ip[0]) {
+    snprintf(line, sizeof line, "ip: %s\n", ip);
+    facts_add(&out, line);
+  }
+  if (curl_easy_getinfo(easy, CURLINFO_PRIMARY_PORT, &port) == CURLE_OK && port > 0) {
+    snprintf(line, sizeof line, "port: %ld\n", port);
+    facts_add(&out, line);
+  }
+  curl_easy_getinfo(easy, CURLINFO_HTTP_VERSION, &version);
+  const char *said = version == CURL_HTTP_VERSION_1_0   ? "HTTP/1.0"
+                     : version == CURL_HTTP_VERSION_1_1 ? "HTTP/1.1"
+                     : version == CURL_HTTP_VERSION_2_0 ? "HTTP/2"
+#ifdef CURL_HTTP_VERSION_3
+                     : version == CURL_HTTP_VERSION_3 ? "HTTP/3"
+#endif
+                                                        : "";
+  if (said[0]) {
+    snprintf(line, sizeof line, "version: %s\n", said);
+    facts_add(&out, line);
+  }
+  struct curl_certinfo *certs = NULL;
+  if (curl_easy_getinfo(easy, CURLINFO_CERTINFO, &certs) == CURLE_OK && certs &&
+      certs->num_of_certs > 0) {
+    for (struct curl_slist *f = certs->certinfo[0]; f; f = f->next) {
+      // (Its names, dates and numbers; not its keys and signature.)
+      static const char *const kept[] = {
+          "Subject:", "Issuer:", "Version:", "Serial Number:", "Start date:",
+          "Expire date:", "Signature Algorithm:", "Public Key Algorithm:",
+          "X509v3 Subject Alternative Name:"};
+      bool keep = false;
+      for (size_t k = 0; k < sizeof kept / sizeof *kept; ++k)
+        if (strncmp(f->data, kept[k], strlen(kept[k])) == 0)
+          keep = true;
+      if (!keep || strchr(f->data, '\n'))
+        continue;
+      facts_add(&out, "certificate ");
+      facts_add(&out, f->data);
+      facts_add(&out, "\n");
+    }
+  }
+  bytes_add(&out, "", 1);
+  return out.bytes;
+}
+
 // An easy handle for a request of a session: one kept, or a new one.
 static CURL *take_easy(http_session *session) {
   if (session->spare_count)
@@ -260,6 +324,7 @@ static void finish(int row, CURLcode code) {
   request->url = info_text(easy, CURLINFO_EFFECTIVE_URL);
   if (request->status >= 300 && request->status < 400)
     request->location = info_text(easy, CURLINFO_REDIRECT_URL);
+  request->facts = facts_of(easy);
   // (On a thread of its own, the session's thread took it out already.)
   if (!sessions[request->session]->threaded)
     curl_multi_remove_handle(sessions[request->session]->multi, easy);
@@ -282,6 +347,9 @@ static void release(int row) {
   bytes_free(&request->head);
   free(request->url);
   free(request->location);
+  free(request->facts);
+  curl_slist_free_all(request->resolve);
+  curl_slist_free_all(request->connect_to);
   uint32_t uses = request->uses;
   *request = (http_request){0};
   request->uses = uses;
@@ -326,6 +394,9 @@ static void forget(int row) {
   bytes_free(&request->head);
   free(request->url);
   free(request->location);
+  free(request->facts);
+  curl_slist_free_all(request->resolve);
+  curl_slist_free_all(request->connect_to);
   uint32_t uses = request->uses;
   *request = (http_request){0};
   request->uses = uses + 1;
@@ -421,10 +492,136 @@ static struct curl_slist *header_list(const ent_text *headers, bool *expect) {
   return list;
 }
 
+// Whether line `line` (of `length` bytes) names option `name`: its value
+// after it (and a space), else NULL.
+static const char *option_value(const char *line, const char *name) {
+  size_t n = strlen(name);
+  if (strncmp(line, name, n) != 0 || (line[n] != 0 && line[n] != ' '))
+    return NULL;
+  const char *v = line + n;
+  while (*v == ' ')
+    ++v;
+  return v;
+}
+// A request's options (http_start_with), a line each, set on its easy
+// handle after the session's own (so they win).
+static void options_set(http_request *request, CURL *easy,
+                        const ent_text *options) {
+  uint32_t length = options ? options->length : 0;
+  uint32_t at = 0;
+  long auth = 0;
+  while (at < length) {
+    uint32_t end = at;
+    while (end < length && options->bytes[end] != '\n')
+      ++end;
+    uint32_t stop = end;
+    while (stop > at && (options->bytes[stop - 1] == '\r' || options->bytes[stop - 1] == ' '))
+      --stop;
+    char *line = grown(NULL, stop - at + 1);
+    memcpy(line, options->bytes + at, stop - at);
+    line[stop - at] = 0;
+    const char *v;
+    if ((v = option_value(line, "insecure"))) {
+      curl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER, 0L);
+      curl_easy_setopt(easy, CURLOPT_SSL_VERIFYHOST, 0L);
+    } else if ((v = option_value(line, "cacert")))
+      curl_easy_setopt(easy, CURLOPT_CAINFO, v);
+    else if ((v = option_value(line, "cert")))
+      curl_easy_setopt(easy, CURLOPT_SSLCERT, v);
+    else if ((v = option_value(line, "cert_password")))
+      curl_easy_setopt(easy, CURLOPT_KEYPASSWD, v);
+    else if ((v = option_value(line, "key")))
+      curl_easy_setopt(easy, CURLOPT_SSLKEY, v);
+    else if ((v = option_value(line, "pinned_public_key")))
+      curl_easy_setopt(easy, CURLOPT_PINNEDPUBLICKEY, v);
+    else if ((v = option_value(line, "proxy")))
+      curl_easy_setopt(easy, CURLOPT_PROXY, v);
+    else if ((v = option_value(line, "no_proxy")))
+      curl_easy_setopt(easy, CURLOPT_NOPROXY, v);
+    else if ((v = option_value(line, "http_version"))) {
+      long version = strcmp(v, "1.0") == 0      ? CURL_HTTP_VERSION_1_0
+                     : strcmp(v, "1.1") == 0    ? CURL_HTTP_VERSION_1_1
+                     : strcmp(v, "2") == 0      ? CURL_HTTP_VERSION_2_0
+                     : strcmp(v, "2-prior") == 0 ? CURL_HTTP_VERSION_2_PRIOR_KNOWLEDGE
+#ifdef CURL_HTTP_VERSION_3
+                     : strcmp(v, "3") == 0 ? CURL_HTTP_VERSION_3
+#endif
+                                           : CURL_HTTP_VERSION_NONE;
+      curl_easy_setopt(easy, CURLOPT_HTTP_VERSION, version);
+    } else if ((v = option_value(line, "tls_min")) || (v = option_value(line, "tls_max"))) {
+      bool max = line[4] == 'm' && line[5] == 'a';
+      long version = strcmp(v, "1.0") == 0   ? (max ? CURL_SSLVERSION_MAX_TLSv1_0 : CURL_SSLVERSION_TLSv1_0)
+                     : strcmp(v, "1.1") == 0 ? (max ? CURL_SSLVERSION_MAX_TLSv1_1 : CURL_SSLVERSION_TLSv1_1)
+                     : strcmp(v, "1.2") == 0 ? (max ? CURL_SSLVERSION_MAX_TLSv1_2 : CURL_SSLVERSION_TLSv1_2)
+                     : strcmp(v, "1.3") == 0 ? (max ? CURL_SSLVERSION_MAX_TLSv1_3 : CURL_SSLVERSION_TLSv1_3)
+                                             : CURL_SSLVERSION_DEFAULT;
+      curl_easy_setopt(easy, CURLOPT_SSLVERSION, version);
+    } else if ((v = option_value(line, "connect_timeout")))
+      curl_easy_setopt(easy, CURLOPT_CONNECTTIMEOUT_MS, (long)(atof(v) * 1000.0 + 0.5));
+    else if ((v = option_value(line, "resolve")))
+      request->resolve = curl_slist_append(request->resolve, v);
+    else if ((v = option_value(line, "connect_to")))
+      request->connect_to = curl_slist_append(request->connect_to, v);
+    else if ((v = option_value(line, "unix_socket")))
+      curl_easy_setopt(easy, CURLOPT_UNIX_SOCKET_PATH, v);
+    else if ((v = option_value(line, "limit_rate")))
+      curl_easy_setopt(easy, CURLOPT_MAX_RECV_SPEED_LARGE, (curl_off_t)atoll(v));
+    else if ((v = option_value(line, "path_as_is")))
+      curl_easy_setopt(easy, CURLOPT_PATH_AS_IS, 1L);
+    else if ((v = option_value(line, "ipv4")))
+      curl_easy_setopt(easy, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+    else if ((v = option_value(line, "ipv6")))
+      curl_easy_setopt(easy, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V6);
+    else if ((v = option_value(line, "user")))
+      curl_easy_setopt(easy, CURLOPT_USERPWD, v);
+    else if ((v = option_value(line, "auth")))
+      auth = strcmp(v, "digest") == 0      ? CURLAUTH_DIGEST
+             : strcmp(v, "ntlm") == 0      ? CURLAUTH_NTLM
+             : strcmp(v, "negotiate") == 0 ? CURLAUTH_NEGOTIATE
+             : strcmp(v, "any") == 0       ? CURLAUTH_ANY
+                                           : CURLAUTH_BASIC;
+    else if ((v = option_value(line, "aws_sigv4")))
+      curl_easy_setopt(easy, CURLOPT_AWS_SIGV4, v);
+    else if ((v = option_value(line, "netrc_file"))) {
+      curl_easy_setopt(easy, CURLOPT_NETRC_FILE, v);
+      curl_easy_setopt(easy, CURLOPT_NETRC, (long)CURL_NETRC_OPTIONAL);
+    } else if ((v = option_value(line, "netrc")))
+      curl_easy_setopt(easy, CURLOPT_NETRC,
+                       strcmp(v, "optional") == 0 ? (long)CURL_NETRC_OPTIONAL : (long)CURL_NETRC_REQUIRED);
+    else if ((v = option_value(line, "location_trusted")))
+      curl_easy_setopt(easy, CURLOPT_UNRESTRICTED_AUTH, 1L);
+    else if ((v = option_value(line, "certinfo")))
+      curl_easy_setopt(easy, CURLOPT_CERTINFO, 1L);
+    free(line);
+    at = end + 1;
+  }
+  if (auth)
+    curl_easy_setopt(easy, CURLOPT_HTTPAUTH, auth);
+  if (request->resolve)
+    curl_easy_setopt(easy, CURLOPT_RESOLVE, request->resolve);
+  if (request->connect_to)
+    curl_easy_setopt(easy, CURLOPT_CONNECT_TO, request->connect_to);
+}
+
+int64_t ent_http_http_start_with(int64_t number, const ent_text *method,
+                                 const ent_text *url, const ent_text *headers,
+                                 const ent_text *body, double timeout,
+                                 int64_t max_body, int32_t follow,
+                                 const ent_text *options);
+
 int64_t ent_http_http_start(int64_t number, const ent_text *method,
                             const ent_text *url, const ent_text *headers,
                             const ent_text *body, double timeout,
                             int64_t max_body, int32_t follow) {
+  return ent_http_http_start_with(number, method, url, headers, body, timeout,
+                                  max_body, follow, NULL);
+}
+
+int64_t ent_http_http_start_with(int64_t number, const ent_text *method,
+                                 const ent_text *url, const ent_text *headers,
+                                 const ent_text *body, double timeout,
+                                 int64_t max_body, int32_t follow,
+                                 const ent_text *options) {
   int row = new_row();
   http_request *request = row_at(row);
   request->state = 1;
@@ -472,6 +669,7 @@ int64_t ent_http_http_start(int64_t number, const ent_text *method,
     curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(easy, CURLOPT_MAXREDIRS, (long)follow);
   }
+  options_set(request, easy, options);
   // The method: GET and HEAD as curl has them, POST by its body (so a
   // 303 turns it into a GET, as browsers do; 307 and 308 keep it), any
   // other by name, with its body where it has one (or one of no bytes,
@@ -876,6 +1074,13 @@ const ent_text *ent_http_http_location(int64_t handle) {
   if (row < 0 || row_at(row)->state < 2 || !row_at(row)->location)
     return NULL;
   return text_of(row_at(row)->location, strlen(row_at(row)->location));
+}
+
+const ent_text *ent_http_http_facts(int64_t handle) {
+  int row = row_of(handle);
+  if (row < 0 || row_at(row)->state < 2 || !row_at(row)->facts)
+    return NULL;
+  return text_of(row_at(row)->facts, strlen(row_at(row)->facts));
 }
 
 void ent_http_http_forget(int64_t handle) {

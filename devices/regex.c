@@ -39,10 +39,10 @@
 #endif
 
 // The tree.
-enum { N_EMPTY, N_CHAR, N_ANY, N_CLASS, N_CAT, N_ALT, N_REPEAT, N_BOL, N_EOL, N_WORD, N_NOT_WORD };
+enum { N_EMPTY, N_CHAR, N_ANY, N_CLASS, N_CAT, N_ALT, N_REPEAT, N_BOL, N_EOL, N_WORD, N_NOT_WORD, N_GROUP };
 typedef struct {
   int kind, a, b;     // children (CAT, ALT; REPEAT's a)
-  int32_t value;      // a CHAR's code point, a CLASS's number
+  int32_t value;      // a CHAR's code point, a CLASS's number, a GROUP's
   int min, max;       // a REPEAT's (max -1: no end)
   bool greedy;
 } rx_node;
@@ -50,7 +50,9 @@ typedef struct {
 typedef struct { int first, count; bool negated; } rx_class;
 
 // The program.
-enum { I_CHAR, I_ANY, I_ANY_NL, I_CLASS, I_SPLIT, I_JMP, I_MATCH, I_BOL, I_EOL, I_WORD, I_NOT_WORD };
+// (SAVE keeps where the text is as a group's start or end: its value
+// 2 * group, or 2 * group + 1.)
+enum { I_CHAR, I_ANY, I_ANY_NL, I_CLASS, I_SPLIT, I_JMP, I_MATCH, I_BOL, I_EOL, I_WORD, I_NOT_WORD, I_SAVE };
 typedef struct { int op, x, y; int32_t value; } rx_inst;
 
 enum { RX_MAX_NODES = 20000, RX_MAX_PROGRAM = 50000, RX_MAX_REPEAT = 1000 };
@@ -69,6 +71,7 @@ typedef struct {
   int program_count, program_room;
   bool ignore_case, multiline, dot_all;
   bool bare_assertion; // (The atom read last is ^ $ \b or \B, not in a group.)
+  int group_count;     // groups that keep what they match: ( ) and (?<name> )
 } rx;
 
 static bool rx_grow(void **items, int *room, int need, size_t size) {
@@ -334,11 +337,13 @@ static int rx_atom(rx *r, int depth) {
                       (c == '\\' && r->at + 1 < r->n && (r->p[r->at + 1] == 'b' || r->p[r->at + 1] == 'B'));
   if (c == '(') {
     r->at++;
+    bool keeps = true;
     if (rx_peek(r) == '?') {
       r->at++;
       int kind = rx_peek(r);
       if (kind == ':') {
         r->at++;
+        keeps = false;
       } else if (kind == '<' && r->at + 1 < r->n && r->p[r->at + 1] != '=' &&
                  r->p[r->at + 1] != '!') {
         while (rx_more(r) && rx_peek(r) != '>')
@@ -360,6 +365,8 @@ static int rx_atom(rx *r, int depth) {
       r->error = "groups are nested too deep";
       return 0;
     }
+    // (Numbered as their "(" come, from 1.)
+    int group = keeps ? ++r->group_count : 0;
     int inner = rx_alternatives(r, depth + 1);
     if (r->error)
       return 0;
@@ -369,7 +376,14 @@ static int rx_atom(rx *r, int depth) {
     }
     r->at++;
     r->bare_assertion = false;
-    return inner;
+    if (!keeps)
+      return inner;
+    int node = rx_node_new(r, N_GROUP);
+    if (r->error)
+      return 0;
+    r->nodes[node].a = inner;
+    r->nodes[node].value = group;
+    return node;
   }
   if (c == '[') {
     r->at++;
@@ -589,6 +603,17 @@ static void rx_compile(rx *r, int n) {
   case N_EOL: rx_emit(r, I_EOL); break;
   case N_WORD: rx_emit(r, I_WORD); break;
   case N_NOT_WORD: rx_emit(r, I_NOT_WORD); break;
+  case N_GROUP: {
+    int child = node->a, group = node->value;
+    int open = rx_emit(r, I_SAVE);
+    if (!r->error)
+      r->program[open].value = 2 * group;
+    rx_compile(r, child);
+    int close = rx_emit(r, I_SAVE);
+    if (!r->error)
+      r->program[close].value = 2 * group + 1;
+    break;
+  }
   case N_CAT: {
     int a = node->a, b = node->b;
     rx_compile(r, a);
@@ -715,62 +740,104 @@ static bool rx_word_before(const unsigned char *p, size_t n, size_t at) {
 
 // The machine: a list of threads, each a place in the program and where
 // its match started, in the order of their priority.
+// Where groups are asked for (`slots`: 2 for each, and 2 for the whole
+// match), each thread has where its groups started and ended so far
+// (SIZE_MAX: not yet), `slots` of them in `caps` from `cap`.
 typedef struct { int pc; size_t start; } rx_thread;
 typedef struct {
   rx_thread *items;
   int count;
+  size_t *caps;
 } rx_list;
 
 // A thread added at `pc`, following jumps, splits and what matches no
 // character (in order: the way a split takes first, first), each place
 // once a step (`mark`).
 static void rx_add(const rx *r, rx_list *list, int *marks, int mark, int pc, size_t start,
-                   const unsigned char *t, size_t n, size_t at, int *stack) {
-  // (Kept on a stack of its own: a program may be long.)
-  int top = 0;
+                   const unsigned char *t, size_t n, size_t at, int *stack,
+                   const size_t *caps, int slots, size_t *scratch) {
+  // (Kept on a stack of its own: a program may be long. With groups, each
+  // place on it has its groups in `scratch`: stack[k + 1] says which.)
+  int top = 0, used = 0;
   stack[top++] = pc;
+  if (slots) {
+    memcpy(scratch, caps, sizeof(size_t) * (size_t)slots);
+    stack[top++] = used++;
+  }
   while (top > 0) {
+    int slot = slots ? stack[--top] : 0;
     int at_pc = stack[--top];
+    size_t *mine = slots ? scratch + (size_t)slot * (size_t)slots : NULL;
     if (marks[at_pc] == mark)
       continue;
     marks[at_pc] = mark;
     const rx_inst *i = &r->program[at_pc];
+#define RX_PUSH(pc_, slot_)                                                    \
+  do {                                                                         \
+    stack[top++] = (pc_);                                                      \
+    if (slots)                                                                 \
+      stack[top++] = (slot_);                                                  \
+  } while (0)
     switch (i->op) {
     case I_JMP:
-      stack[top++] = i->x;
+      RX_PUSH(i->x, slot);
       break;
     case I_SPLIT:
-      stack[top++] = i->y;
-      stack[top++] = i->x;
+      // (The way taken second gets a copy: the first may change its own.)
+      if (slots) {
+        int other = used++;
+        memcpy(scratch + (size_t)other * (size_t)slots, mine, sizeof(size_t) * (size_t)slots);
+        RX_PUSH(i->y, other);
+      } else
+        RX_PUSH(i->y, 0);
+      RX_PUSH(i->x, slot);
+      break;
+    case I_SAVE:
+      if (slots && i->value < slots)
+        mine[i->value] = at;
+      RX_PUSH(at_pc + 1, slot);
       break;
     case I_BOL:
       if (at == 0 || (r->multiline && (t[at - 1] == '\n' || t[at - 1] == '\r')))
-        stack[top++] = at_pc + 1;
+        RX_PUSH(at_pc + 1, slot);
       break;
     case I_EOL:
       if (at == n || (r->multiline && (t[at] == '\n' || t[at] == '\r')))
-        stack[top++] = at_pc + 1;
+        RX_PUSH(at_pc + 1, slot);
       break;
     case I_WORD:
       if (rx_word_before(t, n, at) != rx_word_byte(t, n, at))
-        stack[top++] = at_pc + 1;
+        RX_PUSH(at_pc + 1, slot);
       break;
     case I_NOT_WORD:
       if (rx_word_before(t, n, at) == rx_word_byte(t, n, at))
-        stack[top++] = at_pc + 1;
+        RX_PUSH(at_pc + 1, slot);
       break;
     default:
       list->items[list->count].pc = at_pc;
       list->items[list->count].start = start;
+      if (slots)
+        memcpy(list->caps + (size_t)list->count * (size_t)slots, mine,
+               sizeof(size_t) * (size_t)slots);
       list->count++;
     }
+#undef RX_PUSH
   }
 }
 
 // The first match from byte `from` on: where it starts and ends; false
 // where there is none.
+static bool rx_run_groups(const rx *r, const ent_text *text, int32_t from, size_t *found_start,
+                          size_t *found_end, size_t *groups);
 static bool rx_run(const rx *r, const ent_text *text, int32_t from, size_t *found_start,
                    size_t *found_end) {
+  return rx_run_groups(r, text, from, found_start, found_end, NULL);
+}
+// The same, and where `groups` is given, where each group of the match
+// started and ended (2 for each, group 1 first; SIZE_MAX where it matched
+// nothing).
+static bool rx_run_groups(const rx *r, const ent_text *text, int32_t from, size_t *found_start,
+                          size_t *found_end, size_t *groups) {
   const unsigned char *t = (const unsigned char *)(text ? text->bytes : "");
   size_t n = text ? text->length : 0;
   if (from < 0)
@@ -778,21 +845,28 @@ static bool rx_run(const rx *r, const ent_text *text, int32_t from, size_t *foun
   if ((size_t)from > n)
     return false;
   int size = r->program_count;
+  int slots = groups ? 2 * (r->group_count + 1) : 0;
   rx_thread *a = malloc(sizeof(rx_thread) * (size_t)size);
   rx_thread *b = malloc(sizeof(rx_thread) * (size_t)size);
   int *marks = malloc(sizeof(int) * (size_t)size);
-  int *stack = malloc(sizeof(int) * (size_t)(size * 2 + 2));
-  if (!a || !b || !marks || !stack) {
-    free(a), free(b), free(marks), free(stack);
+  int *stack = malloc(sizeof(int) * (size_t)(size * 4 + 4));
+  size_t *a_caps = slots ? malloc(sizeof(size_t) * (size_t)size * (size_t)slots) : NULL;
+  size_t *b_caps = slots ? malloc(sizeof(size_t) * (size_t)size * (size_t)slots) : NULL;
+  size_t *scratch = slots ? malloc(sizeof(size_t) * (size_t)(size * 2 + 2) * (size_t)slots) : NULL;
+  size_t *none = slots ? malloc(sizeof(size_t) * (size_t)slots) : NULL;
+  if (!a || !b || !marks || !stack || (slots && (!a_caps || !b_caps || !scratch || !none))) {
+    free(a), free(b), free(marks), free(stack), free(a_caps), free(b_caps), free(scratch), free(none);
     return false;
   }
+  for (int k = 0; k < slots; ++k)
+    none[k] = SIZE_MAX;
   for (int k = 0; k < size; ++k)
     marks[k] = -1;
-  rx_list now = {a, 0}, next = {b, 0};
+  rx_list now = {a, 0, a_caps}, next = {b, 0, b_caps};
   bool matched = false;
   int mark = 0;
   size_t at = (size_t)from;
-  rx_add(r, &now, marks, mark, 0, at, t, n, at, stack);
+  rx_add(r, &now, marks, mark, 0, at, t, n, at, stack, none, slots, scratch);
   for (;;) {
     size_t step;
     int32_t c = at < n ? rx_decode(t, n, at, &step) : -1;
@@ -808,6 +882,9 @@ static bool rx_run(const rx *r, const ent_text *text, int32_t from, size_t *foun
         matched = true;
         *found_start = now.items[k].start;
         *found_end = at;
+        if (slots)
+          memcpy(groups, now.caps + (size_t)k * (size_t)slots + 2,
+                 sizeof(size_t) * (size_t)(slots - 2));
         // (Threads after it in priority are dropped.)
         now.count = k + 1;
         break;
@@ -825,13 +902,14 @@ static bool rx_run(const rx *r, const ent_text *text, int32_t from, size_t *foun
         break;
       }
       if (takes)
-        rx_add(r, &next, marks, mark, now.items[k].pc + 1, now.items[k].start, t, n, step, stack);
+        rx_add(r, &next, marks, mark, now.items[k].pc + 1, now.items[k].start, t, n, step, stack,
+               slots ? now.caps + (size_t)k * (size_t)slots : NULL, slots, scratch);
     }
     if (at >= n)
       break;
     // A new start here, last in priority, where no match is found yet.
     if (!matched)
-      rx_add(r, &next, marks, mark, 0, step, t, n, step, stack);
+      rx_add(r, &next, marks, mark, 0, step, t, n, step, stack, none, slots, scratch);
     // (No thread left: done where one matched, else on to the next start.)
     if (next.count == 0 && matched)
       break;
@@ -840,7 +918,7 @@ static bool rx_run(const rx *r, const ent_text *text, int32_t from, size_t *foun
     next = swap;
     at = step;
   }
-  free(a), free(b), free(marks), free(stack);
+  free(a), free(b), free(marks), free(stack), free(a_caps), free(b_caps), free(scratch), free(none);
   return matched;
 }
 
@@ -884,4 +962,34 @@ ENT_REGEX_SAME_RESULT int32_t ent_regex_regex_end(const ent_text *t, const ent_t
   bool found = rx_make(&r, pattern, flags) && rx_run(&r, t, from, &start, &end);
   rx_free(&r);
   return found ? (int32_t)end : -1;
+}
+
+// What group `group` of the first match from byte `from` on matched ("" where
+// there is no match, no such group, or it matched nothing); group 0 is the
+// whole match.
+ENT_REGEX_SAME_RESULT const ent_text *ent_regex_regex_group(const ent_text *t, const ent_text *pattern,
+                                                             const ent_text *flags, int32_t from,
+                                                             int32_t group) {
+  rx r;
+  size_t start = 0, end = 0;
+  bool made = rx_make(&r, pattern, flags);
+  int count = made ? r.group_count : 0;
+  size_t *groups = malloc(sizeof(size_t) * (size_t)(2 * count + 2));
+  bool found = made && groups && group >= 0 && group <= count &&
+               rx_run_groups(&r, t, from, &start, &end, groups);
+  size_t a = 0, z = 0;
+  if (found && group == 0) {
+    a = start;
+    z = end;
+  } else if (found && groups[2 * (group - 1)] != SIZE_MAX && groups[2 * (group - 1) + 1] != SIZE_MAX) {
+    a = groups[2 * (group - 1)];
+    z = groups[2 * (group - 1) + 1];
+  }
+  rx_free(&r);
+  free(groups);
+  size_t length = z > a ? z - a : 0;
+  ent_text *said = ent_text_new((uint32_t)length);
+  if (said && length)
+    memcpy(said->bytes, t->bytes + a, length);
+  return said;
 }

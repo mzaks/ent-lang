@@ -1,0 +1,15 @@
+// devices/regex's regex_group: what a group of the first match took (the
+// whole match as group 0), a group that matched nothing, a named group
+// counted with the others, lazy and greedy repeats, a group repeated (its
+// last round), no match, a group that is not there, and flag i.
+// RUN: %ent run %S/Inputs/regex/groups.ent 2>/dev/null > %t.out
+// RUN: FileCheck %s --input-file=%t.out --match-full-lines
+
+// CHECK: [42]
+// CHECK-NEXT: [id=42]
+// CHECK-NEXT: [|a|b]
+// CHECK-NEXT: [Lee]
+// CHECK-NEXT: [a|aaa]
+// CHECK-NEXT: [b]
+// CHECK-NEXT: [|]
+// CHECK-NEXT: [B]

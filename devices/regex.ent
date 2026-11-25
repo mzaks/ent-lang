@@ -34,3 +34,7 @@ extern fn regex_matches(t: text, pattern: text, flags: text) -> bool
 // (the byte after it); -1 where there is none.
 extern fn regex_find(t: text, pattern: text, flags: text, from: i32) -> i32
 extern fn regex_end(t: text, pattern: text, flags: text, from: i32) -> i32
+// What group `group` of that match matched (the groups are the `( )`
+// and `(?<name> )`, numbered from 1 as their "(" come; 0 is the whole
+// match): "" where there is no match or the group matched nothing.
+extern fn regex_group(t: text, pattern: text, flags: text, from: i32, group: i32) -> text

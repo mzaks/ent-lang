@@ -1,0 +1,27 @@
+// XPath 1.0 over an HTML or XML document given as a text, through libxml2
+// (https://gitlab.gnome.org/GNOME/libxml2, MIT licence), which macOS and
+// most Linux systems carry:
+//
+//   import xml
+//   xpath_text(page, true, "normalize-space(//h1)")   "Welcome"
+//   xpath_count(page, true, "//ul/li")                 3
+//   xpath_item(page, true, "//ul/li/@id", 0)           "first"
+//
+// `html` reads the document as a browser would (tags left open, no
+// namespaces); else it is read as XML, where elements of a namespace are
+// named in XPath only through `*[local-name()='x']`. A document is read
+// as given: no file and no network is reached (no DTD loaded, no entity
+// expanded). Where it cannot be read, or the expression is none, the
+// kind is "".
+import text
+
+// What an expression gives: "nodes", "boolean", "number" or "string";
+// "" where it or the document is wrong.
+extern fn xpath_kind(document: text, html: bool, expression: text) -> text
+// How many nodes it finds (-1 where it gives no nodes).
+extern fn xpath_count(document: text, html: bool, expression: text) -> i32
+// What it gives as text, as XPath's string() makes it (of nodes: the
+// first one's text, all of it).
+extern fn xpath_text(document: text, html: bool, expression: text) -> text
+// The text of node `k` (from 0) it finds ("" where there is none).
+extern fn xpath_item(document: text, html: bool, expression: text, k: i32) -> text

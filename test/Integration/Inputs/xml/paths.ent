@@ -1,0 +1,31 @@
+// What test/Integration/xml_xpath.test checks: devices/xml.
+import console
+import text
+import xml
+default_capacity 16
+fn page() -> text {
+  "<html><head><title>Shop</title></head><body><h1>  Welcome\n  home </h1><ul><li id=\"a\">one<li id=\"b\">two</ul>" +
+    "<p class=x>price: <b>9.50</b></p></body></html>"
+}
+fn feed() -> text {
+  "<?xml version=\"1.0\"?><feed xmlns=\"http://www.w3.org/2005/Atom\"><entry><title>A</title></entry>" +
+    "<entry><title>B &amp; C</title></entry></feed>"
+}
+fn plain() -> text { "<r><n v=\"1\"/><n v=\"2\"/><n v=\"3\"/></r>" }
+fn xxe() -> text { "<?xml version=\"1.0\"?><!DOCTYPE r [<!ENTITY e SYSTEM \"file:///etc/passwd\">]><r>&e;</r>" }
+system run() {
+  put("title [" + xpath_text(page(), true, "string(//title)") + "] " + xpath_kind(page(), true, "string(//title)"))
+  put("h1 [" + xpath_text(page(), true, "normalize-space(//h1)") + "]")
+  let li = xpath_count(page(), true, "//li")
+  put("li {li} [" + xpath_item(page(), true, "//li", 1) + "] [" + xpath_item(page(), true, "//li/@id", 0) + "] [" + xpath_item(page(), true, "//li", 5) + "]")
+  put("kinds " + xpath_kind(page(), true, "//li") + " " + xpath_kind(page(), true, "count(//li)") + " " + xpath_kind(page(), true, "boolean(//b)") + " [" + xpath_kind(page(), true, "//li[") + "]")
+  put("number " + xpath_text(page(), true, "number(//b) * 2") + " " + xpath_text(page(), true, "count(//li) > 1"))
+  let entries = xpath_count(feed(), false, "//*[local-name()='entry']")
+  let plain_entries = xpath_count(feed(), false, "//entry")
+  put("atom {entries} [" + xpath_item(feed(), false, "//*[local-name()='title']", 1) + "] {plain_entries}")
+  let big = xpath_count(plain(), false, "//n[@v > 1]")
+  put("xml {big} [" + xpath_text(plain(), false, "sum(//n/@v)") + "] [" + xpath_kind("<r><unclosed></r>", false, "//r") + "]")
+  put("xxe [" + xpath_text(xxe(), false, "string(/r)") + "]")
+}
+schedule once() { run() }
+main { once() }

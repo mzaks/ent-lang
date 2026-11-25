@@ -1,0 +1,34 @@
+// Other programs, started and watched: what they write is read as they
+// go, without waiting, and whether they ended is asked each frame.
+//
+//   import processes
+//   system start() { Job.handle = process_start(program_file(), "--part\n1\n", "") }
+//   system watch() {
+//     Job.out = Job.out + process_output(Job.handle)
+//     if process_status(Job.handle) >= 0 { ... process_forget(Job.handle) }
+//   }
+//
+// A program is started as it is named (a path, or a name found on the
+// PATH), with this program's environment; its arguments are a text, a
+// line each. Implemented in devices/processes.c, on macOS, Linux and the
+// BSDs; on Windows and a web page none is started yet (process_start
+// gives 0).
+import text
+
+// Starts `program` with `arguments` (a line each) in `folder` ("": where
+// this program is), its output and errors kept to be read: a handle, or
+// 0 where it could not be started.
+extern proc process_start(program: text, arguments: text, folder: text) -> i64
+// What it wrote to its output, and to its errors, since they were read
+// last ("" where nothing more).
+extern proc process_output(handle: i64) -> text
+extern proc process_errors(handle: i64) -> text
+// -1 while it runs; once it ended, its exit status (128 and the signal's
+// number where a signal ended it). What it wrote stays to be read.
+extern proc process_status(handle: i64) -> i32
+// Asks it to end (SIGTERM), where it runs.
+extern proc process_stop(handle: i64)
+// Forgets one: stopped where it still runs, and its handle none after.
+extern proc process_forget(handle: i64)
+// This program's own file ("" where the system does not say).
+extern proc program_file() -> text

@@ -1,0 +1,43 @@
+// http_start_with's options and http_facts (test/Integration/
+// http_options.test), against Inputs/http/serve.py: redirects followed and
+// counted, a host resolved to 127.0.0.1, Basic auth, TLS refused for a
+// self-signed certificate and taken with `insecure` or `cacert`, the
+// certificate's fields, the HTTP version (serve.py answers in HTTP/1.1,
+// also where HTTP/1.0 is asked for), and an option that is none.
+import console
+import text
+import files
+import http
+default_capacity 16
+proc got(name: text, session: i64, url: text, follow: i32, options: text, done: mut Done) {
+  let h = http_start_with(session, "GET", url, "", "", 10.0, 0, follow, options)
+  var n = 0
+  while n == 0 { n = http_poll(5.0, done) }
+  let facts = http_facts(h)
+  let auth = find(http_body(h), "Authorization: Basic Ym9iOnB3", 0) >= 0
+  var two = "-"
+  if find(facts, "redirects: 2\n", 0) >= 0 { two = "2" }
+  let subject = find(facts, "certificate Subject:", 0) >= 0
+  let expires = find(facts, "certificate Expire date:", 0) >= 0
+  let v_at = find(facts, "version: ", 0)
+  let version = if v_at < 0 { "-" } else { slice(facts, v_at + 9, find(facts, "\n", v_at)) }
+  put(name + " {http_status(h)} redirects=" + two +
+      " auth={auth} subject={subject} expires={expires} version=" + version)
+  http_forget(h)
+}
+system run() {
+  let s = http_session("ent-test/1", false, 0, 0, true, true, "", "")
+  let base = read_text("server.url")
+  let tls = read_text("server_tls.url")
+  let port = slice(base, find(base, ":", 6) + 1, len(base))
+  got("follow", s, base + "/redirect/2", 10, "", Done)
+  got("resolve", s, "http://nowhere.invalid:" + port + "/n/1", 0, "resolve nowhere.invalid:" + port + ":127.0.0.1", Done)
+  got("basic", s, base + "/anything", 0, "user bob:pw\nauth basic", Done)
+  got("refused", s, tls + "/n/1", 0, "", Done)
+  got("insecure", s, tls + "/n/1", 0, "insecure\ncertinfo", Done)
+  got("cacert", s, tls + "/n/1", 0, "cacert cert.pem\ncertinfo", Done)
+  got("http10", s, base + "/n/1", 0, "http_version 1.0", Done)
+  got("unknown", s, base + "/n/1", 0, "frobnicate yes", Done)
+}
+schedule once() { run() }
+main { once() }

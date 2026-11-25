@@ -1,0 +1,15 @@
+// devices/xml: XPath over HTML (tags left open) and XML (a namespace,
+// a document that is no XML), each kind of result, and an external
+// entity that is not loaded.
+// REQUIRES: system-darwin || system-linux
+// RUN: %ent run %S/Inputs/xml/paths.ent 2>/dev/null > %t.out
+// RUN: FileCheck %s --input-file=%t.out --match-full-lines
+
+// CHECK: title [Shop] string
+// CHECK-NEXT: h1 [Welcome home]
+// CHECK-NEXT: li 2 [two] [a] []
+// CHECK-NEXT: kinds nodes number boolean []
+// CHECK-NEXT: number 19 true
+// CHECK-NEXT: atom 2 [B & C] 0
+// CHECK-NEXT: xml 2 [6] []
+// CHECK-NEXT: xxe []
