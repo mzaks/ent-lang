@@ -17,7 +17,9 @@
 //   void pong_dish_param(name, value)   for the dishes made after it
 //       (process-wide): the dish parameter `name` (bridge.c's
 //       dish_params_set) set to value after the study's; up to 8, the
-//       last wins (zones.py depression: depress, tau_recover)
+//       last wins (zones.py depression: depress, tau_recover); a name
+//       set again is replaced
+//   void pong_dish_params_clear()   forgets them
 //   pong *pong_create(dish, seed, cond, ego)  ego: the ball's place
 //       relative to the paddle (pong.py's BALL_EGO). cond 2-4 are
 //       DishBrain's feedback on a dish with plain STDP (no dopamine; its
@@ -261,12 +263,22 @@ static char param_name[8][32];
 static double param_value[8];
 static int32_t n_params;
 
+// A name set again takes the new value (a process that plays several
+// games with other values each, as a pool's worker does, would otherwise
+// keep the first 8 and drop the rest); pong_dish_params_clear forgets all.
 void pong_dish_param(const char *name, double value) {
+  for (int32_t k = 0; k < n_params; ++k)
+    if (strncmp(param_name[k], name, 31) == 0) {
+      param_value[k] = value;
+      return;
+    }
   if (n_params < 8) {
     strncpy(param_name[n_params], name, 31);
     param_value[n_params++] = value;
   }
 }
+
+void pong_dish_params_clear(void) { n_params = 0; }
 
 dish *pong_make_dish(int64_t seed, double gain, int32_t cond) {
   dish_params *params = malloc((size_t)dish_params_size());

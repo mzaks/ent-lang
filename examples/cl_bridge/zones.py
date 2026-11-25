@@ -376,10 +376,33 @@ dithering 0.21, parked 0.34, wrong way 0.28; 16k dithering 0.09, parked
 0.28, wrong way 0.44. Hearing more neurons does take the dithering away,
 as the autopsy's reading said, but the miss turns into a firm wrong way
 and the reward stops teaching (16k less 1k -0.19 +- 0.05, 1 of 8 better).
-The denser culture is not the same culture: 17x the rate, bursts 20x as
-often and 80x shorter, far outside Wagenaar's; it was never calibrated.
-A fair test needs the big dish brought back to the 1k culture's numbers
-first (weights or reach per neuron), then the game again.
+The 17x rate is the electrodes', not the neurons' (1.5 Hz a neuron at
+1k, 1.3 at 16k): an electrode hears 46 neurons at 16k. And the short reach
+makes the wiring local, a burst reaching 0.14 of the channels, not 0.73.
+
+size tuned: the 1k culture with more neurons. Reach kept (0.2), the chance
+of a synapse down (density 0.3 * 1024 / n: as many synapses a neuron, as
+far), hear_reach 0.03 * sqrt(1024 / n) (about 3 neurons an electrode, as
+at 1k). The stims are not changed: a stim reaches 16x the axons at 16k,
+the electrodes hear 1/16 of the neurons, and the answer is the 1k dish's
+(evoked.py, seed 1: early 11.5 spikes against 10.9, 5 channels, big 0.09,
+latency 124 ms both). 25 November 2026, 8 seeds (1k reused):
+ neurons  rate Hz  bursts/min  burst ms  recruited  hit   none  reward less none
+    1024     3.6        2.7      3840      0.73     0.72  0.49  +0.23 +- 0.05 (8/8)
+    4096     3.3        2.0      4620      0.73     0.73  0.58  +0.15 +- 0.04 (8/8)
+   16384     3.5        2.3      1880      0.68     0.70  0.70  +0.00 +- 0.04 (4/8)
+The same culture with 16x the neurons plays as well (16k less 1k -0.01 +-
+0.04), and dithers as much (0.51 of the misses with the reward, 0.90
+without). A bigger dish plays better untaught (0.49, 0.58, 0.70), and the
+reward takes all of them to the same 0.7 and no further: the plateau is
+not the number of neurons, nor the noise of a few heard; it is in the
+dish's dynamics or what the game asks of it.
+
+(A process kept the first 8 of pong_dish_param's values and dropped the
+rest, so a pool's worker played its later games with its fourth's; fixed
+25 November 2026 (a name set again replaces it; pong_dish_params_clear
+before each game). The size study's runs are unchanged by the fix, 4k
+games rerun bit for bit; the depression study's were not.)
 """
 from __future__ import annotations
 
@@ -835,6 +858,7 @@ def autopsy_job(seed: int, minute: int, rallies: int, oracle: int = 0, decoder: 
     pong_dish_param); gain: the reward's (0: no reward)."""
     lib = fe._lib()
     lib.pong_dish_param.argtypes = [ctypes.c_char_p, ctypes.c_double]
+    lib.pong_dish_params_clear()        # (a pool's process plays many games)
     for name, value in params:
         lib.pong_dish_param(name.encode(), value)
     lib.pong_layout.argtypes = [ctypes.c_int32]
@@ -1987,13 +2011,23 @@ def depression_main(args: list[str]) -> int:
 
 
 SIZE_NEURONS = (1024, 4096, 16384)
-SIZE_OUT = Path("build/cl_bridge/size")
+# `size tuned ...`: the tuned bigger dishes (size_params), into size_tuned; by
+# the environment, which the pools' processes (forkserver) are started with.
+SIZE_TUNED = os.environ.get("ZONES_SIZE_TUNED") == "1"
+SIZE_OUT = Path("build/cl_bridge/size_tuned" if SIZE_TUNED else "build/cl_bridge/size")
 GPU_LIBRARY = Path("build/cl_bridge/gpu_pong/libdish.so")
 
 
 def size_params(n: int) -> list:
     """A dish of n neurons as the README's bigger dishes: the same culture
-    denser, reach shrunk by the root (about 70 synapses a neuron)."""
+    denser, reach shrunk by the root (about 70 synapses a neuron). Tuned:
+    the 1k culture's wiring with more neurons (reach kept, the chance of a
+    synapse down as the number grows: as many synapses a neuron, as far),
+    each electrode hearing as many neurons (hear_reach down by the root);
+    1024 is the same either way."""
+    if SIZE_TUNED:
+        return [("neurons", n), ("reach", 0.2), ("density", 0.3 * 1024 / n),
+                ("hear_reach", 0.03 * (1024 / n) ** 0.5)]
     return [("neurons", n), ("reach", 0.2 * (1024 / n) ** 0.5)]
 
 
@@ -2046,7 +2080,7 @@ def size_run(args: list[str]) -> int:
         return 0
     workers = int(args[1]) if len(args) > 1 else 11
     order = sorted(todo, key=lambda j: (j[1] == max(SIZE_NEURONS), j[0] != "culture", j[1]))
-    with ProcessPoolExecutor(workers) as pool:
+    with ProcessPoolExecutor(workers, max_tasks_per_child=1) as pool:
         fs = {pool.submit(size_job, j): j for j in order}
         for f in as_completed(fs):
             if f.result():
@@ -2055,11 +2089,22 @@ def size_run(args: list[str]) -> int:
 
 
 def size_main(args: list[str]) -> int:
+    global SIZE_OUT, SIZE_TUNED
+    if args and args[0] == "tuned":
+        os.environ["ZONES_SIZE_TUNED"] = "1"
+        SIZE_TUNED, SIZE_OUT, args = True, Path("build/cl_bridge/size_tuned"), args[1:]
+        # The 1k dish is the same tuned or not: its results are reused.
+        SIZE_OUT.mkdir(parents=True, exist_ok=True)
+        for f in Path("build/cl_bridge/size").glob("*_1024_*"):
+            if not (SIZE_OUT / f.name).exists():
+                (SIZE_OUT / f.name).write_bytes(f.read_bytes())
     if args and args[0] == "run":
         return size_run(args[1:])
     rs = [json.loads(p.read_text()) for p in sorted(SIZE_OUT.glob("*.json"))]
     mean = statistics.mean
-    print("dish size: n neurons, reach 0.2 * sqrt(1024 / n) (the same culture denser); the untrained "
+    print("dish size: n neurons, " + ("tuned (reach 0.2, density 0.3 * 1024 / n, hear_reach 0.03 * "
+          "sqrt(1024 / n))" if SIZE_TUNED else "reach 0.2 * sqrt(1024 / n) (the same culture denser)") +
+          "; the untrained "
           "dish's spontaneous activity (3 min, 4 seeds, median); the best setup trained 20 minutes, "
           "frozen, 120 uniform fixed serves; paired by seed")
     keys = ["rate_hz", "bursts_per_min", "burst_ms", "in_bursts", "recruited"]
@@ -2092,6 +2137,19 @@ def size_main(args: list[str]) -> int:
             if len(dd) > 1:
                 print(f"{n} less {SIZE_NEURONS[0]} (reward): {mean(dd):+.2f} +- "
                       f"{statistics.stdev(dd) / len(dd) ** 0.5:.2f}, better for {sum(x > 0 for x in dd)} of {len(dd)} seeds")
+    print("misses by cause (share of all misses), reward / none:")
+    for n in SIZE_NEURONS:
+        line = f"{n:8d}"
+        for g in (1.0, 0.0):
+            t = {c: 0 for c in CAUSES}
+            for r in rs:
+                if r["kind"] == "game" and r["neurons"] == n and r["gain"] == g:
+                    for c, v in r["causes"].items():
+                        t[c] += v
+            total = sum(t.values())
+            if total:
+                line += "  " + " ".join(f"{c} {t[c] / total:.2f}" for c in CAUSES) + (" /" if g else "")
+        print(line)
     return 0
 
 
