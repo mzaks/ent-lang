@@ -283,9 +283,10 @@ and the best setup's frozen score after 20 minutes.
 23 November 2026, 16 seeds: less depression gives fewer, longer bursts
 (0.231: 2.7 a minute, 91% of spikes in them; 0.1: 1.2, 95%; 0: 0.3 a
 minute, 99%, 10 Hz a channel, a seizing dish) and scores 0.71 (calibrated),
-0.77 (0.1; +0.07 +- 0.03, 10 of 16), 0.73 (0.05), 0.75 (0); faster
-recovery (300 ms) 0.75 and 0.76. Dithering grows to 0.65-0.79 of the
-misses. A little more Pong for a dish less like a culture: depression is
+0.77 (0.1; +0.07 +- 0.03, 10 of 16), 0.73 (0.05), 0.73 (0); faster
+recovery (300 ms) 0.76 and 0.70. Dithering grows to 0.65-0.83 of the
+misses. (Rerun 25 November 2026 after the pong_dish_param fix, see size
+tuned: 0.1 and 0.05 the same, the others within 0.06 of the first run.) A little more Pong for a dish less like a culture: depression is
 not what holds the score down.
 
     ... zones.py more [workers (12)] [out.json]
