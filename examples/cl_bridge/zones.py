@@ -356,11 +356,36 @@ track the ball over the whole court, 0.43-0.73 in every row, which no
 seed does with the height code; most park the paddle at the top. The
 reward rewires one row only (3, ball just above the paddle: up, 0.12 to
 0.31); rows 1 and 2 ("ball well above") stay wired down as grown.
+
+size: the best setup (ego 1, decoder 1, hard STDP, axon 0.11) on 1024,
+4096 and 16384 neurons, reach 0.2 * sqrt(1024 / n) (README "Bigger
+dishes": the same culture denser, ~70 synapses a neuron; the electrodes'
+reach not scaled, so one hears ~3 neurons at 1k, ~45 at 16k), trained 20
+minutes with and without the reward, frozen, 120 serves; 4 seeds of
+untrained spontaneous activity. `size run cpu N` and `size run gpu` share
+the jobs by claim files (a GPU process holds one dish: a process a game);
+16k on the GPU 13 min a game, on one core about 2 h.
+
+24-25 November 2026, 8 seeds:
+ neurons  rate Hz  bursts/min  burst ms  hit   none  reward less none
+    1024     3.6        2.7      3840    0.72  0.49  +0.23 +- 0.05 (8/8)
+    4096    14.7       27.3       125    0.77  0.57  +0.20 +- 0.07 (7/8)
+   16384    62         58.2        47    0.53  0.47  +0.06 +- 0.03 (6/8)
+Misses (reward): 1k dithering 0.65, parked 0.12, wrong way 0.07; 4k
+dithering 0.21, parked 0.34, wrong way 0.28; 16k dithering 0.09, parked
+0.28, wrong way 0.44. Hearing more neurons does take the dithering away,
+as the autopsy's reading said, but the miss turns into a firm wrong way
+and the reward stops teaching (16k less 1k -0.19 +- 0.05, 1 of 8 better).
+The denser culture is not the same culture: 17x the rate, bursts 20x as
+often and 80x shorter, far outside Wagenaar's; it was never calibrated.
+A fair test needs the big dish brought back to the 1k culture's numbers
+first (weights or reach per neuron), then the game again.
 """
 from __future__ import annotations
 
 import ctypes
 import json
+import os
 import statistics
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -801,12 +826,13 @@ CAUSES = ("parked", "still", "dithering", "wrong way", "bounce", "late")
 
 
 def autopsy_job(seed: int, minute: int, rallies: int, oracle: int = 0, decoder: int = 1,
-                hold: float = 0.0, rate: float = 0, burst: int = 1, params=()) -> dict:
+                hold: float = 0.0, rate: float = 0, burst: int = 1, params=(), gain: float = 1.0) -> dict:
     """The best setup (relative code, aligned layout, decoder 1, the reward
     for each move), trained `minute` minutes, frozen, played on the fixed
     serves tick by tick; each miss sorted by what the paddle did in the
     last second before it (CAUSES). oracle: game.c's pong_oracle steers in
-    the test instead of the dish."""
+    the test instead of the dish. params: dish parameters by name (game.c's
+    pong_dish_param); gain: the reward's (0: no reward)."""
     lib = fe._lib()
     lib.pong_dish_param.argtypes = [ctypes.c_char_p, ctypes.c_double]
     for name, value in params:
@@ -817,7 +843,7 @@ def autopsy_job(seed: int, minute: int, rallies: int, oracle: int = 0, decoder: 
     lib.pong_oracle.argtypes = [ctypes.c_void_p, ctypes.c_int32]
     lib.pong_hold.argtypes = [ctypes.c_void_p, ctypes.c_double]
     lib.pong_zones.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    dish = lib.pong_make_dish(seed, 1.0, 0)
+    dish = lib.pong_make_dish(seed, gain, 0)
     game = lib.pong_create(dish, seed, 0, 1)
     lib.pong_decoder(game, decoder)
     lib.pong_hold(game, hold)
@@ -879,7 +905,9 @@ def autopsy_job(seed: int, minute: int, rallies: int, oracle: int = 0, decoder: 
     lib.dish_destroy(dish)
     return {"seed": seed, "minute": minute, "oracle": oracle, "decoder": decoder, "hold": hold,
             "rate": rate, "burst": burst,
-            **({"depress": dict(params)["depress"], "tau": dict(params)["tau_recover"]} if params else {}),
+            **({"depress": dict(params)["depress"], "tau": dict(params)["tau_recover"]}
+               if "depress" in dict(params) else {}),
+            **{k: v for k, v in params if k != "depress" and k != "tau_recover"}, "gain": gain,
             "rallies": seen,
             "seen": list(z[:8]), "hit": list(z[8:]), "causes": causes, "misses": misses}
 
@@ -1958,8 +1986,119 @@ def depression_main(args: list[str]) -> int:
     return 0
 
 
+SIZE_NEURONS = (1024, 4096, 16384)
+SIZE_OUT = Path("build/cl_bridge/size")
+GPU_LIBRARY = Path("build/cl_bridge/gpu_pong/libdish.so")
+
+
+def size_params(n: int) -> list:
+    """A dish of n neurons as the README's bigger dishes: the same culture
+    denser, reach shrunk by the root (about 70 synapses a neuron)."""
+    return [("neurons", n), ("reach", 0.2 * (1024 / n) ** 0.5)]
+
+
+def size_jobs() -> list[tuple]:
+    culture = [("culture", n, s, 0.0) for n in SIZE_NEURONS for s in range(1, 5)]
+    games = [("game", n, s, g) for n in SIZE_NEURONS for g in (1.0, 0.0) for s in range(1, 9)]
+    return culture + games
+
+
+def size_name(job: tuple) -> str:
+    kind, n, seed, gain = job
+    return f"{kind}_{n}_{seed}" + (f"_g{gain:g}" if kind == "game" else "")
+
+
+def size_job(job: tuple) -> dict | None:
+    """One job, if no other runner has claimed it (a file made exclusively)."""
+    name = size_name(job)
+    try:
+        os.close(os.open(SIZE_OUT / f"{name}.claim", os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
+        return None
+    kind, n, seed, gain = job
+    if kind == "culture":
+        fe._lib()
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "culture"))
+        import dish_stats
+        import stats
+        s = stats.stats(*dish_stats.record(3.0, seed=seed, axon=0.11, hard=1, **dict(size_params(n))),
+                        duration=180)
+        r = {"kind": kind, "neurons": n, "seed": seed, "stats": s}
+    else:
+        r = dict(autopsy_job(seed, 20, 120, params=size_params(n), gain=gain), kind=kind)
+    r["library"] = os.environ.get("ENT_DISH_LIBRARY", "cpu")
+    (SIZE_OUT / f"{name}.json").write_text(json.dumps(r))
+    return r
+
+
+def size_run(args: list[str]) -> int:
+    """size run cpu [workers]: everything, smallest first, then what of 16k
+    is left; size run gpu: the 16k games one after another on the GPU."""
+    SIZE_OUT.mkdir(parents=True, exist_ok=True)
+    todo = [j for j in size_jobs() if not (SIZE_OUT / f"{size_name(j)}.claim").exists()]
+    if args[0] == "gpu":
+        # A GPU process holds one dish (bridge.c): a fresh process a game.
+        os.environ["ENT_DISH_LIBRARY"] = str(GPU_LIBRARY.resolve())
+        with ProcessPoolExecutor(1, max_tasks_per_child=1) as pool:
+            for j in [j for j in todo if j[0] == "game" and j[1] == max(SIZE_NEURONS)]:
+                if pool.submit(size_job, j).result():
+                    print(size_name(j), "done (gpu)", flush=True)
+        return 0
+    workers = int(args[1]) if len(args) > 1 else 11
+    order = sorted(todo, key=lambda j: (j[1] == max(SIZE_NEURONS), j[0] != "culture", j[1]))
+    with ProcessPoolExecutor(workers) as pool:
+        fs = {pool.submit(size_job, j): j for j in order}
+        for f in as_completed(fs):
+            if f.result():
+                print(size_name(fs[f]), "done (cpu)", flush=True)
+    return 0
+
+
+def size_main(args: list[str]) -> int:
+    if args and args[0] == "run":
+        return size_run(args[1:])
+    rs = [json.loads(p.read_text()) for p in sorted(SIZE_OUT.glob("*.json"))]
+    mean = statistics.mean
+    print("dish size: n neurons, reach 0.2 * sqrt(1024 / n) (the same culture denser); the untrained "
+          "dish's spontaneous activity (3 min, 4 seeds, median); the best setup trained 20 minutes, "
+          "frozen, 120 uniform fixed serves; paired by seed")
+    keys = ["rate_hz", "bursts_per_min", "burst_ms", "in_bursts", "recruited"]
+    print(f"{'neurons':>8s} " + " ".join(f"{k[:10]:>10s}" for k in keys) +
+          f"   {'hit':>5s} {'s.e.':>5s} {'none':>5s}  {'reward less none':>18s}  {'dithering':>9s} {'(none)':>6s}")
+    base = {}
+    for n in SIZE_NEURONS:
+        cs = [r["stats"] for r in rs if r["kind"] == "culture" and r["neurons"] == n]
+        line = f"{n:8d} " + " ".join(f"{statistics.median(c[k] for c in cs):10.3g}" if cs else f"{'':10s}"
+                                      for k in keys)
+        sc = {}
+        for g in (1.0, 0.0):
+            gs = [r for r in rs if r["kind"] == "game" and r["neurons"] == n and r["gain"] == g]
+            sc[g] = {r["seed"]: sum(r["hit"]) / sum(r["seen"]) for r in gs}
+            total = sum(sum(r["causes"].values()) for r in gs)
+            sc[g, "d"] = sum(r["causes"]["dithering"] for r in gs) / total if total else float("nan")
+        if len(sc[1.0]) > 1:
+            v = list(sc[1.0].values())
+            line += f"   {mean(v):5.2f} {statistics.stdev(v) / len(v) ** 0.5:5.2f}"
+            line += f" {mean(sc[0.0].values()):5.2f}" if sc[0.0] else f" {'':5s}"
+            dd = [sc[1.0][s] - sc[0.0][s] for s in sc[1.0] if s in sc[0.0]]
+            line += (f"  {mean(dd):+.2f} +- {statistics.stdev(dd) / len(dd) ** 0.5:.2f} ({sum(x > 0 for x in dd)}/{len(dd)})"
+                     if len(dd) > 1 else f"  {'':18s}")
+            line += f"  {sc[1.0, 'd']:9.2f} {sc[0.0, 'd']:6.2f}"
+            base[n] = sc[1.0]
+        print(line)
+    for n in SIZE_NEURONS[1:]:
+        if n in base and SIZE_NEURONS[0] in base:
+            dd = [base[n][s] - base[SIZE_NEURONS[0]][s] for s in base[n] if s in base[SIZE_NEURONS[0]]]
+            if len(dd) > 1:
+                print(f"{n} less {SIZE_NEURONS[0]} (reward): {mean(dd):+.2f} +- "
+                      f"{statistics.stdev(dd) / len(dd) ** 0.5:.2f}, better for {sum(x > 0 for x in dd)} of {len(dd)} seeds")
+    return 0
+
+
 def main() -> int:
     args = sys.argv[1:]
+    if args and args[0] == "size":
+        return size_main(args[1:])
     if args and args[0] == "depression":
         return depression_main(args[1:])
     if args and args[0] == "more":
