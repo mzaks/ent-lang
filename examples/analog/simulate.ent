@@ -47,6 +47,7 @@ capacity Nodes 2200000
 capacity Devices 3300000
 capacity Points 1000000
 capacity Probes 2200000
+capacity Initial 2200000
 capacity Entries 24000000
 capacity Solution 2300000
 
@@ -103,6 +104,8 @@ system said() {
     put("the circuit's line {Circuit.wrong} makes no sense")
   } else if Circuit.clashing > 0 {
     put("{Circuit.clashing} nodes are held by two sources at once")
+  } else if Run.way != 0 && len(Initial) > 0 {
+    put("way {Run.way} does not do .ic ({len(Initial)} nodes): way 0 does")
   } else if Run.way != 0 && Circuit.floating > 0 {
     put("way {Run.way} does not do a voltage source between two nodes that are not ground ({Circuit.floating} of them): way 0 does")
   } else {

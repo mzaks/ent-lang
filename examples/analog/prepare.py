@@ -22,7 +22,9 @@ IC=), voltage and current sources V and I (a DC value, and SIN, PULSE
 or PWL), memristors written `X<name> a b <model> name=value ...`, where
 the model is one of examples/analog/models/*.va, and subcircuits
 (`.subckt` ... `.ends`, `X<name> nodes... <subckt>`), which are made
-flat; `.op`, `.tran tstep tstop [tstart [tmax]]`, and what goes into the
+flat; `.op`, `.tran tstep tstop [tstart [tmax]]`, `.ic v(node)=value`
+(held in the operating point a run in time starts from, then let go),
+`.options vntol=` (the others the run's), and what goes into the
 waves, `.print`, `.probe` or `.save` with v(node), v(a,b) is not done,
 and i(device). Numbers may have SPICE's suffixes (k, meg, u, n, ...);
 in circuit.net they are plain, as many digits as it takes for the same
@@ -127,6 +129,7 @@ class Circuit:
         self.tran = None
         self.op = False
         self.vntol = None     # .options vntol=: the most a node may be off
+        self.ics = []         # .ic v(name)=value: (name, value)
         self.subckts = {}
         lines = lines_of(path)
         self.collect(lines)
@@ -270,6 +273,14 @@ class Circuit:
         elif first in (".print", ".probe", ".save"):
             for kind, what in re.findall(r"\b([vViI])\s*\(([^)]*)\)", line):
                 self.probes.append((kind.lower(), " ".join(what.replace(",", " ").split())))
+        elif first == ".ic":
+            # (The voltages some nodes are held at in the operating point
+            # a run in time starts from; then let go, as SPICE does
+            # without uic.)
+            found = re.findall(r"\bv\s*\(\s*([^)\s]+)\s*\)\s*=\s*([^\s]+)", line, re.I)
+            if not found:
+                raise Wrong(".ic gives no v(node)=value")
+            self.ics += [(name.lower(), value(amount)) for name, amount in found]
         elif first in (".options", ".option"):
             # (vntol, kept: a circuit that grows away from where it was
             # wants it tighter than the run's; the others are the run's.)
@@ -361,6 +372,11 @@ class Circuit:
                     raise Wrong(f"{self.path}: no device '{what}' to probe")
                 probes.append(("i", self.named[what]))
         self.settled = probes
+        self.initial = []
+        for name, amount in self.ics:
+            if name not in self.nodes:
+                raise Wrong(f"{self.path}: no node '{name}' for .ic")
+            self.initial.append((self.nodes[name], amount))
         step, stop = (self.tran[0], self.tran[1]) if self.tran else (1.0, 1.0)
         for index, (kind, name, a, b, numbers) in enumerate(self.devices):
             if kind in "VI" and numbers[0] == "sin":
@@ -406,6 +422,7 @@ class Circuit:
                 lines.append(f"M {a} {b} {model} " + " ".join(str(c) for c in controls) +
                              (" " if controls else "") + " ".join(text(n) for n in given))
         lines += [f"probe {kind} {which}" for kind, which in self.settled]
+        lines += [f"ic {node} {text(amount)}" for node, amount in self.initial if node]
         if self.vntol:
             lines.append(f"vntol {text(self.vntol)}")
         if self.op:
@@ -445,6 +462,9 @@ class Circuit:
                              models[key])
         for index, (a, b) in enumerate(self.restored or []):
             lines.append(f"VS{index} {a} {b} DC 0")
+        if self.initial:
+            lines.append(".ic " + " ".join(f"v({node})={text(amount)}"
+                                          for node, amount in self.initial if node))
         if self.op:
             lines.append(".op")
         if self.tran:

@@ -6,7 +6,8 @@
 
 For each prepared circuit (all of build/analog/circuits, or those named)
 ngspice runs the deck prepare.py wrote for it, with its tolerances made
-tight (reltol 1e-6, vntol 1e-12, abstol 1e-15; its steps its own, by its
+tight (reltol 1e-6, vntol 1e-12, abstol 1e-15; by Gear's rule where by
+the trapezoidal it stops, said; its steps its own, by its
 error, and breakpoints at the sources' corners), so that it stands for
 the circuit's own waves. Its steps are no longer than the circuit's step,
 since its values are taken in a straight line between them (with no
@@ -72,7 +73,7 @@ def models():
                            check=True, capture_output=True)
 
 
-def spice(name, net):
+def spice(name, net, method=""):
     """ngspice's waves: a list of lines, the time (or nothing at the
     operating point) and then the probes."""
     folder = os.path.join(common.RUN, f"{name}_spice")
@@ -80,7 +81,8 @@ def spice(name, net):
     os.makedirs(folder)
     with open(os.path.join(common.CIRCUITS, name, "circuit.cir")) as file:
         deck = file.read()
-    options = ".options reltol=1e-6 vntol=1e-12 abstol=1e-15 chgtol=1e-18 itl4=100\n"
+    options = (".options reltol=1e-6 vntol=1e-12 abstol=1e-15 chgtol=1e-18 itl4=100" +
+               (f" method={method}" if method else "") + "\n")
     # (No step longer than the circuit's: ngspice's values are taken in a
     # straight line between its time points, which with steps as long as
     # its error lets them be would be 2e-3 of the range off on a sine.)
@@ -129,6 +131,15 @@ def main():
         if net.nodes > 600:
             continue
         theirs, why = spice(name, net)
+        looser = ""
+        if net.tran and theirs and theirs[-1][0] < net.tran[1] * (1 - 1e-9):
+            # (Where ngspice's step shrinks to nothing by the trapezoidal
+            # rule, it is tried once by Gear's: the axon circuits from
+            # rest, at a growing memristor's first switch. Gear's at 1e-6 is
+            # the tightest it does there, 1.2e-3 of a range off where ours
+            # converge, ours at 1e-5 6e-4.)
+            looser = f" (ngspice by Gear's rule: by the trapezoidal it stopped at {theirs[-1][0]:.3g} s)"
+            theirs, why = spice(name, net, method="gear")
         if theirs is None and why is None:
             left += 1
             print(f"{name}: ngspice not done in {TIMEOUT} s, left out")
@@ -200,7 +211,7 @@ def main():
             else:
                 report.append(f"way {way} within {worst:.1e} of the range" +
                               (f" ({jumped} points on jumps, at their times)" if jumped else ""))
-        print(f"{name}: {points} time points; " + "; ".join(report))
+        print(f"{name}: {points} time points; " + "; ".join(report) + looser)
     print(f"{checked} circuits held against ngspice, {failed} not as it, {left} left out")
     failed += pinched(program)
     return 1 if failed else 0

@@ -104,12 +104,13 @@ component Growth {
   m0: f64, m1: f64, s: f64, sr: f64, uplus: f64, uminus: f64, width: f64, delta: f64
 }
 component Prune {
-  rp0: f64, rp1: f64, eta1: f64, eta2: f64, factor: f64, alpha: f64, beta: f64, uth: f64,
-  width: f64
+  rp0: f64, rp1: f64, eta1: f64, eta2: f64, factor: f64, factor2: f64, alpha: f64, beta: f64,
+  uth: f64, width: f64
 }
-// A device whose state moves with the voltage of a third node, c, to
-// ground (the pruning-cue sensor: its line has c after its model's word).
-component Sensing { c: entity }
+// A device whose state moves with the voltages of two more nodes, c and
+// d, to ground (the pruning-cue sensor: its line has c and d after its
+// model's word); `jd`: how its state's equation grows with d's.
+component Sensing { c: entity, d: entity, jd: f64 }
 component Rram {
   i0: f64, u0: f64, g0: f64, gmax: f64, v0: f64, ea: f64, da: f64, dox: f64, t0: f64, rth: f64,
   gamma0: f64, gammar: f64, beta: f64, alpha: f64, gbar: f64, uth: f64, emin: f64, ewidth: f64, ug: f64,
@@ -121,6 +122,9 @@ relation (Two)-[Touches]->(Node) capacity 16
 buffer Points { t: f64, value: f64 } capacity 16
 // What a probe shows: a node's voltage, or the current through a device.
 buffer Probes { voltage: bool, index: i32 } capacity 16
+// The voltages nodes are held at in the operating point a run in time
+// starts from (`.ic`, as SPICE without uic: then let go).
+buffer Initial { node: i32, value: f64 } capacity 16
 
 // The file's devices as read: the line's first letter, the nodes, and
 // where its numbers start in `Numbers` and how many.
@@ -195,6 +199,7 @@ system netlist() {
   Numbers = []
   Points = []
   Probes = []
+  Initial = []
   Circuit.wrong = 0
   Circuit.op = false
   Circuit.vntol = 0.0
@@ -247,6 +252,12 @@ system netlist() {
         let (index, a0) = whole(Bytes, end(Bytes, kind))
         Probes += { voltage: Bytes[kind].value == 118, index: index }
         rest = a0
+      } else if is(Bytes, word, stop, "ic") {
+        let (index, a0) = whole(Bytes, stop)
+        let (amount, a1) = real(Bytes, a0)
+        if index <= 0 || index >= Circuit.nodes { Circuit.wrong = wrong(line, Circuit.wrong) }
+        Initial += { node: index, value: amount }
+        rest = a1
       } else if is(Bytes, word, stop, "op") {
         Circuit.op = true
       } else if is(Bytes, word, stop, "vntol") {
@@ -335,7 +346,7 @@ fn wanted(kind: u8, model: i32, given: i32, first: f64) -> bool {
   else if kind == 77 {
     given == if model == 1 { 6 } else if model == 2 { 14 } else if model == 3 { 13 }
              else if model == 4 { 28 } else if model == 5 { 12 } else if model == 6 { 6 }
-             else if model == 7 { 9 } else { 11 }
+             else if model == 7 { 9 } else { 13 }
   }
   else if model == 0 { given == 1 }
   else if model == 1 { given == 6 }
@@ -357,11 +368,13 @@ system build() {
             if !wanted(Lines[i].kind, Lines[i].model, Lines[i].count, number(Lines, Numbers, i, 0)) {
         Circuit.wrong = wrong(i + 1, Circuit.wrong)
       }
-      // (A pruning-cue sensor's control node is a node.)
+      // (A pruning-cue sensor's control nodes are nodes.)
       if Lines[i].kind == 77 && Lines[i].model == 8 {
-        let c = number(Lines, Numbers, i, 0)
-        if c < 0.0 || c >= Circuit.nodes as f64 || c != ((c as i32) as f64) {
-          Circuit.wrong = wrong(i + 1, Circuit.wrong)
+        for k in 0..2 {
+          let c = number(Lines, Numbers, i, k)
+          if c < 0.0 || c >= Circuit.nodes as f64 || c != ((c as i32) as f64) {
+            Circuit.wrong = wrong(i + 1, Circuit.wrong)
+          }
         }
       }
       if Lines[i].kind == 86 {
@@ -574,16 +587,19 @@ system build() {
                                          g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0,
                                          rate: 0.0, rate_prev: 0.0, w2: w0, w3: w0,
                                          w_round: w0, v_round: 0.0, alone: 0 },
-                             Sensing { c: Nodes[number(Lines, Numbers, i, 0) as i32].who },
-                             Prune { rp0: number(Lines, Numbers, i, 1),
-                                  rp1: number(Lines, Numbers, i, 2),
-                                  eta1: number(Lines, Numbers, i, 3),
-                                  eta2: number(Lines, Numbers, i, 4),
-                                  factor: number(Lines, Numbers, i, 5),
-                                  alpha: number(Lines, Numbers, i, 6),
-                                  beta: number(Lines, Numbers, i, 7),
-                                  uth: number(Lines, Numbers, i, 8),
-                                  width: number(Lines, Numbers, i, 9) } }
+                             Sensing { c: Nodes[number(Lines, Numbers, i, 0) as i32].who,
+                                       d: Nodes[number(Lines, Numbers, i, 1) as i32].who,
+                                       jd: 0.0 },
+                             Prune { rp0: number(Lines, Numbers, i, 2),
+                                  rp1: number(Lines, Numbers, i, 3),
+                                  eta1: number(Lines, Numbers, i, 4),
+                                  eta2: number(Lines, Numbers, i, 5),
+                                  factor: number(Lines, Numbers, i, 6),
+                                  factor2: number(Lines, Numbers, i, 7),
+                                  alpha: number(Lines, Numbers, i, 8),
+                                  beta: number(Lines, Numbers, i, 9),
+                                  uth: number(Lines, Numbers, i, 10),
+                                  width: number(Lines, Numbers, i, 11) } }
           connect (made)-[Touches]->(a)
           connect (made)-[Touches]->(b)
           Devices += { who: made }

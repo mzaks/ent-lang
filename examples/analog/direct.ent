@@ -40,6 +40,14 @@ system stamp() {
   for p: Place where p.index > 0 {
     Entries += { row: p.index - 1, col: p.index - 1, value: GMIN }
   }
+  // (In the operating point a run in time starts from, a node of `.ic`
+  // is held at its voltage by HOLD to it, as SPICE3 does.)
+  if Circuit.tran && Time.h <= 0.0 {
+    for k in 0..len(Initial) {
+      Entries += { row: Initial[k].node - 1, col: Initial[k].node - 1, value: HOLD }
+      Entries += { row: Initial[k].node - 1, col: -1, value: HOLD * Initial[k].value }
+    }
+  }
   // A companion: g between its nodes, and i0 out of a and into b.
   for t: Two, c: Companion {
     if let a = Place(t.a).index {
@@ -85,24 +93,29 @@ system stamp() {
     }
   }
   // (A pruning-cue sensor's state's equation grows with its control
-  // node's voltage, not with its own.)
+  // nodes' voltages, not with its own.)
   for t: Two, m: Memristor, e: Sensing {
     if let a = Place(t.a).index {
       if let b = Place(t.b).index {
         if let c = Place(e.c).index {
           if let vc = Node(e.c).v {
-            let x = Circuit.nodes - 1 + Circuit.branches + m.index
-            if a > 0 {
-              Entries += { row: a - 1, col: x, value: m.gw }
-              Entries += { row: a - 1, col: -1, value: m.gw * m.w }
+            if let d = Place(e.d).index {
+              if let vd = Node(e.d).v {
+              let x = Circuit.nodes - 1 + Circuit.branches + m.index
+              if a > 0 {
+                Entries += { row: a - 1, col: x, value: m.gw }
+                Entries += { row: a - 1, col: -1, value: m.gw * m.w }
+              }
+              if b > 0 {
+                Entries += { row: b - 1, col: x, value: -m.gw }
+                Entries += { row: b - 1, col: -1, value: -m.gw * m.w }
+              }
+              if c > 0 { Entries += { row: x, col: c - 1, value: m.jv } }
+              if d > 0 { Entries += { row: x, col: d - 1, value: e.jd } }
+              Entries += { row: x, col: x, value: m.jw }
+              Entries += { row: x, col: -1, value: -m.f + m.jv * vc + e.jd * vd + m.jw * m.w }
+              }
             }
-            if b > 0 {
-              Entries += { row: b - 1, col: x, value: -m.gw }
-              Entries += { row: b - 1, col: -1, value: -m.gw * m.w }
-            }
-            if c > 0 { Entries += { row: x, col: c - 1, value: m.jv } }
-            Entries += { row: x, col: x, value: m.jw }
-            Entries += { row: x, col: -1, value: -m.f + m.jv * vc + m.jw * m.w }
           }
         }
       }

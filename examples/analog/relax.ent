@@ -401,20 +401,24 @@ system states_told() {
     if let va = Node(t.a).told {
       if let vb = Node(t.b).told {
         if let vc = Node(e.c).told {
-          let (i, g, gw, f, jw, jv, rate) = prune_equation(k.rp0, k.rp1, k.eta1, k.eta2, k.factor, k.alpha, k.beta, k.uth, k.width,
-                                                    m.w, m.w_prev, va - vb, vc, Time.h, Time.trap,
-                                                    m.rate_prev)
-          let w = m.w - f / jw
-          if far(w - m.w, w, m.w, Time.reltol * Relax.scale, Time.vntol * Relax.scale) {
-            Relax.unsettled += 1
+          if let vd = Node(e.d).told {
+            let (i, g, gw, f, jw, jv, rate) = prune_equation(k.rp0, k.rp1, k.eta1, k.eta2,
+                                                      k.factor, k.factor2, k.alpha, k.beta, k.uth,
+                                                      k.width, m.w, m.w_prev, va - vb, vc, vd,
+                                                      Time.h, Time.trap, m.rate_prev)
+            let w = m.w - f / jw
+            if far(w - m.w, w, m.w, Time.reltol * Relax.scale, Time.vntol * Relax.scale) {
+              Relax.unsettled += 1
+            }
+            let (i2, g2, gw2, f2, jw2, jv2, rate2) = prune_equation(k.rp0, k.rp1, k.eta1, k.eta2,
+                                                      k.factor, k.factor2, k.alpha, k.beta, k.uth,
+                                                      k.width, w, m.w_prev, va - vb, vc, vd,
+                                                      Time.h, Time.trap, m.rate_prev)
+            m.w = w
+            m.i = i2
+            c.g = g2
+            c.i0 = i2 - g2 * (va - vb)
           }
-          let (i2, g2, gw2, f2, jw2, jv2, rate2) = prune_equation(k.rp0, k.rp1, k.eta1, k.eta2, k.factor, k.alpha, k.beta, k.uth, k.width,
-                                                    w, m.w_prev, va - vb, vc, Time.h, Time.trap,
-                                                    m.rate_prev)
-          m.w = w
-          m.i = i2
-          c.g = g2
-          c.i0 = i2 - g2 * (va - vb)
         }
       }
     }
@@ -437,12 +441,15 @@ fn alone_round(alone: i32, w: f64, w_round: f64, v: f64, v_round: f64, reltol: f
 
 system alone() {
   Relax.alone = 0
-  // (A pruning-cue sensor's state moves with its control node.)
+  // (A pruning-cue sensor's state moves with its control nodes: held
+  // still, both are.)
   for m: mut Memristor, e: Sensing {
     if let vc = Node(e.c).v {
-      m.alone = alone_round(m.alone, m.w, m.w_round, vc, m.v_round, Time.reltol * Relax.scale,
-                            Time.vntol * Relax.scale)
-      m.v_round = vc
+      if let vd = Node(e.d).v {
+        m.alone = alone_round(m.alone, m.w, m.w_round, vc + vd, m.v_round,
+                              Time.reltol * Relax.scale, Time.vntol * Relax.scale)
+        m.v_round = vc + vd
+      }
     }
     m.w_round = m.w
     Relax.alone max= m.alone
@@ -462,12 +469,15 @@ system alone() {
 
 system alone_told() {
   Relax.alone = 0
-  // (A pruning-cue sensor's state moves with its control node.)
+  // (A pruning-cue sensor's state moves with its control nodes: held
+  // still, both are.)
   for m: mut Memristor, e: Sensing {
     if let vc = Node(e.c).told {
-      m.alone = alone_round(m.alone, m.w, m.w_round, vc, m.v_round, Time.reltol * Relax.scale,
-                            Time.vntol * Relax.scale)
-      m.v_round = vc
+      if let vd = Node(e.d).told {
+        m.alone = alone_round(m.alone, m.w, m.w_round, vc + vd, m.v_round,
+                              Time.reltol * Relax.scale, Time.vntol * Relax.scale)
+        m.v_round = vc + vd
+      }
     }
     m.w_round = m.w
     Relax.alone max= m.alone

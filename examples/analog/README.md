@@ -129,12 +129,22 @@ ngspice and with Xyce; the IBM power grids come out as published; and
   memsensor's growing memristor (`growth.va`, the Heaviside steps of
   its rate a smoothstep 1 mV wide: a logistic leaks, and its tail beats
   the retention), and its pruning-cue sensor (`prune.va`): a resistor
-  whose state is the cue, made by a third node it does not touch, the
-  target's membrane (`Sensing`: in a netlist line `M a b model c
-  numbers`; way 0 puts the state's dependence in that node's column).
+  whose state is the cue it senses, made by two more nodes it does not
+  touch, two targets' membranes (`Sensing`: in a netlist line `M a b
+  model c d numbers`; way 0 puts the state's dependence in those nodes'
+  columns). Each target's cue is linear in its own with one rate of
+  decay, so what a sensor senses, its share of each, is too, and one
+  state holds it exactly; the minimal example's second is ground.
   The paper's printed values and where they are read otherwise are in
   the files (Rp1 1.25 MOhm, not the table's 125 kOhm, since its text has
-  Rp1 above M1). The Morris-Lecar node's sodium conductance is negative
+  Rp1 above M1). Table 1's oscillator rests at -69.4 mV, near EL as the
+  paper has it, but an operating point from 0 V lands at -26.5 mV, its
+  other root, where the node's conductance is -63 uS: no rest, and every
+  oscillator fires once by itself and grows whatever memsensor senses a
+  gradient. So the circuits hold their membranes at rest in the
+  operating point (`.ic`, as SPICE does without uic: 1e10 S to the
+  value, SPICE3's, then let go; way 0's, and ngspice's). The
+  Morris-Lecar node's sodium conductance is negative
   under its threshold, so a node's conductance can be 0 or less, and
   ways 1 and 2, whose step is a node's current over it, would go away
   from the root: they say so and do not do such a circuit.
@@ -149,6 +159,25 @@ ngspice and with Xyce; the IBM power grids come out as published; and
   synapse's node stops spiking. Which synapse is pruned hangs on where
   eq. 4b's vectors are taken from; at the nodes a memsensor grows to, as
   here, it is the paper's.
+  The paper's biologically inspired example (Fig. 5), `axon.py ...
+  grid`: 15 by 15 oscillators, 416 memsensors and four synapses, two
+  neurons growing to two targets, the paths Fig. 5a draws (its growth
+  cue map is shown, not given: the memsensors along them sense a
+  gradient of 5, the others none, which gives the paper's 800 kOhm and
+  1.8 MOhm to start from; N1 at (3,15), where the figure has it, not
+  (5,15), the text's). Run for 5 s (`check/axon.py grid`, 12.5 minutes,
+  442,000 time points, 1.9 GB of waves read as they come) the paths grow;
+  the two memsensors into the synapses that should not be go to 2.5
+  MOhm by 0.5 s and 3.2 by 5, their memristors back over 800 kOhm, and
+  the ones before them on those paths over 100 kOhm about where Fig. 5a
+  shows them gone (and the last but one of N1's branch, which it
+  keeps); the paths to be kept stay under 122 kOhm (the paper: 100: the
+  one into N1''s synapse hears a quarter of its cue, as Ma2 does), and
+  both targets fire to the end. Here the growth is done in 5 ms, where
+  the paper's takes 0.22 s, a pulse period a hop: as Table 2 is read (S
+  4 kHz) a memristor sets in 0.25 ms over U+, within the spike that
+  reaches it, where the paper's Fig. 4b has 0.6 of it in the first
+  pulse's 2 ms.
 
 ```sh
 examples/analog/prepare.py all            # the circuits, into build/analog/circuits
@@ -231,13 +260,19 @@ echo 1 > run.txt
   to the paper's Fig. 4 (`axon.py` above): grown under 100 kOhm by 10
   ms, Ma1 over 1 MOhm from 0.5 s and its memristor over 800 kOhm by 4.3
   s, Ma2 under 150 kOhm (said against the paper's 100), and the pruned
-  synapse's node silent in the last 60 ms while the others spike.
+  synapse's node silent in the last 60 ms while the others spike. With
+  `grid`, the 15 by 15 example to Fig. 5: the paths grown by 0.25 s,
+  those to be kept under 150 kOhm from then (said against 100), the
+  memsensors into the synapses not to be over 1 MOhm from 1 s and their
+  memristors back over 800 kOhm from 4.5 s, and both targets firing at
+  the end.
 - `check/agree.py` (check 4): ways 1 and 2 give way 0's waves to within
   ten times the tolerance at every time point (in fact within a tenth of
   it), on every circuit but the one way 0 alone does: 32 circuits,
   memristors of all four models and crossbars of 4 and 16 by 16 among
   them; the Morris-Lecar circuits (`ml_pulse`, `ml_synapse`, `axon_grow`)
-  are way 0's alone (`models/ml.va`'s negative conductance, above).
+  are way 0's alone (`models/ml.va`'s negative conductance, above; and
+  `.ic`, which ways 1 and 2 do not do).
   Left out unless named, as hours long by relaxation: crossbars of
   64 by 64 (by hand, below), of 16 by 16 with wires whose states move,
   and with wires under 1 ohm, where a pulse's edge takes more than a
@@ -298,15 +333,20 @@ relaxing between lines, is what it suggests next.
   them out. The written crossbars do not hold to 1e-2 of a range in the
   benchmarks, Xyce included (bench/analog/RESULTS.md), and the 256 ones
   with wires are past 600 s for all.
-- The axon growth circuit's 15 by 15 grid (225 oscillators, 416
-  memsensors; a pruning-cue sensor there may hear two targets), and its
-  devices swapped for RRAM cells with spread. The 5 s minimal example
-  tries a fifth of its time points again: Newton's steps there come to
+- The axon growth circuits' devices swapped for RRAM cells with spread;
+  growth a pulse period a hop, as the paper's (above). The 5 s minimal
+  example tries a fifth of its time points again, the grid three in
+  ten: Newton's steps there come to
   what is not a number somewhere (where, not yet found; SPICE limits
   how far a step moves a node, this does not). Its current probes are
   not held to ngspice: where a growing memristor speeds up, ngspice at
   its tightest is 1.3e-3 to 5e-3 of the range off where ours converge
-  (`axon.py` says more).
+  (`axon.py` says more). From rest (`.ic`) ngspice's trapezoidal rule
+  stops at a growing memristor's first switch (29 us; at reltol 1e-5 it
+  does not): check 3 gives it Gear's rule there, whose reltol 1e-6 is
+  its tightest (at 1e-7 it stops too), 1.2e-3 of the range off where
+  ours converge; axon_grow holds, 4,400 of its points on jumps, at their
+  times. The 15 by 15 grid (1,474 nodes) is past check 3's 600.
 - Way 0's floating sources are done; the relaxation ways refuse them.
 - Xyce has no Biolek and no VTEAM built in, and its Verilog-A plugins
   need ADMS, which the package installed has not: check 5 and the

@@ -3,38 +3,46 @@
 // resistance that grows with the pruning cue it senses,
 //
 //   Rp = Rp0 + Rp1 (1 + tanh((etap - eta1) / eta2)),  i = u / Rp
-//   etap = factor * eta0
+//   etap = factor eta0 + factor2 eta0'
 //   deta0/dt = alpha step(V(c) - uth) - beta eta0
 //
-// where eta0 is the cue made at the target neuron's axon hillock, the
-// node c (to ground), whenever it fires (eq. 4a), and `factor` is how much
-// of it reaches this sensor (eq. 4b: by the direction from the target to
-// the synapse whose axon is to be pruned and the distance to this
-// sensor; prepared with the circuit). The paper makes eta0 by an RC
-// circuit and a controlled source (eq. 5), the same equation; here each
-// sensor has it as its own state, the voltage of the internal node `x`,
-// held at w0 in the operating point. The step is smooth over `width`, as
-// in models/growth.va.
+// where eta0 is the cue made at a target neuron's axon hillock, the node
+// c (to ground), whenever it fires (eq. 4a), eta0' the cue of a second
+// target, at d (the 15 by 15 grid has two; d is ground and factor2 0
+// where there is one), and `factor` and `factor2` how much of each
+// reaches this sensor (eq. 4b: by the direction from the target to the
+// synapse whose axon is to be pruned and the distance to this sensor;
+// prepared with the circuit). The paper makes each eta0 by an RC circuit
+// and a controlled source (eq. 5); since both cues are linear in their
+// own, with one beta, the sensor's etap is so too,
+//
+//   detap/dt = alpha (factor step(V(c) - uth) + factor2 step(V(d) - uth))
+//              - beta etap,
+//
+// and each sensor has it as its own state, the voltage of the internal
+// node `x`, held at w0 in the operating point. The step is smooth over
+// `width`, as in models/growth.va.
 // Its Rp1 is printed 125 kOhm, but the text sets Rp1 above M1 (1 MOhm)
 // for the pruning to drive the memristor back, which only Rp1 > M1 does
 // (at 125 kOhm the memristor stops at z = 0.9, since the voltage it gets
 // as it goes back takes it over U+ again): the circuits take 1.25 MOhm.
 // The single source of this model for examples/analog (ngspice by
 // OpenVAF, devices.ent by hand, parameters in this order, w0 last; in a
-// netlist its line has the control node c after b).
+// netlist its line has the control nodes c and d after b).
 
 `include "constants.vams"
 `include "disciplines.vams"
 
-module prune(a, b, c);
-  inout a, b, c;
-  electrical a, b, c, x;
+module prune(a, b, c, d);
+  inout a, b, c, d;
+  electrical a, b, c, d, x;
 
   parameter real rp0 = 5e3 from (0:inf);
   parameter real rp1 = 1.25e6 from [0:inf);
   parameter real eta1 = 3.5;
   parameter real eta2 = 1 from (0:inf);
   parameter real factor = 1;
+  parameter real factor2 = 0;
   parameter real alpha = 120 from [0:inf);
   parameter real beta = 3 from [0:inf);
   parameter real uth = 15e-3;
@@ -56,10 +64,11 @@ module prune(a, b, c);
   analog begin
     u = V(a, b);
     z = V(x);
-    I(a, b) <+ u / (rp0 + rp1 * (1 + tanh((factor * z - eta1) / eta2)));
+    I(a, b) <+ u / (rp0 + rp1 * (1 + tanh((z - eta1) / eta2)));
     if ($abstime <= 0)
       V(x) <+ w0;
     else
-      I(x) <+ ddt(V(x)) - (alpha * step(V(c) - uth, width) - beta * z);
+      I(x) <+ ddt(V(x)) - (alpha * (factor * step(V(c) - uth, width) +
+                                    factor2 * step(V(d) - uth, width)) - beta * z);
   end
 endmodule
