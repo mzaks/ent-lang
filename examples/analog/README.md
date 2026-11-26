@@ -195,8 +195,14 @@ ngspice and with Xyce; the IBM power grids come out as published; and
   | as measured    | the paper's (kept at most 110 kOhm)       | yes     |
   | 10% easier     | the paper's                               | yes     |
   | 10% harder     | the paper's                               | grown by 2 s, not 0.22 |
-  | sigma 10%, 2 seeds | the paper's                           | some hops late |
-  | sigma 20%, seed 1  | not: hops of the N1 to N1' path stuck at 200 to 600 kOhm, N1' silent, the false synapse into N1' at 0.69 MOhm | |
+  | sigma 10%, 2 seeds | the paper's on both                   | some hops late |
+  | sigma 15%, 5 seeds | the paper's on 2 (seeds 2, 4)         | some hops late |
+  | sigma 20%, 5 seeds | the paper's on 1 (seed 4)             | some hops late |
+
+  Where it is not, a path to be kept has a hop whose cells no spike sets
+  in 5 s (150 kOhm to 3.5 MOhm at the end, held there from 0.25 s on),
+  and then its target falls silent or a false synapse's cue never comes
+  (its memsensor at 66 to 136 kOhm); on one run of 20% both targets.
 
   How fast a cell sets hangs on how far a spike goes past its threshold:
   cells 10% harder set a little each spike and the growth goes a hop in
@@ -359,7 +365,8 @@ relaxing between lines, is what it suggests next.
   benchmarks, Xyce included (bench/analog/RESULTS.md), and the 256 ones
   with wires are past 600 s for all.
 - The axon growth circuits with RRAM cells: how much spread they bear
-  (between 10% and 20% on one seed; more seeds), and the cells' reset,
+  (all of 2 seeds at 10%, 2 of 5 at 15%, 1 of 5 at 20%), what would
+  make a path bear a cell that does not set, and the cells' reset,
   which the circuit never gives them (a pruned cell stays set). Growth a
   pulse period a hop, as the paper's (above). The 5 s minimal
   example tries a fifth of its time points again, the grid three in
