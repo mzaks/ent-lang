@@ -2216,14 +2216,22 @@ void ent_window_pointer_shape(int32_t shape) {
 }
 
 // The items of a menu: a line each; "-" a separator, "~" before one that
-// cannot be chosen. (Split in place: `lines` point into `held`.)
+// cannot be chosen, "✓ " before one that is ticked (the choice made).
+// (Split in place: `lines` point into `held`.)
 #define ENT_WINDOW_MENU_ITEMS 64
 typedef struct {
   char *held;
   const char *lines[ENT_WINDOW_MENU_ITEMS];
-  bool dim[ENT_WINDOW_MENU_ITEMS], separator[ENT_WINDOW_MENU_ITEMS];
+  bool dim[ENT_WINDOW_MENU_ITEMS], separator[ENT_WINDOW_MENU_ITEMS], ticked[ENT_WINDOW_MENU_ITEMS];
   int n;
 } ent_window_menu_items;
+// The first item ticked (-1: none).
+static int ent_window_menu_ticked(const ent_window_menu_items *m) {
+  for (int i = 0; i < m->n; ++i)
+    if (m->ticked[i])
+      return i;
+  return -1;
+}
 
 static bool ent_window_menu_split(const ent_text *items, ent_window_menu_items *m) {
   uint32_t n = items ? items->length : 0;
@@ -2244,7 +2252,9 @@ static bool ent_window_menu_split(const ent_text *items, ent_window_menu_items *
       at[length - 1] = 0;
     m->dim[m->n] = at[0] == '~';
     m->separator[m->n] = strcmp(at, "-") == 0;
-    m->lines[m->n] = m->dim[m->n] ? at + 1 : at;
+    const char *it = m->dim[m->n] ? at + 1 : at;
+    m->ticked[m->n] = strncmp(it, "\xe2\x9c\x93 ", 4) == 0;
+    m->lines[m->n] = m->ticked[m->n] ? it + 4 : it;
     m->n++;
     if (!end)
       break;
@@ -2289,6 +2299,14 @@ static int32_t ent_window_menu_drawn(ent_window_menu_items *m) {
   if (ent_window_menu_placed) {
     x = ent_window_menu_place_x * ent_window_zoom_now() / more;
     y = ent_window_menu_place_y * ent_window_zoom_now() / more;
+    // (The item ticked over the place, as a pop-up button's menu opens.)
+    int tick = ent_window_menu_ticked(m);
+    if (tick >= 0) {
+      y -= pad;
+      x -= pad + 14;
+      for (int i = 0; i < tick; ++i)
+        y -= m->separator[i] ? gap : row;
+    }
   }
   if (x + w > room_w)
     x = x - w > 0 ? x - w : room_w - w;
@@ -2333,6 +2351,8 @@ static int32_t ent_window_menu_drawn(ent_window_menu_items *m) {
       Color ink = m->dim[i] ? (Color){170, 170, 170, 255}
                   : i == hot ? (Color){255, 255, 255, 255}
                              : (Color){30, 30, 30, 255};
+      if (m->ticked[i])
+        ent_window_plain_draw("\xe2\x9c\x93", x + pad + 1, at + (row - size) / 2, size, ink);
       ent_window_plain_draw(m->lines[i], x + pad + 14, at + (row - size) / 2, size,
                             ink);
       at += row;
@@ -2467,6 +2487,7 @@ static int32_t ent_window_menu_native(ent_window_menu_items *m) {
       ent_window_sel("initWithTitle:"), ent_window_ns_text(""));
   ((void (*)(id, SEL, signed char))objc_msgSend)(
       menu, ent_window_sel("setAutoenablesItems:"), 0);
+  id positioned = 0;
   for (int i = 0; i < m->n; ++i) {
     if (m->separator[i]) {
       ((void (*)(id, SEL, id))objc_msgSend)(
@@ -2483,7 +2504,11 @@ static int32_t ent_window_menu_native(ent_window_menu_items *m) {
     ((void (*)(id, SEL, long))objc_msgSend)(item, ent_window_sel("setTag:"), i);
     ((void (*)(id, SEL, signed char))objc_msgSend)(
         item, ent_window_sel("setEnabled:"), !m->dim[i]);
+    if (m->ticked[i]) // NSControlStateValueOn
+      ((void (*)(id, SEL, long))objc_msgSend)(item, ent_window_sel("setState:"), 1);
     ((void (*)(id, SEL, id))objc_msgSend)(menu, ent_window_sel("addItem:"), item);
+    if (ent_window_menu_placed && i == ent_window_menu_ticked(m))
+      positioned = item;
     ent_window_send(item, "release");
   }
   id view = ent_window_send(window, "contentView");
@@ -2509,7 +2534,7 @@ static int32_t ent_window_menu_native(ent_window_menu_items *m) {
   bool right = IsMouseButtonDown(MOUSE_BUTTON_RIGHT);
   ent_window_menu_pick = -1;
   ((signed char (*)(id, SEL, id, ent_window_ns_point, id))objc_msgSend)(
-      menu, ent_window_sel("popUpMenuPositioningItem:atLocation:inView:"), (id)0,
+      menu, ent_window_sel("popUpMenuPositioningItem:atLocation:inView:"), positioned,
       at, view);
   ent_window_send(menu, "release");
   ent_window_menu_let_go(window, left, right);
@@ -2530,7 +2555,8 @@ static int32_t ent_window_menu_native(ent_window_menu_items *m) {
     }
     int n = MultiByteToWideChar(65001, 0, m->lines[i], -1, wide, 255);
     wide[n > 0 ? n : 0] = 0;
-    AppendMenuW(menu, m->dim[i] ? 1 : 0, (unsigned long long)(i + 1), wide);
+    // (MF_GRAYED, MF_CHECKED)
+    AppendMenuW(menu, (m->dim[i] ? 1 : 0) | (m->ticked[i] ? 8 : 0), (unsigned long long)(i + 1), wide);
   }
   struct { long x, y; } at;
   GetCursorPos(&at);
@@ -3105,7 +3131,7 @@ void ent_window_window_title(const ent_text *title) {
 enum {
   ENT_ACCESS_GROUP, ENT_ACCESS_BUTTON, ENT_ACCESS_FIELD, ENT_ACCESS_AREA,
   ENT_ACCESS_TEXT, ENT_ACCESS_LIST, ENT_ACCESS_ROW, ENT_ACCESS_TAB,
-  ENT_ACCESS_LINK, ENT_ACCESS_HEADING, ENT_ACCESS_IMAGE
+  ENT_ACCESS_LINK, ENT_ACCESS_HEADING, ENT_ACCESS_IMAGE, ENT_ACCESS_CHECK, ENT_ACCESS_POPUP
 };
 enum { ENT_ACCESS_SELECTED = 1, ENT_ACCESS_DISABLED = 2, ENT_ACCESS_EXPANDED = 4,
        ENT_ACCESS_COLLAPSED = 8, ENT_ACCESS_READONLY = 16, ENT_ACCESS_MENU_HELD = 32 };
@@ -3252,6 +3278,8 @@ static const char *ent_access_role_name(int32_t role) {
   case ENT_ACCESS_LINK: return "AXLink";
   case ENT_ACCESS_HEADING: return "AXHeading";
   case ENT_ACCESS_IMAGE: return "AXImage";
+  case ENT_ACCESS_CHECK: return "AXCheckBox";
+  case ENT_ACCESS_POPUP: return "AXPopUpButton";
   default: return "AXGroup";
   }
 }
@@ -3344,12 +3372,15 @@ static id ent_access_m_value(id self, SEL s) {
   ent_access_node *n = ent_access_of(self);
   if (!n)
     return (id)0;
-  if (n->role == ENT_ACCESS_TAB)
+  if (n->role == ENT_ACCESS_TAB || n->role == ENT_ACCESS_CHECK)
     return ((id(*)(id, SEL, int))objc_msgSend)(ent_window_class("NSNumber"),
                                                ent_window_sel("numberWithInt:"),
                                                (n->flags & ENT_ACCESS_SELECTED) ? 1 : 0);
   if (n->role == ENT_ACCESS_TEXT || n->role == ENT_ACCESS_ROW)
     return n->value_length ? n->ns_value : n->ns_label;
+  // (A pop-up button's value: the choice made.)
+  if (n->role == ENT_ACCESS_POPUP)
+    return n->value_length ? n->ns_value : (id)0;
   return ent_access_texty(n) ? n->ns_value : (id)0;
 }
 static signed char ent_access_m_yes(id self, SEL s) { return 1; }
@@ -3378,6 +3409,7 @@ static signed char ent_access_m_press(id self, SEL s) {
 // element out of sight shown: AXScrollToVisible).
 static bool ent_access_pressable(ent_access_node *n) {
   return n && (n->role == ENT_ACCESS_BUTTON || n->role == ENT_ACCESS_ROW || n->role == ENT_ACCESS_TAB ||
+               n->role == ENT_ACCESS_CHECK || n->role == ENT_ACCESS_POPUP ||
                n->role == ENT_ACCESS_LINK);
 }
 static id ent_access_m_actions(id self, SEL s) {

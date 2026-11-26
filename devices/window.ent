@@ -136,8 +136,9 @@ fn pointer_resize_up_down() -> i32 { 6 }
 // A menu at the pointer, of the system's own where it has one (a Mac's,
 // Windows'), else drawn by the window in its likeness (ENT_WINDOW_MENU=
 // drawn asks for that one everywhere). `items` has an item a line; "-" is
-// a line between them, and "~" before one shows it but it cannot be
-// chosen. The call waits until the menu is gone, and gives the number of
+// a line between them, "~" before one shows it but it cannot be
+// chosen, and "✓ " before one ticks it, as the choice made (in the
+// menu's own place for a tick). The call waits until the menu is gone, and gives the number of
 // the item chosen (from 0, the lines between counted), or -1 where none
 // was (Escape, a click outside; on a web page there is none). The
 // program then draws its picture again (a lazy window: paint the frame
@@ -145,7 +146,9 @@ fn pointer_resize_up_down() -> i32 { 6 }
 extern proc context_menu(items: text) -> i32
 // Where the next `context_menu` opens, in the window's points (what has
 // the keys' focus: a menu asked for by keys or by a screen reader), not
-// at the pointer; once.
+// at the pointer; once. Where an item is ticked, that item is put there
+// (on a Mac, and the window's own menu), as a pop-up button's menu
+// opens with the choice made over the button.
 extern proc menu_place(x: f32, y: f32)
 
 // The menu bar's menus, where the system has one (a Mac's: the menus go
@@ -261,6 +264,10 @@ fn access_tab() -> i32 { 7 }
 fn access_link() -> i32 { 8 }
 fn access_heading() -> i32 { 9 }
 fn access_image() -> i32 { 10 }
+// A box that is on or off (`access_selected()` when on), and a button
+// whose menu sets a value (the value: the choice made).
+fn access_check_box() -> i32 { 11 }
+fn access_popup() -> i32 { 12 }
 fn access_selected() -> i32 { 1 }
 fn access_disabled() -> i32 { 2 }
 fn access_expanded() -> i32 { 4 }
