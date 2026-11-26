@@ -134,6 +134,80 @@ fn yakopcic_equation(a1: f64, a2: f64, b: f64, ap: f64, an: f64, vp: f64, vn: f6
   (i, g, gw, f, jw, jv, eta * drive * window)
 }
 
+// The IHP RRAM cell (models/rram.va): the enhanced Stanford-PKU model, its
+// state the filament's gap over its largest, held in [zmin, 1] by the
+// window over `delta`.
+fn rram_equation(i0: f64, u0: f64, g0: f64, gmax: f64, v0: f64, ea: f64, da: f64, dox: f64,
+                 t0: f64, rth: f64, gamma0: f64, gammar: f64, beta: f64, alpha: f64, gbar: f64,
+                 uth: f64, emin: f64, ewidth: f64, ug: f64, ug0: f64, uhat: f64, zeta: f64, wl: f64,
+                 eth: f64, dth: f64, rmax: f64, delta: f64, w: f64, w_prev: f64, v: f64, h: f64,
+    trap: bool, rate_prev: f64) -> (f64, f64, f64, f64, f64, f64, f64) {
+  let kq = (1.602176634e-19 as f64) / (1.38e-23 as f64)
+  let e = exp64(-w * gmax / g0)
+  let i = i0 * e * sinh64(v / u0)
+  let g = i0 * e * cosh64(v / u0) / u0
+  let gw = -gmax / g0 * i
+  // The temperature, and how it grows with v and w.
+  let temp = t0 + rth * v * i
+  let temp_v = rth * (i + v * g)
+  let temp_w = rth * v * gw
+  let up = v >= 0.0
+  let speed = if up { v0 } else { v0 / pow64(zeta, (ug - ug0) / uhat) }
+  let ratio = max(w * gmax / gbar, 0.0)
+  let gam0 = (if up { gamma0 } else { gammar }) - beta * pow64(ratio, alpha)
+  let gam0_w = if ratio > 0.0 { -beta * alpha * pow64(ratio, alpha - 1.0) * gmax / gbar } else { 0.0 as f64 }
+  // (The step in the field, a logistic over ewidth.)
+  let sv = if v > 0.0 { 1.0 as f64 } else if v < 0.0 { -1.0 as f64 } else { 0.0 as f64 }
+  let s = 1.0 / (1.0 + exp64(min(-(gam0 * abs64(v) / dox - emin) / ewidth, 700.0)))
+  let s_a = s * (1.0 - s) / (dox * ewidth)
+  let gam = gam0 * s
+  let gam_w = gam0_w * s + gam0 * s_a * gam0_w * abs64(v)
+  let gam_v = gam0 * s_a * gam0 * sv
+  let drive = v - sv * uth
+  let c = da / dox * kq
+  let x = gam * c * drive / temp
+  let act = exp64(-ea * kq / temp)
+  let k = -speed / gmax
+  let free = k * act * sinh64(x)
+  // (How that grows with the temperature: through the activation and x.)
+  let free_t = k * (act * ea * kq / (temp * temp) * sinh64(x) - act * cosh64(x) * x / temp)
+  let free_v = k * act * cosh64(x) * (gam + gam_v * drive) * c / temp + free_t * temp_v
+  let free_w = k * act * cosh64(x) * gam_w * c * drive / temp + free_t * temp_w
+  // Capped smoothly at rmax.
+  let den = 1.0 + abs64(free) / rmax
+  let raw = free / den
+  let raw_v = free_v / (den * den)
+  let raw_w = free_w / (den * den)
+  let zmin = (wl / (eth * ug) + dth) / gmax
+  var window = 1.0 as f64
+  var window_w = 0.0 as f64
+  // (Past an end, the straight line that continues the window turns the
+  // state back.)
+  if raw < 0.0 {
+    if w >= zmin {
+      let ex = exp64(-(w - zmin) / delta)
+      window = 1.0 - ex
+      window_w = ex / delta
+    } else {
+      window = (w - zmin) / delta
+      window_w = 1.0 / delta
+    }
+  } else {
+    if w <= 1.0 {
+      let ex = exp64(-(1.0 - w) / delta)
+      window = 1.0 - ex
+      window_w = -ex / delta
+    } else {
+      window = (1.0 - w) / delta
+      window_w = -1.0 / delta
+    }
+  }
+  let rate = raw * window
+  let (f, jw, jv) = held_state(w, w_prev, h, trap, rate_prev, rate, raw_w * window + raw * window_w,
+                               raw_v * window)
+  (i, g, gw, f, jw, jv, rate)
+}
+
 // The current from a to b through a device so made, and through a source
 // of `level` that is no voltage source.
 fn current(g: f64, i0: f64, va: f64, vb: f64) -> f64 { g * (va - vb) + i0 }
@@ -210,6 +284,24 @@ system companions() {
       }
     }
   }
+  for t: Two, m: mut Memristor, k: Rram, c: mut Companion {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        let (i, g, gw, f, jw, jv, rate) = rram_equation(k.i0, k.u0, k.g0, k.gmax, k.v0, k.ea, k.da, k.dox, k.t0, k.rth,
+                                                 k.gamma0, k.gammar, k.beta, k.alpha, k.gbar, k.uth, k.emin, k.ewidth,
+                                                 k.ug, k.ug0, k.uhat, k.zeta, k.wl, k.eth, k.dth, k.rmax, k.delta,
+                                                 m.w, m.w_prev, va - vb, Time.h, Time.trap, m.rate_prev)
+        m.i = i
+        m.g = g
+        m.gw = gw
+        m.f = f
+        m.jw = jw
+        m.jv = jv
+        c.g = g
+        c.i0 = i - g * (va - vb)
+      }
+    }
+  }
 }
 
 // The current through every memristor from a to b, at its nodes' voltages
@@ -242,6 +334,18 @@ system memristor_currents() {
         let (i, g, gw, f, jw, jv, rate) = yakopcic_equation(k.a1, k.a2, k.b, k.ap, k.an, k.vp, k.vn, k.xp,
                                                       k.xn, k.alphap, k.alphan, k.eta, m.w, m.w_prev,
                                                       va - vb, 0.0, false, 0.0)
+        d.i = i
+        m.rate = rate
+      }
+    }
+  }
+  for t: Two, m: mut Memristor, k: Rram, d: mut Device {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        let (i, g, gw, f, jw, jv, rate) = rram_equation(k.i0, k.u0, k.g0, k.gmax, k.v0, k.ea, k.da, k.dox, k.t0, k.rth,
+                                                 k.gamma0, k.gammar, k.beta, k.alpha, k.gbar, k.uth, k.emin, k.ewidth,
+                                                 k.ug, k.ug0, k.uhat, k.zeta, k.wl, k.eth, k.dth, k.rmax, k.delta,
+                                                 m.w, m.w_prev, va - vb, 0.0, false, 0.0)
         d.i = i
         m.rate = rate
       }

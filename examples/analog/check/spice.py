@@ -33,7 +33,10 @@ ngspice's values are taken at the model's time points (in a straight
 line between its own); every probe at every time point is to be within 1e-3 of the
 probe's range over the run (its peak to peak in ngspice's waves; at an
 operating point, which is one time point, its size; and 1e-12 at least).
-Says the first that is not.
+Says the first that is not. A point that is off on a jump (a switching
+device's runaway, common.jumps) is held to when the jump comes instead:
+within 1e-4 of the run's length of ngspice's, and the climb to it
+allowing for as much.
 
 A memristor runs in ngspice as its model in models/<name>.va, which
 OpenVAF (openvaf-r) compiles here into build/analog/models. Circuits too
@@ -159,14 +162,23 @@ def main():
             if "does not do" in said:
                 continue
             points = max(points, len(waves))
+            jumped = 0
             if not waves or "settled true" not in said:
                 failed += 1
                 report.append(f"way {way} did not settle ({said})")
                 continue
             worst, where = 0.0, None
+            # (A point on a jump is held to when the jump comes:
+            # common.jumps.)
+            steps = [common.jumps(theirs, k, ranges[k]) if net.tran else []
+                     for k in range(columns)]
             for line in waves:
                 for k in range(columns):
                     share = abs(line[1 + k] - at(line[0], k)) / ranges[k]
+                    if share > 1e-3 and common.on_a_jump(line[0], k, line[1 + k], 1e-3 * ranges[k],
+                                                         theirs, steps[k], waves):
+                        jumped += 1
+                        continue
                     if share > worst:
                         worst, where = share, (line[0], k, line[1 + k], at(line[0], k))
             if worst > 1e-3:
@@ -175,7 +187,8 @@ def main():
                 report.append(f"way {way} NOT ngspice's: probe {k} at {t} s is {mine!r}, "
                               f"ngspice {theirs_!r}")
             else:
-                report.append(f"way {way} within {worst:.1e} of the range")
+                report.append(f"way {way} within {worst:.1e} of the range" +
+                              (f" ({jumped} points on jumps, at their times)" if jumped else ""))
         print(f"{name}: {points} time points; " + "; ".join(report))
     print(f"{checked} circuits held against ngspice, {failed} not as it, {left} left out")
     failed += pinched(program)

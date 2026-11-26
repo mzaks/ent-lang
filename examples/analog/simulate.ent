@@ -198,9 +198,11 @@ schedule rounded() {
   told() run_if Run.way == 1
   stepped() run_if Run.way == 1
   states() run_if Run.way == 1
+  alone() run_if Run.way == 1
   moved() run_if Run.way == 2
   retold() run_if Run.way == 2
   states_told() run_if Run.way == 2
+  alone_told() run_if Run.way == 2
   told_states() run_if Run.way == 2
   judged() run_if Run.way != 0
 }
@@ -228,7 +230,7 @@ main {
     begun()
     loop { rounded() } until Run.refused ||
       (Run.way == 0 && (Direct.settled || Direct.failed || Direct.rounds >= 50)) ||
-      (Run.way != 0 && (Relax.unsettled == 0 || Relax.round >= Run.most))
+      (Run.way != 0 && (Relax.unsettled == 0 || Relax.round >= Run.most || Relax.alone >= 50))
     ended()
   } until Run.refused || Run.failed || Step.done
   done()

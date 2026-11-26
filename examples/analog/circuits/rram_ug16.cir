@@ -1,0 +1,6 @@
+An IHP HfO2 RRAM cell (models/rram.va) swept 0, +1.5, 0, -1.5, 0 V over 4 s, the gate at 1.6 V: set near +0.64 V, reset later the higher the gate
+V1 in 0 PWL(0 0 1 1.5 3 -1.5 4 0)
+X1 in 0 rram ug=1.6 w0=1
+.tran 1m 4
+.print tran v(in) i(V1)
+.end

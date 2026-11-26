@@ -47,8 +47,11 @@ import math
 // `mark`: the rounds of all time points, which marks a device that is
 // told (it only grows: at the next time point a round's number starts
 // again, and would leave a mark as it was).
+// `alone`: the most rounds in a row any memristor's state moved at
+// voltages that held still (`alone()`).
 unique Relax {
-  round: i32, unsettled: i32, updates: i64, largest: f64, before: f64, scale: f64, mark: i32
+  round: i32, unsettled: i32, updates: i64, largest: f64, before: f64, scale: f64, mark: i32,
+  alone: i32
 }
 
 system relax_started() {
@@ -58,6 +61,12 @@ system relax_started() {
   Relax.largest = 0.0
   Relax.before = 0.0
   Relax.scale = 1.0
+  Relax.alone = 0
+  for m: mut Memristor {
+    m.alone = 0
+    m.w_round = m.w
+    m.v_round = 1e300
+  }
 }
 
 // After a round: how much the largest step shrank, and so the tolerance's
@@ -295,6 +304,72 @@ system states_told() {
         c.i0 = i2 - g2 * (va - vb)
       }
     }
+  }
+  for t: Two, m: mut Memristor, k: Rram, c: mut Companion {
+    if let va = Node(t.a).told {
+      if let vb = Node(t.b).told {
+        let (i, g, gw, f, jw, jv, rate) = rram_equation(k.i0, k.u0, k.g0, k.gmax, k.v0, k.ea, k.da, k.dox, k.t0, k.rth,
+                                                 k.gamma0, k.gammar, k.beta, k.alpha, k.gbar, k.uth, k.emin, k.ewidth,
+                                                 k.ug, k.ug0, k.uhat, k.zeta, k.wl, k.eth, k.dth, k.rmax, k.delta,
+                                                 m.w, m.w_prev, va - vb, Time.h, Time.trap, m.rate_prev)
+        let w = m.w - f / jw
+        if far(w - m.w, w, m.w, Time.reltol * Relax.scale, Time.vntol * Relax.scale) {
+          Relax.unsettled += 1
+        }
+        let (i2, g2, gw2, f2, jw2, jv2, rate2) = rram_equation(k.i0, k.u0, k.g0, k.gmax, k.v0, k.ea, k.da, k.dox, k.t0, k.rth,
+                                                 k.gamma0, k.gammar, k.beta, k.alpha, k.gbar, k.uth, k.emin, k.ewidth,
+                                                 k.ug, k.ug0, k.uhat, k.zeta, k.wl, k.eth, k.dth, k.rmax, k.delta,
+                                                 w, m.w_prev, va - vb, Time.h, Time.trap, m.rate_prev)
+        m.w = w
+        m.i = i2
+        c.g = g2
+        c.i0 = i2 - g2 * (va - vb)
+      }
+    }
+  }
+}
+
+// Ways 1 and 2: a memristor whose state goes on moving while its voltage
+// holds still is in its own Newton steps, at that voltage, and 50 of
+// them that do not settle say the step is too long (at a switching
+// device's runaway the steps go round in a cycle: the RRAM cell's set,
+// at reltol 1e-3). Then the time point is given up and tried again
+// shorter, as way 0 does after 50 rounds, not after the million rounds
+// a relaxation may take.
+fn alone_round(alone: i32, w: f64, w_round: f64, v: f64, v_round: f64, reltol: f64,
+               vntol: f64) -> i32 {
+  if !far(v - v_round, v, v_round, reltol, vntol) && far(w - w_round, w, w_round, reltol, vntol) {
+    alone + 1
+  } else { 0 }
+}
+
+system alone() {
+  Relax.alone = 0
+  for t: Two, m: mut Memristor {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        m.alone = alone_round(m.alone, m.w, m.w_round, va - vb, m.v_round, Time.reltol * Relax.scale,
+                              Time.vntol * Relax.scale)
+        m.v_round = va - vb
+      }
+    }
+    m.w_round = m.w
+    Relax.alone max= m.alone
+  }
+}
+
+system alone_told() {
+  Relax.alone = 0
+  for t: Two, m: mut Memristor {
+    if let va = Node(t.a).told {
+      if let vb = Node(t.b).told {
+        m.alone = alone_round(m.alone, m.w, m.w_round, va - vb, m.v_round, Time.reltol * Relax.scale,
+                              Time.vntol * Relax.scale)
+        m.v_round = va - vb
+      }
+    }
+    m.w_round = m.w
+    Relax.alone max= m.alone
   }
 }
 

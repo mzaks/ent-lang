@@ -78,10 +78,11 @@ component Source {
 // two time points before the last, for the step's error.)
 component Memristor {
   w: f64, w_prev: f64, index: i32, i: f64, g: f64, gw: f64, f: f64, jw: f64, jv: f64,
-  rate: f64, rate_prev: f64, w2: f64, w3: f64
+  rate: f64, rate_prev: f64, w2: f64, w3: f64, w_round: f64, v_round: f64, alone: i32
 }
 // The models, each with its parameters in the order of its .va file in
-// models/: the HP memristor with Biolek's window, VTEAM, Yakopcic's.
+// models/: the HP memristor with Biolek's window, VTEAM, Yakopcic's, IHP's
+// RRAM cell (the enhanced Stanford-PKU model).
 component Biolek { ron: f64, roff: f64, d: f64, uv: f64, p: f64 }
 component Vteam {
   ron: f64, roff: f64, k_off: f64, k_on: f64, alpha_off: f64, alpha_on: f64, v_off: f64,
@@ -90,6 +91,11 @@ component Vteam {
 component Yakopcic {
   a1: f64, a2: f64, b: f64, ap: f64, an: f64, vp: f64, vn: f64, xp: f64, xn: f64,
   alphap: f64, alphan: f64, eta: f64
+}
+component Rram {
+  i0: f64, u0: f64, g0: f64, gmax: f64, v0: f64, ea: f64, da: f64, dox: f64, t0: f64, rth: f64,
+  gamma0: f64, gammar: f64, beta: f64, alpha: f64, gbar: f64, uth: f64, emin: f64, ewidth: f64, ug: f64,
+  ug0: f64, uhat: f64, zeta: f64, wl: f64, eth: f64, dth: f64, rmax: f64, delta: f64
 }
 
 relation (Two)-[Touches]->(Node) capacity 16
@@ -255,6 +261,7 @@ system netlist() {
             if is(Bytes, kind, to, "biolek") { model = 1 }
             else if is(Bytes, kind, to, "vteam") { model = 2 }
             else if is(Bytes, kind, to, "yakopcic") { model = 3 }
+            else if is(Bytes, kind, to, "rram") { model = 4 }
             else { Circuit.wrong = wrong(line, Circuit.wrong) }
           } else if is(Bytes, kind, to, "dc") { model = 0 }
           else if is(Bytes, kind, to, "sin") { model = 1 }
@@ -296,7 +303,7 @@ system netlist() {
 fn wanted(kind: u8, model: i32, given: i32, first: f64) -> bool {
   if kind == 82 { given == 1 }
   else if kind == 67 { given == 2 }
-  else if kind == 77 { given == if model == 1 { 6 } else if model == 2 { 14 } else { 13 } }
+  else if kind == 77 { given == if model == 1 { 6 } else if model == 2 { 14 } else if model == 3 { 13 } else { 28 } }
   else if model == 0 { given == 1 }
   else if model == 1 { given == 6 }
   else if model == 2 { given == 7 }
@@ -367,7 +374,8 @@ system build() {
                              Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
                              Memristor { w: w0, w_prev: w0, index: Circuit.memristors, i: 0.0,
                                          g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0,
-                                         rate: 0.0, rate_prev: 0.0, w2: w0, w3: w0 },
+                                         rate: 0.0, rate_prev: 0.0, w2: w0, w3: w0,
+                                         w_round: w0, v_round: 0.0, alone: 0 },
                              Biolek { ron: number(Lines, Numbers, i, 0),
                                       roff: number(Lines, Numbers, i, 1),
                                       d: number(Lines, Numbers, i, 2),
@@ -382,7 +390,8 @@ system build() {
                              Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
                              Memristor { w: w0, w_prev: w0, index: Circuit.memristors, i: 0.0,
                                          g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0,
-                                         rate: 0.0, rate_prev: 0.0, w2: w0, w3: w0 },
+                                         rate: 0.0, rate_prev: 0.0, w2: w0, w3: w0,
+                                         w_round: w0, v_round: 0.0, alone: 0 },
                              Vteam { ron: number(Lines, Numbers, i, 0),
                                      roff: number(Lines, Numbers, i, 1),
                                      k_off: number(Lines, Numbers, i, 2),
@@ -405,7 +414,8 @@ system build() {
                              Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
                              Memristor { w: w0, w_prev: w0, index: Circuit.memristors, i: 0.0,
                                          g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0,
-                                         rate: 0.0, rate_prev: 0.0, w2: w0, w3: w0 },
+                                         rate: 0.0, rate_prev: 0.0, w2: w0, w3: w0,
+                                         w_round: w0, v_round: 0.0, alone: 0 },
                              Yakopcic { a1: number(Lines, Numbers, i, 0),
                                         a2: number(Lines, Numbers, i, 1),
                                         b: number(Lines, Numbers, i, 2),
@@ -418,6 +428,44 @@ system build() {
                                         alphap: number(Lines, Numbers, i, 9),
                                         alphan: number(Lines, Numbers, i, 10),
                                         eta: number(Lines, Numbers, i, 11) } }
+          connect (made)-[Touches]->(a)
+          connect (made)-[Touches]->(b)
+          Devices += { who: made }
+        }
+        if Lines[i].model == 4 {
+          let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
+                             Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
+                             Memristor { w: w0, w_prev: w0, index: Circuit.memristors, i: 0.0,
+                                         g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0,
+                                         rate: 0.0, rate_prev: 0.0, w2: w0, w3: w0,
+                                         w_round: w0, v_round: 0.0, alone: 0 },
+                             Rram { i0: number(Lines, Numbers, i, 0),
+                                   u0: number(Lines, Numbers, i, 1),
+                                   g0: number(Lines, Numbers, i, 2),
+                                   gmax: number(Lines, Numbers, i, 3),
+                                   v0: number(Lines, Numbers, i, 4),
+                                   ea: number(Lines, Numbers, i, 5),
+                                   da: number(Lines, Numbers, i, 6),
+                                   dox: number(Lines, Numbers, i, 7),
+                                   t0: number(Lines, Numbers, i, 8),
+                                   rth: number(Lines, Numbers, i, 9),
+                                   gamma0: number(Lines, Numbers, i, 10),
+                                   gammar: number(Lines, Numbers, i, 11),
+                                   beta: number(Lines, Numbers, i, 12),
+                                   alpha: number(Lines, Numbers, i, 13),
+                                   gbar: number(Lines, Numbers, i, 14),
+                                   uth: number(Lines, Numbers, i, 15),
+                                   emin: number(Lines, Numbers, i, 16),
+                                   ewidth: number(Lines, Numbers, i, 17),
+                                   ug: number(Lines, Numbers, i, 18),
+                                   ug0: number(Lines, Numbers, i, 19),
+                                   uhat: number(Lines, Numbers, i, 20),
+                                   zeta: number(Lines, Numbers, i, 21),
+                                   wl: number(Lines, Numbers, i, 22),
+                                   eth: number(Lines, Numbers, i, 23),
+                                   dth: number(Lines, Numbers, i, 24),
+                                   rmax: number(Lines, Numbers, i, 25),
+                                   delta: number(Lines, Numbers, i, 26) } }
           connect (made)-[Touches]->(a)
           connect (made)-[Touches]->(b)
           Devices += { who: made }

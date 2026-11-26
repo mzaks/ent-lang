@@ -100,14 +100,27 @@ ngspice and with Xyce; the IBM power grids come out as published; and
 - `models/`: the memristor models in Verilog-A, the single source of
   each: the HP memristor with Biolek's window (`biolek.va`), VTEAM
   (`vteam.va`, numbers chosen to switch at 1.2 V and not at 0.1 V in the
-  crossbars, not a device's fit) and Yakopcic's (`yakopcic.va`, that
-  paper's fit of a device). ngspice runs them compiled by OpenVAF
+  crossbars, not a device's fit), Yakopcic's (`yakopcic.va`, that
+  paper's fit of a device) and IHP's HfO2 RRAM cell (`rram.va`: the
+  enhanced Stanford-PKU model of Al Beattie et al., IEEE TNANO 2023,
+  with its Table I; multilevel by the gate voltage `ug`; three
+  departures so an implicit step holds it, said in the file: the field's
+  threshold a logistic 0.7% of it wide, the rate capped at 1e8/s, a
+  window at the state's ends). Swept as that paper's Fig. 6
+  (`circuits/rram_ug1`, `rram_ug12`, `rram_ug16`) it sets at 0.63 V and
+  gives the figure's model curves at ug 1 and 1.2 V; at 1.6 V the
+  figure's low resistance is that of 1 V, which its own formula does
+  not give, and here it is 2.2 times lower. ngspice runs them compiled by OpenVAF
   (`openvaf-r`); `devices.ent` has each by hand, its parameters in the
   order of the file. A state is held at w0 in the operating point; in
   time, way 0 solves for the states with the voltages in each Newton
   step (an unknown each, as ngspice has a model's internal node), and in
   ways 1 and 2 every memristor takes a Newton step of its own on its
-  state's equation in each round, beside the nodes (spec 7.3).
+  state's equation in each round, beside the nodes (spec 7.3). A state
+  that goes on moving for 50 rounds while its voltage holds still is
+  stuck in its own Newton steps (at the RRAM cell's set, with too long a
+  step, they go round in a cycle), and the time point is tried again
+  shorter, as way 0 does after 50 rounds, not after a million.
 
 ```sh
 examples/analog/prepare.py all            # the circuits, into build/analog/circuits
@@ -159,8 +172,9 @@ echo 1 > run.txt
 - `check/spice.py` (check 3): ngspice with tight tolerances, its steps
   no longer than the circuit's, against the model with its steps chosen
   at reltol 1e-5, every probe at every time point within 1e-3 of its
-  range: 31 circuits, the memristors of all three models among them
-  (compiled from models/ by OpenVAF), crossbars up to 16 by 16 with
+  range: 44 circuits (3 crossbars of Yakopcic's devices left out:
+  ngspice not done in 600 s), the memristors of all four models among
+  them (compiled from models/ by OpenVAF), crossbars up to 16 by 16 with
   wires and 64 by 64 without. Way 0 on all; ways 1 and 2 on those of up
   to 100 nodes without resistance in the wires. The largest: 5.1e-4 (the
   4 by 4 crossbar of Yakopcic's devices, written); most crossbars 1e-7
@@ -168,6 +182,17 @@ echo 1 > run.txt
   2.4e-4. (At SPICE's reltol of 1e-3 the error each step may leave adds
   up to more than 1e-3 of a range on some: the Yakopcic crossbar 4.9e-3,
   2.1e-3 at 1e-4.) The divider is 3e-9 below ngspice's: GMIN, see below.
+  A point on a jump (`check/common.py`: a probe crossing at least 5% of
+  its range in 1e-4 of the run or less, a switching device's runaway)
+  is held to when the jump comes instead: the RRAM cell's set takes its
+  current up tenfold in nanoseconds, and comes 7e-5 s early at reltol
+  1e-5, 2.8e-5 at 1e-7, against a stiff solver's at 1e-12 (of a 4 s
+  sweep), so a point there is off by a tenth of the range at any
+  tolerance. From 1e-3 of the run before such a jump to 1e-4 after, a
+  point off is to cross the jump's middle within 1e-4 of the run of
+  ngspice and to be within its tolerance of what ngspice goes through
+  over as long as the jump is early or late. The three RRAM sweeps: 38
+  to 43 such points, the rest within 8.7e-4 to 1.0e-3 of the range.
   And a memristor under a sine: its current crosses 0 where its voltage
   does, and the loop's area shrinks from 2.3e-5 V A at 1 Hz to 7.7e-7 at
   10 Hz and 6.7e-8 at 100 Hz. (ngspice takes 20 ms a step with 256
@@ -175,13 +200,16 @@ echo 1 > run.txt
   out.)
 - `check/agree.py` (check 4): ways 1 and 2 give way 0's waves to within
   ten times the tolerance at every time point (in fact within a tenth of
-  it), on every circuit but the one way 0 alone does: 24 circuits,
-  memristors of all three models and crossbars of 4 and 16 by 16 among
+  it), on every circuit but the one way 0 alone does: 32 circuits,
+  memristors of all four models and crossbars of 4 and 16 by 16 among
   them. Left out unless named, as hours long by relaxation: crossbars of
   64 by 64 (by hand, below), of 16 by 16 with wires whose states move,
   and with wires under 1 ohm, where a pulse's edge takes more than a
   million rounds. A time point may take up to a million rounds here: a crossbar
-  with 1 ohm wires takes 130,000 at a pulse's edge.
+  with 1 ohm wires takes 130,000 at a pulse's edge. A point on a jump is
+  held to when it comes, as in check 3: the RRAM sweeps' ways 1 and 2
+  set 9.7e-5 s after way 0 at reltol 1e-3 (10 to 14 points), and are
+  within half the tolerance elsewhere.
 - `check/same.py` (check 6): the build for one core and the build for
   all of them, on 1, 4, 16 and 24 threads, give the same waves, every
   way, on nine circuits through time, memristors of three models and

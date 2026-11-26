@@ -2,6 +2,7 @@
 prepared circuit, its waves read, and the circuit read here too."""
 
 import atexit
+import bisect
 import os
 import shutil
 import subprocess
@@ -56,6 +57,93 @@ def run(program, name, way, at=0.0, most=100000, environment=None, step=0.0, fol
         with open(os.path.join(folder, "waves.txt")) as file:
             waves = [[float(word) for word in line.split()] for line in file if line.strip()]
     return waves, said
+
+
+# A jump: where a probe of the waves held to moves 1/STEEP of the run's
+# length or less for its whole range, by at least JUMP of it (a switching
+# device's runaway: the RRAM cell's set takes its current up tenfold in
+# nanoseconds). The jump can come a bit early or late at any tolerance
+# (the cell's set at reltol 1e-4, 1e-5, 1e-7 comes 1.6e-4, 7e-5, 2.8e-5 s
+# before a stiff solver's at 1e-12, of a 4 s sweep), and the climb up to
+# it with it, so there a point off in its value says little. A point off
+# from BEFORE of the run's length before a jump to ON after it is held to
+# when the jump comes instead: the waves are to cross the jump's middle
+# within ON of the run's length of where those held to do, and the point
+# to be within its tolerance of what those held to go through over as
+# long again as the jump is early or late (and half as long more).
+STEEP = 1e4
+JUMP = 0.05
+ON = 1e-4
+BEFORE = 1e-3
+
+
+def jumps(waves, k, size):
+    """The jumps of probe k of the waves (its range `size`): (start, end,
+    middle value, when the middle is crossed)."""
+    span = waves[-1][0] - waves[0][0] if len(waves) > 1 else 0.0
+    found = []
+
+    def steep(j):
+        dt = waves[j][0] - waves[j - 1][0]
+        dv = abs(waves[j][1 + k] - waves[j - 1][1 + k]) / size
+        return dv > 0 and (dt <= 0 or dv * span / dt > STEEP)
+
+    j = 1
+    while j < len(waves) and span > 0:
+        if not steep(j):
+            j += 1
+            continue
+        start = j - 1
+        while j < len(waves) and steep(j):
+            j += 1
+        a, b = waves[start], waves[j - 1]
+        if abs(b[1 + k] - a[1 + k]) > JUMP * size:
+            middle = (a[1 + k] + b[1 + k]) / 2
+            found.append((a[0], b[0], middle, crossing(waves, k, middle, a[0], b[0])))
+    return found
+
+
+def crossing(waves, k, middle, start, end):
+    """When probe k of the waves first crosses `middle` between start and
+    end (in a straight line between its time points), or None."""
+    for j in range(1, len(waves)):
+        t0, t1 = waves[j - 1][0], waves[j][0]
+        if t1 < start or t0 > end:
+            continue
+        a, b = waves[j - 1][1 + k] - middle, waves[j][1 + k] - middle
+        if a == 0:
+            return t0
+        if a * b < 0:
+            return t0 + (t1 - t0) * a / (a - b)
+    return None
+
+
+def on_a_jump(t, k, value, tolerance, theirs, theirs_jumps, mine):
+    """Whether a point of `mine` at t, probe k, `value`, is about one of the
+    jumps of the waves held to (`theirs`), and comes with it: `mine`
+    crosses its middle when they do, and the value is within `tolerance`
+    of what they go through over as long as the jump is early or late."""
+    span = theirs[-1][0] - theirs[0][0] if len(theirs) > 1 else 0.0
+    near = ON * span
+    for start, end, middle, when in theirs_jumps:
+        if not (start - BEFORE * span <= t <= end + near) or when is None:
+            continue
+        mine_when = crossing(mine, k, middle, start - near, end + near)
+        if mine_when is None or abs(mine_when - when) > near:
+            return False
+        shift = 1.5 * abs(mine_when - when)
+        seen = [line[1 + k] for line in theirs if t - shift <= line[0] <= t + shift]
+        seen += [level_at(theirs, k, t - shift), level_at(theirs, k, t + shift)]
+        return min(seen) - tolerance <= value <= max(seen) + tolerance
+    return False
+
+
+def level_at(waves, k, t):
+    """Probe k of the waves at t, in a straight line between its points."""
+    j = min(max(bisect.bisect_left([line[0] for line in waves], t), 1), len(waves) - 1)
+    t0, t1 = waves[j - 1][0], waves[j][0]
+    a, b = waves[j - 1][1 + k], waves[j][1 + k]
+    return a if t1 == t0 else a + (b - a) * (t - t0) / (t1 - t0)
 
 
 class Netlist:

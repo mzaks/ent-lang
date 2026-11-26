@@ -12,7 +12,9 @@ Every probe of ways 1 and 2 at every time point is to be way 0's (in a
 straight line between way 0's time points, since each way chooses its
 own steps) to within ten times the tolerance a node settles to
 (reltol of the value and vntol, 1e-3 and 1e-6; for a current reltol of
-the value and 1e-9 A), where the way settled; a way that did not settle in
+the value and 1e-9 A), where the way settled (a point off on a jump,
+a switching device's runaway, is held to when the jump comes:
+common.jumps); a way that did not settle in
 so many rounds (1,000,000) is said, and a circuit with a voltage source
 between two nodes that are not ground is way 0's only. Says for each way
 how many rounds and node steps it took, and how far off it is, in those
@@ -71,6 +73,13 @@ def main():
                 continue
             worst, at = 0.0, None
             times = [w[0] for w in base]
+            # (A point on a jump is held to when the jump comes:
+            # common.jumps.)
+            span = times[-1] - times[0] if len(times) > 1 else 0.0
+            steps = [common.jumps(base, k, max(max(w[1 + k] for w in base) -
+                                                min(w[1 + k] for w in base), 1e-300))
+                     for k in range(len(net.probes))] if span > 0 else [[] for _ in net.probes]
+            jumped = 0
             for got in waves:
                 # (Way 0's waves at this way's time point, in a straight
                 # line between its own: the steps each way chooses may
@@ -87,6 +96,10 @@ def main():
                 for k, ((kind, _), a, b) in enumerate(zip(net.probes, got[1:], wanted[1:])):
                     floor = 1e-6 if kind == "v" else 1e-9
                     share = abs(a - b) / (10 * (1e-3 * abs(b) + floor))
+                    if share > 1 and common.on_a_jump(got[0], k, a, 10 * (1e-3 * abs(b) + floor),
+                                                      base, steps[k], waves):
+                        jumped += 1
+                        continue
                     if share > worst:
                         worst, at = share, (k, a, b, got[0])
             rounds = said.split(" in ", 1)[-1]
@@ -96,7 +109,8 @@ def main():
                 line.append(f"way {way} NOT the same: probe {k} at {when} s {a!r}, way 0 {b!r} "
                             f"({rounds})")
             else:
-                line.append(f"way {way} {rounds}, off by {worst:.3f}")
+                line.append(f"way {way} {rounds}, off by {worst:.3f}" +
+                            (f" ({jumped} points on jumps, at their times)" if jumped else ""))
         print("; ".join(line))
     print(f"{len(names)} circuits, {failed} where the ways do not agree")
     return 1 if failed else 0
