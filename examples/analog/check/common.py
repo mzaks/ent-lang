@@ -59,10 +59,13 @@ def run(program, name, way, at=0.0, most=100000, environment=None, step=0.0, fol
     return waves, said
 
 
-# A jump: where a probe of the waves held to moves 1/STEEP of the run's
-# length or less for its whole range, by at least JUMP of it (a switching
-# device's runaway: the RRAM cell's set takes its current up tenfold in
-# nanoseconds). The jump can come a bit early or late at any tolerance
+# A jump: where a probe of the waves held to moves at a pace that takes it
+# across its whole range in 1/STEEP of the run's length or less, by at
+# least JUMP of its range (a switching device's runaway: the RRAM cell's
+# set takes its current up tenfold in nanoseconds; a spike: a Morris-Lecar
+# membrane falls 100 mV in 50 us, where the solvers differ in when by 0.07
+# us after 8 ms of spikes, ngspice and the model, and a stiff solver at
+# 1e-12 by 0.3 us from both). The jump can come a bit early or late at any tolerance
 # (the cell's set at reltol 1e-4, 1e-5, 1e-7 comes 1.6e-4, 7e-5, 2.8e-5 s
 # before a stiff solver's at 1e-12, of a 4 s sweep), and the climb up to
 # it with it, so there a point off in its value says little. A point off
@@ -71,7 +74,7 @@ def run(program, name, way, at=0.0, most=100000, environment=None, step=0.0, fol
 # within ON of the run's length of where those held to do, and the point
 # to be within its tolerance of what those held to go through over as
 # long again as the jump is early or late (and half as long more).
-STEEP = 1e4
+STEEP = 1e2
 JUMP = 0.05
 ON = 1e-4
 BEFORE = 1e-3
@@ -93,8 +96,11 @@ def jumps(waves, k, size):
         if not steep(j):
             j += 1
             continue
+        # (One way: a spike's up and down are two jumps, else the two
+        # together may come back to near where they started.)
         start = j - 1
-        while j < len(waves) and steep(j):
+        rising = waves[j][1 + k] > waves[j - 1][1 + k]
+        while j < len(waves) and steep(j) and (waves[j][1 + k] > waves[j - 1][1 + k]) == rising:
             j += 1
         a, b = waves[start], waves[j - 1]
         if abs(b[1 + k] - a[1 + k]) > JUMP * size:
@@ -125,16 +131,20 @@ def on_a_jump(t, k, value, tolerance, theirs, theirs_jumps, mine):
     of what they go through over as long as the jump is early or late."""
     span = theirs[-1][0] - theirs[0][0] if len(theirs) > 1 else 0.0
     near = ON * span
+    # (Any of the jumps near it that so explains it: one jump can come in
+    # two parts where it slows on the way, as a growing memristor's
+    # current does, and the point is the second's.)
     for start, end, middle, when in theirs_jumps:
         if not (start - BEFORE * span <= t <= end + near) or when is None:
             continue
         mine_when = crossing(mine, k, middle, start - near, end + near)
         if mine_when is None or abs(mine_when - when) > near:
-            return False
+            continue
         shift = 1.5 * abs(mine_when - when)
         seen = [line[1 + k] for line in theirs if t - shift <= line[0] <= t + shift]
         seen += [level_at(theirs, k, t - shift), level_at(theirs, k, t + shift)]
-        return min(seen) - tolerance <= value <= max(seen) + tolerance
+        if min(seen) - tolerance <= value <= max(seen) + tolerance:
+            return True
     return False
 
 

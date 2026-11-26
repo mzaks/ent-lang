@@ -1,0 +1,11 @@
+Two Morris-Lecar membranes joined by a synapse (models/synapse.va), the first under the pulses of the axon-growth circuit
+C1 n 0 2n
+X1 n 0 ml w0=0
+C2 m 0 2n
+X2 m 0 ml w0=0
+Xs n m synapse w0=0
+I1 0 n PULSE(0 2.4u 0 1u 1u 2m 6m)
+.options vntol=1e-9
+.tran 0.1m 0.02
+.print tran v(n) v(m)
+.end

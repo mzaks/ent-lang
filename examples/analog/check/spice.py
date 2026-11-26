@@ -40,7 +40,9 @@ allowing for as much.
 
 A memristor runs in ngspice as its model in models/<name>.va, which
 OpenVAF (openvaf-r) compiles here into build/analog/models. Circuits too
-big for a run of ngspice in minutes (above 600 nodes) are left out here.
+big for a run of ngspice in minutes (above 600 nodes) are left out here,
+and axon_prune unless named (check/axon.py's, 5 s of spikes: ngspice's
+two million time points take half an hour to hold to here).
 """
 
 import bisect
@@ -115,7 +117,10 @@ def spice(name, net):
 
 
 def main():
-    names = sys.argv[1:] or sorted(os.listdir(common.CIRCUITS))
+    # (axon_prune, check/axon.py's: 5 s of spikes, two million of
+    # ngspice's time points; held to the paper there, left out here.)
+    names = sys.argv[1:] or [n for n in sorted(os.listdir(common.CIRCUITS))
+                             if n != "axon_prune"]
     program = common.build()
     models()
     failed = checked = left = 0
@@ -131,6 +136,12 @@ def main():
         if theirs is None:
             failed += 1
             print(f"{name}: ngspice gave nothing: {why}")
+            continue
+        if net.tran and theirs[-1][0] < net.tran[1] * (1 - 1e-9):
+            # (ngspice stops where its step shrinks to nothing, "timestep
+            # too small"; its waves are not taken on past their end.)
+            failed += 1
+            print(f"{name}: ngspice stopped at {theirs[-1][0]} s of {net.tran[1]}")
             continue
         checked += 1
         times = [line[0] for line in theirs]

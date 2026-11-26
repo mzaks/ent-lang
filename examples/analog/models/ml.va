@@ -1,0 +1,57 @@
+// The ion channels of a Morris-Lecar oscillator with sodium for calcium,
+// as Jenderny, Ochs and Xue use it for axon hillocks and nodes of Ranvier
+// ("A memristive circuit for self-organized network topology formation
+// based on guided axon growth", Scientific Reports 14:16643, 2024, eq. 1
+// and Table 1): from the membrane (a) to ground (b) the leak, the sodium
+// conductance and the potassium memductance, each to its resting
+// potential,
+//
+//   i  = GL (u - EL) + gNa(u) (u - ENa) + zK GK (u - EK)
+//   gNa(u) = GNa / 2 (1 + tanh((u - UNa1) / UNa2))
+//   dzK/dt = FK cosh((u - UK1) / (2 UK2)) (f(u) - zK)
+//   f(u) = (1 + tanh((u - UK1) / UK2)) / 2
+//
+// The membrane's capacitance C is a capacitor beside it, and the input
+// current j a source. The paper prints the state's equation as
+// f(u) - zK FK cosh(...), which is not one in its units; this is the
+// Morris-Lecar equation it stands for (zK relaxes to f(u) at FK cosh(...)).
+// The single source of this model for examples/analog. ngspice runs it
+// compiled by OpenVAF; devices.ent has it by hand, with the parameters in
+// this order (prepare.py reads the order from here), w0 last. The state
+// is the voltage of the internal node `x`, held at w0 in the operating
+// point.
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module ml(a, b);
+  inout a, b;
+  electrical a, b, x;
+
+  parameter real gl = 20e-6 from [0:inf);
+  parameter real el = -70e-3;
+  parameter real gna = 0.2e-3 from [0:inf);
+  parameter real ena = 50e-3;
+  parameter real una1 = -1.2e-3;
+  parameter real una2 = 18e-3 from (0:inf);
+  parameter real gk = 0.2e-3 from [0:inf);
+  parameter real ek = -90e-3;
+  parameter real uk1 = 0;
+  parameter real uk2 = 10e-3 from (0:inf);
+  parameter real fk = 66.7 from (0:inf);
+  parameter real w0 = 0;
+
+  real u, z;
+
+  analog begin
+    u = V(a, b);
+    z = V(x);
+    I(a, b) <+ gl * (u - el) + gna / 2 * (1 + tanh((u - una1) / una2)) * (u - ena) +
+               z * gk * (u - ek);
+    if ($abstime <= 0)
+      V(x) <+ w0;
+    else
+      I(x) <+ ddt(V(x)) - fk * cosh((u - uk1) / (2 * uk2)) *
+                          ((1 + tanh((u - uk1) / uk2)) / 2 - z);
+  end
+endmodule

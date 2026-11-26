@@ -49,9 +49,10 @@ import math
 // again, and would leave a mark as it was).
 // `alone`: the most rounds in a row any memristor's state moved at
 // voltages that held still (`alone()`).
+// `negative`: nodes whose conductance is not above 0 (`pivots()`).
 unique Relax {
   round: i32, unsettled: i32, updates: i64, largest: f64, before: f64, scale: f64, mark: i32,
-  alone: i32
+  alone: i32, negative: i32
 }
 
 system relax_started() {
@@ -62,6 +63,7 @@ system relax_started() {
   Relax.before = 0.0
   Relax.scale = 1.0
   Relax.alone = 0
+  Relax.negative = 0
   for m: mut Memristor {
     m.alone = 0
     m.w_round = m.w
@@ -138,11 +140,25 @@ system told() {
 }
 
 // Whether a node with this sum and voltage has settled.
+// (Written so that what is not a number is far, and left: it never
+// settles.)
 fn far(step: f64, v: f64, before: f64, reltol: f64, vntol: f64) -> bool {
-  abs64(step) > reltol * max(abs64(v), abs64(before)) + vntol
+  !(abs64(step) <= reltol * max(abs64(v), abs64(before)) + vntol)
 }
 fn left(i: f64, most: f64, reltol: f64, abstol: f64) -> bool {
-  abs64(i) > reltol * most + abstol
+  !(abs64(i) <= reltol * most + abstol)
+}
+
+// A node's step is its current over its conductance, which takes it
+// towards its root only where that is above 0. A device can make it less
+// (the sodium channel of a Morris-Lecar oscillator, models/ml.va, has a
+// negative conductance under its threshold), and where a node's comes to
+// 0 or below, relaxation goes away from its root: the time point is tried
+// again shorter, where a capacitor's C / h is more, and at the operating
+// point, where there is none, the way does not do the circuit.
+system pivots() {
+  Relax.negative = 0
+  for n: Node, s: Sum without Fixed where !(s.g > 0.0) { Relax.negative += 1 }
 }
 
 // Way 1: every node's step.
@@ -327,6 +343,82 @@ system states_told() {
       }
     }
   }
+  for t: Two, m: mut Memristor, k: Ml, c: mut Companion {
+    if let va = Node(t.a).told {
+      if let vb = Node(t.b).told {
+        let (i, g, gw, f, jw, jv, rate) = ml_equation(k.gl, k.el, k.gna, k.ena, k.una1, k.una2, k.gk, k.ek, k.uk1, k.uk2, k.fk,
+                                                 m.w, m.w_prev, va - vb, Time.h, Time.trap, m.rate_prev)
+        let w = m.w - f / jw
+        if far(w - m.w, w, m.w, Time.reltol * Relax.scale, Time.vntol * Relax.scale) {
+          Relax.unsettled += 1
+        }
+        let (i2, g2, gw2, f2, jw2, jv2, rate2) = ml_equation(k.gl, k.el, k.gna, k.ena, k.una1, k.una2, k.gk, k.ek, k.uk1, k.uk2, k.fk,
+                                                 w, m.w_prev, va - vb, Time.h, Time.trap, m.rate_prev)
+        m.w = w
+        m.i = i2
+        c.g = g2
+        c.i0 = i2 - g2 * (va - vb)
+      }
+    }
+  }
+  for t: Two, m: mut Memristor, k: Synapse, c: mut Companion {
+    if let va = Node(t.a).told {
+      if let vb = Node(t.b).told {
+        let (i, g, gw, f, jw, jv, rate) = synapse_equation(k.gs1, k.gs0, k.us1, k.us2, k.fs,
+                                                 m.w, m.w_prev, va - vb, Time.h, Time.trap, m.rate_prev)
+        let w = m.w - f / jw
+        if far(w - m.w, w, m.w, Time.reltol * Relax.scale, Time.vntol * Relax.scale) {
+          Relax.unsettled += 1
+        }
+        let (i2, g2, gw2, f2, jw2, jv2, rate2) = synapse_equation(k.gs1, k.gs0, k.us1, k.us2, k.fs,
+                                                 w, m.w_prev, va - vb, Time.h, Time.trap, m.rate_prev)
+        m.w = w
+        m.i = i2
+        c.g = g2
+        c.i0 = i2 - g2 * (va - vb)
+      }
+    }
+  }
+  for t: Two, m: mut Memristor, k: Growth, c: mut Companion {
+    if let va = Node(t.a).told {
+      if let vb = Node(t.b).told {
+        let (i, g, gw, f, jw, jv, rate) = growth_equation(k.m0, k.m1, k.s, k.sr, k.uplus, k.uminus, k.width, k.delta,
+                                                 m.w, m.w_prev, va - vb, Time.h, Time.trap, m.rate_prev)
+        let w = m.w - f / jw
+        if far(w - m.w, w, m.w, Time.reltol * Relax.scale, Time.vntol * Relax.scale) {
+          Relax.unsettled += 1
+        }
+        let (i2, g2, gw2, f2, jw2, jv2, rate2) = growth_equation(k.m0, k.m1, k.s, k.sr, k.uplus, k.uminus, k.width, k.delta,
+                                                 w, m.w_prev, va - vb, Time.h, Time.trap, m.rate_prev)
+        m.w = w
+        m.i = i2
+        c.g = g2
+        c.i0 = i2 - g2 * (va - vb)
+      }
+    }
+  }
+  for t: Two, m: mut Memristor, k: Prune, e: Sensing, c: mut Companion {
+    if let va = Node(t.a).told {
+      if let vb = Node(t.b).told {
+        if let vc = Node(e.c).told {
+          let (i, g, gw, f, jw, jv, rate) = prune_equation(k.rp0, k.rp1, k.eta1, k.eta2, k.factor, k.alpha, k.beta, k.uth, k.width,
+                                                    m.w, m.w_prev, va - vb, vc, Time.h, Time.trap,
+                                                    m.rate_prev)
+          let w = m.w - f / jw
+          if far(w - m.w, w, m.w, Time.reltol * Relax.scale, Time.vntol * Relax.scale) {
+            Relax.unsettled += 1
+          }
+          let (i2, g2, gw2, f2, jw2, jv2, rate2) = prune_equation(k.rp0, k.rp1, k.eta1, k.eta2, k.factor, k.alpha, k.beta, k.uth, k.width,
+                                                    w, m.w_prev, va - vb, vc, Time.h, Time.trap,
+                                                    m.rate_prev)
+          m.w = w
+          m.i = i2
+          c.g = g2
+          c.i0 = i2 - g2 * (va - vb)
+        }
+      }
+    }
+  }
 }
 
 // Ways 1 and 2: a memristor whose state goes on moving while its voltage
@@ -345,7 +437,17 @@ fn alone_round(alone: i32, w: f64, w_round: f64, v: f64, v_round: f64, reltol: f
 
 system alone() {
   Relax.alone = 0
-  for t: Two, m: mut Memristor {
+  // (A pruning-cue sensor's state moves with its control node.)
+  for m: mut Memristor, e: Sensing {
+    if let vc = Node(e.c).v {
+      m.alone = alone_round(m.alone, m.w, m.w_round, vc, m.v_round, Time.reltol * Relax.scale,
+                            Time.vntol * Relax.scale)
+      m.v_round = vc
+    }
+    m.w_round = m.w
+    Relax.alone max= m.alone
+  }
+  for t: Two, m: mut Memristor without Sensing {
     if let va = Node(t.a).v {
       if let vb = Node(t.b).v {
         m.alone = alone_round(m.alone, m.w, m.w_round, va - vb, m.v_round, Time.reltol * Relax.scale,
@@ -360,7 +462,17 @@ system alone() {
 
 system alone_told() {
   Relax.alone = 0
-  for t: Two, m: mut Memristor {
+  // (A pruning-cue sensor's state moves with its control node.)
+  for m: mut Memristor, e: Sensing {
+    if let vc = Node(e.c).told {
+      m.alone = alone_round(m.alone, m.w, m.w_round, vc, m.v_round, Time.reltol * Relax.scale,
+                            Time.vntol * Relax.scale)
+      m.v_round = vc
+    }
+    m.w_round = m.w
+    Relax.alone max= m.alone
+  }
+  for t: Two, m: mut Memristor without Sensing {
     if let va = Node(t.a).told {
       if let vb = Node(t.b).told {
         m.alone = alone_round(m.alone, m.w, m.w_round, va - vb, m.v_round, Time.reltol * Relax.scale,

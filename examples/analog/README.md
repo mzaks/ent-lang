@@ -121,6 +121,34 @@ ngspice and with Xyce; the IBM power grids come out as published; and
   stuck in its own Newton steps (at the RRAM cell's set, with too long a
   step, they go round in a cycle), and the time point is tried again
   shorter, as way 0 does after 50 rounds, not after a million.
+- The parts of the guided axon growth circuit of Jenderny, Ochs and Xue
+  (Sci Rep 14:16643, 2024), each a model in `models/` and by hand in
+  `devices.ent` as the memristors are, a state each: a Morris-Lecar
+  oscillator's ion channels (`ml.va`, its potassium gate the state;
+  beside a capacitor, a membrane), a synapse (`synapse.va`), the
+  memsensor's growing memristor (`growth.va`, the Heaviside steps of
+  its rate a smoothstep 1 mV wide: a logistic leaks, and its tail beats
+  the retention), and its pruning-cue sensor (`prune.va`): a resistor
+  whose state is the cue, made by a third node it does not touch, the
+  target's membrane (`Sensing`: in a netlist line `M a b model c
+  numbers`; way 0 puts the state's dependence in that node's column).
+  The paper's printed values and where they are read otherwise are in
+  the files (Rp1 1.25 MOhm, not the table's 125 kOhm, since its text has
+  Rp1 above M1). The Morris-Lecar node's sodium conductance is negative
+  under its threshold, so a node's conductance can be 0 or less, and
+  ways 1 and 2, whose step is a node's current over it, would go away
+  from the root: they say so and do not do such a circuit.
+- `axon.py`: the paper's minimal example (Fig. 3 and 4) as a netlist,
+  a 2 by 2 grid of oscillators, the start fed pulses, two memsensors
+  growing from it and two synapses on to the target; `circuits/axon_grow`
+  (50 ms) is it, held to ngspice. Run for 5 s (`check/axon.py`, 17 s,
+  170,000 time points) the memsensors grow from 800 to 20 kOhm in 10 ms;
+  the one whose synapse the target's cue reaches most, Ma1, goes to 2.5
+  MOhm by 0.5 s and its memristor back to 840 kOhm by 4.3 s, 980 by 5;
+  Ma2 is kept, at 120 to 140 kOhm (the paper: under 100), and the pruned
+  synapse's node stops spiking. Which synapse is pruned hangs on where
+  eq. 4b's vectors are taken from; at the nodes a memsensor grows to, as
+  here, it is the paper's.
 
 ```sh
 examples/analog/prepare.py all            # the circuits, into build/analog/circuits
@@ -172,7 +200,7 @@ echo 1 > run.txt
 - `check/spice.py` (check 3): ngspice with tight tolerances, its steps
   no longer than the circuit's, against the model with its steps chosen
   at reltol 1e-5, every probe at every time point within 1e-3 of its
-  range: 44 circuits (3 crossbars of Yakopcic's devices left out:
+  range: 47 circuits (3 crossbars of Yakopcic's devices left out:
   ngspice not done in 600 s), the memristors of all four models among
   them (compiled from models/ by OpenVAF), crossbars up to 16 by 16 with
   wires and 64 by 64 without. Way 0 on all; ways 1 and 2 on those of up
@@ -182,8 +210,9 @@ echo 1 > run.txt
   2.4e-4. (At SPICE's reltol of 1e-3 the error each step may leave adds
   up to more than 1e-3 of a range on some: the Yakopcic crossbar 4.9e-3,
   2.1e-3 at 1e-4.) The divider is 3e-9 below ngspice's: GMIN, see below.
-  A point on a jump (`check/common.py`: a probe crossing at least 5% of
-  its range in 1e-4 of the run or less, a switching device's runaway)
+  A point on a jump (`check/common.py`: a probe moving one way at least
+  5% of its range at a pace that crosses all of it in 1e-2 of the run or
+  less: a switching device's runaway, a spike's edge)
   is held to when the jump comes instead: the RRAM cell's set takes its
   current up tenfold in nanoseconds, and comes 7e-5 s early at reltol
   1e-5, 2.8e-5 at 1e-7, against a stiff solver's at 1e-12 (of a 4 s
@@ -198,11 +227,18 @@ echo 1 > run.txt
   10 Hz and 6.7e-8 at 100 Hz. (ngspice takes 20 ms a step with 256
   compiled memristors, so the 64 by 64 crossbars with wires are left
   out.)
+- `check/axon.py`: the minimal example of guided axon growth, 5 s, held
+  to the paper's Fig. 4 (`axon.py` above): grown under 100 kOhm by 10
+  ms, Ma1 over 1 MOhm from 0.5 s and its memristor over 800 kOhm by 4.3
+  s, Ma2 under 150 kOhm (said against the paper's 100), and the pruned
+  synapse's node silent in the last 60 ms while the others spike.
 - `check/agree.py` (check 4): ways 1 and 2 give way 0's waves to within
   ten times the tolerance at every time point (in fact within a tenth of
   it), on every circuit but the one way 0 alone does: 32 circuits,
   memristors of all four models and crossbars of 4 and 16 by 16 among
-  them. Left out unless named, as hours long by relaxation: crossbars of
+  them; the Morris-Lecar circuits (`ml_pulse`, `ml_synapse`, `axon_grow`)
+  are way 0's alone (`models/ml.va`'s negative conductance, above).
+  Left out unless named, as hours long by relaxation: crossbars of
   64 by 64 (by hand, below), of 16 by 16 with wires whose states move,
   and with wires under 1 ohm, where a pulse's edge takes more than a
   million rounds. A time point may take up to a million rounds here: a crossbar
@@ -262,6 +298,15 @@ relaxing between lines, is what it suggests next.
   them out. The written crossbars do not hold to 1e-2 of a range in the
   benchmarks, Xyce included (bench/analog/RESULTS.md), and the 256 ones
   with wires are past 600 s for all.
+- The axon growth circuit's 15 by 15 grid (225 oscillators, 416
+  memsensors; a pruning-cue sensor there may hear two targets), and its
+  devices swapped for RRAM cells with spread. The 5 s minimal example
+  tries a fifth of its time points again: Newton's steps there come to
+  what is not a number somewhere (where, not yet found; SPICE limits
+  how far a step moves a node, this does not). Its current probes are
+  not held to ngspice: where a growing memristor speeds up, ngspice at
+  its tightest is 1.3e-3 to 5e-3 of the range off where ours converge
+  (`axon.py` says more).
 - Way 0's floating sources are done; the relaxation ways refuse them.
 - Xyce has no Biolek and no VTEAM built in, and its Verilog-A plugins
   need ADMS, which the package installed has not: check 5 and the
@@ -274,6 +319,17 @@ relaxing between lines, is what it suggests next.
 
 ## Where it goes beyond the spec
 
+- The first step after the operating point or a corner, which no error
+  holds, is shorter by the square root of reltol under 1e-3: backward
+  Euler's error goes as its square, and what it leaves a Morris-Lecar
+  membrane at rest under its threshold grows (0.1 us early of 15 at the
+  first spike, at any tolerance). And a circuit may ask for a tighter
+  vntol (`.options vntol=`, the run's is the larger): the axon circuits
+  1e-9, where at the run's 1e-6 the spikes come 0.1 us early, as ngspice
+  has them only with its own vntol of 1e-12. What is not a number never
+  settles, in Newton's steps or in relaxation, and the time point is
+  tried again shorter (a 5 s axon run took NaN from 0.42 s on as
+  settled).
 - Step control is SPICE's, with one difference that shows: the error is
   worked out from the time points since the last corner of a source only,
   so a step across a corner is not taken as a large error. At SPICE's

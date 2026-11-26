@@ -1,0 +1,40 @@
+// A synapse of Jenderny, Ochs and Xue (Scientific Reports 14:16643, 2024,
+// eq. 2): a memductance that opens with the voltage across it, as an ion
+// channel does,
+//
+//   i = (Gs1 zs + Gs0) u
+//   dzs/dt = Fs ((1 + tanh((u - Us1) / Us2)) / 2 - zs)
+//
+// The paper prints the state's equation as (1 + tanh(...)) / 2 - zs Fs,
+// which is not one in its units; this is the channel equation it stands
+// for (zs relaxes to the opening at the rate Fs). The single source of
+// this model for examples/analog (ngspice by OpenVAF, devices.ent by
+// hand, parameters in this order, w0 last; the state is the internal node
+// `x`, held at w0 in the operating point).
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module synapse(a, b);
+  inout a, b;
+  electrical a, b, x;
+
+  parameter real gs1 = 20e-6 from [0:inf);
+  parameter real gs0 = 5e-6 from [0:inf);
+  parameter real us1 = 40e-3;
+  parameter real us2 = 1e-3 from (0:inf);
+  parameter real fs = 3e3 from (0:inf);
+  parameter real w0 = 0;
+
+  real u, z;
+
+  analog begin
+    u = V(a, b);
+    z = V(x);
+    I(a, b) <+ (gs1 * z + gs0) * u;
+    if ($abstime <= 0)
+      V(x) <+ w0;
+    else
+      I(x) <+ ddt(V(x)) - fs * ((1 + tanh((u - us1) / us2)) / 2 - z);
+  end
+endmodule

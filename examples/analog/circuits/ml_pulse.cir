@@ -1,0 +1,8 @@
+A Morris-Lecar membrane (models/ml.va beside 2 nF) under the pulses of the axon-growth circuit: 2.4 uA, 2 ms on, 4 ms off
+C1 n 0 2n
+X1 n 0 ml w0=0
+I1 0 n PULSE(0 2.4u 0 1u 1u 2m 6m)
+.options vntol=1e-9
+.tran 0.1m 0.02
+.print tran v(n)
+.end

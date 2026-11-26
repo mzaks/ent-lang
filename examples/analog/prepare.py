@@ -84,6 +84,14 @@ def parameters(model):
     return [(name, value(default)) for name, default in found]
 
 
+def model_ports(model):
+    """How many nodes a memristor model's module has: two, and a third for
+    one whose state moves with a control node (models/prune.va)."""
+    with open(os.path.join(MODELS, model + ".va")) as file:
+        found = re.search(r"^\s*module\s+\w+\s*\(([^)]*)\)", file.read(), re.M)
+    return len(found.group(1).split(","))
+
+
 def lines_of(path):
     """The netlist's lines, comments gone and continued lines joined."""
     with open(path) as file:
@@ -118,6 +126,7 @@ class Circuit:
         self.probes = []
         self.tran = None
         self.op = False
+        self.vntol = None     # .options vntol=: the most a node may be off
         self.subckts = {}
         lines = lines_of(path)
         self.collect(lines)
@@ -230,8 +239,9 @@ class Circuit:
         declared = parameters(what)
         if declared is None:
             raise Wrong(f"'{what}' is no subcircuit and no model in {MODELS}")
-        if len(rest) != 3:
-            raise Wrong("a memristor has two nodes")
+        count = model_ports(what)
+        if len(rest) != count + 1:
+            raise Wrong(f"a memristor of {what} has {count} nodes")
         given = {}
         for setting in settings:
             key, _, amount = setting.partition("=")
@@ -241,8 +251,9 @@ class Circuit:
         if unknown:
             raise Wrong(f"{what} has no parameter {', '.join(sorted(unknown))}")
         numbers = [given.get(n.lower(), default) for n, default in declared]
+        controls = [self.node(node, prefix, ports) for node in rest[2:count]]
         self.add("M", name, self.node(rest[0], prefix, ports), self.node(rest[1], prefix, ports),
-                 [what, numbers])
+                 [what, numbers, controls])
 
     def control(self, first, parts, prefix, line):
         if prefix and first not in (".model",):
@@ -259,7 +270,14 @@ class Circuit:
         elif first in (".print", ".probe", ".save"):
             for kind, what in re.findall(r"\b([vViI])\s*\(([^)]*)\)", line):
                 self.probes.append((kind.lower(), " ".join(what.replace(",", " ").split())))
-        elif first in (".end", ".options", ".option", ".model"):
+        elif first in (".options", ".option"):
+            # (vntol, kept: a circuit that grows away from where it was
+            # wants it tighter than the run's; the others are the run's.)
+            for setting in parts:
+                key, _, amount = setting.partition("=")
+                if key.lower() == "vntol" and amount:
+                    self.vntol = value(amount)
+        elif first in (".end", ".model"):
             pass
         else:
             raise Wrong(f"{first}, which is not done")
@@ -310,10 +328,14 @@ class Circuit:
             if find(k) != k:
                 whole[k] = len(whole)
         self.whole = [(whole[a], whole[b]) for _, _, a, b, _ in kept]
+        self.whole_controls = [[whole[c] for c in numbers[2]] if kind == "M" else []
+                               for kind, _, _, _, numbers in kept]
         self.restored = [(whole[a], whole[b]) for a, b in dropped]
         self.nodes = {name: number[find(k)] for k, name in enumerate(self.names)}
         self.names = names
-        self.devices = [(kind, name, number[find(a)], number[find(b)], numbers)
+        self.devices = [(kind, name, number[find(a)], number[find(b)],
+                         [numbers[0], numbers[1], [number[find(c)] for c in numbers[2]]]
+                         if kind == "M" else numbers)
                         for kind, name, a, b, numbers in kept]
         self.named = {name.lower(): k for k, (_, name, _, _, _) in enumerate(self.devices)}
 
@@ -380,9 +402,12 @@ class Circuit:
                 else:
                     lines.append(f"{kind} {a} {b} {shape} " + " ".join(text(n) for n in given))
             else:
-                model, given = numbers
-                lines.append(f"M {a} {b} {model} " + " ".join(text(n) for n in given))
+                model, given, controls = numbers
+                lines.append(f"M {a} {b} {model} " + " ".join(str(c) for c in controls) +
+                             (" " if controls else "") + " ".join(text(n) for n in given))
         lines += [f"probe {kind} {which}" for kind, which in self.settled]
+        if self.vntol:
+            lines.append(f"vntol {text(self.vntol)}")
         if self.op:
             lines.append("op")
         if self.tran:
@@ -407,14 +432,17 @@ class Circuit:
                     shape.upper() + "(" + " ".join(text(n) for n in given) + ")"
                 lines.append(f"{kind}{index} {a} {b} {body}")
             else:
-                model, given = numbers
+                model, given, controls = numbers
+                if self.whole:
+                    controls = self.whole_controls[index]
                 names = [n for n, _ in parameters(model)]
                 key = (model, tuple(given))
                 if key not in models:
                     models[key] = f"{model}_{len(models)}"
                     lines.append(f".model {models[key]} {model} " +
                                  " ".join(f"{n}={text(v)}" for n, v in zip(names, given)))
-                lines.append(f"N{index} {a} {b} {models[key]}")
+                lines.append(f"N{index} {a} {b} " + "".join(f"{c} " for c in controls) +
+                             models[key])
         for index, (a, b) in enumerate(self.restored or []):
             lines.append(f"VS{index} {a} {b} DC 0")
         if self.op:
@@ -471,7 +499,7 @@ class Circuit:
                 if swept is None and kind == "V" and shape == "dc":
                     swept = (index, given)
             else:
-                model, given = numbers
+                model, given = numbers[:2]
                 level, names, state = XYCE_MODELS[model]
                 values = dict(zip([n for n, _ in parameters(model)], given))
                 key = (model, tuple(given[:-1]))

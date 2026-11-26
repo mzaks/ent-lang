@@ -208,6 +208,99 @@ fn rram_equation(i0: f64, u0: f64, g0: f64, gmax: f64, v0: f64, ea: f64, da: f64
   (i, g, gw, f, jw, jv, rate)
 }
 
+// tanh, and a step over `width` about 0 (the Heaviside steps of
+// models/growth.va and prune.va: 3 y^2 - 2 y^3, y from 0 to 1 across it)
+// with how it grows with its argument.
+fn tanh64(x: f64) -> f64 {
+  let e = exp64(-2.0 * abs64(x))
+  if x >= 0.0 { (1.0 - e) / (1.0 + e) } else { (e - 1.0) / (1.0 + e) }
+}
+fn step64(x: f64, width: f64) -> f64 {
+  let y = min(max(x / width + 0.5, 0.0), 1.0)
+  y * y * (3.0 - 2.0 * y)
+}
+fn step64_x(x: f64, width: f64) -> f64 {
+  let y = min(max(x / width + 0.5, 0.0), 1.0)
+  6.0 * y * (1.0 - y) / width
+}
+
+// The ion channels of a Morris-Lecar oscillator (models/ml.va).
+fn ml_equation(gl: f64, el: f64, gna: f64, ena: f64, una1: f64, una2: f64, gk: f64, ek: f64,
+               uk1: f64, uk2: f64, fk: f64, w: f64, w_prev: f64, v: f64, h: f64,
+    trap: bool, rate_prev: f64) -> (f64, f64, f64, f64, f64, f64, f64) {
+  let tn = tanh64((v - una1) / una2)
+  let gn = gna / 2.0 * (1.0 + tn)
+  let i = gl * (v - el) + gn * (v - ena) + w * gk * (v - ek)
+  let g = gl + gn + gna / 2.0 * (1.0 - tn * tn) / una2 * (v - ena) + w * gk
+  let gw = gk * (v - ek)
+  let x = (v - uk1) / (2.0 * uk2)
+  let speed = fk * cosh64(x)
+  let tk = tanh64((v - uk1) / uk2)
+  let open = (1.0 + tk) / 2.0
+  let rate = speed * (open - w)
+  let rate_v = fk * sinh64(x) / (2.0 * uk2) * (open - w) + speed * (1.0 - tk * tk) / (2.0 * uk2)
+  let (f, jw, jv) = held_state(w, w_prev, h, trap, rate_prev, rate, -speed, rate_v)
+  (i, g, gw, f, jw, jv, rate)
+}
+
+// A synapse (models/synapse.va).
+fn synapse_equation(gs1: f64, gs0: f64, us1: f64, us2: f64, fs: f64, w: f64, w_prev: f64,
+                    v: f64, h: f64, trap: bool, rate_prev: f64) -> (f64, f64, f64, f64, f64, f64, f64) {
+  let g = gs1 * w + gs0
+  let ts = tanh64((v - us1) / us2)
+  let rate = fs * ((1.0 + ts) / 2.0 - w)
+  let (f, jw, jv) = held_state(w, w_prev, h, trap, rate_prev, rate, -fs, fs * (1.0 - ts * ts) / (2.0 * us2))
+  (g * v, g, gs1 * v, f, jw, jv, rate)
+}
+
+// The memristor of a memsensor (models/growth.va).
+fn growth_equation(m0: f64, m1: f64, s: f64, sr: f64, uplus: f64, uminus: f64, width: f64,
+                   delta: f64, w: f64, w_prev: f64, v: f64, h: f64,
+    trap: bool, rate_prev: f64) -> (f64, f64, f64, f64, f64, f64, f64) {
+  let m = m1 + w * (m0 - m1)
+  let raw = s * (step64(v - uplus, width) - step64(uminus - v, width)) - sr
+  let raw_v = s * (step64_x(v - uplus, width) + step64_x(uminus - v, width))
+  var window = 1.0 as f64
+  var window_w = 0.0 as f64
+  if raw < 0.0 {
+    if w >= 0.0 {
+      let ex = exp64(-w / delta)
+      window = 1.0 - ex
+      window_w = ex / delta
+    } else {
+      window = w / delta
+      window_w = 1.0 / delta
+    }
+  } else {
+    if w <= 1.0 {
+      let ex = exp64(-(1.0 - w) / delta)
+      window = 1.0 - ex
+      window_w = -ex / delta
+    } else {
+      window = (1.0 - w) / delta
+      window_w = -1.0 / delta
+    }
+  }
+  let rate = raw * window
+  let (f, jw, jv) = held_state(w, w_prev, h, trap, rate_prev, rate, raw * window_w, raw_v * window)
+  (v / m, 1.0 / m, -v * (m0 - m1) / (m * m), f, jw, jv, rate)
+}
+
+// The pruning-cue sensor of a memsensor (models/prune.va): its state moves
+// with the voltage vc of its control node, not the voltage v across it,
+// so `jv` is how its equation grows with vc.
+fn prune_equation(rp0: f64, rp1: f64, eta1: f64, eta2: f64, factor: f64, alpha: f64, beta: f64,
+                  uth: f64, width: f64, w: f64, w_prev: f64, v: f64, vc: f64, h: f64,
+    trap: bool, rate_prev: f64) -> (f64, f64, f64, f64, f64, f64, f64) {
+  let tp = tanh64((factor * w - eta1) / eta2)
+  let r = rp0 + rp1 * (1.0 + tp)
+  let r_w = rp1 * (1.0 - tp * tp) * factor / eta2
+  let rate = alpha * step64(vc - uth, width) - beta * w
+  let (f, jw, jv) = held_state(w, w_prev, h, trap, rate_prev, rate, -beta,
+                               alpha * step64_x(vc - uth, width))
+  (v / r, 1.0 / r, -v / (r * r) * r_w, f, jw, jv, rate)
+}
+
 // The current from a to b through a device so made, and through a source
 // of `level` that is no voltage source.
 fn current(g: f64, i0: f64, va: f64, vb: f64) -> f64 { g * (va - vb) + i0 }
@@ -302,6 +395,74 @@ system companions() {
       }
     }
   }
+  for t: Two, m: mut Memristor, k: Ml, c: mut Companion {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        let (i, g, gw, f, jw, jv, rate) = ml_equation(k.gl, k.el, k.gna, k.ena, k.una1, k.una2, k.gk, k.ek, k.uk1, k.uk2, k.fk,
+                                                 m.w, m.w_prev, va - vb, Time.h, Time.trap, m.rate_prev)
+        m.i = i
+        m.g = g
+        m.gw = gw
+        m.f = f
+        m.jw = jw
+        m.jv = jv
+        c.g = g
+        c.i0 = i - g * (va - vb)
+      }
+    }
+  }
+  for t: Two, m: mut Memristor, k: Synapse, c: mut Companion {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        let (i, g, gw, f, jw, jv, rate) = synapse_equation(k.gs1, k.gs0, k.us1, k.us2, k.fs,
+                                                 m.w, m.w_prev, va - vb, Time.h, Time.trap, m.rate_prev)
+        m.i = i
+        m.g = g
+        m.gw = gw
+        m.f = f
+        m.jw = jw
+        m.jv = jv
+        c.g = g
+        c.i0 = i - g * (va - vb)
+      }
+    }
+  }
+  for t: Two, m: mut Memristor, k: Growth, c: mut Companion {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        let (i, g, gw, f, jw, jv, rate) = growth_equation(k.m0, k.m1, k.s, k.sr, k.uplus, k.uminus, k.width, k.delta,
+                                                 m.w, m.w_prev, va - vb, Time.h, Time.trap, m.rate_prev)
+        m.i = i
+        m.g = g
+        m.gw = gw
+        m.f = f
+        m.jw = jw
+        m.jv = jv
+        c.g = g
+        c.i0 = i - g * (va - vb)
+      }
+    }
+  }
+  // (The pruning-cue sensor: its state by its control node's voltage.)
+  for t: Two, m: mut Memristor, k: Prune, e: Sensing, c: mut Companion {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        if let vc = Node(e.c).v {
+          let (i, g, gw, f, jw, jv, rate) = prune_equation(k.rp0, k.rp1, k.eta1, k.eta2, k.factor, k.alpha, k.beta, k.uth, k.width,
+                                                    m.w, m.w_prev, va - vb, vc, Time.h, Time.trap,
+                                                    m.rate_prev)
+          m.i = i
+          m.g = g
+          m.gw = gw
+          m.f = f
+          m.jw = jw
+          m.jv = jv
+          c.g = g
+          c.i0 = i - g * (va - vb)
+        }
+      }
+    }
+  }
 }
 
 // The current through every memristor from a to b, at its nodes' voltages
@@ -348,6 +509,48 @@ system memristor_currents() {
                                                  m.w, m.w_prev, va - vb, 0.0, false, 0.0)
         d.i = i
         m.rate = rate
+      }
+    }
+  }
+  for t: Two, m: mut Memristor, k: Ml, d: mut Device {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        let (i, g, gw, f, jw, jv, rate) = ml_equation(k.gl, k.el, k.gna, k.ena, k.una1, k.una2, k.gk, k.ek, k.uk1, k.uk2, k.fk,
+                                                 m.w, m.w_prev, va - vb, 0.0, false, 0.0)
+        d.i = i
+        m.rate = rate
+      }
+    }
+  }
+  for t: Two, m: mut Memristor, k: Synapse, d: mut Device {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        let (i, g, gw, f, jw, jv, rate) = synapse_equation(k.gs1, k.gs0, k.us1, k.us2, k.fs,
+                                                 m.w, m.w_prev, va - vb, 0.0, false, 0.0)
+        d.i = i
+        m.rate = rate
+      }
+    }
+  }
+  for t: Two, m: mut Memristor, k: Growth, d: mut Device {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        let (i, g, gw, f, jw, jv, rate) = growth_equation(k.m0, k.m1, k.s, k.sr, k.uplus, k.uminus, k.width, k.delta,
+                                                 m.w, m.w_prev, va - vb, 0.0, false, 0.0)
+        d.i = i
+        m.rate = rate
+      }
+    }
+  }
+  for t: Two, m: mut Memristor, k: Prune, e: Sensing, d: mut Device {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        if let vc = Node(e.c).v {
+          let (i, g, gw, f, jw, jv, rate) = prune_equation(k.rp0, k.rp1, k.eta1, k.eta2, k.factor, k.alpha, k.beta, k.uth, k.width,
+                                                    m.w, m.w_prev, va - vb, vc, 0.0, false, 0.0)
+          d.i = i
+          m.rate = rate
+        }
       }
     }
   }

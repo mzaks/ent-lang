@@ -20,7 +20,8 @@
 // corner of a source: a PULSE's edges, a PWL's points, a SIN's delay. The
 // first step from the operating point or a corner is small: a tenth of
 // the least of the circuit's step and a hundredth of its stop, and no more
-// than a tenth of the way to the next corner. A
+// than a tenth of the way to the next corner, and less by the square root
+// of reltol under 1e-3 (its error is not worked out). A
 // time point that does not settle is tried again with an eighth of the
 // step; below HMIN of the circuit's step the run ends, said.
 //
@@ -120,6 +121,7 @@ system planned_steps() {
   Step.most = if Circuit.most > 0.0 { Circuit.most }
               else { min(Circuit.step, Circuit.stop / 50.0) }
   Step.first = min(Circuit.stop / 100.0, Circuit.step) / 10.0
+  if Circuit.vntol > 0.0 { Time.vntol = min(Time.vntol, Circuit.vntol) }
   Step.h = Step.first
   Time.trap = false
 }
@@ -204,9 +206,15 @@ system next_step() {
   if Step.adaptive {
     var h = min(Step.h, Step.most)
     // (From the operating point or a corner: small, and no more than a
-    // tenth of the way to the next corner, as SPICE starts.)
+    // tenth of the way to the next corner, as SPICE starts; and smaller
+    // by the square root of reltol under 1e-3, since no error holds this
+    // step and backward Euler's goes as its square: else what it leaves
+    // stays at any tolerance, and where a circuit grows away from where
+    // it was, as a Morris-Lecar membrane at rest under its threshold
+    // does, it comes out in when the spikes come, 0.1 us early of 15.)
     if Step.cornered || Step.points <= 1 {
-      h = min(min(h, Step.first), 0.1 * (Step.corner - Step.t1))
+      h = min(min(h, Step.first), 0.1 * (Step.corner - Step.t1)) *
+          min(1.0, sqrt64(Time.reltol / 1e-3))
     }
     // (Onto the corner, not just past it, nor just short of it.)
     if Step.t1 + h > Step.corner - 0.1 * h { h = Step.corner - Step.t1 }

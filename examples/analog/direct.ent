@@ -61,7 +61,7 @@ system stamp() {
   }
   // A memristor's current also grows with its state (gw), and its state's
   // equation, made straight, is a row of its own.
-  for t: Two, m: Memristor {
+  for t: Two, m: Memristor without Sensing {
     if let a = Place(t.a).index {
       if let b = Place(t.b).index {
         if let va = Node(t.a).v {
@@ -79,6 +79,30 @@ system stamp() {
             }
             Entries += { row: x, col: x, value: m.jw }
             Entries += { row: x, col: -1, value: -m.f + m.jv * (va - vb) + m.jw * m.w }
+          }
+        }
+      }
+    }
+  }
+  // (A pruning-cue sensor's state's equation grows with its control
+  // node's voltage, not with its own.)
+  for t: Two, m: Memristor, e: Sensing {
+    if let a = Place(t.a).index {
+      if let b = Place(t.b).index {
+        if let c = Place(e.c).index {
+          if let vc = Node(e.c).v {
+            let x = Circuit.nodes - 1 + Circuit.branches + m.index
+            if a > 0 {
+              Entries += { row: a - 1, col: x, value: m.gw }
+              Entries += { row: a - 1, col: -1, value: m.gw * m.w }
+            }
+            if b > 0 {
+              Entries += { row: b - 1, col: x, value: -m.gw }
+              Entries += { row: b - 1, col: -1, value: -m.gw * m.w }
+            }
+            if c > 0 { Entries += { row: x, col: c - 1, value: m.jv } }
+            Entries += { row: x, col: x, value: m.jw }
+            Entries += { row: x, col: -1, value: -m.f + m.jv * vc + m.jw * m.w }
           }
         }
       }
@@ -119,21 +143,22 @@ system solved() {
 
 // The nodes take their voltages and the memristors their states, and
 // whether one moved by more than the tolerance says whether Newton goes
-// on.
+// on (what is not a number has moved: it never settles, and the time
+// point is tried again shorter).
 unique Moved { nodes: i32 }
 
 system taken() {
   Moved.nodes = 0
   for n: mut Node, p: Place where p.index > 0 && !Direct.failed {
     let v = Solution[p.index - 1].value
-    if abs64(v - n.v) > Time.reltol * max(abs64(v), abs64(n.v)) + Time.vntol {
+    if !(abs64(v - n.v) <= Time.reltol * max(abs64(v), abs64(n.v)) + Time.vntol) {
       Moved.nodes += 1
     }
     n.v = v
   }
   for m: mut Memristor where !Direct.failed {
     let w = Solution[Circuit.nodes - 1 + Circuit.branches + m.index].value
-    if abs64(w - m.w) > Time.reltol * max(abs64(w), abs64(m.w)) + Time.vntol {
+    if !(abs64(w - m.w) <= Time.reltol * max(abs64(w), abs64(m.w)) + Time.vntol) {
       Moved.nodes += 1
     }
     m.w = w

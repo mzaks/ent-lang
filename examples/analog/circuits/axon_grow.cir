@@ -1,0 +1,26 @@
+Guided axon growth and pruning, the minimal example of Jenderny, Ochs, Xue 2024: 0.05 s
+Cn11 n11 0 2n
+Xn11 n11 0 ml w0=0
+Cn12 n12 0 2n
+Xn12 n12 0 ml w0=0
+Cn21 n21 0 2n
+Xn21 n21 0 ml w0=0
+Cn22 n22 0 2n
+Xn22 n22 0 ml w0=0
+I1 0 n12 PULSE(0 2.4u 0 1u 1u 2m 6m)
+Xa1p n12 ma1 n21 prune eta2=0.5 factor=0.5 w0=0
+Xa1m ma1 pa1 growth w0=0
+Ra1p pa1 n22 6006.050391399449
+Xa1n qa1 ma1 growth w0=0
+Ra1n qa1 n22 3004981.5674761934
+Xa2p n12 ma2 n21 prune eta2=0.5 factor=0.25 w0=0
+Xa2m ma2 pa2 growth w0=0
+Ra2p pa2 n11 6006.050391399449
+Xa2n qa2 ma2 growth w0=0
+Ra2n qa2 n11 3004981.5674761934
+Xs1 n11 n21 synapse w0=0
+Xs2 n22 n21 synapse w0=0
+.options vntol=1e-9
+.tran 0.1m 0.05
+.print tran v(n11) v(n12) v(n21) v(n22) v(ma1) v(pa1) v(ma2) v(pa2)
+.end

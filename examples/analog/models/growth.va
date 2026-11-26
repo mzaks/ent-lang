@@ -1,0 +1,67 @@
+// The memristor of a memsensor of Jenderny, Ochs and Xue (Scientific
+// Reports 14:16643, 2024, eq. 3a, Table 2): an axon segment's length as a
+// memristance, from M1 (not grown, z = 0) to M0 (grown, z = 1),
+//
+//   M = M1 + z (M0 - M1),  i = u / M
+//   dz/dt = w(z) [S (step(u - U+) - step(U- - u)) - Sr]
+//
+// growing at S above U+ and shrinking at S below U- (U- = -0.3 V; the
+// paper prints step(-u - U-), which with its U- would shrink it at any u
+// under 0.3 V), and shrinking at the slope Sr of its retention always,
+// which is what prunes it once its voltage stays under U+. The paper's
+// steps are Heaviside's and its window w(z) is not given: here the steps
+// are smooth over `width` (1 mV) and nothing past it (3 x^2 - 2 x^3: a
+// logistic leaks, and since S / Sr is 2e4 the retention never wins under
+// a spike's peak but for one 0.1 mV wide, too sharp for ngspice) and the window
+// brings the state to rest at either end over `delta`, as models/rram.va
+// does (1 - exp(-(z - 0) / delta) falling, 1 - exp(-(1 - z) / delta)
+// rising, the straight line past an end). The single source of this
+// model for examples/analog (ngspice by OpenVAF, devices.ent by hand,
+// parameters in this order, w0 last; the state is the internal node `x`,
+// held at w0 in the operating point).
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module growth(a, b);
+  inout a, b;
+  electrical a, b, x;
+
+  parameter real m0 = 10e3 from (0:inf);
+  parameter real m1 = 1e6 from (0:inf);
+  parameter real s = 4e3 from [0:inf);
+  parameter real sr = 0.2 from [0:inf);
+  parameter real uplus = 30e-3;
+  parameter real uminus = -0.3;
+  parameter real width = 1e-3 from (0:inf);
+  parameter real delta = 1e-3 from (0:inf);
+  parameter real w0 = 0;
+
+  real u, z, raw, window;
+
+  // A step over `width` about 0: 0 below -width/2, 1 above width/2, and
+  // 3 x^2 - 2 x^3 between (x from 0 to 1): smooth, and nothing past it.
+  analog function real step;
+    input x, width;
+    real x, width, y;
+    begin
+      y = min(max(x / width + 0.5, 0), 1);
+      step = y * y * (3 - 2 * y);
+    end
+  endfunction
+
+  analog begin
+    u = V(a, b);
+    z = V(x);
+    I(a, b) <+ u / (m1 + z * (m0 - m1));
+    raw = s * (step(u - uplus, width) - step(uminus - u, width)) - sr;
+    if (raw < 0)
+      window = z >= 0 ? 1 - exp(-z / delta) : z / delta;
+    else
+      window = z <= 1 ? 1 - exp(-(1 - z) / delta) : (1 - z) / delta;
+    if ($abstime <= 0)
+      V(x) <+ w0;
+    else
+      I(x) <+ ddt(V(x)) - raw * window;
+  end
+endmodule

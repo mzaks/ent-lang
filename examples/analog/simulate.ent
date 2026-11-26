@@ -160,7 +160,12 @@ system counted() {
   Run.rounds += rounds as i64
   Run.most_rounds = max(Run.most_rounds, rounds)
   if Run.way != 0 { Run.updates += Relax.updates }
-  Step.settled = if Run.way == 0 { Direct.settled } else { Relax.unsettled == 0 }
+  Step.settled = if Run.way == 0 { Direct.settled }
+                 else { Relax.unsettled == 0 && Relax.negative == 0 }
+  if Run.way != 0 && Relax.negative > 0 && Time.h <= 0.0 && !Run.refused {
+    put("way {Run.way} does not do a node whose conductance is not above 0 ({Relax.negative} at the operating point): way 0 does")
+    Run.refused = true
+  }
   if !Step.settled && !Run.refused && (!Step.adaptive || Time.h <= 0.0) {
     Run.failed = true
     if Run.way == 0 && Direct.failed {
@@ -187,6 +192,7 @@ schedule begun() {
   companions()
   gathered() run_if Run.way == 2
   told() run_if Run.way == 2
+  pivots() run_if Run.way == 2
   started_events() run_if Run.way == 2
 }
 schedule rounded() {
@@ -196,6 +202,7 @@ schedule rounded() {
   taken() run_if Run.way == 0
   gathered() run_if Run.way == 1
   told() run_if Run.way == 1
+  pivots() run_if Run.way == 1
   stepped() run_if Run.way == 1
   states() run_if Run.way == 1
   alone() run_if Run.way == 1
@@ -230,7 +237,8 @@ main {
     begun()
     loop { rounded() } until Run.refused ||
       (Run.way == 0 && (Direct.settled || Direct.failed || Direct.rounds >= 50)) ||
-      (Run.way != 0 && (Relax.unsettled == 0 || Relax.round >= Run.most || Relax.alone >= 50))
+      (Run.way != 0 && (Relax.unsettled == 0 || Relax.round >= Run.most || Relax.alone >= 50 ||
+                        Relax.negative > 0))
     ended()
   } until Run.refused || Run.failed || Step.done
   done()

@@ -82,7 +82,10 @@ component Memristor {
 }
 // The models, each with its parameters in the order of its .va file in
 // models/: the HP memristor with Biolek's window, VTEAM, Yakopcic's, IHP's
-// RRAM cell (the enhanced Stanford-PKU model).
+// RRAM cell (the enhanced Stanford-PKU model); and the parts of a circuit
+// of axon growth (Jenderny, Ochs, Xue 2024): a Morris-Lecar oscillator's
+// ion channels, a synapse, a memsensor's memristor and its pruning-cue
+// sensor.
 component Biolek { ron: f64, roff: f64, d: f64, uv: f64, p: f64 }
 component Vteam {
   ron: f64, roff: f64, k_off: f64, k_on: f64, alpha_off: f64, alpha_on: f64, v_off: f64,
@@ -92,6 +95,21 @@ component Yakopcic {
   a1: f64, a2: f64, b: f64, ap: f64, an: f64, vp: f64, vn: f64, xp: f64, xn: f64,
   alphap: f64, alphan: f64, eta: f64
 }
+component Ml {
+  gl: f64, el: f64, gna: f64, ena: f64, una1: f64, una2: f64, gk: f64, ek: f64, uk1: f64,
+  uk2: f64, fk: f64
+}
+component Synapse { gs1: f64, gs0: f64, us1: f64, us2: f64, fs: f64 }
+component Growth {
+  m0: f64, m1: f64, s: f64, sr: f64, uplus: f64, uminus: f64, width: f64, delta: f64
+}
+component Prune {
+  rp0: f64, rp1: f64, eta1: f64, eta2: f64, factor: f64, alpha: f64, beta: f64, uth: f64,
+  width: f64
+}
+// A device whose state moves with the voltage of a third node, c, to
+// ground (the pruning-cue sensor: its line has c after its model's word).
+component Sensing { c: entity }
 component Rram {
   i0: f64, u0: f64, g0: f64, gmax: f64, v0: f64, ea: f64, da: f64, dox: f64, t0: f64, rth: f64,
   gamma0: f64, gammar: f64, beta: f64, alpha: f64, gbar: f64, uth: f64, emin: f64, ewidth: f64, ug: f64,
@@ -120,7 +138,7 @@ buffer Devices { who: entity } capacity 16
 unique Circuit {
   file: text[126], read: bool, wrong: i32, nodes: i32, devices: i32, probes: i32,
   op: bool, tran: bool, step: f64, stop: f64, most: f64, floating: i32, clashing: i32,
-  branches: i32, memristors: i32
+  branches: i32, memristors: i32, vntol: f64
 }
 
 // --- reading words ------------------------------------------------------
@@ -179,6 +197,7 @@ system netlist() {
   Probes = []
   Circuit.wrong = 0
   Circuit.op = false
+  Circuit.vntol = 0.0
   Circuit.tran = false
   Circuit.floating = 0
   Circuit.clashing = 0
@@ -230,6 +249,12 @@ system netlist() {
         rest = a0
       } else if is(Bytes, word, stop, "op") {
         Circuit.op = true
+      } else if is(Bytes, word, stop, "vntol") {
+        // (The most a node may be off, where the circuit wants it tighter
+        // than the run: its .options.)
+        let (most, a0) = real(Bytes, stop)
+        Circuit.vntol = most
+        rest = a0
       } else if is(Bytes, word, stop, "tran") {
         let (step, a0) = real(Bytes, stop)
         let (finish, a1) = real(Bytes, a0)
@@ -262,6 +287,10 @@ system netlist() {
             else if is(Bytes, kind, to, "vteam") { model = 2 }
             else if is(Bytes, kind, to, "yakopcic") { model = 3 }
             else if is(Bytes, kind, to, "rram") { model = 4 }
+            else if is(Bytes, kind, to, "ml") { model = 5 }
+            else if is(Bytes, kind, to, "synapse") { model = 6 }
+            else if is(Bytes, kind, to, "growth") { model = 7 }
+            else if is(Bytes, kind, to, "prune") { model = 8 }
             else { Circuit.wrong = wrong(line, Circuit.wrong) }
           } else if is(Bytes, kind, to, "dc") { model = 0 }
           else if is(Bytes, kind, to, "sin") { model = 1 }
@@ -303,7 +332,11 @@ system netlist() {
 fn wanted(kind: u8, model: i32, given: i32, first: f64) -> bool {
   if kind == 82 { given == 1 }
   else if kind == 67 { given == 2 }
-  else if kind == 77 { given == if model == 1 { 6 } else if model == 2 { 14 } else if model == 3 { 13 } else { 28 } }
+  else if kind == 77 {
+    given == if model == 1 { 6 } else if model == 2 { 14 } else if model == 3 { 13 }
+             else if model == 4 { 28 } else if model == 5 { 12 } else if model == 6 { 6 }
+             else if model == 7 { 9 } else { 11 }
+  }
   else if model == 0 { given == 1 }
   else if model == 1 { given == 6 }
   else if model == 2 { given == 7 }
@@ -323,6 +356,13 @@ system build() {
     for i in 0..len(Lines) {
             if !wanted(Lines[i].kind, Lines[i].model, Lines[i].count, number(Lines, Numbers, i, 0)) {
         Circuit.wrong = wrong(i + 1, Circuit.wrong)
+      }
+      // (A pruning-cue sensor's control node is a node.)
+      if Lines[i].kind == 77 && Lines[i].model == 8 {
+        let c = number(Lines, Numbers, i, 0)
+        if c < 0.0 || c >= Circuit.nodes as f64 || c != ((c as i32) as f64) {
+          Circuit.wrong = wrong(i + 1, Circuit.wrong)
+        }
       }
       if Lines[i].kind == 86 {
         if Lines[i].a != 0 && Lines[i].b != 0 { Circuit.floating += 1 }
@@ -466,6 +506,84 @@ system build() {
                                    dth: number(Lines, Numbers, i, 24),
                                    rmax: number(Lines, Numbers, i, 25),
                                    delta: number(Lines, Numbers, i, 26) } }
+          connect (made)-[Touches]->(a)
+          connect (made)-[Touches]->(b)
+          Devices += { who: made }
+        }
+        if Lines[i].model == 5 {
+          let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
+                             Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
+                             Memristor { w: w0, w_prev: w0, index: Circuit.memristors, i: 0.0,
+                                         g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0,
+                                         rate: 0.0, rate_prev: 0.0, w2: w0, w3: w0,
+                                         w_round: w0, v_round: 0.0, alone: 0 },
+                             Ml { gl: number(Lines, Numbers, i, 0),
+                               el: number(Lines, Numbers, i, 1),
+                               gna: number(Lines, Numbers, i, 2),
+                               ena: number(Lines, Numbers, i, 3),
+                               una1: number(Lines, Numbers, i, 4),
+                               una2: number(Lines, Numbers, i, 5),
+                               gk: number(Lines, Numbers, i, 6),
+                               ek: number(Lines, Numbers, i, 7),
+                               uk1: number(Lines, Numbers, i, 8),
+                               uk2: number(Lines, Numbers, i, 9),
+                               fk: number(Lines, Numbers, i, 10) } }
+          connect (made)-[Touches]->(a)
+          connect (made)-[Touches]->(b)
+          Devices += { who: made }
+        }
+        if Lines[i].model == 6 {
+          let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
+                             Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
+                             Memristor { w: w0, w_prev: w0, index: Circuit.memristors, i: 0.0,
+                                         g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0,
+                                         rate: 0.0, rate_prev: 0.0, w2: w0, w3: w0,
+                                         w_round: w0, v_round: 0.0, alone: 0 },
+                             Synapse { gs1: number(Lines, Numbers, i, 0),
+                                    gs0: number(Lines, Numbers, i, 1),
+                                    us1: number(Lines, Numbers, i, 2),
+                                    us2: number(Lines, Numbers, i, 3),
+                                    fs: number(Lines, Numbers, i, 4) } }
+          connect (made)-[Touches]->(a)
+          connect (made)-[Touches]->(b)
+          Devices += { who: made }
+        }
+        if Lines[i].model == 7 {
+          let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
+                             Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
+                             Memristor { w: w0, w_prev: w0, index: Circuit.memristors, i: 0.0,
+                                         g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0,
+                                         rate: 0.0, rate_prev: 0.0, w2: w0, w3: w0,
+                                         w_round: w0, v_round: 0.0, alone: 0 },
+                             Growth { m0: number(Lines, Numbers, i, 0),
+                                   m1: number(Lines, Numbers, i, 1),
+                                   s: number(Lines, Numbers, i, 2),
+                                   sr: number(Lines, Numbers, i, 3),
+                                   uplus: number(Lines, Numbers, i, 4),
+                                   uminus: number(Lines, Numbers, i, 5),
+                                   width: number(Lines, Numbers, i, 6),
+                                   delta: number(Lines, Numbers, i, 7) } }
+          connect (made)-[Touches]->(a)
+          connect (made)-[Touches]->(b)
+          Devices += { who: made }
+        }
+        if Lines[i].model == 8 {
+          let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
+                             Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
+                             Memristor { w: w0, w_prev: w0, index: Circuit.memristors, i: 0.0,
+                                         g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0,
+                                         rate: 0.0, rate_prev: 0.0, w2: w0, w3: w0,
+                                         w_round: w0, v_round: 0.0, alone: 0 },
+                             Sensing { c: Nodes[number(Lines, Numbers, i, 0) as i32].who },
+                             Prune { rp0: number(Lines, Numbers, i, 1),
+                                  rp1: number(Lines, Numbers, i, 2),
+                                  eta1: number(Lines, Numbers, i, 3),
+                                  eta2: number(Lines, Numbers, i, 4),
+                                  factor: number(Lines, Numbers, i, 5),
+                                  alpha: number(Lines, Numbers, i, 6),
+                                  beta: number(Lines, Numbers, i, 7),
+                                  uth: number(Lines, Numbers, i, 8),
+                                  width: number(Lines, Numbers, i, 9) } }
           connect (made)-[Touches]->(a)
           connect (made)-[Touches]->(b)
           Devices += { who: made }
