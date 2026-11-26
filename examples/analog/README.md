@@ -178,6 +178,31 @@ ngspice and with Xyce; the IBM power grids come out as published; and
   4 kHz) a memristor sets in 0.25 ms over U+, within the spike that
   reaches it, where the paper's Fig. 4b has 0.6 of it in the first
   pulse's 2 ms.
+  With `rram` (`axon.py ... rram [shift=s] [sigma=s] [seed=n]`) the
+  growing memristors are IHP's HfO2 cells (`rram.va`, from their high
+  resistance, gate at 1 V) and the neurons' voltages ten times the
+  paper's, so that a spike, 1.1 V across a memsensor, passes a cell's
+  0.63 V set (the currents ten times too, the times the same). The cells
+  hold their state, so a connection is pruned by its cue sensor alone.
+  `shift` moves the cells' g0, uth, Emin and v0 all one way (0.1: 10%
+  up), `sigma` draws each cell's about that from a normal. The minimal
+  example ends as the paper's in 10 of 10 runs (shifts of 10% either
+  way; sigma 10% and 20%, four seeds each), one late in growing. The
+  grid, 5 s (14 minutes each, three at once):
+
+  | cells          | the network at 5 s                        | on time |
+  |----------------|-------------------------------------------|---------|
+  | as measured    | the paper's (kept at most 110 kOhm)       | yes     |
+  | 10% easier     | the paper's                               | yes     |
+  | 10% harder     | the paper's                               | grown by 2 s, not 0.22 |
+  | sigma 10%, 2 seeds | the paper's                           | some hops late |
+  | sigma 20%, seed 1  | not: hops of the N1 to N1' path stuck at 200 to 600 kOhm, N1' silent, the false synapse into N1' at 0.69 MOhm | |
+
+  How fast a cell sets hangs on how far a spike goes past its threshold:
+  cells 10% harder set a little each spike and the growth goes a hop in
+  50 to 100 ms, about the paper's pace (above); a cell that a spike does
+  not reach at all holds its path open for good. `check/axon.py rram`
+  holds such runs to the network at the end and says the rest as late.
 
 ```sh
 examples/analog/prepare.py all            # the circuits, into build/analog/circuits
@@ -333,8 +358,10 @@ relaxing between lines, is what it suggests next.
   them out. The written crossbars do not hold to 1e-2 of a range in the
   benchmarks, Xyce included (bench/analog/RESULTS.md), and the 256 ones
   with wires are past 600 s for all.
-- The axon growth circuits' devices swapped for RRAM cells with spread;
-  growth a pulse period a hop, as the paper's (above). The 5 s minimal
+- The axon growth circuits with RRAM cells: how much spread they bear
+  (between 10% and 20% on one seed; more seeds), and the cells' reset,
+  which the circuit never gives them (a pruned cell stays set). Growth a
+  pulse period a hop, as the paper's (above). The 5 s minimal
   example tries a fifth of its time points again, the grid three in
   ten: Newton's steps there come to
   what is not a number somewhere (where, not yet found; SPICE limits

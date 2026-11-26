@@ -4,7 +4,7 @@ and Xue ("A memristive circuit for self-organized network topology
 formation based on guided axon growth", Scientific Reports 14:16643,
 2024) as SPICE netlists:
 
-  examples/analog/axon.py [stop] [name] [currents] [grid]
+  examples/analog/axon.py [stop] [name] [currents] [grid] [rram [shift=s] [sigma=s] [seed=n]]
   examples/analog/axon.py 0.05 axon_grow                  # the minimal example, 50 ms
   examples/analog/axon.py 5 axon_prune currents           # growth and pruning, 5 s
   examples/analog/axon.py 0.25 axon_grid_grow grid        # the 15 by 15 grid, its growth
@@ -85,6 +85,7 @@ larger in when the next spike comes.
 
 import math
 import os
+import random
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -123,6 +124,44 @@ def rest():
 
 
 REST = rest()
+
+# With `rram` (step 3 of the GEMESYS plan): the memsensors' memristors are
+# IHP's HfO2 RRAM cells (models/rram.va, from their high resistance, z =
+# 1, the gate at 1 V: 12.6 kOhm set, 249 kOhm not), and since a cell
+# sets at 0.63 V where an oscillator's spike puts 0.11 V across a
+# memsensor, every voltage of the neurons is SCALE times the paper's: the
+# oscillators' (EL, ENa, EK, the thresholds and edges, the rest), the
+# synapses' (Us1, Us2), the cue's threshold (uth, and the step's width)
+# and the pulses' current; then every current is SCALE times too, and
+# every time as it was, with the resistors as they are. A spike puts
+# 1.1 V across a memsensor. The cells do not drift back as the paper's
+# memristors do (they hold their state): a connection is pruned by its
+# pruning-cue sensor alone, its cell set.
+SCALE = 10.0
+# The cells' parameters that spread from cell to cell (models/rram.va's
+# values): the gap's scale g0 (the resistances), the voltage uth and the
+# field Emin over which a cell switches, and its rate v0.
+SPREAD = {"g0": 0.285, "uth": 0.31, "emin": 1.4, "v0": 1e7}
+
+
+class Cells:
+    """How the memristors are made: the paper's (`rram` False), or RRAM
+    cells, all shifted by `shift` (0.1: each of SPREAD 10% more) and each
+    drawn about that from a normal of `sigma` of it (seeded by `seed`)."""
+
+    def __init__(self, rram=False, shift=0.0, sigma=0.0, seed=1):
+        self.rram, self.shift, self.sigma = rram, shift, sigma
+        self.random = random.Random(seed)
+        self.scale = SCALE if rram else 1.0
+
+    def memristor(self):
+        if not self.rram:
+            return "growth w0=0"
+        values = []
+        for name, value in SPREAD.items():
+            share = 1 + self.shift + (self.random.gauss(0, self.sigma) if self.sigma else 0)
+            values.append(f"{name}={value * max(share, 0.05)!r}")
+        return "rram " + " ".join(values) + " w0=1"
 
 
 def gradient_sensor(d):
@@ -208,14 +247,21 @@ def grid():
     return layout
 
 
-def netlist(layout, stop, currents, title):
+def netlist(layout, stop, currents, title, cells=None):
+    cells = cells or Cells()
+    k = cells.scale
     node = layout.naming
     lines = [title]
+    neuron = "ml" if k == 1 else (
+        f"ml el={EL * k!r} ena={ENA * k!r} una1={UNA1 * k!r} una2={UNA2 * k!r} ek={EK * k!r} "
+        f"uk1={UK1 * k!r} uk2={UK2 * k!r}")
     for p in layout.positions:
         lines.append(f"C{node(p)} {node(p)} 0 2n")
-        lines.append(f"X{node(p)} {node(p)} 0 ml w0={opened(REST)!r}")
-    for k, p in enumerate(layout.starts):
-        lines.append(f"I{k + 1} 0 {node(p)} {PULSES}")
+        lines.append(f"X{node(p)} {node(p)} 0 {neuron} w0={opened(REST)!r}")
+    pulses = PULSES if k == 1 else f"PULSE(0 {2.4e-6 * k!r} 0 1u 1u 2m 6m)"
+    for n, p in enumerate(layout.starts):
+        lines.append(f"I{n + 1} 0 {node(p)} {pulses}")
+    scaled = "" if k == 1 else f" uth={15e-3 * k!r} width={1e-3 * k!r}"
     first = layout.targets[0]
     second = layout.targets[1] if len(layout.targets) > 1 else None
     for name, a, b, d in layout.sensors:
@@ -225,14 +271,15 @@ def netlist(layout, stop, currents, title):
                    f"factor2={factor(second[0], second[1], b)!r}")
         else:
             cue = f"{node(first[0])} 0 prune eta2=0.5 factor={f1!r}"
-        lines.append(f"X{name}p {node(a)} m{name} {cue} w0=0")
-        lines.append(f"X{name}m m{name} p{name} growth w0=0")
+        lines.append(f"X{name}p {node(a)} m{name} {cue}{scaled} w0=0")
+        lines.append(f"X{name}m m{name} p{name} {cells.memristor()}")
         lines.append(f"R{name}p p{name} {node(b)} {gradient_sensor(d)!r}")
-        lines.append(f"X{name}n q{name} m{name} growth w0=0")
+        lines.append(f"X{name}n q{name} m{name} {cells.memristor()}")
         lines.append(f"R{name}n q{name} {node(b)} {gradient_sensor(-d)!r}")
-    for k, (a, b) in enumerate(layout.synapses):
-        lines.append(f"Xs{k + 1} {node(a)} {node(b)} synapse w0=0")
-    lines.append(".ic " + " ".join(f"v({node(p)})={REST!r}" for p in layout.positions))
+    synapse = "synapse" if k == 1 else f"synapse us1={40e-3 * k!r} us2={1e-3 * k!r}"
+    for n, (a, b) in enumerate(layout.synapses):
+        lines.append(f"Xs{n + 1} {node(a)} {node(b)} {synapse} w0=0")
+    lines.append(".ic " + " ".join(f"v({node(p)})={REST * k!r}" for p in layout.positions))
     lines.append(".options vntol=1e-9")
     lines.append(f".tran 0.1m {stop}")
     lines.append(".print tran " + " ".join(f"v({node(p)})" for p in layout.probed_nodes) + " " +
@@ -245,8 +292,11 @@ def netlist(layout, stop, currents, title):
 
 def main():
     words = sys.argv[1:]
-    flags = {w for w in words if w in ("currents", "grid")}
-    rest = [w for w in words if w not in flags]
+    flags = {w for w in words if w in ("currents", "grid", "rram")}
+    settings = dict(w.split("=", 1) for w in words if "=" in w)
+    rest = [w for w in words if w not in flags and "=" not in w]
+    cells = Cells("rram" in flags, float(settings.get("shift", 0)),
+                  float(settings.get("sigma", 0)), int(settings.get("seed", 1)))
     stop = rest[0] if rest else "0.05"
     on_grid = "grid" in flags
     name = rest[1] if len(rest) > 1 else ("axon_grid_grow" if on_grid else "axon_grow")
@@ -257,7 +307,7 @@ def main():
              f"2024: {stop} s")
     path = os.path.join(HERE, "circuits", name + ".cir")
     with open(path, "w") as file:
-        file.write(netlist(layout, stop, "currents" in flags, title))
+        file.write(netlist(layout, stop, "currents" in flags, title, cells))
     print(path)
 
 

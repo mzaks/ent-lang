@@ -4,6 +4,8 @@ Ochs and Xue, Sci Rep 14:16643, 2024) do what the paper shows:
 
   examples/analog/check/axon.py [stop]         # the minimal example, 5 s (Fig. 4)
   examples/analog/check/axon.py grid [stop]    # the 15 by 15 grid, 5 s (Fig. 5)
+  examples/analog/check/axon.py [grid] rram [shift=0.1] [sigma=0.1] [seed=1]
+                                               # with IHP's RRAM cells (axon.py)
 
 writes the circuit (axon.py, with the currents probed: circuits/
 axon_prune.cir, axon_grid.cir), prepares it, runs it way 0, and works
@@ -25,6 +27,15 @@ The minimal example is held to:
              100 kOhm; here it settles at 120 to 140 kOhm, said)
   silent     in the last 60 ms the node of the pruned synapse, (2,2),
              does not spike, and the other three do
+
+With `rram` the memristors are RRAM cells, which hold their state: a
+connection is pruned by its pruning-cue sensor, and the memristor's
+going back is not asked for. How fast a cell sets hangs on how far a
+spike goes past its threshold, so with cells shifted or spread growth
+can take seconds where the paper's takes 0.22 s: what is held is then
+the network at the end (the kept under 150 kOhm, the ends into the
+synapses not to be over 1 MOhm, the targets as above), and what comes
+later than the paper's times is said as late, not counted.
 
 The grid, its paths as axon.py's GRID_PATHS (Fig. 5a: N1 to N1' and N2
 to N2' to be kept, N1 to N2' and N2 to N1' to be pruned):
@@ -97,8 +108,8 @@ def read(folder, layout, marks, stop):
 
 
 def run(name, stop, flags):
-    """The circuit written, prepared and run way 0 at reltol 1e-3; the
-    folder of its waves."""
+    """The circuit written (with axon.py's `flags`), prepared and run way 0
+    at reltol 1e-3; the folder of its waves."""
     subprocess.run([sys.executable, os.path.join(ANALOG, "axon.py"), repr(stop), name,
                     "currents", *flags], check=True, stdout=subprocess.DEVNULL)
     subprocess.run([sys.executable, os.path.join(ANALOG, "prepare.py"), name],
@@ -117,30 +128,35 @@ def run(name, stop, flags):
     return folder
 
 
-def minimal(stop):
+def minimal(stop, flags):
     layout = axon.minimal()
     marks = [m for m in MARKS if m <= stop]
-    folder = run("axon_prune", stop, [])
+    rram = "rram" in flags
+    folder = run(name_of("axon_prune", flags), stop, flags)
     best, spikes, last = read(folder, layout, marks, stop)
     if last is None or last < stop * (1 - 1e-9):
-        print("axon_prune: the run did not reach its end")
+        print(f"{name_of('axon_prune', flags)}: the run did not reach its end")
         return 1
     for mark in marks:
         print(f"t {mark:5.3f} s  " + "   ".join(
             f"M{name} {best[(mark, name)][1] / 1e3:7.1f} kOhm "
             f"(memristor {best[(mark, name)][2] / 1e3:6.1f})" for name in layout.probed))
-    wrong = []
+    wrong, late = [], []
     for mark in marks:
         ma1, m1 = best[(mark, "a1")][1:]
         ma2 = best[(mark, "a2")][1]
+        timely = late if rram else wrong
         if mark == 0.01 and not (ma1 < 1e5 and ma2 < 1e5):
-            wrong.append(f"not grown by 10 ms: {ma1:.0f}, {ma2:.0f} Ohm")
-        if mark >= 0.5 and ma1 < 1e6:
+            timely.append(f"not grown by 10 ms: {ma1:.0f}, {ma2:.0f} Ohm")
+        if (mark >= 0.5 if not rram else mark == marks[-1]) and ma1 < 1e6:
             wrong.append(f"Ma1 not pruned at {mark} s: {ma1:.0f} Ohm")
-        if mark >= 4.3 and m1 < 8e5:
+        elif rram and mark >= 0.5 and ma1 < 1e6:
+            late.append(f"Ma1 not pruned at {mark} s: {ma1:.0f} Ohm")
+        if mark >= 4.3 and m1 < 8e5 and not rram:
             wrong.append(f"Ma1's memristor not back at {mark} s: {m1:.0f} Ohm")
         if mark >= 0.01 and ma2 > 1.5e5:
-            wrong.append(f"Ma2 not kept at {mark} s: {ma2:.0f} Ohm")
+            (late if rram and mark < marks[-1] else wrong).append(
+                f"Ma2 not kept at {mark} s: {ma2:.0f} Ohm")
     for p in layout.probed_nodes:
         name = layout.naming(p)
         print(f"{name}: {spikes[p]} spikes in the last 60 ms")
@@ -148,23 +164,25 @@ def minimal(stop):
             wrong.append(f"{name} {'spikes' if spikes[p] else 'is silent'} at the end")
     kept = max(best[(m, "a2")][1] for m in marks if m >= 0.01)
     print(f"Ma2 at most {kept / 1e3:.0f} kOhm after growth (the paper: under 100)")
-    return verdict("axon_prune", wrong)
+    return verdict(name_of("axon_prune", flags), wrong, late)
 
 
-def grid(stop):
+def grid(stop, flags):
     layout = axon.grid()
     marks = [m for m in MARKS if m <= stop]
-    folder = run("axon_grid", stop, ["grid"])
+    rram = "rram" in flags
+    folder = run(name_of("axon_grid", flags), stop, ["grid"] + flags)
     best, spikes, last = read(folder, layout, marks, stop)
     if last is None or last < stop * (1 - 1e-9):
-        print("axon_grid: the run did not reach its end")
+        print(f"{name_of('axon_grid', flags)}: the run did not reach its end")
         return 1
     named = {frozenset((a, b)): name for name, a, b, _ in layout.sensors}
     paths = [[named[frozenset(e)] for e in zip(path, path[1:])] for path in axon.GRID_PATHS]
     labels = ["N1 to N1' (kept)", "N1 to N2' (pruned)", "N2 to N2' (kept)",
               "N2 to N1' (pruned)"]
     kept, pruned = [0, 2], [1, 3]
-    wrong = []
+    wrong, late = [], []
+    timely = late if rram else wrong
     for label, path in zip(labels, paths):
         print(label + ", each memsensor from the start, kOhm:")
         for mark in marks:
@@ -177,46 +195,61 @@ def grid(stop):
             for name in path:
                 r = best[(0.25, name)][1]
                 if r > 1e5 and name not in ends:
-                    wrong.append(f"{name} not grown by 0.25 s: {r:.0f} Ohm")
+                    timely.append(f"{name} not grown by 0.25 s: {r:.0f} Ohm")
     for k in kept:
         for name in paths[k]:
             far = [m for m in marks if m >= 0.25 and best[(m, name)][1] > 1.5e5]
             if far:
-                wrong.append(f"{name}, to be kept, at {best[(far[0], name)][1]:.0f} Ohm at "
-                             f"{far[0]} s")
+                (wrong if not rram or far[-1] == marks[-1] else late).append(
+                    f"{name}, to be kept, at {best[(far[0], name)][1]:.0f} Ohm at {far[0]} s" +
+                    (f" (and at {marks[-1]} s: {best[(marks[-1], name)][1]:.0f} Ohm)"
+                     if rram and far[-1] == marks[-1] else ""))
     most = max(best[(m, name)][1] for k in kept for name in paths[k] for m in marks if m >= 0.25)
     print(f"the paths to be kept at most {most / 1e3:.0f} kOhm after growth (the paper: under 100)")
     for k in pruned:
         end = paths[k][-1]
         for mark in marks:
             if mark >= 1 and best[(mark, end)][1] < 1e6:
-                wrong.append(f"{end}, into the synapse not to be, at "
+                (late if rram and mark < marks[-1] else wrong).append(f"{end}, into the synapse not to be, at "
                              f"{best[(mark, end)][1]:.0f} Ohm at {mark} s")
-            if mark >= 4.5 and best[(mark, end)][2] < 8e5:
+            if mark >= 4.5 and best[(mark, end)][2] < 8e5 and not rram:
                 wrong.append(f"{end}'s memristor at {best[(mark, end)][2]:.0f} Ohm at {mark} s")
         back = [name for name in paths[k] if best[(marks[-1], name)][2] > 8e5]
-        print(f"{labels[k]}: {len(back)} of its {len(paths[k])} memristors back over 800 kOhm "
-              f"at {marks[-1]} s")
+        cut = [name for name in paths[k] if best[(marks[-1], name)][1] > 1e6]
+        print(f"{labels[k]}: {len(cut)} of its {len(paths[k])} memsensors over 1 MOhm, "
+              f"{len(back)} memristors back over 800 kOhm at {marks[-1]} s")
     for (target, _), label in zip(axon.GRID_TARGETS, ("N1'", "N2'")):
         print(f"{label}: {spikes[target]} spikes in the last 60 ms")
         if spikes[target] == 0 and stop >= 1:
             wrong.append(f"{label} silent at the end")
-    return verdict("axon_grid", wrong)
+    return verdict(name_of("axon_grid", flags), wrong, late)
 
 
-def verdict(name, wrong):
+def name_of(name, flags):
+    """The circuit's name: the paper's, or with its cells' settings."""
+    if "rram" not in flags:
+        return name
+    return name + "_rram" + "".join("_" + f.replace("=", "").replace(".", "p").replace("-", "m")
+                                    for f in flags if "=" in f)
+
+
+def verdict(name, wrong, late=()):
+    for line in late:
+        print("late:", line)
     for line in wrong:
         print("NOT as the paper:", line)
-    print(f"{name}: " + ("as the paper" if not wrong else f"{len(wrong)} not as the paper"))
+    print(f"{name}: " + ("as the paper" if not wrong else f"{len(wrong)} not as the paper") +
+          (f" ({len(late)} late)" if late else ""))
     return 1 if wrong else 0
 
 
 def main():
     words = sys.argv[1:]
     on_grid = "grid" in words
-    numbers = [float(w) for w in words if w != "grid"]
+    flags = [w for w in words if w == "rram" or "=" in w]
+    numbers = [float(w) for w in words if w not in flags and w != "grid"]
     stop = numbers[0] if numbers else 5.0
-    sys.exit(grid(stop) if on_grid else minimal(stop))
+    sys.exit(grid(stop, flags) if on_grid else minimal(stop, flags))
 
 
 if __name__ == "__main__":
