@@ -25,6 +25,16 @@
 // time point that does not settle is tried again with an eighth of the
 // step; below HMIN of the circuit's step the run ends, said.
 //
+// A memristor's state that moves more than MOVE in one step (the states
+// here are of ranges about 1: a gap, a gate, a share) has been thrown:
+// the trapezoidal rule takes half its step from the rate at the last time
+// point, and where that rate is a window turning a state back from past
+// its end, it throws it far the other way (an RRAM cell with a small g0,
+// rung past zmin, to z = 1.97, where its rate is 0), while the error
+// worked out from such a short step lets it be. That time point is tried
+// again with an eighth of the step by backward Euler, which takes no rate
+// from before, and the trapezoidal rule comes back two time points on.
+//
 // Where "run.txt" gives a step, every step is that long, by backward
 // Euler or the trapezoidal rule as it says, with nothing of this
 // (milestone M2, and the checks of a rule's order).
@@ -36,6 +46,7 @@ import math
 
 const TRTOL: f64 = 7.0
 const HMIN: f64 = 1e-9
+const MOVE: f64 = 0.25
 
 // `adaptive`: steps chosen here (else fixed). `trap`: the fixed steps'
 // rule. `h`: the step to be tried; `first`: the first (the fixed one,
@@ -50,7 +61,7 @@ const HMIN: f64 = 1e-9
 unique Step {
   adaptive: bool, trap: bool, h: f64, first: f64, most: f64, t1: f64, t2: f64, t3: f64,
   history: i32, worst: f64, corner: f64, settled: bool, taken: bool, points: i32,
-  rejected: i32, done: bool, cornered: bool
+  rejected: i32, done: bool, cornered: bool, thrown: bool
 }
 
 // The first corner of a source after the time t (1e300 where none).
@@ -130,6 +141,7 @@ system planned_steps() {
 // capacitor's voltage and every memristor's state.
 system judged_step() {
   Step.worst = 0.0
+  Step.thrown = false
   if Step.adaptive && Time.h > 0.0 {
     for t: Two, k: Capacitor {
       if let va = Node(t.a).v {
@@ -143,6 +155,7 @@ system judged_step() {
     for m: Memristor {
       Step.worst max= error_share(m.w, m.w_prev, m.w2, m.w3, Time.t, Step.t1, Step.t2,
                                   Step.t3, Step.history, Time.trap, Time.reltol, Time.vntol)
+      if abs64(m.w - m.w_prev) > MOVE { Step.thrown = true }
     }
   }
 }
@@ -158,6 +171,10 @@ system decided() {
   } else if !Step.settled {
     Step.taken = false
     Step.h = Time.h / 8.0
+  } else if Step.adaptive && Step.thrown {
+    Step.taken = false
+    Step.h = Time.h / 8.0
+    Step.history = min(Step.history, 2)
   } else if Step.adaptive && Step.worst > 1.0 {
     Step.taken = false
     Step.h = Time.h * max(0.9 * pow64(Step.worst, -1.0 / order), 0.125)

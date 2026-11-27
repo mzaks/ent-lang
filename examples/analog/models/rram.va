@@ -31,7 +31,7 @@
 // lower than the figure's. Its "e = 1 eV" is the elementary charge (Ea in eV), and
 // Rth in K/W.
 //
-// Lengths are in nm here (Emin in V/nm, v0 in nm/s). Three departures,
+// Lengths are in nm here (Emin in V/nm, v0 in nm/s). Four departures,
 // so that an implicit step can hold it. The step in gamma is a logistic
 // over `ewidth` of the field (0.01 V/nm, 0.7% of Emin): in the reset the
 // state rides that threshold up as the voltage grows, and on a true step
@@ -44,7 +44,10 @@
 // state to rest at either end over `delta` of it: dz/dt is multiplied by
 // 1 - exp(-(z - zmin) / delta) when it falls, 1 - exp(-(1 - z) / delta)
 // when it rises, and past an end by the straight line that continues it,
-// which turns it back (a hard stop leaves Newton no root to find). The state is
+// which turns it back (a hard stop leaves Newton no root to find); and
+// the rate's gap, in gamma, is taken within [zmin, 1] (past 1.2 gamma is
+// below 0 and its step closes, so the rate is 0 and the window, which
+// multiplies it, could not turn back a state that a step threw there). The state is
 // the voltage of the internal node `x`, held at w0 in the operating point.
 
 `include "constants.vams"
@@ -83,7 +86,7 @@ module rram(a, b);
   parameter real delta = 1e-3 from (0:inf);
   parameter real w0 = 1;
 
-  real z, u, i, temp, speed, gam, raw, zmin, window, kq;
+  real z, u, i, temp, speed, gam, raw, zmin, zc, window, kq;
 
   analog begin
     z = V(x);
@@ -94,18 +97,21 @@ module rram(a, b);
     // (q / kB: the elementary charge over Boltzmann's constant, the paper's
     // 1.38e-23 J/K.)
     kq = 1.602176634e-19 / 1.38e-23;
+    zmin = (wl / (eth * ug) + dth) / gmax;
+    // (The rate's gap taken within [zmin, 1]: past 1.2 gamma0 is below 0,
+    // its step closes, and a state thrown there would never come back.)
+    zc = min(max(z, zmin), 1);
     if (u >= 0) begin
       speed = v0;
-      gam = gamma0 - beta * pow(max(z * gmax / gbar, 0), alpha);
+      gam = gamma0 - beta * pow(zc * gmax / gbar, alpha);
     end else begin
       speed = v0 / pow(zeta, (ug - ug0) / uhat);
-      gam = gammar - beta * pow(max(z * gmax / gbar, 0), alpha);
+      gam = gammar - beta * pow(zc * gmax / gbar, alpha);
     end
     gam = gam / (1 + exp(min(-(gam * abs(u) / dox - emin) / ewidth, 700)));
     raw = -speed / gmax * exp(-ea * kq / temp) *
           sinh(gam * da / dox * kq / temp * (u - (u > 0 ? uth : (u < 0 ? -uth : 0))));
     raw = raw / (1 + abs(raw) / rmax);
-    zmin = (wl / (eth * ug) + dth) / gmax;
     if (raw < 0)
       window = z >= zmin ? 1 - exp(-(z - zmin) / delta) : (z - zmin) / delta;
     else

@@ -89,7 +89,14 @@ ngspice and with Xyce; the IBM power grids come out as published; and
   twice the last step, the circuit's largest step, or the way to the next
   corner (a PULSE's edges, a PWL's points, a SIN's delay), onto which a
   time point is put. A time point whose error is too big is tried again
-  shorter, one that does not settle with an eighth of the step.
+  shorter, one that does not settle with an eighth of the step. One in
+  which a memristor's state moved more than 0.25 (the states here are of
+  ranges about 1) is tried again with an eighth of the step by backward
+  Euler: the trapezoidal rule takes half a step from the rate at the
+  last point, and where that is a window turning a state back from past
+  its end it throws the state far, an RRAM cell's rung past zmin to z =
+  1.97, in a step so short that the error worked out lets it be (0.35%
+  of its tolerance).
 - `simulate.ent`: the program. It reads "circuit.net" and "run.txt"
   (the way, a seed, whether to write the waves, reltol, vntol, abstol,
   the most rounds, the time of an operating point without `tran`, a
@@ -103,10 +110,12 @@ ngspice and with Xyce; the IBM power grids come out as published; and
   crossbars, not a device's fit), Yakopcic's (`yakopcic.va`, that
   paper's fit of a device) and IHP's HfO2 RRAM cell (`rram.va`: the
   enhanced Stanford-PKU model of Al Beattie et al., IEEE TNANO 2023,
-  with its Table I; multilevel by the gate voltage `ug`; three
+  with its Table I; multilevel by the gate voltage `ug`; four
   departures so an implicit step holds it, said in the file: the field's
   threshold a logistic 0.7% of it wide, the rate capped at 1e8/s, a
-  window at the state's ends). Swept as that paper's Fig. 6
+  window at the state's ends, and the rate's gap taken within them: past
+  z = 1.2 the paper's gamma is below 0, its field step closes, and a
+  state a step threw there stayed for good, its cell dead). Swept as that paper's Fig. 6
   (`circuits/rram_ug1`, `rram_ug12`, `rram_ug16`) it sets at 0.63 V and
   gives the figure's model curves at ug 1 and 1.2 V; at 1.6 V the
   figure's low resistance is that of 1 V, which its own formula does
@@ -199,10 +208,19 @@ ngspice and with Xyce; the IBM power grids come out as published; and
   | sigma 15%, 5 seeds | the paper's on 2 (seeds 2, 4)         | some hops late |
   | sigma 20%, 5 seeds | the paper's on 1 (seed 4)             | some hops late |
 
-  Where it is not, a path to be kept has a hop whose cells no spike sets
-  in 5 s (150 kOhm to 3.5 MOhm at the end, held there from 0.25 s on),
-  and then its target falls silent or a false synapse's cue never comes
-  (its memsensor at 66 to 136 kOhm); on one run of 20% both targets.
+  (These counts are with way 0's thrown states caught, below; before,
+  the same counts came of another cause: every path that failed began at
+  a cell of small g0, which way 0 threw past its end, dead, where
+  ngspice holds it set.) Where it is not, a cell partly set stops: as a
+  hop grows the neuron after it fires with the one before, the voltage
+  across the memsensor falls under the cell's set, and the cell stays
+  where it got (as the kept ones do at 110 to 120 kOhm, there at 120 to
+  530 kOhm, from 0.25 s on; such a cell alone on the minimal example
+  sets fully, ours and ngspice's alike). Its target then fires less (N1'
+  2 to 4 times in the last 60 ms, not 7), its cue does not reach the
+  false synapse's sensor, and that synapse stays (at 37 to 435 kOhm);
+  on two runs of 20% both targets fall silent. One cell of g0 0.48 sets
+  to 38 times the low resistance and its path does not carry a spike.
 
   How fast a cell sets hangs on how far a spike goes past its threshold:
   cells 10% harder set a little each spike and the growth goes a hop in

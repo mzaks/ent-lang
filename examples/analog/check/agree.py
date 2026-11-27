@@ -36,8 +36,11 @@ def slow(name):
     64 and up, or of 16 by 16 with resistance in its wires whose states
     move: written, or of Yakopcic's, at 20,000 time points), or not
     settling in a million rounds at a pulse's edge (wires under 1 ohm)); and
-    the IBM power grids, check 7's."""
-    if name.startswith("ibmpg"):
+    the IBM power grids, check 7's; and check/axon.py's runs of 5 s of
+    spikes (axon_prune, axon_grid and their RRAM ones: minutes to a
+    quarter of an hour by way 0, gigabytes of waves, and ways 1 and 2 do
+    not do them)."""
+    if name.startswith(("ibmpg", "axon_prune", "axon_grid")):
         return True
     if not name.startswith("crossbar_"):
         return False

@@ -155,9 +155,13 @@ fn rram_equation(i0: f64, u0: f64, g0: f64, gmax: f64, v0: f64, ea: f64, da: f64
   let temp_w = rth * v * gw
   let up = v >= 0.0
   let speed = if up { v0 } else { v0 / pow64(zeta, (ug - ug0) / uhat) }
-  let ratio = max(w * gmax / gbar, 0.0)
+  // (The rate's gap taken within [zmin, 1], as in rram.va: past 1.2
+  // gamma is below 0, and the rate and the window with it would be 0.)
+  let zmin = (wl / (eth * ug) + dth) / gmax
+  let inside = w >= zmin && w <= 1.0
+  let ratio = min(max(w, zmin), 1.0) * gmax / gbar
   let gam0 = (if up { gamma0 } else { gammar }) - beta * pow64(ratio, alpha)
-  let gam0_w = if ratio > 0.0 { -beta * alpha * pow64(ratio, alpha - 1.0) * gmax / gbar } else { 0.0 as f64 }
+  let gam0_w = if inside { -beta * alpha * pow64(ratio, alpha - 1.0) * gmax / gbar } else { 0.0 as f64 }
   // (The step in the field, a logistic over ewidth.)
   let sv = if v > 0.0 { 1.0 as f64 } else if v < 0.0 { -1.0 as f64 } else { 0.0 as f64 }
   let s = 1.0 / (1.0 + exp64(min(-(gam0 * abs64(v) / dox - emin) / ewidth, 700.0)))
@@ -180,7 +184,6 @@ fn rram_equation(i0: f64, u0: f64, g0: f64, gmax: f64, v0: f64, ea: f64, da: f64
   let raw = free / den
   let raw_v = free_v / (den * den)
   let raw_w = free_w / (den * den)
-  let zmin = (wl / (eth * ug) + dth) / gmax
   var window = 1.0 as f64
   var window_w = 0.0 as f64
   // (Past an end, the straight line that continues the window turns the
