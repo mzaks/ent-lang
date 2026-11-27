@@ -16255,6 +16255,12 @@ bool Parser::mayBeAssigned(const Expr &expr) {
   case Expr::If:
     return (expr.thenBranch && mayBeAssigned(*expr.thenBranch->value)) ||
            (expr.elseBranch && mayBeAssigned(*expr.elseBranch->value));
+  case Expr::Binary:
+    // (Texts joined, "{a} of {b}": a text of its own, the bytes copied,
+    // whatever its parts read.)
+    if (expr.op == Token::Plus)
+      return false;
+    [[fallthrough]];
   default:
     return llvm::any_of(expr.operands, [&](const ExprPtr &operand) {
       return mayBeAssigned(*operand);

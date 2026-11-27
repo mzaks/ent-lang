@@ -1,0 +1,15 @@
+// A `let` of texts joined from what a unique holds
+// (test/Integration/let_join.test).
+import console
+import text
+unique G { name: text, n: i64, on: bool }
+system s() {
+  G.name = "first"
+  let says = if G.on { "over" } else { "{G.name} at {G.n} of {G.name}" }
+  let joined = G.name + "!"
+  G.name = "second"
+  G.n = 5
+  put("{says} / {joined} / {G.name}")
+}
+schedule go() { s() }
+main { go() }

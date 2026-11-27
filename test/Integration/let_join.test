@@ -1,0 +1,12 @@
+// A `let` keeps a text joined from what a unique holds ("{a} of {b}",
+// a + b): the join is a text of its own, so the unique given another
+// later does not change it. (It was refused as if it were the unique's
+// own text, which a `let` may not keep.) The unique's text alone still is.
+// RUN: rm -rf %t && mkdir -p %t && cd %t
+// RUN: %ent run %S/Inputs/let_join.ent | FileCheck %s
+// RUN: sed 's/let joined = G.name + "!"/let joined = G.name/' \
+// RUN:     %S/Inputs/let_join.ent > alone.ent
+// RUN: not %ent build alone.ent -o alone 2>&1 | FileCheck %s --check-prefix=ALONE
+
+// CHECK: first at 0 of first / first! / second
+// ALONE: a 'let' does not keep the text a unique
