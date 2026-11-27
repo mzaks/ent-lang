@@ -69,7 +69,7 @@ system stamp() {
   }
   // A memristor's current also grows with its state (gw), and its state's
   // equation, made straight, is a row of its own.
-  for t: Two, m: Memristor without Sensing {
+  for t: Two, m: Memristor without Sensing, Inner {
     if let a = Place(t.a).index {
       if let b = Place(t.b).index {
         if let va = Node(t.a).v {
@@ -169,7 +169,7 @@ system taken() {
     }
     n.v = v
   }
-  for m: mut Memristor where !Direct.failed {
+  for m: mut Memristor without Inner where !Direct.failed {
     let w = Solution[Circuit.nodes - 1 + Circuit.branches + m.index].value
     if !(abs64(w - m.w) <= Time.reltol * max(abs64(w), abs64(m.w)) + Time.vntol) {
       Moved.nodes += 1
@@ -179,7 +179,10 @@ system taken() {
   // (With no memristor the circuit is linear: the matrix does not hang on
   // the voltages, a second step would solve the same again, and on a
   // power grid of 850,000 nodes it takes half a minute.)
-  Direct.settled = !Direct.failed && (Moved.nodes == 0 || Circuit.memristors == 0)
+  // (An RRAM cell with its series resistance whose own solve did not
+  // settle: the round has not.)
+  for n: Inner where n.failed { Moved.nodes += 1 }
+  Direct.settled = !Direct.failed && (Moved.nodes == 0 || (Circuit.memristors == 0 && Circuit.inner == 0))
 }
 
 // The currents through the devices from a to b, for the probes.

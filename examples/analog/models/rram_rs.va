@@ -1,0 +1,58 @@
+// The IHP RRAM cell of rram.va (its equations in rram_cell.vams) with a
+// resistance rs in series within it, from its internal node m to b: the
+// 1T-1R cell's transistor, on, as a resistor. The same circuit as rram.va
+// and a resistor of its own between the cell and the next node; but
+// examples/analog solves the two as one device, the cell's voltage and
+// state within it (devices.ent's rram_inner), so that its nodes are only
+// a and b, and a relaxation of the nodes does not have to follow a cell's
+// set or reset (a runaway of its state and the node between) round by
+// round. Its parameters are rram.va's, in that order, then rs, w0 last.
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module rram_rs(a, b);
+  inout a, b;
+  electrical a, b, x, m;
+
+  parameter real i0 = 1e-3 from (0:inf);
+  parameter real u0 = 0.45 from (0:inf);
+  parameter real g0 = 0.285 from (0:inf);
+  parameter real gmax = 1.8 from (0:inf);
+  parameter real v0 = 1e7 from (0:inf);
+  parameter real ea = 0.6 from (0:inf);
+  parameter real da = 0.25 from (0:inf);
+  parameter real dox = 6 from (0:inf);
+  parameter real t0 = 298 from (0:inf);
+  parameter real rth = 1500 from [0:inf);
+  parameter real gamma0 = 40;
+  parameter real gammar = 26;
+  parameter real beta = 4.25;
+  parameter real alpha = 2.9;
+  parameter real gbar = 1 from (0:inf);
+  parameter real uth = 0.31 from [0:inf);
+  parameter real emin = 1.4 from [0:inf);
+  parameter real ewidth = 0.01 from (0:inf);
+  parameter real ug = 1 from (0:inf);
+  parameter real ug0 = 1;
+  parameter real uhat = 0.2 from (0:inf);
+  parameter real zeta = 70 from (0:inf);
+  parameter real wl = 1.1538461538461537 from (0:inf);
+  parameter real eth = 1.9230769230769231 from (0:inf);
+  parameter real dth = 0.35 from [0:inf);
+  parameter real rmax = 1e8 from (0:inf);
+  parameter real delta = 1e-3 from (0:inf);
+  parameter real rs = 1e3 from (0:inf);
+  parameter real w0 = 1;
+
+  real z, u, i, temp, speed, gam, raw, zmin, zc, window, kq;
+
+  analog begin
+    z = V(x);
+    u = V(a, m);
+    i = i0 * exp(-z * gmax / g0) * sinh(u / u0);
+    I(a, m) <+ i;
+    I(m, b) <+ V(m, b) / rs;
+    `include "rram_cell.vams"
+  end
+endmodule

@@ -52,7 +52,7 @@ import math
 // `negative`: nodes whose conductance is not above 0 (`pivots()`).
 unique Relax {
   round: i32, unsettled: i32, updates: i64, largest: f64, before: f64, scale: f64, mark: i32,
-  alone: i32, negative: i32
+  alone: i32, negative: i32, cells: i32
 }
 
 system relax_started() {
@@ -64,6 +64,7 @@ system relax_started() {
   Relax.scale = 1.0
   Relax.alone = 0
   Relax.negative = 0
+  Relax.cells = 0
   for m: mut Memristor {
     m.alone = 0
     m.w_round = m.w
@@ -88,6 +89,12 @@ system judged() {
 
 // The nodes that sources to ground hold, at their values.
 system held() {
+  // (A node of `.ic` starts the operating point at its voltage: what
+  // holds it there is then no current, and way 2's events, which tell
+  // only the devices' changes, need none told.)
+  if Circuit.tran && Time.h <= 0.0 {
+    for n: mut Node, h: Held { n.v = h.value }
+  }
   for me, n: mut Node, p: Place with Fixed where p.index > 0 {
     var v = n.v
     for (d, s: Source, t: Two)-[Touches]->(me) {
@@ -112,6 +119,15 @@ system gathered() {
     s.i = -GMIN * n.v
     s.g = GMIN
     s.most = abs64(GMIN * n.v)
+  }
+  // (In the operating point a run in time starts from, a node of `.ic`
+  // held at its voltage by HOLD to it, as way 0 and SPICE3 do.)
+  if Circuit.tran && Time.h <= 0.0 {
+    for n: Node, s: mut Sum, h: Held {
+      s.i += HOLD * (h.value - n.v)
+      s.g += HOLD
+      s.most max= abs64(HOLD * (h.value - n.v))
+    }
   }
 }
 
@@ -164,12 +180,17 @@ system pivots() {
 // Way 1: every node's step.
 system stepped() {
   Relax.unsettled = 0
-  for n: mut Node, s: Sum without Fixed {
+  for me, n: mut Node, s: Sum without Fixed {
     let step = s.i / s.g
     let v = n.v + step
     Relax.largest max= abs64(step)
+    // (A node of `.ic` in the operating point is held, and what holds it
+    // takes what current is left: its step, HOLD's 1e10 S, is under what
+    // its voltage's digits can say.)
+    var held = false
+    if Circuit.tran && Time.h <= 0.0 { if let value = Held(me).value { held = true } }
     if far(step, v, n.v, Time.reltol * Relax.scale, Time.vntol * Relax.scale) ||
-       left(s.i, s.most, Time.reltol * Relax.scale, Time.abstol) { Relax.unsettled += 1 }
+       (!held && left(s.i, s.most, Time.reltol * Relax.scale, Time.abstol)) { Relax.unsettled += 1 }
     n.v = v
     Relax.updates += 1
   }
@@ -247,7 +268,7 @@ system retold() {
 // made straight by `companions()` at the round's start (spec 7.3: the
 // states go with the voltages, round by round).
 system states() {
-  for m: mut Memristor {
+  for m: mut Memristor without Inner {
     let w = m.w - m.f / m.jw
     if far(w - m.w, w, m.w, Time.reltol * Relax.scale, Time.vntol * Relax.scale) {
       Relax.unsettled += 1
@@ -321,7 +342,28 @@ system states_told() {
       }
     }
   }
-  for t: Two, m: mut Memristor, k: Rram, c: mut Companion {
+  // (A cell with its series resistance is solved through at its told
+  // voltages: one whose nodes were not told anew gives what it gave.)
+  for t: Two, m: mut Memristor, k: Rram, n: mut Inner, c: mut Companion, d: Told on changed d.round {
+    if let va = Node(t.a).told {
+      if let vb = Node(t.b).told {
+        let (i, g, w, u, rate, ok) = rram_inner(k.i0, k.u0, k.g0, k.gmax, k.v0, k.ea, k.da, k.dox, k.t0, k.rth,
+                                                 k.gamma0, k.gammar, k.beta, k.alpha, k.gbar, k.uth, k.emin, k.ewidth,
+                                                 k.ug, k.ug0, k.uhat, k.zeta, k.wl, k.eth, k.dth, k.rmax, k.delta, k.rs,
+                                                 m.w, n.u, m.w_prev, va - vb, Time.h, Time.trap, m.rate_prev)
+        if far(w - m.w, w, m.w, Time.reltol * Relax.scale, Time.vntol * Relax.scale) {
+          Relax.unsettled += 1
+        }
+        m.w = w
+        m.i = i
+        n.u = u
+        n.failed = !ok
+        c.g = g
+        c.i0 = i - g * (va - vb)
+      }
+    }
+  }
+  for t: Two, m: mut Memristor, k: Rram, c: mut Companion without Inner {
     if let va = Node(t.a).told {
       if let vb = Node(t.b).told {
         let (i, g, gw, f, jw, jv, rate) = rram_equation(k.i0, k.u0, k.g0, k.gmax, k.v0, k.ea, k.da, k.dox, k.t0, k.rth,
@@ -493,6 +535,14 @@ system alone_told() {
     m.w_round = m.w
     Relax.alone max= m.alone
   }
+}
+
+// Ways 1 and 2: an RRAM cell with its series resistance whose own solve
+// did not settle ends the round, and the time point is tried again
+// shorter.
+system cells_failed() {
+  Relax.cells = 0
+  for n: Inner where n.failed { Relax.cells += 1 }
 }
 
 system told_states() {

@@ -19,6 +19,16 @@ so many rounds (1,000,000) is said, and a circuit with a voltage source
 between two nodes that are not ground is way 0's only. Says for each way
 how many rounds and node steps it took, and how far off it is, in those
 tolerances.
+
+A circuit whose waves turn on when a switch comes (TIGHTER) is run all
+three ways at a tighter reltol, and held to the same 1e-2: at 1e-3 the
+steps each way chooses put the RRAM cell's set of rram_rs 1.4e-2 of its
+current's range apart (3.1e-5 at 1e-4, 1.7e-9 at 1e-5). axon_grow's
+spikes are held by spice.py, ways 1 and 2 to ngspice's spike times, not
+here: way 0's at 1e-3 is the one off (2.3201 ms, at 1e-4 2.2943, way 1's
+at 1e-3 2.2945), and at 1e-4 the ways' spikes are within a few us, but
+on their edges, in millivolts, ten times 1e-4 of the value is less, and
+ways 1 and 2 take 20 to 35 million rounds.
 """
 
 import bisect
@@ -29,6 +39,12 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common
 import exact
+
+
+# (The circuits run at a tighter reltol, and it; those ways 1 and 2 are not
+# run for, spice.py holding them.)
+TIGHTER = {"rram_rs": 1e-4}
+BY_SPICE = {"axon_grow"}
 
 
 def slow(name):
@@ -60,14 +76,19 @@ def main():
     for name in names:
         net = common.Netlist(name)
         t = exact.when(name)
-        base, said0 = common.run(program, name, 0, t, most)
+        reltol = TIGHTER.get(name, 1e-3)
+        base, said0 = common.run(program, name, 0, t, most, reltol=reltol)
         if not base:
             failed += 1
             print(f"{name}: way 0 gave nothing ({said0})")
             continue
-        line = [f"{name}: way 0 {said0.split(': ', 1)[-1]}"]
+        line = [f"{name}: " + (f"at reltol {reltol:g}, " if reltol != 1e-3 else "") +
+                f"way 0 {said0.split(': ', 1)[-1]}"]
         for way in (1, 2):
-            waves, said = common.run(program, name, way, t, most)
+            if name in BY_SPICE:
+                line.append(f"way {way} held by spice.py")
+                continue
+            waves, said = common.run(program, name, way, t, most, reltol=reltol)
             if "does not do" in said:
                 line.append(f"way {way} not for it")
                 continue

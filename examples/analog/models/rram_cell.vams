@@ -1,0 +1,31 @@
+// The equations of the IHP RRAM cell (rram.va, which says them), for a
+// module of it to include: given its state z, the voltage across the cell
+// u and its current i, the temperature and the state's rate, and the state
+// node x's contribution.
+    temp = t0 + rth * u * i;
+    // (q / kB: the elementary charge over Boltzmann's constant, the paper's
+    // 1.38e-23 J/K.)
+    kq = 1.602176634e-19 / 1.38e-23;
+    zmin = (wl / (eth * ug) + dth) / gmax;
+    // (The rate's gap taken within [zmin, 1]: past 1.2 gamma0 is below 0,
+    // its step closes, and a state thrown there would never come back.)
+    zc = min(max(z, zmin), 1);
+    if (u >= 0) begin
+      speed = v0;
+      gam = gamma0 - beta * pow(zc * gmax / gbar, alpha);
+    end else begin
+      speed = v0 / pow(zeta, (ug - ug0) / uhat);
+      gam = gammar - beta * pow(zc * gmax / gbar, alpha);
+    end
+    gam = gam / (1 + exp(min(-(gam * abs(u) / dox - emin) / ewidth, 700)));
+    raw = -speed / gmax * exp(-ea * kq / temp) *
+          sinh(gam * da / dox * kq / temp * (u - (u > 0 ? uth : (u < 0 ? -uth : 0))));
+    raw = raw / (1 + abs(raw) / rmax);
+    if (raw < 0)
+      window = z >= zmin ? 1 - exp(-(z - zmin) / delta) : (z - zmin) / delta;
+    else
+      window = z <= 1 ? 1 - exp(-(1 - z) / delta) : (1 - z) / delta;
+    if ($abstime <= 0)
+      V(x) <+ w0;
+    else
+      I(x) <+ ddt(V(x)) - raw * window;

@@ -104,8 +104,6 @@ system said() {
     put("the circuit's line {Circuit.wrong} makes no sense")
   } else if Circuit.clashing > 0 {
     put("{Circuit.clashing} nodes are held by two sources at once")
-  } else if Run.way != 0 && len(Initial) > 0 {
-    put("way {Run.way} does not do .ic ({len(Initial)} nodes): way 0 does")
   } else if Run.way != 0 && Circuit.floating > 0 {
     put("way {Run.way} does not do a voltage source between two nodes that are not ground ({Circuit.floating} of them): way 0 does")
   } else {
@@ -164,7 +162,7 @@ system counted() {
   Run.most_rounds = max(Run.most_rounds, rounds)
   if Run.way != 0 { Run.updates += Relax.updates }
   Step.settled = if Run.way == 0 { Direct.settled }
-                 else { Relax.unsettled == 0 && Relax.negative == 0 }
+                 else { Relax.unsettled == 0 && Relax.negative == 0 && Relax.cells == 0 }
   if Run.way != 0 && Relax.negative > 0 && Time.h <= 0.0 && !Run.refused {
     put("way {Run.way} does not do a node whose conductance is not above 0 ({Relax.negative} at the operating point): way 0 does")
     Run.refused = true
@@ -214,6 +212,7 @@ schedule rounded() {
   states_told() run_if Run.way == 2
   alone_told() run_if Run.way == 2
   told_states() run_if Run.way == 2
+  cells_failed() run_if Run.way != 0
   judged() run_if Run.way != 0
 }
 schedule ended() {
@@ -241,7 +240,7 @@ main {
     loop { rounded() } until Run.refused ||
       (Run.way == 0 && (Direct.settled || Direct.failed || Direct.rounds >= 50)) ||
       (Run.way != 0 && (Relax.unsettled == 0 || Relax.round >= Run.most || Relax.alone >= 50 ||
-                        Relax.negative > 0))
+                        Relax.negative > 0 || Relax.cells > 0))
     ended()
   } until Run.refused || Run.failed || Step.done
   done()

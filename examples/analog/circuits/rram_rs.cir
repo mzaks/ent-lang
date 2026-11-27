@@ -1,0 +1,6 @@
+An IHP HfO2 RRAM cell with 2 kOhm in series within it (models/rram_rs.va, the 1T-1R cell's transistor on), swept 0, +1.5, 0, -1.5, 0 V over 4 s, the gate at 0.8 V: one device, its voltage and state solved within it
+V1 in 0 PWL(0 0 1 1.5 3 -1.5 4 0)
+X1 in 0 rram_rs ug=0.8 rs=2000 w0=1
+.tran 1m 4
+.print tran v(in) i(V1)
+.end

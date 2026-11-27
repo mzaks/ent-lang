@@ -3,10 +3,11 @@
 food, two cells an edge, set and reset by which end fired last) are the
 ways a breadth-first search gives:
 
-  examples/analog/check/maze.py [stop] [maze=moving] [sigma=s] [seed=n] [reltol=r] [...]
+  examples/analog/check/maze.py [stop] [maze=moving] [sigma=s] [seed=n] [reltol=r] [way=0] [parallel=1] [...]
 
 writes the circuit (maze.py, with what else is given: k=, c=, ug=, r=,
-gs=), prepares it, runs it way 0 (reltol 1e-3 unless given), and reads
+gs=, split=), prepares it, runs it the way given (0 unless; reltol 1e-3
+unless given; `parallel=1`: the model built with --parallel), and reads
 the waves as they come (Pac-Man's maze gives gigabytes). Each cell's
 state z is worked out from its probes (its current and the voltage
 across it, by its own g0) the last time it carried enough to, before the
@@ -36,6 +37,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from collections import deque
 
 sys.dont_write_bytecode = True
@@ -77,21 +79,32 @@ def states(folder, rows, cir, times):
     open_, _ = maze.tiles(rows)
     edges = maze.edges(open_, maze.wrap_of(rows))
     n = len(open_)
-    g0 = {}
-    for m in re.finditer(r"^X([cd]\S+) \S+ \S+ rram (.*)$", cir, re.M):
+    g0, rs = {}, {}
+    for m in re.finditer(r"^X([cd]\S+) \S+ \S+ rram(?:_rs)? (.*)$", cir, re.M):
         g0[m.group(1)] = float(re.search(r"g0=(\S+)", m.group(2)).group(1))
-    # (Per cell: the column of the node between it and its resistor, of
-    # its current, of its tile, and its g0.)
+        found = re.search(r"rs=(\S+)", m.group(2))
+        rs[m.group(1)] = float(found.group(1)) if found else 0.0
+    split = re.search(r"^Rc", cir, re.M) is not None
+    # (Per cell: the columns of its voltage's two ends, of its current, the
+    # resistance in series within it, and its g0. Split (maze.py split=1):
+    # the cell's from its tile to the node before its resistor, the current
+    # the resistor's; else the tiles', less the current through rs.)
     cells = []
     for j, (x, y) in enumerate(edges):
-        c = 1 + n + 4 * j
         e = f"{maze.name(x)}_{maze.name(y)}"
-        cells.append((c, c + 1, 1 + open_.index(x), g0["c" + e]))
-        cells.append((c + 2, c + 3, 1 + open_.index(y), g0["d" + e]))
+        cx, cy = 1 + open_.index(x), 1 + open_.index(y)
+        if split:
+            c = 1 + n + 4 * j
+            cells.append((cx, c, c + 1, 0.0, g0["c" + e]))
+            cells.append((cy, c + 2, c + 3, 0.0, g0["d" + e]))
+        else:
+            c = 1 + n + 2 * j
+            cells.append((cx, cy, c, rs["c" + e], g0["c" + e]))
+            cells.append((cy, cx, c + 1, rs["d" + e], g0["d" + e]))
     # (A cell no voltage ever reaches is as it started, z = 1: the two ends
     # of Pac-Man's tunnel fire as one, his maze and its food being the same
     # either side.)
-    last = [(1.0, read_r(1.0, g)) for _, _, _, g in cells]
+    last = [(1.0, read_r(1.0, g)) for _, _, _, _, g in cells]
     out = {}
     pending = sorted(times)
     with open(os.path.join(folder, "waves.txt")) as file:
@@ -100,8 +113,8 @@ def states(folder, rows, cir, times):
             t = float(row[0])
             while pending and t > pending[0]:
                 out[pending.pop(0)] = list(last)
-            for k, (cv, ci, ca, g) in enumerate(cells):
-                u = float(row[ca]) - float(row[cv])
+            for k, (ca, cb, ci, r, g) in enumerate(cells):
+                u = float(row[ca]) - float(row[cb]) - float(row[ci]) * r
                 if abs(u) > 0.05:
                     i = abs(float(row[ci]))
                     if i > 0:
@@ -162,6 +175,8 @@ def main():
     stop = float(next((w for w in words if "=" not in w), "0.1"))
     which = settings.pop("maze", "moving")
     reltol = settings.pop("reltol", "0.001")
+    way = settings.pop("way", "0")
+    parallel = settings.pop("parallel", "0") == "1"
     rows = maze.pacman_rows() if which == "pacman" else maze.MAZES[which]
     name = f"maze_{which}_check"
     subprocess.run([sys.executable, os.path.join(ANALOG, "maze.py"), repr(stop), name,
@@ -173,7 +188,7 @@ def main():
     with open(cir_path) as file:
         cir = file.read()
     os.remove(cir_path)
-    program = common.build()
+    program = common.build(("--parallel",) if parallel else ())
     folder = os.path.join(common.RUN, name)
     os.makedirs(folder, exist_ok=True)
     with open(os.path.join(common.CIRCUITS, name, "circuit.net")) as file:
@@ -181,9 +196,10 @@ def main():
     with open(os.path.join(folder, "circuit.net"), "w") as file:
         file.write(net)
     with open(os.path.join(folder, "run.txt"), "w") as file:
-        file.write(f"0 1 1 {reltol} 0.000001 1e-12 1000000 0.0 0.0 0\n")
+        file.write(f"{way} 1 1 {reltol} 0.000001 1e-12 1000000 0.0 0.0 0\n")
+    began = time.time()
     said = subprocess.run([program], capture_output=True, text=True, cwd=folder).stdout.strip()
-    print(said)
+    print(f"{said} ({time.time() - began:.1f} s)")
     moving = any(ch in "ab" for line in rows for ch in line)
     looks = [(0, stop / 2 - 1e-3), (1, stop)] if moving else [(None, stop)]
     edges, cells = states(folder, rows, cir, [at for _, at in looks])

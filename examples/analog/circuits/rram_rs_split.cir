@@ -1,0 +1,7 @@
+rram_rs's cell with its 2 kOhm as a resistor of its own and a node between: the same circuit, the cell's state a row of the whole
+V1 in 0 PWL(0 0 1 1.5 3 -1.5 4 0)
+X1 in m rram ug=0.8 w0=1
+R1 m 0 2000
+.tran 1m 4
+.print tran v(in) i(V1) v(m)
+.end

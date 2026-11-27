@@ -46,6 +46,12 @@ fn held_state(w: f64, w_prev: f64, h: f64, trap: bool, rate_prev: f64, rate: f64
 }
 
 fn sinh64(x: f64) -> f64 { (exp64(x) - exp64(-x)) / 2.0 }
+// Both of x by one exp.
+fn sinh_cosh64(x: f64) -> (f64, f64) {
+  let e = exp64(x)
+  let f = 1.0 / e
+  ((e - f) / 2.0, (e + f) / 2.0)
+}
 fn cosh64(x: f64) -> f64 { (exp64(x) + exp64(-x)) / 2.0 }
 
 // The resistance of a Biolek memristor in the state w (0: all Roff, 1:
@@ -146,8 +152,9 @@ fn rram_equation(i0: f64, u0: f64, g0: f64, gmax: f64, v0: f64, ea: f64, da: f64
     trap: bool, rate_prev: f64) -> (f64, f64, f64, f64, f64, f64, f64) {
   let kq = (1.602176634e-19 as f64) / (1.38e-23 as f64)
   let e = exp64(-w * gmax / g0)
-  let i = i0 * e * sinh64(v / u0)
-  let g = i0 * e * cosh64(v / u0) / u0
+  let (sh, ch) = sinh_cosh64(v / u0)
+  let i = i0 * e * sh
+  let g = i0 * e * ch / u0
   let gw = -gmax / g0 * i
   // The temperature, and how it grows with v and w.
   let temp = t0 + rth * v * i
@@ -160,8 +167,9 @@ fn rram_equation(i0: f64, u0: f64, g0: f64, gmax: f64, v0: f64, ea: f64, da: f64
   let zmin = (wl / (eth * ug) + dth) / gmax
   let inside = w >= zmin && w <= 1.0
   let ratio = min(max(w, zmin), 1.0) * gmax / gbar
-  let gam0 = (if up { gamma0 } else { gammar }) - beta * pow64(ratio, alpha)
-  let gam0_w = if inside { -beta * alpha * pow64(ratio, alpha - 1.0) * gmax / gbar } else { 0.0 as f64 }
+  let power = pow64(ratio, alpha - 1.0)
+  let gam0 = (if up { gamma0 } else { gammar }) - beta * power * ratio
+  let gam0_w = if inside { -beta * alpha * power * gmax / gbar } else { 0.0 as f64 }
   // (The step in the field, a logistic over ewidth.)
   let sv = if v > 0.0 { 1.0 as f64 } else if v < 0.0 { -1.0 as f64 } else { 0.0 as f64 }
   let s = 1.0 / (1.0 + exp64(min(-(gam0 * abs64(v) / dox - emin) / ewidth, 700.0)))
@@ -174,11 +182,12 @@ fn rram_equation(i0: f64, u0: f64, g0: f64, gmax: f64, v0: f64, ea: f64, da: f64
   let x = gam * c * drive / temp
   let act = exp64(-ea * kq / temp)
   let k = -speed / gmax
-  let free = k * act * sinh64(x)
+  let (shx, chx) = sinh_cosh64(x)
+  let free = k * act * shx
   // (How that grows with the temperature: through the activation and x.)
-  let free_t = k * (act * ea * kq / (temp * temp) * sinh64(x) - act * cosh64(x) * x / temp)
-  let free_v = k * act * cosh64(x) * (gam + gam_v * drive) * c / temp + free_t * temp_v
-  let free_w = k * act * cosh64(x) * gam_w * c * drive / temp + free_t * temp_w
+  let free_t = k * (act * ea * kq / (temp * temp) * shx - act * chx * x / temp)
+  let free_v = k * act * chx * (gam + gam_v * drive) * c / temp + free_t * temp_v
+  let free_w = k * act * chx * gam_w * c * drive / temp + free_t * temp_w
   // Capped smoothly at rmax.
   let den = 1.0 + abs64(free) / rmax
   let raw = free / den
@@ -211,6 +220,58 @@ fn rram_equation(i0: f64, u0: f64, g0: f64, gmax: f64, v0: f64, ea: f64, da: f64
   let (f, jw, jv) = held_state(w, w_prev, h, trap, rate_prev, rate, raw_w * window + raw * window_w,
                                raw_v * window)
   (i, g, gw, f, jw, jv, rate)
+}
+
+// An RRAM cell and its series resistance rs as one device (`Inner`): at
+// v across both, the cell's voltage u and its state w that hold
+//
+//   i(u, w) = (v - u) / rs     and     f(w, u) = 0  (the state's step)
+//
+// by Newton on the two from (u, w) as given (u first taken between 0 and
+// v, where it is: the cell's current grows with u), each step at most
+// 0.1 of the state and 0.2 V; then the current, and how it grows with v
+// with the state's change along:
+//
+//   (du/dv, dw/dv) = J^-1 (1/rs, 0),   g = (1 - du/dv) / rs
+//
+// J the two equations' Jacobian. Not settled in 100 steps (or not a
+// number): `ok` false, and u and w as given.
+fn rram_inner(i0: f64, u0: f64, g0: f64, gmax: f64, v0: f64, ea: f64, da: f64, dox: f64,
+              t0: f64, rth: f64, gamma0: f64, gammar: f64, beta: f64, alpha: f64, gbar: f64,
+              uth: f64, emin: f64, ewidth: f64, ug: f64, ug0: f64, uhat: f64, zeta: f64, wl: f64,
+              eth: f64, dth: f64, rmax: f64, delta: f64, rs: f64, w: f64, u: f64, w_prev: f64,
+              v: f64, h: f64, trap: bool, rate_prev: f64) -> (f64, f64, f64, f64, f64, bool) {
+  let gr = 1.0 / rs
+  var uu = min(max(u, min(v, 0.0)), max(v, 0.0))
+  var ww = w
+  var settled = false
+  var k = 0
+  // (The last step's slopes and rate, taken as those of where it ends:
+  // it moved u and w by less than 1e-9.)
+  var dudv = 0.0 as f64
+  var at_rate = 0.0 as f64
+  while k < 100 && !settled {
+    let (ic, gc, gwc, f, jw, jv, rate) = rram_equation(i0, u0, g0, gmax, v0, ea, da, dox, t0, rth,
+                                                gamma0, gammar, beta, alpha, gbar, uth, emin, ewidth,
+                                                ug, ug0, uhat, zeta, wl, eth, dth, rmax, delta,
+                                                ww, w_prev, uu, h, trap, rate_prev)
+    let r = ic - (v - uu) * gr
+    let a11 = gc + gr
+    let det = a11 * jw - gwc * jv
+    let du = min(max(-(r * jw - gwc * f) / det, -0.2), 0.2)
+    let dw = min(max(-(a11 * f - jv * r) / det, -0.1), 0.1)
+    uu += du
+    ww += dw
+    settled = abs64(du) <= 1e-12 + 1e-9 * abs64(uu) && abs64(dw) <= 1e-10
+    dudv = gr * jw / det
+    at_rate = rate
+    k += 1
+  }
+  let rate = at_rate
+  let i = (v - uu) * gr
+  let g = (1.0 - dudv) * gr
+  let ok = settled && i == i && g == g && ww == ww
+  if ok { (i, g, ww, uu, rate, true) } else { (0.0 as f64, gr, w, u, 0.0 as f64, false) }
 }
 
 // tanh, and a step over `width` about 0 (the Heaviside steps of
@@ -390,7 +451,7 @@ system companions() {
       }
     }
   }
-  for t: Two, m: mut Memristor, k: Rram, c: mut Companion {
+  for t: Two, m: mut Memristor, k: Rram, c: mut Companion without Inner {
     if let va = Node(t.a).v {
       if let vb = Node(t.b).v {
         let (i, g, gw, f, jw, jv, rate) = rram_equation(k.i0, k.u0, k.g0, k.gmax, k.v0, k.ea, k.da, k.dox, k.t0, k.rth,
@@ -403,6 +464,25 @@ system companions() {
         m.f = f
         m.jw = jw
         m.jv = jv
+        c.g = g
+        c.i0 = i - g * (va - vb)
+      }
+    }
+  }
+  // (An RRAM cell with its series resistance: its state solved within it,
+  // so to the rest a two-terminal device of conductance g alone.)
+  for t: Two, m: mut Memristor, k: Rram, n: mut Inner, c: mut Companion {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        let (i, g, w, u, rate, ok) = rram_inner(k.i0, k.u0, k.g0, k.gmax, k.v0, k.ea, k.da, k.dox, k.t0, k.rth,
+                                                 k.gamma0, k.gammar, k.beta, k.alpha, k.gbar, k.uth, k.emin, k.ewidth,
+                                                 k.ug, k.ug0, k.uhat, k.zeta, k.wl, k.eth, k.dth, k.rmax, k.delta, k.rs,
+                                                 m.w, n.u, m.w_prev, va - vb, Time.h, Time.trap, m.rate_prev)
+        m.w = w
+        m.i = i
+        m.g = g
+        n.u = u
+        n.failed = !ok
         c.g = g
         c.i0 = i - g * (va - vb)
       }
@@ -517,13 +597,25 @@ system memristor_currents() {
       }
     }
   }
-  for t: Two, m: mut Memristor, k: Rram, d: mut Device {
+  for t: Two, m: mut Memristor, k: Rram, d: mut Device without Inner {
     if let va = Node(t.a).v {
       if let vb = Node(t.b).v {
         let (i, g, gw, f, jw, jv, rate) = rram_equation(k.i0, k.u0, k.g0, k.gmax, k.v0, k.ea, k.da, k.dox, k.t0, k.rth,
                                                  k.gamma0, k.gammar, k.beta, k.alpha, k.gbar, k.uth, k.emin, k.ewidth,
                                                  k.ug, k.ug0, k.uhat, k.zeta, k.wl, k.eth, k.dth, k.rmax, k.delta,
                                                  m.w, m.w_prev, va - vb, 0.0, false, 0.0)
+        d.i = i
+        m.rate = rate
+      }
+    }
+  }
+  for t: Two, m: mut Memristor, k: Rram, n: Inner, d: mut Device {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        let (i, g, w, u, rate, ok) = rram_inner(k.i0, k.u0, k.g0, k.gmax, k.v0, k.ea, k.da, k.dox, k.t0, k.rth,
+                                                 k.gamma0, k.gammar, k.beta, k.alpha, k.gbar, k.uth, k.emin, k.ewidth,
+                                                 k.ug, k.ug0, k.uhat, k.zeta, k.wl, k.eth, k.dth, k.rmax, k.delta, k.rs,
+                                                 m.w, n.u, m.w, va - vb, 0.0, false, 0.0)
         d.i = i
         m.rate = rate
       }

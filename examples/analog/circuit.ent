@@ -38,6 +38,9 @@ component Node { v: f64, v_prev: f64, told: f64 }
 // rises), and the largest current of one of them (spec 7.1).
 component Sum { i: f64, g: f64, most: f64 }
 tag Fixed
+// A node of `.ic`: its voltage there (the relaxation ways hold it so in
+// the operating point; way 0 by `Initial`).
+component Held { value: f64 }
 // (`index`: the node's number in the file.)
 component Place { index: i32 }
 
@@ -114,8 +117,15 @@ component Sensing { c: entity, d: entity, jd: f64 }
 component Rram {
   i0: f64, u0: f64, g0: f64, gmax: f64, v0: f64, ea: f64, da: f64, dox: f64, t0: f64, rth: f64,
   gamma0: f64, gammar: f64, beta: f64, alpha: f64, gbar: f64, uth: f64, emin: f64, ewidth: f64, ug: f64,
-  ug0: f64, uhat: f64, zeta: f64, wl: f64, eth: f64, dth: f64, rmax: f64, delta: f64
+  ug0: f64, uhat: f64, zeta: f64, wl: f64, eth: f64, dth: f64, rmax: f64, delta: f64, rs: f64
 }
+// An RRAM cell with a resistance in series (models/rram_rs.va; `rs`, 0
+// for rram.va's): its voltage `u`
+// (the cell's, without the resistor's) and its state are solved within
+// it at its two nodes' voltages (devices.ent), and it has no row of its
+// own in way 0 (`Memristor.index` -1); `failed`: that solve did not
+// settle, and the time point is tried again shorter.
+component Inner { u: f64, failed: bool }
 
 relation (Two)-[Touches]->(Node) capacity 16
 
@@ -142,7 +152,7 @@ buffer Devices { who: entity } capacity 16
 unique Circuit {
   file: text[126], read: bool, wrong: i32, nodes: i32, devices: i32, probes: i32,
   op: bool, tran: bool, step: f64, stop: f64, most: f64, floating: i32, clashing: i32,
-  branches: i32, memristors: i32, vntol: f64
+  branches: i32, memristors: i32, vntol: f64, inner: i32
 }
 
 // --- reading words ------------------------------------------------------
@@ -302,6 +312,7 @@ system netlist() {
             else if is(Bytes, kind, to, "synapse") { model = 6 }
             else if is(Bytes, kind, to, "growth") { model = 7 }
             else if is(Bytes, kind, to, "prune") { model = 8 }
+            else if is(Bytes, kind, to, "rram_rs") { model = 9 }
             else { Circuit.wrong = wrong(line, Circuit.wrong) }
           } else if is(Bytes, kind, to, "dc") { model = 0 }
           else if is(Bytes, kind, to, "sin") { model = 1 }
@@ -345,7 +356,7 @@ fn wanted(kind: u8, model: i32, given: i32, first: f64) -> bool {
   else if kind == 67 { given == 2 }
   else if kind == 77 {
     given == if model == 1 { 6 } else if model == 2 { 14 } else if model == 3 { 13 }
-             else if model == 4 { 28 } else if model == 5 { 12 } else if model == 6 { 6 }
+             else if model == 4 { 28 } else if model == 9 { 29 } else if model == 5 { 12 } else if model == 6 { 6 }
              else if model == 7 { 9 } else { 13 }
   }
   else if model == 0 { given == 1 }
@@ -391,11 +402,17 @@ system build() {
   }
   Circuit.branches = 0
   Circuit.memristors = 0
+  Circuit.inner = 0
   if Circuit.read && Circuit.wrong == 0 {
     Devices = []
     for i in 0..len(Nodes) {
+      var held = -1
+      for k in 0..len(Initial) { if Initial[k].node == i { held = k } }
       Nodes[i].who = if Nodes[i].fixed {
         spawn { Node { v: 0.0, v_prev: 0.0, told: 0.0 }, Sum { i: 0.0, g: 0.0, most: 0.0 }, Place { index: i }, Fixed }
+      } else if held >= 0 {
+        spawn { Node { v: 0.0, v_prev: 0.0, told: 0.0 }, Sum { i: 0.0, g: 0.0, most: 0.0 }, Place { index: i },
+                Held { value: Initial[held].value } }
       } else {
         spawn { Node { v: 0.0, v_prev: 0.0, told: 0.0 }, Sum { i: 0.0, g: 0.0, most: 0.0 }, Place { index: i } }
       }
@@ -485,7 +502,47 @@ system build() {
           connect (made)-[Touches]->(b)
           Devices += { who: made }
         }
-        if Lines[i].model == 4 {
+        if Lines[i].model == 9 {
+          let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
+                             Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
+                             Memristor { w: w0, w_prev: w0, index: -1, i: 0.0,
+                                         g: 0.0, gw: 0.0, f: 0.0, jw: 1.0, jv: 0.0,
+                                         rate: 0.0, rate_prev: 0.0, w2: w0, w3: w0,
+                                         w_round: w0, v_round: 0.0, alone: 0 },
+                             Inner { u: 0.0, failed: false },
+                             Rram { i0: number(Lines, Numbers, i, 0),
+                                   u0: number(Lines, Numbers, i, 1),
+                                   g0: number(Lines, Numbers, i, 2),
+                                   gmax: number(Lines, Numbers, i, 3),
+                                   v0: number(Lines, Numbers, i, 4),
+                                   ea: number(Lines, Numbers, i, 5),
+                                   da: number(Lines, Numbers, i, 6),
+                                   dox: number(Lines, Numbers, i, 7),
+                                   t0: number(Lines, Numbers, i, 8),
+                                   rth: number(Lines, Numbers, i, 9),
+                                   gamma0: number(Lines, Numbers, i, 10),
+                                   gammar: number(Lines, Numbers, i, 11),
+                                   beta: number(Lines, Numbers, i, 12),
+                                   alpha: number(Lines, Numbers, i, 13),
+                                   gbar: number(Lines, Numbers, i, 14),
+                                   uth: number(Lines, Numbers, i, 15),
+                                   emin: number(Lines, Numbers, i, 16),
+                                   ewidth: number(Lines, Numbers, i, 17),
+                                   ug: number(Lines, Numbers, i, 18),
+                                   ug0: number(Lines, Numbers, i, 19),
+                                   uhat: number(Lines, Numbers, i, 20),
+                                   zeta: number(Lines, Numbers, i, 21),
+                                   wl: number(Lines, Numbers, i, 22),
+                                   eth: number(Lines, Numbers, i, 23),
+                                   dth: number(Lines, Numbers, i, 24),
+                                   rmax: number(Lines, Numbers, i, 25),
+                                   delta: number(Lines, Numbers, i, 26),
+                                   rs: number(Lines, Numbers, i, 27) } }
+          connect (made)-[Touches]->(a)
+          connect (made)-[Touches]->(b)
+          Devices += { who: made }
+          Circuit.inner += 1
+        } else if Lines[i].model == 4 {
           let made = spawn { Two { a: a, b: b }, Device { index: i, i: 0.0 },
                              Companion { g: 0.0, i0: 0.0 }, Told { round: 0 }, Gave { i: 0.0 },
                              Memristor { w: w0, w_prev: w0, index: Circuit.memristors, i: 0.0,
@@ -518,7 +575,8 @@ system build() {
                                    eth: number(Lines, Numbers, i, 23),
                                    dth: number(Lines, Numbers, i, 24),
                                    rmax: number(Lines, Numbers, i, 25),
-                                   delta: number(Lines, Numbers, i, 26) } }
+                                   delta: number(Lines, Numbers, i, 26),
+                                   rs: number(Lines, Numbers, i, 27) } }
           connect (made)-[Touches]->(a)
           connect (made)-[Touches]->(b)
           Devices += { who: made }
@@ -604,7 +662,7 @@ system build() {
           connect (made)-[Touches]->(b)
           Devices += { who: made }
         }
-        Circuit.memristors += 1
+        if Lines[i].model != 9 { Circuit.memristors += 1 }
       } else {
         let wave = if Lines[i].model == 0 { Wave.Dc } else if Lines[i].model == 1 { Wave.Sin }
                    else if Lines[i].model == 2 { Wave.Pulse } else { Wave.Pwl }

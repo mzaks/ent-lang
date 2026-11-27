@@ -130,6 +130,21 @@ ngspice and with Xyce; the IBM power grids come out as published; and
   stuck in its own Newton steps (at the RRAM cell's set, with too long a
   step, they go round in a cycle), and the time point is tried again
   shorter, as way 0 does after 50 rounds, not after a million.
+- `models/rram_rs.va`: the RRAM cell with a resistance `rs` in series
+  within it, from an internal node to b (the 1T-1R cell's transistor,
+  on). Its equations are rram.va's (both include `rram_cell.vams`).
+  To ngspice it is the cell and a resistor; here it is one device whose
+  state is solved within it (`rram_inner`): at the voltage v across both,
+  the cell's own voltage u and state z by Newton on the two equations
+  (the cell's current through the resistor, the state's step), then the
+  current and its conductance with the state's change along. So it has
+  no row in way 0 and no node between, and ways 1 and 2 relax only the
+  nodes on its two sides: as a cell and a resistor apart, every set or
+  reset (a runaway of the state and the node between) is followed round
+  by round, and the maze below took 37 million rounds by events for
+  20 ms where way 0 took 40,000; as one device, 19,000.
+  `circuits/rram_rs` (one device) and `rram_rs_split` (a cell and a
+  resistor) are both held to ngspice, by all three ways.
 - The parts of the guided axon growth circuit of Jenderny, Ochs and Xue
   (Sci Rep 14:16643, 2024), each a model in `models/` and by hand in
   `devices.ent` as the memristors are, a state each: a Morris-Lecar
@@ -152,11 +167,16 @@ ngspice and with Xyce; the IBM power grids come out as published; and
   oscillator fires once by itself and grows whatever memsensor senses a
   gradient. So the circuits hold their membranes at rest in the
   operating point (`.ic`, as SPICE does without uic: 1e10 S to the
-  value, SPICE3's, then let go; way 0's, and ngspice's). The
-  Morris-Lecar node's sodium conductance is negative
+  value, SPICE3's, then let go; ngspice's and all three ways': ways 1
+  and 2 start such a node at its value and hold it with the same 1e10 S,
+  and do not ask its current to add up to 0 there, which the 1e10 S
+  takes, as in way 0: its step would be under what its voltage's digits
+  can say). The Morris-Lecar node's sodium conductance is negative
   under its threshold, so a node's conductance can be 0 or less, and
   ways 1 and 2, whose step is a node's current over it, would go away
-  from the root: they say so and do not do such a circuit.
+  from the root: in an operating point without `.ic` they say so and
+  do not do such a circuit (in time a capacitor's C / h keeps it above
+  0).
 - `axon.py`: the paper's minimal example (Fig. 3 and 4) as a netlist,
   a 2 by 2 grid of oscillators, the start fed pulses, two memsensors
   growing from it and two synapses on to the target; `circuits/axon_grow`
@@ -256,7 +276,19 @@ ngspice and with Xyce; the IBM power grids come out as published; and
   at 20% 1 to 4 tiles do not. The states are mostly right then: g0's
   spread moves a cell's resistance more than set and reset do. The same
   at reltol 1e-3, 1e-4 and 1e-5; ngspice stops at the first cell's set,
-  "timestep too small", at any reltol and by either rule.
+  "timestep too small", at any reltol and by either rule. Each cell is
+  `models/rram_rs.va` (with `split=1` a cell and a resistor apart: the
+  same ways, at reltol 1e-4 the least ratio 4.8 and 4.9), so ways 1 and
+  2 do the maze too, and give the same ways. Pac-Man's maze for 0.1 s:
+  as a cell and a resistor, way 0 521 s; as one device, way 1 280 s and
+  way 2 231 s on one core. Of that, 80% is the cells' equation, which
+  way 2 now solves only for cells whose nodes were told anew, and which
+  shares its exp and pow; and on 16 threads the cells' loop alone (built
+  `--parallel --tune` with a trace of the run: by ent's rule a loop of
+  640 entities is not worth threads, and the loops of the nodes are
+  not), 10 ms of it takes 9.5 s by way 1, 23.4 on one core. What is left
+  is the steps: all tiles go by one, 0.45 us, as some tile is always in
+  a spike.
 
 ```sh
 examples/analog/prepare.py all            # the circuits, into build/analog/circuits
@@ -352,11 +384,16 @@ echo 1 > run.txt
   turns, and those the cells turn) or pacman.
 - `check/agree.py` (check 4): ways 1 and 2 give way 0's waves to within
   ten times the tolerance at every time point (in fact within a tenth of
-  it), on every circuit but the one way 0 alone does: 32 circuits,
+  it), on every circuit but the one way 0 alone does: 38 circuits,
   memristors of all four models and crossbars of 4 and 16 by 16 among
-  them; the Morris-Lecar circuits (`ml_pulse`, `ml_synapse`, `axon_grow`)
-  are way 0's alone (`models/ml.va`'s negative conductance, above; and
-  `.ic`, which ways 1 and 2 do not do).
+  them; `ml_pulse` and `ml_synapse` are way 0's alone (`models/ml.va`'s
+  negative conductance, above, in an operating point without `.ic`), and
+  `axon_grow`'s ways 1 and 2 are held by `check/spice.py`, to ngspice's
+  spike times (way 0's at reltol 1e-3 is the one off, 26 us late; at
+  1e-4 the ways' spikes are within a few us, but on their edges more
+  than ten times 1e-4 of millivolts apart). `rram_rs` is run all three
+  ways at reltol 1e-4: at 1e-3 the steps each way chooses put its cell's
+  set 1.4e-2 of the current's range apart, at 1e-4 3.1e-5.
   Left out unless named, as hours long by relaxation: crossbars of
   64 by 64 (by hand, below), of 16 by 16 with wires whose states move,
   and with wires under 1 ohm, where a pulse's edge takes more than a

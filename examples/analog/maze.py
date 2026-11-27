@@ -44,6 +44,11 @@ cells' gate voltage (0.8 V). Each as it is so, tried on the chain and the
             soon after its neighbour (driven from two sides); under it a
             cell sets less far and resets faster (v0 / zeta^((ug-1)/0.2))
   r 500     a cell takes the voltage between its tiles, not its resistor
+
+The resistor is the cell's own (models/rram_rs.va), so each cell is one
+device between two tiles, its voltage and state solved within it; with
+`split=1` a resistor of its own and a node between (the same circuit,
+solved as nodes and states of the whole).
 """
 
 import os
@@ -194,7 +199,7 @@ def name(p):
     return f"t{p[0]}_{p[1]}"
 
 
-def netlist(rows, stop, r, gs, cells, title, k=axon.SCALE, c=1.0, ug=1.0):
+def netlist(rows, stop, r, gs, cells, title, k=axon.SCALE, c=1.0, ug=1.0, split=False):
     open_, food = tiles(rows)
     neuron = (f"ml gl={axon.GL * c!r} el={axon.EL * k!r} gna={axon.GNA * c!r} ena={axon.ENA * k!r} "
               f"una1={axon.UNA1 * k!r} una2={axon.UNA2 * k!r} gk={axon.GK * c!r} ek={axon.EK * k!r} "
@@ -211,13 +216,22 @@ def netlist(rows, stop, r, gs, cells, title, k=axon.SCALE, c=1.0, ug=1.0):
         e = f"{name(x)}_{name(y)}"
         lines.append(f"Xs{e} {name(x)} {name(y)} {synapse} w0=0")
         lines.append(f"Xr{e} {name(y)} {name(x)} {synapse} w0=0")
-        lines.append(f"Xc{e} {name(x)} m{e} " +
-                     cells.memristor().replace(" w0=", f" ug={ug!r} w0="))
-        lines.append(f"Rc{e} m{e} {name(y)} {r!r}")
-        lines.append(f"Xd{e} {name(y)} n{e} " +
-                     cells.memristor().replace(" w0=", f" ug={ug!r} w0="))
-        lines.append(f"Rd{e} n{e} {name(x)} {r!r}")
-        probes.append(f"v(m{e}) i(Rc{e}) v(n{e}) i(Rd{e})")
+        if split:
+            lines.append(f"Xc{e} {name(x)} m{e} " +
+                         cells.memristor().replace(" w0=", f" ug={ug!r} w0="))
+            lines.append(f"Rc{e} m{e} {name(y)} {r!r}")
+            lines.append(f"Xd{e} {name(y)} n{e} " +
+                         cells.memristor().replace(" w0=", f" ug={ug!r} w0="))
+            lines.append(f"Rd{e} n{e} {name(x)} {r!r}")
+            probes.append(f"v(m{e}) i(Rc{e}) v(n{e}) i(Rd{e})")
+        else:
+            # (The resistor within the cell, rs: one device, its state
+            # solved within it.)
+            cell = cells.memristor().replace("rram ", "rram_rs ", 1).replace(
+                " w0=", f" ug={ug!r} rs={r!r} w0=")
+            lines.append(f"Xc{e} {name(x)} {name(y)} {cell}")
+            lines.append(f"Xd{e} {name(y)} {name(x)} {cell}")
+            probes.append(f"i(Xc{e}) i(Xd{e})")
     lines.append(".ic " + " ".join(f"v({name(p)})={axon.REST * k!r}" for p in open_))
     lines.append(".options vntol=1e-9")
     lines.append(f".tran 0.1m {stop}")
@@ -239,7 +253,7 @@ def main():
                    float(settings.get("gs", 20e-6)), cells,
                    f"A maze's ways to its food by a wave of spikes, kept in RRAM cells: {maze}, {stop} s",
                    float(settings.get("k", 20)), float(settings.get("c", 30)),
-                   float(settings.get("ug", 0.8)))
+                   float(settings.get("ug", 0.8)), settings.get("split", "0") == "1")
     path = os.path.join(HERE, "circuits", title_name + ".cir")
     with open(path, "w") as file:
         file.write(text)
