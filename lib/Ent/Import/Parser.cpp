@@ -13384,9 +13384,13 @@ FailureOr<ExprPtr> Parser::parseCountedQuery() {
     OpBuilder::InsertionGuard guard(builder);
     builder.setInsertionPoint(systemOp);
     name = declareSymbol(at, ("for_count_" + Twine(countedFors++)).str());
-    ResourceOp::create(builder, loc(at), name,
-                       builder.getArrayAttr({builder.getStringAttr("value")}),
-                       builder.getArrayAttr({TypeAttr::get(i32)}));
+    ResourceOp counted = ResourceOp::create(
+        builder, loc(at), name,
+        builder.getArrayAttr({builder.getStringAttr("value")}),
+        builder.getArrayAttr({TypeAttr::get(i32)}));
+    // (Scratch of the system's own, set before it is read: not part of a
+    // saved world, so that counting somewhere does not change its layout.)
+    counted->setAttr(WorldLayout::kTransientAttr, builder.getUnitAttr());
   }
   FlatSymbolRefAttr counter = FlatSymbolRefAttr::get(name);
   StringAttr value = builder.getStringAttr("value");
@@ -14114,8 +14118,13 @@ Type Parser::typeOf(const Expr &expr) {
       return builder.getIntegerType(64, /*isSigned=*/false);
     // (The bits of a float, and the float of bits: of as many bits.)
     if ((expr.name == "bits_of" || expr.name == "float_of") &&
-        expr.operands.size() == 1)
-      if (Type type = typeOf(*expr.operands[0]))
+        expr.operands.size() == 1) {
+      Type type = typeOf(*expr.operands[0]);
+      // (Of a literal, `bits_of(12.0)`: the bits of the float `emit`
+      // makes it, the type literals take.)
+      if (!type && expr.name == "bits_of")
+        type = defaultType(*expr.operands[0]);
+      if (type)
         if (type.isF32() || type.isF64() || isUnsigned(type)) {
           unsigned width = type.getIntOrFloatBitWidth();
           if (expr.name == "bits_of")
@@ -14123,6 +14132,7 @@ Type Parser::typeOf(const Expr &expr) {
           return width == 64 ? Type(builder.getF64Type())
                              : Type(builder.getF32Type());
         }
+    }
     for (const ExprPtr &operand : expr.operands)
       if (Type type = typeOf(*operand))
         return type;

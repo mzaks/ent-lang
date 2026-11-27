@@ -1,0 +1,15 @@
+// A counted `for` (test/Integration/count_layout.test): its count is the
+// system's own scratch, not part of the saved world.
+import world
+import console
+component P { x: i32 } capacity 8
+unique U { n: i32 }
+system start() { for i in 0..3 { spawn { P { x: i } } } }
+system count() {
+  let n = for p: P where p.x > 0 { }
+  U.n = n
+  put("counted {U.n}")
+}
+schedule begin() { start() }
+schedule go() { count() }
+main { begin() go() }

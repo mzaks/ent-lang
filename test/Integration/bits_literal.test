@@ -1,0 +1,8 @@
+// `bits_of(12.0) as i32`: the literal is an f32 (the type literals take),
+// its bits a u32, cast as any u32 is (the cast once took the call for a
+// float and the program did not build).
+// RUN: rm -rf %t && mkdir -p %t && cd %t
+// RUN: %ent run %S/Inputs/bits_literal.ent | FileCheck %s
+
+// 12.0 as f32 is 0x41400000; as f64 its exponent field is 1026.
+// CHECK: 1094713344 1026 1094713344 1094713344 1 true

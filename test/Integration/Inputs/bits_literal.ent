@@ -1,0 +1,14 @@
+// bits_of and float_of of literals and of what is cast at once
+// (test/Integration/bits_literal.test).
+import console
+unique U { a: i32, b: i64, c: u32, d: f32 }
+system s() {
+  U.a = bits_of(12.0) as i32
+  U.b = (bits_of(12.0 as f64) >> 52) as i64
+  U.c = bits_of(12.0 as f32)
+  U.d = float_of(bits_of(12.0) + 1) - 12.0
+  let x = 12.0
+  put("{U.a} {U.b} {U.c} {bits_of(x) as i32} {(bits_of(-2.0) >> 31) as i32} {U.d > 0.0}")
+}
+schedule go() { s() }
+main { go() }

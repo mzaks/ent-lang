@@ -1,0 +1,16 @@
+// A `let n = for ...` keeps its count in a unique of its own; it is
+// transient, so that counting somewhere in a program does not change the
+// layout of the world it saves (the save fingerprint): the program with
+// the counted `for` and the same program without it read each other's
+// saves.
+// RUN: rm -rf %t && mkdir -p %t && cd %t
+// RUN: %ent run %S/Inputs/count_layout.ent | FileCheck %s
+// RUN: sed 's/let n = for p: P where p.x > 0 { }/let n = 2/' \
+// RUN:     %S/Inputs/count_layout.ent > plain.ent
+// RUN: %ent build %S/Inputs/count_layout.ent -o counted --keep counted.dir
+// RUN: %ent build plain.ent -o plain --keep plain.dir
+// RUN: grep -rh ENT_WORLD_FINGERPRINT counted.dir > counted.fp
+// RUN: grep -rh ENT_WORLD_FINGERPRINT plain.dir > plain.fp
+// RUN: diff counted.fp plain.fp
+
+// CHECK: counted 2
