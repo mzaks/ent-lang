@@ -39,8 +39,9 @@ def slow(name):
     the IBM power grids, check 7's; and check/axon.py's runs of 5 s of
     spikes (axon_prune, axon_grid and their RRAM ones: minutes to a
     quarter of an hour by way 0, gigabytes of waves, and ways 1 and 2 do
-    not do them)."""
-    if name.startswith(("ibmpg", "axon_prune", "axon_grid")):
+    not do them); and check/maze.py's (their neurons too, and Pac-Man's
+    maze nine minutes)."""
+    if name.startswith(("ibmpg", "axon_prune", "axon_grid", "maze_")):
         return True
     if not name.startswith("crossbar_"):
         return False

@@ -120,9 +120,11 @@ def spice(name, net, method=""):
 
 def main():
     # (axon_prune and its RRAM ones, check/axon.py's: 5 s of spikes, two million of
-    # ngspice's time points; held to the paper there, left out here.)
+    # ngspice's time points; held to the paper there, left out here. And
+    # check/maze.py's: ngspice stops at their first cell's set, "timestep
+    # too small", at any reltol and by either rule.)
     names = sys.argv[1:] or [n for n in sorted(os.listdir(common.CIRCUITS))
-                             if not n.startswith("axon_prune")]
+                             if not n.startswith(("axon_prune", "maze_"))]
     program = common.build()
     models()
     failed = checked = left = 0

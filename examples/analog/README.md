@@ -227,6 +227,36 @@ ngspice and with Xyce; the IBM power grids come out as published; and
   50 to 100 ms, about the paper's pace (above); a cell that a spike does
   not reach at all holds its path open for good. `check/axon.py rram`
   holds such runs to the network at the end and says the rest as late.
+- `maze.py`: a maze's ways to its food, found by a wave of spikes and
+  kept in RRAM cells (the first step of steering Pac-Man by such a chip,
+  examples/cl_bridge/pacman, where the host searches the maze now). Each
+  open tile an oscillator, the food's fed pulses; a synapse each way
+  between neighbours, so the tiles fire in the order of their distance
+  to the food. Each edge two of IHP's cells, one each way: a cell sets
+  when its first end fires and resets when its second does, so it ends
+  in the state of whichever end fired last, and the pair, read against
+  each other, says which neighbour is nearer the food. Each wave writes
+  it anew, so the ways follow the food as it moves. It takes the
+  neurons' voltages 20 times the paper's, their conductances and
+  capacitance 30 times (else a set cell holds its two tiles together
+  and nothing is left across it to reset it; a chip would have
+  transistors between), the cells' gate at 0.8 V (they reset more
+  easily) and a pair read against each other (a cell's own spread moves
+  its resistance as much as set and reset do). `check/maze.py`: on a
+  chain both ways, a corner and 5 by 5 mazes, the food moved halfway,
+  every edge as a breadth-first search has it; on Pac-Man's maze (300
+  tiles, 320 edges with the tunnel; 0.1 s, nine minutes) 14 edges not,
+  where waves from two pellets meet (other ones each half, each with its
+  mirror: the maze and its food are the same either side), and from
+  every tile the ways reach the food, 12 steps more than the shortest in
+  all of 298 tiles; the food moved from the top power pellets to the
+  bottom ones, the search turns 152 edges and the cells the same 152. With
+  cells spread (5 by 5, the food moved, three seeds each), at 10% 0 to 2
+  of 20 edges read the wrong way and 0 to 2 tiles do not reach the food;
+  at 20% 1 to 4 tiles do not. The states are mostly right then: g0's
+  spread moves a cell's resistance more than set and reset do. The same
+  at reltol 1e-3, 1e-4 and 1e-5; ngspice stops at the first cell's set,
+  "timestep too small", at any reltol and by either rule.
 
 ```sh
 examples/analog/prepare.py all            # the circuits, into build/analog/circuits
@@ -315,6 +345,11 @@ echo 1 > run.txt
   memsensors into the synapses not to be over 1 MOhm from 1 s and their
   memristors back over 800 kOhm from 4.5 s, and both targets firing at
   the end.
+- `check/maze.py`: `maze.py`'s ways against a breadth-first search,
+  each edge read as a chip would (a pair's two resistances at 0.2 V) and
+  each tile followed as Pac-Man would (above); `maze=` chain, back,
+  corner, small, moving (the food moved halfway: the edges the search
+  turns, and those the cells turn) or pacman.
 - `check/agree.py` (check 4): ways 1 and 2 give way 0's waves to within
   ten times the tolerance at every time point (in fact within a tenth of
   it), on every circuit but the one way 0 alone does: 32 circuits,
