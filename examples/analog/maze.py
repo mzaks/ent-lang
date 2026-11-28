@@ -23,7 +23,7 @@ cell's own spread moves its resistance as much as set and reset do, so
 no one reference reads them all. The wave comes again each period of
 the pulses and writes them anew, as the food moves.
 
-  examples/analog/maze.py [stop] [name] [maze=chain] [r=...] [gs=...] [k=...] [c=...] [ug=...] [sigma=s] [seed=n]
+  examples/analog/maze.py [stop] [name] [maze=chain] [r=...] [gs=...] [k=...] [c=...] [ug=...] [sigma=s] [seed=n] [game=1]
 
 writes circuits/<name>.cir (maze_chain unless named): the mazes are
 MAZES' below and `pacman`, examples/pacman.ent's (300 tiles, 320 edges
@@ -44,6 +44,10 @@ cells' gate voltage (0.8 V). Each as it is so, tried on the chain and the
             soon after its neighbour (driven from two sides); under it a
             cell sets less far and resets faster (v0 / zeta^((ug-1)/0.2))
   r 500     a cell takes the voltage between its tiles, not its resistor
+
+With `game=1` the maze is a game's (game.ent, check/game.py): a dot on
+every tile of Pac-Man's maze that has one (on every tile but the first
+of another maze), each fed its pulse every period until it is eaten.
 
 The resistor is the cell's own (models/rram_rs.va), so each cell is one
 device between two tiles, its voltage and state solved within it; with
@@ -145,6 +149,20 @@ def pacman_rows():
 PERIOD = 20e-3
 
 
+def game_rows(which):
+    """A maze for a game (game.ent), and where Pac-Man starts: his maze
+    with a dot's or a power pellet's tile food (`o`) and he at (13, 23);
+    another maze with every tile food but its first, where he starts."""
+    if which == "pacman":
+        rows = ["".join("#" if ch == "#" else "o" if PACMAN[r][c] in ".o" else "."
+                        for c, ch in enumerate(line)) for r, line in enumerate(pacman_rows())]
+        return rows, (13, 23)
+    open_, _ = tiles(MAZES[which])
+    rows = ["".join("#" if ch == "#" else "." if (c, r) == open_[0] else "o"
+                    for c, ch in enumerate(line)) for r, line in enumerate(MAZES[which])]
+    return rows, open_[0]
+
+
 def tiles(rows, half=None):
     """The open tiles (col, row), and the food's (with `half` 0 or 1, that
     of that half of the run: `o` always, `a` the first, `b` the second;
@@ -199,7 +217,8 @@ def name(p):
     return f"t{p[0]}_{p[1]}"
 
 
-def netlist(rows, stop, r, gs, cells, title, k=axon.SCALE, c=1.0, ug=1.0, split=False):
+def netlist(rows, stop, r, gs, cells, title, k=axon.SCALE, c=1.0, ug=1.0, split=False,
+            pulsed=False):
     open_, food = tiles(rows)
     neuron = (f"ml gl={axon.GL * c!r} el={axon.EL * k!r} gna={axon.GNA * c!r} ena={axon.ENA * k!r} "
               f"una1={axon.UNA1 * k!r} una2={axon.UNA2 * k!r} gk={axon.GK * c!r} ek={axon.EK * k!r} "
@@ -210,7 +229,11 @@ def netlist(rows, stop, r, gs, cells, title, k=axon.SCALE, c=1.0, ug=1.0, split=
         lines.append(f"C{name(p)} {name(p)} 0 {2e-9 * c!r}")
         lines.append(f"X{name(p)} {name(p)} 0 {neuron} w0={axon.opened(axon.REST)!r}")
     for n, p in enumerate(food):
-        lines.append(f"I{n + 1} 0 {name(p)} {feeding(rows[p[1]][p[0]], float(stop), k, c)}")
+        # (A game's food: the same pulses as a source of its own kind, on
+        # until game.ent turns it off.)
+        lines.append(f"I{n + 1} 0 {name(p)} " +
+                     (f"PULSE(0 {2.4e-6 * k * c!r} 1e-3 1e-6 1e-6 2e-3 {PERIOD!r})" if pulsed
+                      else feeding(rows[p[1]][p[0]], float(stop), k, c)))
     probes = []
     for x, y in edges(open_, wrap_of(rows)):
         e = f"{name(x)}_{name(y)}"
@@ -249,11 +272,13 @@ def main():
     maze = settings.get("maze", "chain")
     title_name = rest[1] if len(rest) > 1 else f"maze_{maze}"
     cells = axon.Cells(True, 0.0, float(settings.get("sigma", 0)), int(settings.get("seed", 1)))
-    text = netlist(pacman_rows() if maze == "pacman" else MAZES[maze], stop, float(settings.get("r", 500)),
+    game = settings.get("game", "0") == "1"
+    rows = game_rows(maze)[0] if game else pacman_rows() if maze == "pacman" else MAZES[maze]
+    text = netlist(rows, stop, float(settings.get("r", 500)),
                    float(settings.get("gs", 20e-6)), cells,
                    f"A maze's ways to its food by a wave of spikes, kept in RRAM cells: {maze}, {stop} s",
                    float(settings.get("k", 20)), float(settings.get("c", 30)),
-                   float(settings.get("ug", 0.8)), settings.get("split", "0") == "1")
+                   float(settings.get("ug", 0.8)), settings.get("split", "0") == "1", game)
     path = os.path.join(HERE, "circuits", title_name + ".cir")
     with open(path, "w") as file:
         file.write(text)

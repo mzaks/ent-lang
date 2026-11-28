@@ -37,6 +37,7 @@ import direct
 import relax
 import steps
 import multirate
+import game
 
 capacity Bytes 268435456
 capacity Node 2200000
@@ -57,6 +58,10 @@ capacity Pts 16000000
 capacity Base 2200000
 capacity NodeCol 2200000
 capacity LineCol 3300000
+capacity GameNumbers 16000000
+capacity GameTiles 2200000
+capacity GameEdges 3300000
+capacity GameCells 3300000
 
 // `way`, `shown` and `most` as "run.txt" says, and the fixed step it
 // gives and its rule (`step` 0: steps chosen). `refused`: what keeps the
@@ -303,6 +308,7 @@ schedule mr_setup() {
   mr_ported() run_if Run.three && Circuit.tran && !Run.refused && !Run.failed
   mr_started() run_if Run.three && Circuit.tran && !Run.refused && !Run.failed
   mr_seen() run_if Run.three && Circuit.tran && !Run.refused && !Run.failed
+  game_read() run_if Run.way == 3 && !Multi.refused
 }
 schedule mr_ticked() {
   mr_chosen() run_if Run.way == 3
@@ -319,6 +325,7 @@ schedule mr_ended() {
   mr_capped() run_if Run.way == 3
   mr_seen() run_if Run.way == 3
   mr_lines() run_if Run.way == 3
+  game_played() run_if Run.way == 3 && Game.on && Multi.low >= Game.next
 }
 schedule done() {
   flushed()

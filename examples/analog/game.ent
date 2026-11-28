@@ -1,0 +1,124 @@
+// Pac-Man steered by the maze's RRAM cells, the circuit in the game's loop
+// (maze.py with `game=1`, way 3): every tile with a dot is fed a pulse each
+// period, so a wave of spikes goes out from the dots and each edge's two
+// cells keep which of its ends fired last. Once each period, before the
+// next pulse, Pac-Man reads the pairs of cells at his tile as a chip
+// would (the lower resistance says the way) and goes one tile the way the
+// surest pair says, the one whose two resistances are furthest apart;
+// where none says a way he stays. A dot he comes to is eaten: its tile's
+// source gives nothing from then on, and the next wave writes the ways to
+// the dots that are left. The run ends with the last dot.
+//
+// "game.txt", where the program is started, says the game (check/game.py
+// writes it), numbers on one line: the period and the first time read,
+// in seconds; how many tiles, edges and devices; the tile he starts at;
+// then for each tile its node, the device that feeds it (-1: none) and
+// whether a dot is there (1); then for each edge its two tiles and its
+// two cells' devices, the one from the first tile to the second, then
+// the other. Without the file there is no game.
+//
+// Each move is said as it is made: `move <seconds> <tile> <ate> <dots
+// left> <ratio>` (the tile he is at after it; ratio 1: he stayed).
+import console
+import files
+import decimal
+import math
+import circuit
+import multirate
+
+// `period`, `next` (the next time read): in ticks; `at`: his tile.
+unique Game {
+  on: bool, period: i64, next: i64, at: i32, food: i32, tiles: i32, edges: i32, moves: i32
+}
+buffer GameNumbers { v: f64 } capacity 16
+buffer GameTiles { node: i32, source: i32, food: bool } capacity 16
+buffer GameEdges { a: i32, b: i32, c: i32, d: i32 } capacity 16
+// Each cell's state over its g0 (its resistance read at a small voltage
+// goes as exp(1.8 z / g0), rram.va), by its device's number.
+buffer GameCells { s: f64 } capacity 16
+
+system game_read() {
+  let size = read_file("game.txt", Bytes)
+  GameNumbers = []
+  if size > 0 {
+    var at = 0
+    var going = true
+    while going && at < len(Bytes) {
+      let (value, next) = read_real(Bytes, at)
+      if next > at {
+        GameNumbers += { v: value }
+        at = next
+      } else { going = false }
+    }
+  }
+  Bytes = []
+  if len(GameNumbers) >= 6 {
+    Game.on = true
+    Game.period = (GameNumbers[0].v / Multi.unit + 0.5) as i64
+    Game.next = (GameNumbers[1].v / Multi.unit + 0.5) as i64
+    Game.tiles = GameNumbers[2].v as i32
+    Game.edges = GameNumbers[3].v as i32
+    GameCells = [{ s: 0.0 }; GameNumbers[4].v as i32]
+    Game.at = GameNumbers[5].v as i32
+    Game.food = 0
+    GameTiles = []
+    for k in 0..Game.tiles {
+      let at = 6 + 3 * k
+      let food = GameNumbers[at + 2].v != 0.0
+      GameTiles += { node: GameNumbers[at].v as i32, source: GameNumbers[at + 1].v as i32, food: food }
+      if food { Game.food += 1 }
+    }
+    GameEdges = []
+    for k in 0..Game.edges {
+      let at = 6 + 3 * Game.tiles + 4 * k
+      GameEdges += { a: GameNumbers[at].v as i32, b: GameNumbers[at + 1].v as i32,
+                     c: GameNumbers[at + 2].v as i32, d: GameNumbers[at + 3].v as i32 }
+    }
+  }
+}
+
+// A move, once every node is past the time read.
+system game_played() {
+  // (A cell's state as its first node last took it.)
+  for me, c: Clock in turn by c.slot {
+    for (me)-[q: Port]->(d, dv: Device, k: Rram) {
+      if q.side > 0.0 { GameCells[dv.index].s = q.wc / k.g0 }
+    }
+  }
+  var best = 1.0 as f64
+  var to = -1
+  for j in 0..Game.edges {
+    let sc = GameCells[GameEdges[j].c].s
+    let sd = GameCells[GameEdges[j].d].s
+    if GameEdges[j].a == Game.at && sc < sd {
+      let ratio = exp64(1.8 * (sd - sc))
+      if ratio > best {
+        best = ratio
+        to = GameEdges[j].b
+      }
+    }
+    if GameEdges[j].b == Game.at && sd < sc {
+      let ratio = exp64(1.8 * (sc - sd))
+      if ratio > best {
+        best = ratio
+        to = GameEdges[j].a
+      }
+    }
+  }
+  let ate = to >= 0 && GameTiles[max(to, 0)].food
+  let source = if ate { GameTiles[max(to, 0)].source } else { -1 }
+  if to >= 0 {
+    Game.at = to
+    Game.moves += 1
+  }
+  if ate {
+    GameTiles[Game.at].food = false
+    Game.food -= 1
+  }
+  for dv: Device, s: mut Source where dv.index == source { s.p1 = 0.0 }
+  let when = (Game.next as f64) * Multi.unit
+  let eaten = if ate { 1 } else { 0 }
+  put("move {when} {Game.at} {eaten} {Game.food} {best}")
+  Game.next += Game.period
+  if Game.food == 0 { Multi.done = true }
+}
