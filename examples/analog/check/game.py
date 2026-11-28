@@ -19,7 +19,10 @@ against a breadth-first search to the dots then left:
 Held to: every move goes to a neighbour, and every dot is eaten before
 the stop. The moves are kept in the run's folder ("moves.txt": the
 time, the tile's column and row, whether he ate, the dots left, the
-ratio of the pair he went by).
+ratio of the pair he went by), and the game for replay.ent to show
+("replay.txt": the maze, then for each move its line as in moves.txt and
+a line of the way each tile's cells said then, a letter a tile, r d l u,
+`-` none, a blank a wall).
 """
 
 import importlib.util
@@ -73,6 +76,14 @@ def game_text(net, rows, start):
     return " ".join(str(n) for n in numbers) + "\n"
 
 
+def letter(p, to, wrap):
+    """The way from the tile p to its neighbour `to`, as replay.txt has it."""
+    dc = to[0] - p[0]
+    if wrap and abs(dc) == wrap - 1:
+        dc = -dc
+    return "r" if dc > 0 else "l" if dc < 0 else "d" if to[1] > p[1] else "u"
+
+
 def main():
     words = sys.argv[1:]
     settings = dict(w.split("=", 1) for w in words if "=" in w)
@@ -104,6 +115,8 @@ def main():
     nearer = aside = stayed = 0
     failed = False
     said = ""
+    ways = {p: "-" for p in open_}
+    frames = []
     began = time.time()
     # (stdbuf: each move as it is said, not when the program's lines fill a block.)
     run = subprocess.Popen(["stdbuf", "-oL", program], stdout=subprocess.PIPE, text=True,
@@ -111,6 +124,10 @@ def main():
     with open(os.path.join(folder, "moves.txt"), "w") as moves:
         for line in run.stdout:
             word = line.split()
+            if word and word[0] == "says":
+                p = open_[int(word[1])]
+                ways[p] = "-" if word[2] == "-1" else letter(p, open_[int(word[2])], wrap)
+                continue
             if not word or word[0] != "move":
                 said += line
                 continue
@@ -137,12 +154,19 @@ def main():
             food.discard(tile)
             here = tile
             moves.write(f"{at!r} {tile[0]} {tile[1]} {int(ate)} {left} {ratio!r}\n")
+            frames.append(f"{at!r} {tile[0]} {tile[1]} {int(ate)} {left} {ratio!r}\n" +
+                          "".join(ways.get((c, r), " ") for r in range(len(rows))
+                                  for c in range(len(rows[0]))) + "\n")
             moves.flush()
             count = nearer + aside + stayed
             if count % 25 == 0:
                 print(f"at {at:.3f} s: {count} moves, {len(food)} of {dots} dots left "
                       f"({time.time() - began:.0f} s)", flush=True)
     run.wait()
+    with open(os.path.join(folder, "replay.txt"), "w") as file:
+        file.write(f"{len(rows[0])} {len(rows)} {start[0]} {start[1]} {len(frames)} "
+                   f"{maze.PERIOD!r}\n" + "".join(line + "\n" for line in rows) + "".join(frames))
+    print(f"to see it: build examples/analog/replay.ent and start it in {folder}")
     print(f"{said.strip()} ({time.time() - began:.1f} s)")
     print(f"{nearer + aside + stayed} moves: {nearer} nearer the nearest dot, {aside} aside, "
           f"{stayed} stayed; {dots - len(food)} of {dots} dots eaten")

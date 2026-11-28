@@ -18,7 +18,10 @@
 // the other. Without the file there is no game.
 //
 // Each move is said as it is made: `move <seconds> <tile> <ate> <dots
-// left> <ratio>` (the tile he is at after it; ratio 1: he stayed).
+// left> <ratio>` (the tile he is at after it; ratio 1: he stayed); and
+// before it what the cells said at that time, for every tile whose way is
+// another than the time before: `says <tile> <to>` (the tile its surest
+// pair says to go to; -1: no pair says a way).
 import console
 import files
 import decimal
@@ -36,6 +39,9 @@ buffer GameEdges { a: i32, b: i32, c: i32, d: i32 } capacity 16
 // Each cell's state over its g0 (its resistance read at a small voltage
 // goes as exp(1.8 z / g0), rram.va), by its device's number.
 buffer GameCells { s: f64 } capacity 16
+// Each tile's way by its cells now (`best`: its pair's ratio), and the one
+// last said.
+buffer GameWays { best: f64, to: i32, said: i32 } capacity 16
 
 system game_read() {
   let size = read_file("game.txt", Bytes)
@@ -62,6 +68,7 @@ system game_read() {
     Game.at = GameNumbers[5].v as i32
     Game.food = 0
     GameTiles = []
+    GameWays = [{ best: 1.0, to: -1, said: -1 }; Game.tiles]
     for k in 0..Game.tiles {
       let at = 6 + 3 * k
       let food = GameNumbers[at + 2].v != 0.0
@@ -85,26 +92,38 @@ system game_played() {
       if q.side > 0.0 { GameCells[dv.index].s = q.wc / k.g0 }
     }
   }
-  var best = 1.0 as f64
-  var to = -1
+  for k in 0..Game.tiles {
+    GameWays[k].best = 1.0
+    GameWays[k].to = -1
+  }
   for j in 0..Game.edges {
+    let a = GameEdges[j].a
+    let b = GameEdges[j].b
     let sc = GameCells[GameEdges[j].c].s
     let sd = GameCells[GameEdges[j].d].s
-    if GameEdges[j].a == Game.at && sc < sd {
+    if sc < sd {
       let ratio = exp64(1.8 * (sd - sc))
-      if ratio > best {
-        best = ratio
-        to = GameEdges[j].b
+      if ratio > GameWays[a].best {
+        GameWays[a].best = ratio
+        GameWays[a].to = b
       }
     }
-    if GameEdges[j].b == Game.at && sd < sc {
+    if sd < sc {
       let ratio = exp64(1.8 * (sc - sd))
-      if ratio > best {
-        best = ratio
-        to = GameEdges[j].a
+      if ratio > GameWays[b].best {
+        GameWays[b].best = ratio
+        GameWays[b].to = a
       }
     }
   }
+  for k in 0..Game.tiles {
+    if GameWays[k].to != GameWays[k].said {
+      put("says {k} {GameWays[k].to}")
+      GameWays[k].said = GameWays[k].to
+    }
+  }
+  let best = GameWays[Game.at].best
+  let to = GameWays[Game.at].to
   let ate = to >= 0 && GameTiles[max(to, 0)].food
   let source = if ate { GameTiles[max(to, 0)].source } else { -1 }
   if to >= 0 {

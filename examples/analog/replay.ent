@@ -1,0 +1,294 @@
+// A game of Pac-Man steered by the maze's RRAM cells (game.ent,
+// check/game.py), shown again from what the run kept: "replay.txt", where
+// the program is started.
+//
+//   tools/ent build examples/analog/replay.ent -o build/analog/run/replay
+//   cd build/analog/run/maze_pacman_game && ../replay
+//
+// The green marks are what the cells said when he last read them: from
+// each tile the way its surest pair of cells says to go, towards the
+// nearest dot; a tile without one had no pair saying a way (a tile with a
+// dot fires with its neighbours, and nothing is written between them).
+// He reads only the pairs at his own tile, once a wave: 20 ms of the
+// circuit a move, shown slower.
+//
+// Space stops and goes on; Up and Down show it faster and slower; R from
+// the start. Escape or closing the window ends the program.
+//
+// With a file "shot.txt" there too, a number in it (a move, with a
+// fraction: how far into it), the program shows the game there, keeps
+// the picture as "shot.png" and ends.
+//
+// The file: a line of the maze's columns and rows, his first tile's
+// column and row, the moves and the seconds of the circuit between two;
+// the maze's rows (`#` a wall, `o` a dot, `.` open); then for each move
+// a line (the circuit's time, his tile's column and row after it,
+// whether he ate, the dots left, the ratio of the pair he went by) and
+// a line of every tile's way then, a letter a tile (r d l u, `-` none, a
+// blank a wall).
+import window
+import files
+import decimal
+import math
+
+capacity Bytes 67108864
+
+// `at`: where the showing is, in moves (its whole part the moves done);
+// `eaten`: the moves whose dots are taken off; `speed`: moves a second;
+// `tile`: a tile's pixels; `top`: where the maze begins.
+unique Replay {
+  read: bool, cols: i32, rows: i32, col: i32, row: i32, moves: i32, period: f64, at: f32,
+  eaten: i32, speed: f32, paused: bool, tile: f32, top: f32, time: f32, shot: bool, frames: i32,
+  over: bool
+}
+buffer Tiles { kind: u8, dot: bool } capacity 4096
+buffer Moves { time: f64, col: i32, row: i32, ate: bool, left: i32, ratio: f64 } capacity 65536
+// (Each move's ways: a byte a tile, the moves one after the other.)
+buffer Ways { way: u8 } capacity 67108864
+
+world {
+  Window.width = 560
+  Window.height = 720
+  Window.title = "ent-lang: Pac-Man by RRAM cells"
+  Window.background = 0x000000
+  Window.fps = 60
+  Replay.speed = 8.0
+}
+
+system load() {
+  let size = read_file("replay.txt", Bytes)
+  if size > 0 {
+    let (cols, a0) = read_real(Bytes, 0)
+    let (rows, a1) = read_real(Bytes, a0)
+    let (col, a2) = read_real(Bytes, a1)
+    let (row, a3) = read_real(Bytes, a2)
+    let (moves, a4) = read_real(Bytes, a3)
+    let (period, a5) = read_real(Bytes, a4)
+    Replay.cols = cols as i32
+    Replay.rows = rows as i32
+    Replay.col = col as i32
+    Replay.row = row as i32
+    Replay.period = period
+    let cells = Replay.cols * Replay.rows
+    var at = a5 + 1
+    Tiles = []
+    for r in 0..Replay.rows {
+      for c in 0..Replay.cols {
+        let kind = Bytes[at + c].value
+        Tiles += { kind: kind, dot: kind == 111 }
+      }
+      at += Replay.cols + 1
+    }
+    Moves = []
+    Ways = []
+    for m in 0..moves as i32 {
+      if at < len(Bytes) {
+        let (time, b0) = read_real(Bytes, at)
+        let (c, b1) = read_real(Bytes, b0)
+        let (r, b2) = read_real(Bytes, b1)
+        let (ate, b3) = read_real(Bytes, b2)
+        let (left, b4) = read_real(Bytes, b3)
+        let (ratio, b5) = read_real(Bytes, b4)
+        Moves += { time: time, col: c as i32, row: r as i32, ate: ate != 0.0, left: left as i32,
+                   ratio: ratio }
+        for k in 0..cells { Ways += { way: Bytes[b5 + 1 + k].value } }
+        at = b5 + 1 + cells + 1
+      }
+    }
+    Replay.moves = len(Moves)
+    Replay.read = Replay.moves > 0
+    // (A tile as large as lets the maze into 600 pixels, 20 to 80.)
+    let most = max(Replay.cols, Replay.rows)
+    Replay.tile = max(20, min(80, 600 / most)) as f32
+    Replay.top = 60.0
+    Window.width = max(420, Replay.cols * Replay.tile as i32)
+    Window.height = Replay.rows * Replay.tile as i32 + 100
+  }
+  if read_file("shot.txt", Bytes) > 0 && Replay.read {
+    let (where, next) = read_real(Bytes, 0)
+    Replay.shot = next > 0
+    Replay.at = min(max(where, 0.0), Replay.moves as f64) as f32
+    Replay.paused = true
+  }
+  Bytes = []
+}
+
+// (The picture once the window has drawn a few frames.)
+system shoot() {
+  Replay.frames += 1
+  if Replay.frames == 5 {
+    screenshot("shot.png")
+    Replay.over = true
+  }
+}
+
+// The keys, the time, and the dots of the moves gone by.
+system flow() {
+  if key_pressed(32) { Replay.paused = !Replay.paused }
+  if key_pressed(265) { Replay.speed = min(Replay.speed * 2.0, 512.0) }
+  if key_pressed(264) { Replay.speed = max(Replay.speed / 2.0, 0.5) }
+  if key_pressed(82) {
+    Replay.at = 0.0
+    Replay.eaten = 0
+    Replay.paused = false
+    for k in 0..len(Tiles) { Tiles[k].dot = Tiles[k].kind == 111 }
+  }
+  let dt = min(Window.dt, 0.05)
+  Replay.time += dt
+  if !Replay.paused {
+    Replay.at = min(Replay.at + dt * Replay.speed, Replay.moves as f32)
+  }
+  // (A dot goes when he is past the middle of the way to it.)
+  var going = true
+  while going && Replay.eaten < Replay.moves {
+    if Replay.at >= Replay.eaten as f32 + 0.6 {
+      let m = Replay.eaten
+      if Moves[m].ate { Tiles[Moves[m].row * Replay.cols + Moves[m].col].dot = false }
+      Replay.eaten += 1
+    } else { going = false }
+  }
+}
+
+fn solid(tiles: Tiles, cols: i32, rows: i32, col: i32, row: i32) -> bool {
+  col < 0 || col >= cols || row < 0 || row >= rows || tiles[row * cols + col].kind == 35
+}
+
+// A wall is drawn as a line through the middle of its tiles, where they
+// border on what is not a wall (as examples/pacman.ent draws its maze);
+// in a maze of large tiles as a block.
+system draw_maze() {
+  let s = Replay.tile / 20.0
+  let color = 0x2121de
+  let cols = Replay.cols
+  let rows = Replay.rows
+  for i in 0..cols * rows {
+    let col = i % cols
+    let row = i / cols
+    let x = col as f32 * Replay.tile
+    let y = row as f32 * Replay.tile + Replay.top
+    // (A small maze has no wall around it to draw lines along: blocks.)
+    if Tiles[i].kind == 35 && Replay.tile > 20.0 {
+      rect(x + 2.0 * s, y + 2.0 * s, 16.0 * s, 16.0 * s, 0x16168f)
+    }
+    if Tiles[i].kind == 35 && Replay.tile <= 20.0 {
+      let u = solid(Tiles, cols, rows, col, row - 1)
+      let d = solid(Tiles, cols, rows, col, row + 1)
+      let l = solid(Tiles, cols, rows, col - 1, row)
+      let r = solid(Tiles, cols, rows, col + 1, row)
+      if !u || !d {
+        let from = if l { 0.0 } else { 9.0 }
+        let to = if r { 20.0 } else { 11.0 }
+        rect(x + from * s, y + 9.0 * s, (to - from) * s, 2.0 * s, color)
+      }
+      if !l || !r {
+        let from = if u { 0.0 } else { 9.0 }
+        let to = if d { 20.0 } else { 11.0 }
+        rect(x + 9.0 * s, y + from * s, 2.0 * s, (to - from) * s, color)
+      }
+      if u && l && !solid(Tiles, cols, rows, col - 1, row - 1) {
+        rect(x + 9.0 * s, y, 2.0 * s, 11.0 * s, color)
+        rect(x, y + 9.0 * s, 11.0 * s, 2.0 * s, color)
+      }
+      if u && r && !solid(Tiles, cols, rows, col + 1, row - 1) {
+        rect(x + 9.0 * s, y, 2.0 * s, 11.0 * s, color)
+        rect(x + 9.0 * s, y + 9.0 * s, 11.0 * s, 2.0 * s, color)
+      }
+      if d && l && !solid(Tiles, cols, rows, col - 1, row + 1) {
+        rect(x + 9.0 * s, y + 9.0 * s, 2.0 * s, 11.0 * s, color)
+        rect(x, y + 9.0 * s, 11.0 * s, 2.0 * s, color)
+      }
+      if d && r && !solid(Tiles, cols, rows, col + 1, row + 1) {
+        rect(x + 9.0 * s, y + 9.0 * s, 2.0 * s, 11.0 * s, color)
+        rect(x + 9.0 * s, y + 9.0 * s, 11.0 * s, 2.0 * s, color)
+      }
+    }
+  }
+}
+
+// The ways the cells said at the move being shown, and the dots.
+system draw_ways() {
+  let s = Replay.tile / 20.0
+  let cols = Replay.cols
+  let cells = cols * Replay.rows
+  let m = min(Replay.at as i32, Replay.moves - 1)
+  for i in 0..cells {
+    let x = ((i % cols) as f32 + 0.5) * Replay.tile
+    let y = ((i / cols) as f32 + 0.5) * Replay.tile + Replay.top
+    let way = Ways[m * cells + i].way
+    let dx = if way == 114 { 1.0 } else if way == 108 { -1.0 } else { 0.0 }
+    let dy = if way == 100 { 1.0 } else if way == 117 { -1.0 } else { 0.0 }
+    if dx != 0.0 || dy != 0.0 {
+      // (A stroke from the tile's middle the way it says, a knob at its end.)
+      let reach = 7.0 * s
+      let w = 2.0 * s
+      rect(x + min(0.0, dx * reach) - w / 2.0, y + min(0.0, dy * reach) - w / 2.0,
+           abs(dx) * reach + w, abs(dy) * reach + w, 0x1f7a3a)
+      circle(x + dx * reach, y + dy * reach, 2.6 * s, 0x35d063)
+    }
+    if Tiles[i].dot { rect(x - 2.0 * s, y - 2.0 * s, 4.0 * s, 4.0 * s, 0xffb8ae) }
+  }
+}
+
+system draw_pac() {
+  let s = Replay.tile / 20.0
+  let m = min(Replay.at as i32, Replay.moves - 1)
+  let part = if Replay.at >= Replay.moves as f32 { 1.0 } else { Replay.at - m as f32 }
+  let c0 = if m == 0 { Replay.col } else { Moves[m - 1].col }
+  let r0 = if m == 0 { Replay.row } else { Moves[m - 1].row }
+  let c1 = Moves[m].col
+  let r1 = Moves[m].row
+  // (Through the tunnel he is at one side, then at the other.)
+  let far = abs((c1 - c0) as f32) > 1.5
+  let fc = if far { if part < 0.5 { c0 as f32 } else { c1 as f32 } }
+           else { c0 as f32 + (c1 - c0) as f32 * part }
+  let fr = r0 as f32 + (r1 - r0) as f32 * part
+  let x = (fc + 0.5) * Replay.tile
+  let y = (fr + 0.5) * Replay.tile + Replay.top
+  let still = (c0 == c1 && r0 == r1) || Replay.paused || Replay.at >= Replay.moves as f32
+  let mouth = if still { 25.0 } else { 3.0 + abs(fract(Replay.time * 7.0) * 2.0 - 1.0) * 42.0 }
+  let step = if far { c0 - c1 } else { c1 - c0 }
+  let toward = if r1 > r0 { 90.0 } else if r1 < r0 { 270.0 } else if step < 0 { 180.0 } else { 0.0 }
+  sector(x, y, 14.0 * s, toward + mouth, toward + 360.0 - mouth, 0xffff00)
+}
+
+system draw_text() {
+  let m = min(Replay.at as i32, Replay.moves - 1)
+  let done = min(Replay.eaten, Replay.moves)
+  let left = if done == 0 { Moves[0].left + (if Moves[0].ate { 1 } else { 0 }) }
+             else { Moves[done - 1].left }
+  let ms = (Moves[m].time * 1000.0 + 0.5) as i32
+  let tenths = (Moves[m].ratio * 10.0 + 0.5) as i32
+  // (How much slower than the circuit it is shown.)
+  let slower = (1.0 / (Replay.speed as f64 * Replay.period) + 0.5) as i32
+  let below = Replay.top + Replay.rows as f32 * Replay.tile
+  label("DOTS LEFT", 20.0, 8.0, 20.0, 0xffffff)
+  label("{left}", 20.0, 32.0, 20.0, 0xffffff)
+  label("CIRCUIT TIME", 220.0, 8.0, 20.0, 0xffffff)
+  label("{ms} ms", 220.0, 32.0, 20.0, 0xffffff)
+  label("move {m + 1} of {Replay.moves}, by a pair {tenths / 10}.{tenths % 10} apart", 20.0,
+        below + 6.0, 16.0, 0x35d063)
+  label("{slower} times slower than the circuit", 20.0, below + 24.0, 16.0, 0x9a9a9a)
+  if Replay.paused { label("stopped", 300.0, below + 24.0, 16.0, 0xffff00) }
+}
+
+system draw_none() {
+  label("no replay.txt here: check/game.py writes one", 20.0, 100.0, 18.0, 0xffffff)
+}
+
+schedule opened() { load() }
+schedule frame() {
+  begin()
+  flow() run_if Replay.read
+  draw_maze() run_if Replay.read
+  draw_ways() run_if Replay.read
+  draw_pac() run_if Replay.read
+  draw_text() run_if Replay.read
+  draw_none() run_if !Replay.read
+  shoot() run_if Replay.shot
+  present()
+}
+
+main {
+  opened()
+  loop { frame() } until Window.closed || Replay.over
+}

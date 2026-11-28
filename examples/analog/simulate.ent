@@ -62,6 +62,7 @@ capacity GameNumbers 16000000
 capacity GameTiles 2200000
 capacity GameEdges 3300000
 capacity GameCells 3300000
+capacity GameWays 2200000
 
 // `way`, `shown` and `most` as "run.txt" says, and the fixed step it
 // gives and its rule (`step` 0: steps chosen). `refused`: what keeps the
