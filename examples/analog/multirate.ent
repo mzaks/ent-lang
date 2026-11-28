@@ -1,0 +1,544 @@
+// Way 3, multirate by block time steps: every node that no source holds
+// goes on in time by steps of its own, each chosen by the error it leaves
+// in the node's voltage and in the states of its devices (steps.ent's
+// rule, node by node). Time is counted in ticks of the largest step over
+// 2^30; a node's next time is the next multiple of the largest power of
+// two its step allows, so that nodes come to the same times, or the next
+// corner of a source at it. The nodes whose next time is the least are
+// solved together, a batch: rounds of a Newton step each, with the
+// batch's other nodes as the round before left them, until none moves.
+// A neighbour not in the batch is read from its points: between two where
+// it is past the batch's time, along its last two where it is behind.
+//
+// A node's step is at most `ratio` times the least step of a neighbour
+// (16 unless "run.txt" says), and where a neighbour's step comes to be
+// shorter, the node's next time comes sooner to keep to that: a node at
+// rest whose long step was placed before its neighbour began to move
+// would else read it along its last two, from before it moved, all that
+// step (and spikes come late, by more at each tile a wave goes through);
+// so a wave's front goes on in short steps and what is far from it in
+// long ones. (Undoing a neighbour's points that read wrong values,
+// rollback, was tried: it did not come closer than this, at twice the
+// cost.)
+//
+// Each device is seen by each of its nodes through an edge of its own
+// (`Port`), which keeps the device's state as that node last took it:
+// the device's two nodes go on apart, and each solves the device at its
+// own times.
+//
+// The operating point is way 1's; then way 3 alone. The waves are written
+// on a grid of the largest step over 512, a node's value there between
+// its points; a device's current between the points of the node that
+// keeps it (its first node, else its second).
+//
+// It does what the mazes are made of (capacitors, resistors, current
+// sources, Morris-Lecar channels, synapses, RRAM cells with their series
+// resistance); a circuit with anything else, or with a node a voltage
+// source holds, it says it does not do.
+import console
+import decimal
+import files
+import math
+import circuit
+import sources
+import devices
+import steps
+import relax
+
+// The ticks in the largest step.
+const SPAN: i64 = 1073741824
+// The grid's lines in the largest step, and how many lines are kept
+// until every node is past them.
+const LINES: i64 = 512
+const KEPT: i32 = 1024
+// The points each node keeps (a ring), for its neighbours to read.
+const K: i32 = 16
+
+// A node's own time. `slot`: its ring's place; `n`: its last point's
+// number (0 the operating point). Of the last point: `t` (ticks),
+// `history` (the points the error may be worked out from), `cornered`,
+// `corner` (the next corner of a source at it; `Multi.end` where none). `next`: the time it
+// is to be solved at; `want`: the step it would take. In a batch: `inb`;
+// `hh`: the step in seconds; `trap`: by the trapezoidal rule; `x`: its
+// voltage in the rounds; `settled`, `failed`: in the last round.
+// What its neighbours read of it, never written where they read it: `g`,
+// `gin` (the voltage of the last round, in the batch), `st`, `snext` (`t`
+// and `next`). `took`: it took a point in this batch, from `tprev`
+// (`vprev` there); `watch`: a neighbour was in the batch. `col`: the column of its
+// voltage in the waves (-1: none).
+component Clock {
+  slot: i32, n: i32, t: i64, history: i32, cornered: bool, corner: i64, next: i64,
+  want: f64, inb: bool, hh: f64, trap: bool, x: f64, settled: bool, failed: bool, g: f64,
+  gin: bool, st: i64, snext: i64, took: bool, tprev: i64, vprev: f64, watch: bool, col: i32
+}
+
+// A device as one of its nodes sees it. `other`: its other node; `side`:
+// 1 where this node is its first (a), -1 its second (b); `col`: the
+// column of the device's current in the waves (-1: none, or the other
+// node keeps it). `vo`: the other node's voltage at the batch's time,
+// where it is not in the batch. The device's state in the rounds (`w`,
+// `rate`, `u`, the current from a to b `i`, the voltage across it from a
+// to b `vd`), and at the node's last point (`wc`, `ratec`, `uc`, `ic`,
+// `vdc`; `w1`, `w2` the states and `ip` the current at the points
+// before).
+relation (Clock)-[Port {
+  other: entity, side: f64, col: i32, vo: f64, w: f64, rate: f64, u: f64, i: f64, vd: f64,
+  wc: f64, ratec: f64, uc: f64, ic: f64, vdc: f64, w1: f64, w2: f64, ip: f64
+}]->(Two) capacity 16
+
+// `tau`: the batch's time; `end`: the stop, in ticks; `unit`: a tick in
+// seconds; `low`: the least time of a node, to which the waves are
+// complete. `ratio`: a node's step at most that many times its
+// neighbours' (0: any). `round`, `unsettled`: of the batch. `refused`: a
+// device this way does not do. The counts: batches, node steps tried,
+// taken, tried again for their error and for not settling, device
+// evaluations, rounds. `line`: the next line of the waves, in ticks.
+unique Multi {
+  tau: i64, end: i64, unit: f64, low: i64, first: f64, most: f64, ratio: f64, round: i32,
+  unsettled: i32, done: bool, refused: bool, nodes: i32, batches: i64, tried: i64, steps: i64,
+  rejected: i64, failed: i64, evals: i64, rounds: i64, line: i64, grid: i64, lost: i64,
+  others: i32
+}
+
+// Each node's last K points.
+buffer Pts { t: i64, v: f64 } capacity 16
+// The waves' lines not yet complete (`KEPT` of them, each a row per probe),
+// and what each probe showed at the operating point.
+buffer Out { v: f64 } capacity 16
+buffer Base { v: f64 } capacity 16
+// (Where a node's and a device's probes are: by the node's number and the
+// device's line.)
+buffer NodeCol { col: i32 } capacity 16
+buffer LineCol { col: i32 } capacity 16
+
+fn between(ta: i64, va: f64, tb: i64, vb: f64, t: i64) -> f64 {
+  va + (vb - va) * ((t - ta) as f64) / ((tb - ta) as f64)
+}
+
+fn ring(slot: i32, k: i32) -> i32 { slot * K + k % K }
+
+// A node's voltage at t from its points: between two, or along its last
+// two past them (the oldest it keeps before them).
+fn value_at(pts: Pts[], slot: i32, n: i32, t: i64) -> f64 {
+  let last = pts[ring(slot, n)].t
+  let lv = pts[ring(slot, n)].v
+  let lo = max(0, n - K + 1)
+  var value = lv
+  if t > last {
+    if n > lo {
+      let before = pts[ring(slot, n - 1)].t
+      value = lv + (lv - pts[ring(slot, n - 1)].v) * ((t - last) as f64) / ((last - before) as f64)
+    }
+  } else if t < last {
+    var k = n
+    var found = false
+    while k > lo && !found {
+      let before = pts[ring(slot, k - 1)].t
+      if t >= before {
+        value = between(before, pts[ring(slot, k - 1)].v, pts[ring(slot, k)].t,
+                        pts[ring(slot, k)].v, t)
+        found = true
+      }
+      k -= 1
+    }
+    if !found { value = pts[ring(slot, lo)].v }
+  }
+  value
+}
+
+// The next time of a node at t whose step is to be at most h: the next
+// multiple of the largest power of two of ticks within it, or the corner
+// before that.
+fn placed(t: i64, h: f64, unit: f64, corner: i64, end: i64) -> i64 {
+  var ht = (h / unit) as i64
+  if ht < 1 { ht = 1 }
+  if ht > SPAN { ht = SPAN }
+  var p = 1 as i64
+  while p * 2 <= ht { p = p * 2 }
+  var next = (t / p + 1) * p
+  if corner > t && next > corner { next = corner }
+  if t >= end { end + 1 } else { min(next, end) }
+}
+
+fn ticks_of(t: f64, unit: f64, end: i64) -> i64 {
+  if t >= (end as f64) * unit { end } else { floor64(t / unit + 0.5) as i64 }
+}
+
+// After the operating point: each free node its clock, what way 3 does
+// not do said.
+system mr_clocked() {
+  Multi.most = Step.most
+  Multi.unit = Step.most / (SPAN as f64)
+  Multi.end = floor64(Circuit.stop / Multi.unit + 0.5) as i64
+  Multi.first = Step.first
+  Multi.grid = SPAN / LINES
+  Multi.line = Multi.grid
+  NodeCol = [{ col: -1 }; len(Nodes)]
+  LineCol = [{ col: -1 }; len(Lines)]
+  Base = [{ v: 0.0 }; len(Probes)]
+  for k in 0..len(Probes) {
+    if Probes[k].voltage {
+      NodeCol[Probes[k].index].col = k
+      if let v = Node(Nodes[Probes[k].index].who).v { Base[k].v = v }
+    } else {
+      let who = Devices[Probes[k].index].who
+      if let line = Device(who).index { LineCol[line].col = k }
+      if let i = Device(who).i { Base[k].v = i }
+    }
+  }
+  Out = []
+  for s in 0..KEPT {
+    for k in 0..len(Probes) { Out += { v: Base[k].v } }
+  }
+  Multi.others = 0
+  for n: Node, p: Place with Fixed where p.index > 0 { Multi.others += 1 }
+  for m: Memristor without Ml, Synapse, Inner { Multi.others += 1 }
+  for k: Source where k.voltage { Multi.others += 1 }
+  if Multi.others > 0 {
+    put("way 3 does not do {Multi.others} of this circuit's devices and held nodes: ways 0 to 2 do")
+    Multi.refused = true
+  }
+  Multi.nodes = 0
+  for me, n: Node, p: Place without Fixed in turn by p.index {
+    me.add(Clock { slot: Multi.nodes, n: 0, t: 0, history: 0, cornered: true,
+                   corner: Multi.end, next: 0, want: Multi.first, inb: false, hh: 0.0,
+                   trap: false, x: n.v, settled: false, failed: false, g: n.v, gin: false,
+                   st: 0, snext: 0, took: false, tprev: 0, vprev: n.v, watch: false,
+                   col: NodeCol[p.index].col })
+    Multi.nodes += 1
+  }
+}
+
+// Each device's edge from each of its free nodes, with its state at the
+// operating point.
+system mr_ported() {
+  for me, t: Two, d: Device {
+    if let va = Node(t.a).v {
+      if let vb = Node(t.b).v {
+        var w = 0.0 as f64
+        var rate = 0.0 as f64
+        var u = 0.0 as f64
+        if let mw = Memristor(me).w { w = mw }
+        if let mr = Memristor(me).rate { rate = mr }
+        if let nu = Inner(me).u { u = nu }
+        let col = LineCol[d.index].col
+        var kept = false
+        if let ta = Clock(t.a).t {
+          connect (t.a)-[Port { other: t.b, side: 1.0, col: col, vo: vb, w: w, rate: rate, u: u,
+                                i: d.i, vd: va - vb, wc: w, ratec: rate, uc: u, ic: d.i,
+                                vdc: va - vb, w1: w, w2: w, ip: d.i }]->(me)
+          kept = true
+        }
+        if let tb = Clock(t.b).t {
+          connect (t.b)-[Port { other: t.a, side: -1.0, col: if kept { -1 } else { col }, vo: va,
+                                w: w, rate: rate, u: u, i: d.i, vd: va - vb, wc: w, ratec: rate,
+                                uc: u, ic: d.i, vdc: va - vb, w1: w, w2: w, ip: d.i }]->(me)
+        }
+      }
+    }
+  }
+}
+
+// Each node's first point (the operating point), corner and time.
+system mr_started() {
+  let eps = 1e-9 * Circuit.step
+  Pts = [{ t: 0, v: 0.0 }; Multi.nodes * K]
+  for me, n: Node, c: mut Clock in turn by c.slot {
+    var corner = 1e300 as f64
+    for (me)-[q: Port]->(d, s: Source) {
+      corner = min(corner, corner_after(s.wave, s.p2, s.p3, s.p4, s.p5, s.p6, s.first, s.count,
+                                        Points, 0.0, eps))
+    }
+    c.corner = ticks_of(corner, Multi.unit, Multi.end)
+    c.next = placed(0, min(c.want, 0.1 * (c.corner as f64) * Multi.unit), Multi.unit, c.corner,
+                    Multi.end)
+    Pts[ring(c.slot, 0)].v = n.v
+  }
+}
+
+system mr_seen() {
+  for c: mut Clock {
+    c.st = c.t
+    c.snext = c.next
+  }
+}
+
+// A batch: the nodes whose next time is the least.
+system mr_chosen() {
+  Multi.tau = Multi.end + 2
+  for c: Clock { Multi.tau min= c.next }
+  Multi.done = Multi.tau > Multi.end
+  if !Multi.done { Multi.batches += 1 }
+  Multi.round = 0
+  Multi.unsettled = 1
+}
+
+system mr_marked() {
+  let tau = Multi.tau
+  for c: mut Clock {
+    let inb = c.next == tau && !Multi.done
+    c.inb = inb
+    c.gin = inb
+    c.took = false
+    if inb {
+      c.hh = ((tau - c.t) as f64) * Multi.unit
+      c.trap = c.history >= 3
+      c.x = value_at(Pts, c.slot, c.n, tau)
+      c.g = c.x
+      c.settled = false
+      c.failed = false
+      Multi.tried += 1
+    }
+  }
+}
+
+// The batch's devices from their states at their nodes' last points, and
+// the neighbours not in it at the batch's time.
+system mr_primed() {
+  let tau = Multi.tau
+  for me, c: Clock where c.inb {
+    for (me)-[mut q: Port]->(d) {
+      q.w = q.wc
+      q.u = q.uc
+      q.rate = q.ratec
+      var vo = 0.0 as f64
+      var clocked = false
+      if let slot = Clock(q.other).slot {
+        if let n = Clock(q.other).n {
+          vo = value_at(Pts, slot, n, tau)
+          clocked = true
+        }
+      }
+      if !clocked { if let v = Node(q.other).v { vo = v } }
+      q.vo = vo
+    }
+  }
+}
+
+// A round: each node of the batch a Newton step, its devices' states one
+// with it, its neighbours in the batch as the round before left them.
+fn across(x: f64, vo: f64, side: f64) -> f64 { if side > 0.0 { x - vo } else { vo - x } }
+
+system mr_swept() {
+  Multi.unsettled = 0
+  Multi.round += 1
+  Multi.rounds += 1
+  let tn = (Multi.tau as f64) * Multi.unit
+  let reltol = Time.reltol
+  let vntol = Time.vntol
+  for me, c: mut Clock where c.inb {
+    let x = c.x
+    let h = c.hh
+    let trap = c.trap
+    var r = -GMIN * x
+    var dr = GMIN
+    var moved = false
+    var failed = false
+    for (me)-[mut q: Port]->(d, k: Capacitor) {
+      var vo = q.vo
+      if let gin = Clock(q.other).gin { if gin { if let g = Clock(q.other).g { vo = g } } }
+      let vd = across(x, vo, q.side)
+      let g = (if trap { 2.0 as f64 } else { 1.0 as f64 }) * k.c / h
+      let i = g * (vd - q.vdc) - (if trap { q.ic } else { 0.0 as f64 })
+      r += -i * q.side
+      dr += g
+      q.i = i
+      q.vd = vd
+    }
+    for (me)-[mut q: Port]->(d, k: Resistor) {
+      var vo = q.vo
+      if let gin = Clock(q.other).gin { if gin { if let g = Clock(q.other).g { vo = g } } }
+      let vd = across(x, vo, q.side)
+      let i = k.g * vd
+      r += -i * q.side
+      dr += k.g
+      q.i = i
+      q.vd = vd
+    }
+    for (me)-[mut q: Port]->(d, s: Source) {
+      let i = level(s.wave, s.p0, s.p1, s.p2, s.p3, s.p4, s.p5, s.p6, s.first, s.count, Points, tn)
+      r += -i * q.side
+      q.i = i
+    }
+    for (me)-[mut q: Port]->(d, k: Synapse) {
+      var vo = q.vo
+      if let gin = Clock(q.other).gin { if gin { if let g = Clock(q.other).g { vo = g } } }
+      let vd = across(x, vo, q.side)
+      let (i, g, gw, f, jw, jv, rate) = synapse_equation(k.gs1, k.gs0, k.us1, k.us2, k.fs, q.w, q.wc,
+                                                         vd, h, trap, q.ratec)
+      let dw = -f / jw
+      let w = q.w + dw
+      if far(dw, w, q.w, reltol, vntol) { moved = true }
+      let il = i + gw * dw
+      r += -il * q.side
+      dr += g - gw * jv / jw
+      q.w = w
+      q.rate = rate
+      q.i = il
+      q.vd = vd
+      Multi.evals += 1
+    }
+    for (me)-[mut q: Port]->(d, k: Ml) {
+      var vo = q.vo
+      if let gin = Clock(q.other).gin { if gin { if let g = Clock(q.other).g { vo = g } } }
+      let vd = across(x, vo, q.side)
+      let (i, g, gw, f, jw, jv, rate) = ml_equation(k.gl, k.el, k.gna, k.ena, k.una1, k.una2, k.gk,
+                                                    k.ek, k.uk1, k.uk2, k.fk, q.w, q.wc, vd, h, trap,
+                                                    q.ratec)
+      let dw = -f / jw
+      let w = q.w + dw
+      if far(dw, w, q.w, reltol, vntol) { moved = true }
+      let il = i + gw * dw
+      r += -il * q.side
+      dr += g - gw * jv / jw
+      q.w = w
+      q.rate = rate
+      q.i = il
+      q.vd = vd
+      Multi.evals += 1
+    }
+    for (me)-[mut q: Port]->(d, k: Rram, n: Inner) {
+      var vo = q.vo
+      if let gin = Clock(q.other).gin { if gin { if let g = Clock(q.other).g { vo = g } } }
+      let vd = across(x, vo, q.side)
+      let (i, g, w, u, rate, ok) = rram_inner(k.i0, k.u0, k.g0, k.gmax, k.v0, k.ea, k.da, k.dox, k.t0,
+                                              k.rth, k.gamma0, k.gammar, k.beta, k.alpha, k.gbar,
+                                              k.uth, k.emin, k.ewidth, k.ug, k.ug0, k.uhat, k.zeta,
+                                              k.wl, k.eth, k.dth, k.rmax, k.delta, k.rs, q.w, q.u,
+                                              q.wc, vd, h, trap, q.ratec)
+      if !ok { failed = true }
+      if far(w - q.w, w, q.w, reltol, vntol) { moved = true }
+      r += -i * q.side
+      dr += g
+      q.w = w
+      q.u = u
+      q.rate = rate
+      q.i = i
+      q.vd = vd
+      Multi.evals += 1
+    }
+    let dx = r / dr
+    let v = x + dx
+    if far(dx, v, x, reltol, vntol) { moved = true }
+    c.x = v
+    c.settled = !moved && !failed
+    c.failed = failed
+    if moved && !failed { Multi.unsettled += 1 }
+  }
+}
+
+system mr_guessed() {
+  for c: mut Clock where c.inb { c.g = c.x }
+}
+
+// No more than `ratio` times the least step of a neighbour that is not
+// through.
+fn capped_by(want: f64, ratio: f64, st: i64, snext: i64, end: i64, unit: f64) -> f64 {
+  if ratio > 0.0 && snext > st && st < end { min(want, ratio * ((snext - st) as f64) * unit) }
+  else { want }
+}
+
+// After the rounds: each node of the batch takes its point, or tries again
+// with a shorter step; then its next time. (In turn: it writes its ring.)
+system mr_closed() {
+  let tau = Multi.tau
+  let tn = (tau as f64) * Multi.unit
+  let eps = 1e-9 * Circuit.step
+  let unit = Multi.unit
+  for me, n: mut Node, c: mut Clock in turn by c.slot where c.inb {
+    let h = c.hh
+    var want = h / 8.0
+    if !c.settled {
+      Multi.failed += 1
+    } else {
+      // (The last three points' times and voltages, the last first.)
+      let a1 = ring(c.slot, c.n)
+      let a2 = ring(c.slot, max(c.n - 1, 0))
+      let a3 = ring(c.slot, max(c.n - 2, 0))
+      let t1 = (Pts[a1].t as f64) * unit
+      let t2 = (Pts[a2].t as f64) * unit
+      let t3 = (Pts[a3].t as f64) * unit
+      var worst = error_share(c.x, Pts[a1].v, Pts[a2].v, Pts[a3].v, tn, t1, t2, t3, c.history,
+                              c.trap, Time.reltol, Time.vntol)
+      for (me)-[q: Port]->(d, m: Memristor) {
+        worst = max(worst, error_share(q.w, q.wc, q.w1, q.w2, tn, t1, t2, t3, c.history, c.trap,
+                                       Time.reltol, Time.vntol))
+        if abs64(q.w - q.wc) > MOVE { worst = max(worst, 1e9) }
+      }
+      let order = if c.trap { 3.0 as f64 } else { 2.0 as f64 }
+      if worst > 1.0 {
+        Multi.rejected += 1
+        want = h * max(0.9 * pow64(worst, -1.0 / order), 0.125)
+      } else {
+        Multi.steps += 1
+        c.took = true
+        c.tprev = c.t
+        c.vprev = n.v
+        c.n += 1
+        for (me)-[mut q: Port]->(d) {
+          q.ip = q.ic
+          q.w2 = q.w1
+          q.w1 = q.wc
+          q.wc = q.w
+          q.ratec = q.rate
+          q.uc = q.u
+          q.ic = q.i
+          q.vdc = q.vd
+        }
+        n.v = c.x
+        c.history += 1
+        c.t = tau
+        c.cornered = tau == c.corner
+        if c.cornered {
+          c.history = 1
+          var corner = 1e300 as f64
+          for (me)-[q: Port]->(d, s: Source) {
+            corner = min(corner, corner_after(s.wave, s.p2, s.p3, s.p4, s.p5, s.p6, s.first,
+                                              s.count, Points, tn, eps))
+          }
+          c.corner = ticks_of(corner, unit, Multi.end)
+        }
+        let at = ring(c.slot, c.n)
+        Pts[at].t = tau
+        Pts[at].v = c.x
+        var hnew = if worst > 0.0 { h * min(0.9 * pow64(worst, -1.0 / order), 2.0) }
+                   else { h * 2.0 }
+        if c.cornered {
+          hnew = min(min(hnew, Multi.first), 0.1 * ((c.corner - c.t) as f64) * unit)
+        }
+        want = min(hnew, Multi.most)
+      }
+    }
+    for (me)-[q: Port]->(d) {
+      if let st = Clock(q.other).st {
+        if let sn = Clock(q.other).snext { want = capped_by(want, Multi.ratio, st, sn, Multi.end, unit) }
+      }
+    }
+    c.want = want
+    c.next = placed(c.t, want, unit, c.corner, Multi.end)
+    for (me)-[q: Port]->(d) {
+      if let w = Clock(q.other).watch { Clock(q.other).watch = true }
+    }
+  }
+}
+
+// The neighbours of the batch's nodes: where a neighbour's step is now
+// shorter, their next time comes sooner, to keep within the ratio (a node
+// at rest that took a long step next to one that has begun to move would
+// else go on past it).
+system mr_capped() {
+  let unit = Multi.unit
+  for me, c: mut Clock where c.watch {
+    c.watch = false
+    if Multi.ratio > 0.0 && c.t < Multi.end {
+      var want = c.want
+      for (me)-[q: Port]->(d) {
+        if let st = Clock(q.other).st {
+          if let sn = Clock(q.other).snext { want = capped_by(want, Multi.ratio, st, sn, Multi.end, unit) }
+        }
+      }
+      let next = placed(c.t, want, unit, c.corner, Multi.end)
+      if next < c.next { c.next = next }
+    }
+  }
+}

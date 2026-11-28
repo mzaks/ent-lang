@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""The three ways give the same waves, within the tolerances a time
-point is solved to (the spec's check 4).
+"""The ways give the same waves, within the tolerances a time point is
+solved to (the spec's check 4).
 
   examples/analog/check/agree.py [circuits] [most=N]
 
 For each prepared circuit (all of build/analog/circuits but the slowest
 crossbars, or those named)
-the model runs three ways, the operating point and every time point
-after: 0 direct, 1 relaxation by Gauss–Jacobi, 2 relaxation by events.
-Every probe of ways 1 and 2 at every time point is to be way 0's (in a
+the model runs each way, the operating point and every time point
+after: 0 direct, 1 relaxation by Gauss–Jacobi, 2 relaxation by events,
+3 multirate (multirate.ent: the circuits of the devices it does).
+Every probe of ways 1 to 3 at every time point is to be way 0's (in a
 straight line between way 0's time points, since each way chooses its
 own steps) to within ten times the tolerance a node settles to
 (reltol of the value and vntol, 1e-3 and 1e-6; for a current reltol of
@@ -84,7 +85,7 @@ def main():
             continue
         line = [f"{name}: " + (f"at reltol {reltol:g}, " if reltol != 1e-3 else "") +
                 f"way 0 {said0.split(': ', 1)[-1]}"]
-        for way in (1, 2):
+        for way in (1, 2, 3):
             if name in BY_SPICE:
                 line.append(f"way {way} held by spice.py")
                 continue
@@ -127,7 +128,7 @@ def main():
                         continue
                     if share > worst:
                         worst, at = share, (k, a, b, got[0])
-            rounds = said.split(" in ", 1)[-1]
+            rounds = said.split(" in ", 1)[-1] if way != 3 else said.split(": ", 1)[-1]
             if worst > 1:
                 failed += 1
                 k, a, b, when = at

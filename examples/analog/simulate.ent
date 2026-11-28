@@ -36,6 +36,7 @@ import devices
 import direct
 import relax
 import steps
+import multirate
 
 capacity Bytes 268435456
 capacity Node 2200000
@@ -50,6 +51,12 @@ capacity Probes 2200000
 capacity Initial 2200000
 capacity Entries 24000000
 capacity Solution 2300000
+capacity Port 6600000
+capacity Out 16000000
+capacity Pts 16000000
+capacity Base 2200000
+capacity NodeCol 2200000
+capacity LineCol 3300000
 
 // `way`, `shown` and `most` as "run.txt" says, and the fixed step it
 // gives and its rule (`step` 0: steps chosen). `refused`: what keeps the
@@ -58,7 +65,7 @@ capacity Solution 2300000
 // rounds and node steps in all, and the most rounds at one time point.
 unique Run {
   way: i32, shown: bool, most: i32, step: f64, method: i32, refused: bool, failed: bool,
-  written: bool, rounds: i64, most_rounds: i32, updates: i64
+  written: bool, rounds: i64, most_rounds: i32, updates: i64, three: bool
 }
 
 world {
@@ -69,6 +76,7 @@ world {
   Run.most = 100000
   Run.shown = true
   Time.t = 0.0
+  Multi.ratio = 16.0
 }
 
 system plan() {
@@ -76,10 +84,14 @@ system plan() {
   if size > 0 {
     var at = 0
     var k = 0
-    while k < 10 && at < len(Bytes) {
+    while k < 11 && at < len(Bytes) {
       let (value, next) = read_real(Bytes, at)
       if next > at {
-        if k == 0 { Run.way = value as i32 }
+        if k == 0 {
+          // (Way 3 takes way 1's operating point.)
+          Run.way = if value as i32 == 3 { 1 } else { value as i32 }
+          Run.three = value as i32 == 3
+        }
         if k == 2 { Run.shown = value != 0.0 }
         if k == 3 { Time.reltol = value }
         if k == 4 { Time.vntol = value }
@@ -88,6 +100,7 @@ system plan() {
         if k == 7 { Time.t = value }
         if k == 8 { Run.step = value }
         if k == 9 { Run.method = value as i32 }
+        if k == 10 { Multi.ratio = value }
         at = next
       } else { at = len(Bytes) }
       k += 1
@@ -231,7 +244,87 @@ schedule ended() {
   cornered() run_if Step.taken
   next_step()
 }
-schedule done() { flushed() told_how() }
+// Way 3 (multirate.ent).
+system mr_way() { Run.way = 3 }
+
+// The waves: the batch's points onto the grid's lines, and the lines every
+// node is past written out.
+system mr_lines() {
+  Multi.low = Multi.end + 2
+  for c: Clock { Multi.low min= c.t }
+  if Run.shown && !Run.refused {
+    let p = len(Probes)
+    let kept = KEPT as i64
+    let grid = Multi.grid
+    let first = Multi.line
+    for me, nd: Node, c: Clock in turn by c.col where c.took {
+      var line = (c.tprev / grid + 1) * grid
+      while line <= c.t {
+        let slot = ((line / grid) % kept) as i32
+        if line - first >= kept * grid { Multi.lost += 1 }
+        else {
+          if c.col >= 0 { Out[slot * p + c.col].v = between(c.tprev, c.vprev, c.t, nd.v, line) }
+          for (me)-[q: Port]->(d) {
+            if q.col >= 0 { Out[slot * p + q.col].v = between(c.tprev, q.ip, c.t, q.ic, line) }
+          }
+        }
+        line += grid
+      }
+    }
+    while Multi.line <= Multi.low && Multi.line <= Multi.end {
+      let slot = ((Multi.line / grid) % kept) as i32
+      write_real(Bytes, (Multi.line as f64) * Multi.unit)
+      for k in 0..p {
+        Bytes += { value: 32 }
+        write_real(Bytes, Out[slot * p + k].v)
+      }
+      Bytes += { value: 10 }
+      Multi.line += grid
+      if len(Bytes) > 16000000 {
+        write_bytes("waves.txt", Bytes, 0, len(Bytes), Run.written)
+        Run.written = true
+        Bytes = []
+      }
+    }
+  }
+}
+
+system mr_told() {
+  if !Run.refused && !Multi.refused {
+    put("way 3: {Multi.batches} batches, {Multi.tried} node steps tried, {Multi.steps} taken, {Multi.rejected} tried again, {Multi.failed} not settled, {Multi.rounds} rounds, {Multi.evals} device evaluations, settled {Multi.done && !Run.failed}" +
+        (if Multi.lost > 0 { ", {Multi.lost} points past the lines kept" } else { "" }))
+  }
+}
+
+// Way 3, after the operating point: batch by batch.
+schedule mr_setup() {
+  mr_way() run_if Run.three && Circuit.tran && !Run.refused && !Run.failed
+  mr_clocked() run_if Run.three && Circuit.tran && !Run.refused && !Run.failed
+  mr_ported() run_if Run.three && Circuit.tran && !Run.refused && !Run.failed
+  mr_started() run_if Run.three && Circuit.tran && !Run.refused && !Run.failed
+  mr_seen() run_if Run.three && Circuit.tran && !Run.refused && !Run.failed
+}
+schedule mr_ticked() {
+  mr_chosen() run_if Run.way == 3
+  mr_marked() run_if Run.way == 3
+  mr_primed() run_if Run.way == 3
+}
+schedule mr_round() {
+  mr_swept() run_if Run.way == 3
+  mr_guessed() run_if Run.way == 3
+}
+schedule mr_ended() {
+  mr_closed() run_if Run.way == 3
+  mr_seen() run_if Run.way == 3
+  mr_capped() run_if Run.way == 3
+  mr_seen() run_if Run.way == 3
+  mr_lines() run_if Run.way == 3
+}
+schedule done() {
+  flushed()
+  told_how() run_if Run.way != 3
+  mr_told() run_if Run.way == 3
+}
 
 main {
   setup()
@@ -242,6 +335,12 @@ main {
       (Run.way != 0 && (Relax.unsettled == 0 || Relax.round >= Run.most || Relax.alone >= 50 ||
                         Relax.negative > 0 || Relax.cells > 0))
     ended()
-  } until Run.refused || Run.failed || Step.done
+  } until Run.refused || Run.failed || Step.done || (Run.three && Step.points >= 1)
+  mr_setup()
+  loop {
+    mr_ticked()
+    loop { mr_round() } until Run.way != 3 || Multi.unsettled == 0 || Multi.round >= 60
+    mr_ended()
+  } until Run.way != 3 || Multi.done || Multi.refused || Run.refused || Run.failed
   done()
 }
