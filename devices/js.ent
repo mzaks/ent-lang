@@ -26,7 +26,9 @@ import text
 // js_call_kind and js_call_data, until the next poll.
 buffer JsCalls { js: i64, call: i64 } capacity 1024
 
-// A context, with at most `memory` bytes (0: no limit) and `seconds` of
+// A context, with at most `memory` bytes (0: no limit; once a script
+// has run out, an eighth more, at most 1 MB, until it lets go of what it
+// holds: room to say so, and for what lets go) and `seconds` of
 // work each time the program enters it (js_eval, js_answer, a timer or
 // a job in js_poll; 0: no limit). Its handle; 0 where it could not be
 // made.

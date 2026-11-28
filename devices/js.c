@@ -58,7 +58,95 @@ typedef struct {
   js_rejected *rejected;
   int rejected_count, rejected_room;
   JSValue sources, loaded; // require's: name -> source, name -> exports
+  // The memory the runtime holds, counted here (see `held_malloc`), and
+  // its limit (0: none); `spare`: allowed past it for now.
+  size_t held, limit;
+  bool spare;
 } js_state;
+
+// ---- Memory.
+//
+// The limit is kept here, not by QuickJS's own (JS_SetMemoryLimit): when
+// an allocation is refused at that limit, QuickJS makes the error that
+// says so ("out of memory") with more memory, and where the refused
+// allocation left no room under the limit (as small ones do, by where the
+// platform's malloc rounds) that error could not be made either: the
+// script failed with `null` thrown, and the context had no room even to
+// let go of what it held. So the first allocation refused opens a spare
+// (an eighth of the limit, at most 1 MB) past the limit, for the error
+// and for the calls after to let go of what they hold; it closes when
+// what is held is a spare under the limit again. (So the most a context
+// holds is its limit and a spare.) Each block carries its size in
+// front, so that what is counted is the same on every platform.
+enum { held_header = 16 };
+static size_t spare_of(const js_state *s) {
+  size_t spare = s->limit / 8;
+  return spare < (1u << 20) ? spare : (1u << 20);
+}
+static bool held_fits(js_state *s, size_t more) {
+  if (!s->limit || s->held + more <= s->limit)
+    return true;
+  if (!s->spare) {
+    s->spare = true; // (this one refused; what follows may use the spare)
+    return false;
+  }
+  return s->held + more <= s->limit + spare_of(s);
+}
+static void *held_block(js_state *s, char *block, size_t size) {
+  if (!block)
+    return NULL;
+  memcpy(block, &size, sizeof size);
+  s->held += size;
+  return block + held_header;
+}
+static size_t held_size(const void *ptr) {
+  size_t size;
+  memcpy(&size, (const char *)ptr - held_header, sizeof size);
+  return size;
+}
+static void held_less(js_state *s, size_t size) {
+  s->held -= size;
+  if (s->spare && s->held + spare_of(s) <= s->limit)
+    s->spare = false;
+}
+static void *held_malloc(void *opaque, size_t size) {
+  js_state *s = opaque;
+  if (!held_fits(s, size))
+    return NULL;
+  return held_block(s, malloc(held_header + size), size);
+}
+static void *held_calloc(void *opaque, size_t count, size_t size) {
+  js_state *s = opaque;
+  if (size && count > ((size_t)-1 - held_header) / size)
+    return NULL;
+  if (!held_fits(s, count * size))
+    return NULL;
+  return held_block(s, calloc(1, held_header + count * size), count * size);
+}
+static void held_free(void *opaque, void *ptr) {
+  if (!ptr)
+    return;
+  held_less(opaque, held_size(ptr));
+  free((char *)ptr - held_header);
+}
+static void *held_realloc(void *opaque, void *ptr, size_t size) {
+  js_state *s = opaque;
+  if (!ptr)
+    return held_malloc(opaque, size);
+  size_t old = held_size(ptr);
+  if (size > old && !held_fits(s, size - old))
+    return NULL;
+  char *block = realloc((char *)ptr - held_header, held_header + size);
+  if (!block)
+    return NULL;
+  memcpy(block, &size, sizeof size);
+  s->held += size;
+  held_less(s, old);
+  return block + held_header;
+}
+static size_t held_usable(const void *ptr) { return held_size(ptr); }
+static const JSMallocFunctions held_functions = {
+    held_calloc, held_malloc, held_free, held_realloc, held_usable};
 
 typedef struct {
   int64_t js, call;
@@ -457,7 +545,8 @@ int64_t ent_js_js_open(int64_t memory, double seconds) {
   uint32_t uses = s->uses + 1;
   memset(s, 0, sizeof *s);
   s->uses = uses;
-  s->rt = JS_NewRuntime();
+  s->limit = memory > 0 ? (size_t)memory : 0;
+  s->rt = JS_NewRuntime2(&held_functions, s);
   if (!s->rt)
     return 0;
   s->ctx = JS_NewContext(s->rt);
@@ -467,8 +556,6 @@ int64_t ent_js_js_open(int64_t memory, double seconds) {
   }
   s->used = true;
   s->seconds = seconds;
-  if (memory > 0)
-    JS_SetMemoryLimit(s->rt, (size_t)memory);
 #ifdef __EMSCRIPTEN__
   JS_SetMaxStackSize(s->rt, 512 * 1024);
 #else
@@ -500,7 +587,8 @@ void ent_js_js_limit(int64_t js, int64_t memory, double seconds) {
   js_state *s = state_of(js);
   if (!s)
     return;
-  JS_SetMemoryLimit(s->rt, memory > 0 ? (size_t)memory : (size_t)-1);
+  s->limit = memory > 0 ? (size_t)memory : 0;
+  s->spare = false;
   s->seconds = seconds;
 }
 

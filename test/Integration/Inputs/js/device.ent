@@ -31,6 +31,8 @@ system first() {
   say("after loop", js_eval(a, "40 + 2", "v.js"))
   say("memory", js_eval(a, "let big = []; for (let i = 0; i < 1e8; i++) big.push('x' + i); 1", "mem.js") + js_failed(a))
   say("after memory", js_eval(a, "big = null; 'ok'", "v.js"))
+  say("memory again", js_eval(a, "let more = []; for (let i = 0; i < 1e8; i++) more.push('y' + i); 1", "mem.js") + js_failed(a))
+  say("after again", js_eval(a, "more = null; 'ok'", "v.js"))
   say("deep", js_eval(a, "function d(n) \{ return d(n + 1) + 1 \}\nd(0)", "deep.js") + js_failed(a))
   say("no std", js_eval(a, "[typeof std, typeof os, typeof print, typeof scriptArgs].join(' ')", "v.js"))
   say("import", "[" + js_eval(a, "import('x')", "i.js") + "] " + js_failed(a))

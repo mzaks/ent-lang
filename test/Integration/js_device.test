@@ -1,6 +1,7 @@
 // The js device (devices/js.ent, QuickJS-ng in devices/quickjs): values
 // to and from JSON (UTF-8 kept), errors with where they were, a loop
-// stopped by its time (and no `catch` stopping that), memory run out,
+// stopped by its time (and no `catch` stopping that), memory run out
+// (twice, and let go of each time),
 // recursion too deep, the context used after each; no std, os or
 // import; two contexts apart; random bytes; require (each source run
 // once); a promise rejected that nothing handles; calls of the program
@@ -27,6 +28,8 @@
 // CHECK-NEXT: after loop: 42
 // CHECK-NEXT: memory: out of memory
 // CHECK-NEXT: after memory: "ok"
+// CHECK-NEXT: memory again: out of memory
+// CHECK-NEXT: after again: "ok"
 // CHECK-NEXT: deep: RangeError: Maximum call stack size exceeded
 // CHECK: no std: "undefined undefined undefined undefined"
 // CHECK-NEXT: import: [] not handled: ReferenceError: could not load module 'x'
