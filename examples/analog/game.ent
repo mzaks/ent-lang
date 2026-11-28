@@ -9,19 +9,77 @@
 // source gives nothing from then on, and the next wave writes the ways to
 // the dots that are left. The run ends with the last dot.
 //
+// Ghosts: where a ghost is, and on the tiles next to it, the tile is
+// held: every edge at it is cut (a switch in series with each of the
+// edge's synapses and cells, opened by whatever sees the ghost: here the
+// synapses' conductances 0 and the cells' series resistance CUT), so the
+// wave does not go through it and the tiles behind are reached from the
+// other side: the cells there say the way round the ghost. A cut edge's
+// cells keep what they had, so a pair that leads to a held tile is not
+// read (the same switch). His own tile is never held, so that with a
+// ghost next to him the wave still says his way out. (Holding a tile's
+// neuron at rest, its leak 30 times, cuts the wave too, but the held
+// tile then takes current through the synapses its firing neighbours
+// open towards it: their spikes end early, and since a cell keeps which
+// end's spike ended last, their other cells say the wrong way.)
+//
+// Fear (maze.py `fear=1`): the maze a second time, neurons, synapses and
+// cells of its own, nothing between the two. In it the ghosts' tiles are
+// fed the pulses, so its wave goes out from the ghosts and its cells
+// keep, at each edge, which end is nearer a ghost. He reads there too:
+// when his own tile fired after the pulse (a timer: the wave takes about
+// 0.1 ms a tile, so how many tiles the nearest ghost is off), and, where
+// that is within `fear` seconds, he is afraid and goes by the pairs of
+// that layer at his tile: to a neighbour, not held, that fired after his
+// tile (further from the ghost); of several the one the dots' layer says
+// too, else the one whose pair is surest. With no such neighbour, and
+// when not afraid, he goes as the dots' cells say.
+//
+// The ghosts go as examples/pacman.ent's (the arcade's rule), a tile
+// every `pace` periods, his pace where it is 1: at each tile the
+// neighbour, not the one it came from but out of a dead end, that is
+// nearest its target in a straight line (of equals up before left before
+// down before right). They take turns, SCATTER periods each to its corner
+// of the maze, then CHASE periods after him: the first (red) to his tile,
+// the second (pink) four tiles ahead of him, the third (cyan) to the far
+// side of the tile two ahead of him as seen from the first, the fourth
+// (orange) to him while more than eight tiles away, to its corner when
+// nearer; and so on in fours. Each comes into the maze after its wait.
+// A ghost that comes to his tile has caught him, and the run ends.
+//
+// A power pellet (a dot of kind 2) frightens the ghosts then in the maze
+// for `fright` periods: they turn back, then wander (the first open way
+// from one the dice give, not back), a tile every second period; a
+// frightened ghost holds no tile and feeds no fear, and where he and it
+// meet it is eaten: out of the maze, and in again where it first came
+// in, no longer frightened, after `back` periods.
+//
 // "game.txt", where the program is started, says the game (check/game.py
 // writes it), numbers on one line: the period and the first time read,
 // in seconds; how many tiles, edges and devices; the tile he starts at;
-// then for each tile its node, the device that feeds it (-1: none) and
-// whether a dot is there (1); then for each edge its two tiles and its
-// two cells' devices, the one from the first tile to the second, then
-// the other. Without the file there is no game.
+// how many ghosts, and their pace; `fear` in seconds (0: no fear), and
+// how long after a period's start the pulses come; `fright` and `back`
+// in periods; the voltage a neuron fires through. Then for each tile its
+// node, the device that feeds it (-1: none), its dot (0 none, 1 a dot, 2
+// a power pellet), its column and row, its neuron's device, and in the
+// fear's layer its node and the device that feeds it (-1: no such
+// layer); then for each edge its two tiles, its two cells' devices, the
+// one from the first tile to the second, then the other, its two
+// synapses' devices, and the fear layer's two cells' (-1); then each
+// ghost's first tile and the periods it waits before it is there.
+// Without the file there is no game.
 //
-// Each move is said as it is made: `move <seconds> <tile> <ate> <dots
-// left> <ratio>` (the tile he is at after it; ratio 1: he stayed); and
-// before it what the cells said at that time, for every tile whose way is
-// another than the time before: `says <tile> <to>` (the tile its surest
-// pair says to go to; -1: no pair says a way).
+// What is said, each period: for every tile whose way by the cells is
+// another than the period before, `says <tile> <to>` (the tile its surest
+// pair says to go to; -1: no pair says a way; -2: the tile was held), and
+// `fear <tile> <to>` by the fear layer's (the way to the nearest ghost);
+// `move <seconds> <tile> <ate> <dots left> <ratio> <afraid> <fired>` (the
+// tile he is at after it; ate 2: a power pellet; ratio 1: he stayed;
+// afraid 1: he went by the fear layer; fired: the microseconds from the
+// pulse to his tile's spike in the fear layer, -1 where none);
+// `ghost <which> <tile> <frightened>` for each ghost, after its move
+// (tile -1: not in the maze); `eaten <which>`; and `caught` where one
+// has him.
 import console
 import files
 import decimal
@@ -29,19 +87,50 @@ import math
 import circuit
 import multirate
 
-// `period`, `next` (the next time read): in ticks; `at`: his tile.
+// A cut cell's series resistance, in ohms.
+const CUT: f64 = 1e12
+// The periods the ghosts scatter and chase (7 and 20 seconds of the
+// arcade's, at his 8 tiles a second).
+const SCATTER: i32 = 56
+const CHASE: i32 = 160
+
+// `period`, `next` (the next time read), `fear`, `delay`: in ticks; `at`:
+// his tile, `dc`, `dr` the way he last went; `turn`: the periods gone;
+// `due`: the held tiles are to be set anew; `scared`: the periods the
+// ghosts are still frightened.
 unique Game {
-  on: bool, period: i64, next: i64, at: i32, food: i32, tiles: i32, edges: i32, moves: i32
+  on: bool, period: i64, next: i64, at: i32, food: i32, tiles: i32, edges: i32, moves: i32,
+  ghosts: i32, pace: i32, turn: i32, dc: i32, dr: i32, due: bool, caught: bool, cols: i32,
+  rows: i32, fear: i64, delay: i64, fright: i32, back: i32, scared: i32, feared: bool
 }
 buffer GameNumbers { v: f64 } capacity 16
-buffer GameTiles { node: i32, source: i32, food: bool } capacity 16
-buffer GameEdges { a: i32, b: i32, c: i32, d: i32 } capacity 16
+buffer GameTiles {
+  node: i32, source: i32, food: i32, col: i32, row: i32, neuron: i32, held: bool, fnode: i32,
+  fsource: i32
+} capacity 16
+buffer GameEdges {
+  a: i32, b: i32, c: i32, d: i32, s: i32, r: i32, fc: i32, fd: i32
+} capacity 16
 // Each cell's state over its g0 (its resistance read at a small voltage
 // goes as exp(1.8 z / g0), rram.va), by its device's number.
 buffer GameCells { s: f64 } capacity 16
 // Each tile's way by its cells now (`best`: its pair's ratio), and the one
-// last said.
+// last said; and the same by the fear layer's.
 buffer GameWays { best: f64, to: i32, said: i32 } capacity 16
+buffer GameFears { best: f64, to: i32, said: i32 } capacity 16
+// (`before`: the tile it came from; `first`: where it comes into the
+// maze, after `wait` periods, until when `tile` is -1; `turned`: it is to
+// go back the way it came.)
+buffer GameGhosts {
+  tile: i32, before: i32, first: i32, wait: i32, scared: bool, seed: i32, turned: bool
+} capacity 16
+// By a device's number: a synapse's own two conductances or a cell's own
+// series resistance, and whether its edge is cut; a source's own height,
+// whether it is the fear layer's, and whether a ghost is at its tile.
+buffer GameSwitches { own: f64, other: f64, cut: bool } capacity 16
+buffer GameSources { top: f64, fear: bool, on: bool } capacity 16
+// When each node last fired, in ticks, by its number.
+buffer GameFired { t: i64 } capacity 16
 
 system game_read() {
   let size = read_file("game.txt", Bytes)
@@ -58,61 +147,189 @@ system game_read() {
     }
   }
   Bytes = []
-  if len(GameNumbers) >= 6 {
+  if len(GameNumbers) >= 13 {
     Game.on = true
     Game.period = (GameNumbers[0].v / Multi.unit + 0.5) as i64
     Game.next = (GameNumbers[1].v / Multi.unit + 0.5) as i64
     Game.tiles = GameNumbers[2].v as i32
     Game.edges = GameNumbers[3].v as i32
-    GameCells = [{ s: 0.0 }; GameNumbers[4].v as i32]
+    let devices = GameNumbers[4].v as i32
+    GameCells = [{ s: 0.0 }; devices]
+    GameSwitches = [{ own: 0.0, other: 0.0, cut: false }; devices]
+    GameSources = [{ top: 0.0, fear: false, on: false }; devices]
+    GameFired = [{ t: 0 }; Circuit.nodes]
     Game.at = GameNumbers[5].v as i32
+    Game.ghosts = GameNumbers[6].v as i32
+    Game.pace = max(GameNumbers[7].v as i32, 1)
+    Game.fear = (GameNumbers[8].v / Multi.unit + 0.5) as i64
+    Game.delay = (GameNumbers[9].v / Multi.unit + 0.5) as i64
+    Game.fright = GameNumbers[10].v as i32
+    Game.back = GameNumbers[11].v as i32
+    Multi.fire = GameNumbers[12].v
     Game.food = 0
+    Game.cols = 0
+    Game.feared = false
     GameTiles = []
     GameWays = [{ best: 1.0, to: -1, said: -1 }; Game.tiles]
+    GameFears = [{ best: 1.0, to: -1, said: -1 }; Game.tiles]
     for k in 0..Game.tiles {
-      let at = 6 + 3 * k
-      let food = GameNumbers[at + 2].v != 0.0
-      GameTiles += { node: GameNumbers[at].v as i32, source: GameNumbers[at + 1].v as i32, food: food }
-      if food { Game.food += 1 }
+      let at = 13 + 8 * k
+      let food = GameNumbers[at + 2].v as i32
+      let fsource = GameNumbers[at + 7].v as i32
+      GameTiles += { node: GameNumbers[at].v as i32, source: GameNumbers[at + 1].v as i32, food: food,
+                     col: GameNumbers[at + 3].v as i32, row: GameNumbers[at + 4].v as i32,
+                     neuron: GameNumbers[at + 5].v as i32, held: false,
+                     fnode: GameNumbers[at + 6].v as i32, fsource: fsource }
+      if food > 0 { Game.food += 1 }
+      if fsource >= 0 {
+        GameSources[fsource].fear = true
+        Game.feared = true
+      }
+      Game.cols = max(Game.cols, GameNumbers[at + 3].v as i32 + 1)
+      Game.rows = max(Game.rows, GameNumbers[at + 4].v as i32 + 1)
     }
     GameEdges = []
     for k in 0..Game.edges {
-      let at = 6 + 3 * Game.tiles + 4 * k
+      let at = 13 + 8 * Game.tiles + 8 * k
       GameEdges += { a: GameNumbers[at].v as i32, b: GameNumbers[at + 1].v as i32,
-                     c: GameNumbers[at + 2].v as i32, d: GameNumbers[at + 3].v as i32 }
+                     c: GameNumbers[at + 2].v as i32, d: GameNumbers[at + 3].v as i32,
+                     s: GameNumbers[at + 4].v as i32, r: GameNumbers[at + 5].v as i32,
+                     fc: GameNumbers[at + 6].v as i32, fd: GameNumbers[at + 7].v as i32 }
     }
+    GameGhosts = []
+    for k in 0..Game.ghosts {
+      let at = 13 + 8 * Game.tiles + 8 * Game.edges + 2 * k
+      let tile = GameNumbers[at].v as i32
+      let wait = GameNumbers[at + 1].v as i32
+      GameGhosts += { tile: if wait > 0 { -1 } else { tile }, before: tile, first: tile, wait: wait,
+                      scared: false, seed: 7 + k * 13, turned: false }
+    }
+    Game.due = true
   }
 }
 
-// A move, once every node is past the time read.
+// (Each synapse, cell and source as the circuit has it.)
+system game_switches() {
+  for dv: Device, k: Synapse in turn by dv.index {
+    GameSwitches[dv.index].own = k.gs1
+    GameSwitches[dv.index].other = k.gs0
+  }
+  for dv: Device, k: Rram in turn by dv.index { GameSwitches[dv.index].own = k.rs }
+  for dv: Device, s: Source in turn by dv.index { GameSources[dv.index].top = s.p1 }
+}
+
+// The tiles held for the wave to come: the ghosts' and those next to
+// them, but his; and their edges cut. And the fear layer fed where the
+// ghosts are. (Not the frightened ones.)
+system game_held() {
+  for k in 0..Game.tiles {
+    GameTiles[k].held = false
+    if GameTiles[k].fsource >= 0 { GameSources[GameTiles[k].fsource].on = false }
+  }
+  for g in 0..Game.ghosts {
+    let tile = GameGhosts[g].tile
+    if tile >= 0 && !GameGhosts[g].scared {
+      GameTiles[tile].held = true
+      if GameTiles[tile].fsource >= 0 { GameSources[GameTiles[tile].fsource].on = true }
+    }
+  }
+  for j in 0..Game.edges {
+    for g in 0..Game.ghosts {
+      if !GameGhosts[g].scared {
+        if GameEdges[j].a == GameGhosts[g].tile { GameTiles[GameEdges[j].b].held = true }
+        if GameEdges[j].b == GameGhosts[g].tile { GameTiles[GameEdges[j].a].held = true }
+      }
+    }
+  }
+  GameTiles[Game.at].held = false
+  for j in 0..Game.edges {
+    let cut = GameTiles[GameEdges[j].a].held || GameTiles[GameEdges[j].b].held
+    GameSwitches[GameEdges[j].c].cut = cut
+    GameSwitches[GameEdges[j].d].cut = cut
+    GameSwitches[GameEdges[j].s].cut = cut
+    GameSwitches[GameEdges[j].r].cut = cut
+  }
+  for dv: Device, k: mut Synapse in turn by dv.index {
+    let cut = GameSwitches[dv.index].cut
+    k.gs1 = if cut { 0.0 } else { GameSwitches[dv.index].own }
+    k.gs0 = if cut { 0.0 } else { GameSwitches[dv.index].other }
+  }
+  for dv: Device, k: mut Rram in turn by dv.index {
+    k.rs = if GameSwitches[dv.index].cut { CUT } else { GameSwitches[dv.index].own }
+  }
+  for dv: Device, s: mut Source in turn by dv.index {
+    if GameSources[dv.index].fear {
+      s.p1 = if GameSources[dv.index].on { GameSources[dv.index].top } else { 0.0 }
+    }
+  }
+  Game.due = false
+}
+
+// How far apart two columns are, the shorter way round where the maze
+// wraps (`cols` 28: Pac-Man's tunnel).
+fn columns(a: i32, b: i32, cols: i32) -> i32 {
+  let d = b - a
+  if cols == 28 && d > 14 { d - 28 } else if cols == 28 && d < -14 { d + 28 } else { d }
+}
+
+// One of four by its number.
+fn of_four(k: i32, n0: i32, n1: i32, n2: i32, n3: i32) -> i32 {
+  if k == 0 { n0 } else if k == 1 { n1 } else if k == 2 { n2 } else { n3 }
+}
+
+// A period's moves, once every node is past the time read.
 system game_played() {
-  // (A cell's state as its first node last took it.)
+  // (A cell's state as its first node last took it; a node's last spike.)
   for me, c: Clock in turn by c.slot {
     for (me)-[q: Port]->(d, dv: Device, k: Rram) {
       if q.side > 0.0 { GameCells[dv.index].s = q.wc / k.g0 }
     }
   }
+  for p: Place, c: Clock in turn by p.index { GameFired[p.index].t = c.fired }
   for k in 0..Game.tiles {
     GameWays[k].best = 1.0
-    GameWays[k].to = -1
+    GameWays[k].to = if GameTiles[k].held { -2 } else { -1 }
+    GameFears[k].best = 1.0
+    GameFears[k].to = -1
   }
   for j in 0..Game.edges {
     let a = GameEdges[j].a
     let b = GameEdges[j].b
     let sc = GameCells[GameEdges[j].c].s
     let sd = GameCells[GameEdges[j].d].s
-    if sc < sd {
-      let ratio = exp64(1.8 * (sd - sc))
-      if ratio > GameWays[a].best {
-        GameWays[a].best = ratio
-        GameWays[a].to = b
+    // (No pair read from a held tile, nor one that leads to it.)
+    if !GameTiles[a].held && !GameTiles[b].held {
+      if sc < sd {
+        let ratio = exp64(1.8 * (sd - sc))
+        if ratio > GameWays[a].best {
+          GameWays[a].best = ratio
+          GameWays[a].to = b
+        }
+      }
+      if sd < sc {
+        let ratio = exp64(1.8 * (sc - sd))
+        if ratio > GameWays[b].best {
+          GameWays[b].best = ratio
+          GameWays[b].to = a
+        }
       }
     }
-    if sd < sc {
-      let ratio = exp64(1.8 * (sc - sd))
-      if ratio > GameWays[b].best {
-        GameWays[b].best = ratio
-        GameWays[b].to = a
+    if GameEdges[j].fc >= 0 {
+      let fc = GameCells[GameEdges[j].fc].s
+      let fd = GameCells[GameEdges[j].fd].s
+      if fc < fd {
+        let ratio = exp64(1.8 * (fd - fc))
+        if ratio > GameFears[a].best {
+          GameFears[a].best = ratio
+          GameFears[a].to = b
+        }
+      }
+      if fd < fc {
+        let ratio = exp64(1.8 * (fc - fd))
+        if ratio > GameFears[b].best {
+          GameFears[b].best = ratio
+          GameFears[b].to = a
+        }
       }
     }
   }
@@ -121,23 +338,184 @@ system game_played() {
       put("says {k} {GameWays[k].to}")
       GameWays[k].said = GameWays[k].to
     }
+    if GameFears[k].to != GameFears[k].said {
+      put("fear {k} {GameFears[k].to}")
+      GameFears[k].said = GameFears[k].to
+    }
   }
-  let best = GameWays[Game.at].best
-  let to = GameWays[Game.at].to
-  let ate = to >= 0 && GameTiles[max(to, 0)].food
-  let source = if ate { GameTiles[max(to, 0)].source } else { -1 }
+  // Afraid: his tile of the fear layer fired soon after this period's pulse.
+  let start = Game.next - Game.period + Game.delay
+  let spike = if Game.feared { GameFired[GameTiles[Game.at].fnode].t } else { -1 }
+  let fired = if spike >= start { ((spike - start) as f64) * Multi.unit * 1e6 } else { -1.0 }
+  let afraid = Game.feared && spike >= start && spike - start <= Game.fear
+  var best = GameWays[Game.at].best
+  var to = GameWays[Game.at].to
+  var fled = false
+  if afraid {
+    var score = 0.0 as f64
+    for j in 0..Game.edges {
+      let mine = GameEdges[j].a == Game.at
+      let other = if mine { GameEdges[j].b } else if GameEdges[j].b == Game.at { GameEdges[j].a }
+                  else { -1 }
+      if other >= 0 && GameEdges[j].fc >= 0 {
+        if !GameTiles[other].held {
+          // (From his tile to the other, in each layer: the cell that way
+          // and the one back.)
+          let fo = GameCells[if mine { GameEdges[j].fc } else { GameEdges[j].fd }].s
+          let fb = GameCells[if mine { GameEdges[j].fd } else { GameEdges[j].fc }].s
+          let so = GameCells[if mine { GameEdges[j].c } else { GameEdges[j].d }].s
+          let sb = GameCells[if mine { GameEdges[j].d } else { GameEdges[j].c }].s
+          // (The other fired after his tile: the way back is the lower.)
+          if fb < fo {
+            let away = exp64(1.8 * (fo - fb))
+            let dots = if so < sb { exp64(1.8 * (sb - so)) } else { 0.0 }
+            let this = if dots > 1.0 { 1000.0 + dots } else { away }
+            if this > score {
+              score = this
+              to = other
+              best = if dots > 1.0 { dots } else { away }
+              fled = true
+            }
+          }
+        }
+      }
+    }
+  }
+  let was = Game.at
+  let ate = if to >= 0 { GameTiles[max(to, 0)].food } else { 0 }
+  let source = if ate > 0 { GameTiles[max(to, 0)].source } else { -1 }
   if to >= 0 {
+    Game.dc = columns(GameTiles[Game.at].col, GameTiles[to].col, Game.cols)
+    Game.dr = GameTiles[to].row - GameTiles[Game.at].row
     Game.at = to
     Game.moves += 1
   }
-  if ate {
-    GameTiles[Game.at].food = false
+  if ate > 0 {
+    GameTiles[Game.at].food = 0
     Game.food -= 1
   }
   for dv: Device, s: mut Source where dv.index == source { s.p1 = 0.0 }
   let when = (Game.next as f64) * Multi.unit
-  let eaten = if ate { 1 } else { 0 }
-  put("move {when} {Game.at} {eaten} {Game.food} {best}")
+  let went = if fled { 1 } else { 0 }
+  put("move {when} {Game.at} {ate} {Game.food} {best} {went} {fired}")
+  // The ghosts: frightened by a power pellet, each its move, and where
+  // one and he meet.
+  Game.turn += 1
+  if Game.scared > 0 {
+    Game.scared -= 1
+    if Game.scared == 0 { for g in 0..Game.ghosts { GameGhosts[g].scared = false } }
+  }
+  if ate == 2 && Game.fright > 0 {
+    Game.scared = Game.fright
+    for g in 0..Game.ghosts {
+      if GameGhosts[g].tile >= 0 {
+        GameGhosts[g].scared = true
+        GameGhosts[g].turned = true
+      }
+    }
+  }
+  let scatter = (Game.turn - 1) % (SCATTER + CHASE) < SCATTER
+  let pc = GameTiles[Game.at].col
+  let pr = GameTiles[Game.at].row
+  for g in 0..Game.ghosts {
+    let here = GameGhosts[g].tile
+    var met = here >= 0 && here == Game.at
+    let goes = if GameGhosts[g].scared { Game.turn % 2 == 0 } else { Game.turn % Game.pace == 0 }
+    if here < 0 {
+      if Game.turn >= GameGhosts[g].wait {
+        GameGhosts[g].tile = GameGhosts[g].first
+        GameGhosts[g].before = GameGhosts[g].first
+      }
+    } else if goes && !met {
+      // (Its neighbours: right, down, left, up.)
+      var n0 = -1
+      var n1 = -1
+      var n2 = -1
+      var n3 = -1
+      for j in 0..Game.edges {
+        let other = if GameEdges[j].a == here { GameEdges[j].b }
+                    else if GameEdges[j].b == here { GameEdges[j].a } else { -1 }
+        if other >= 0 {
+          let sc = columns(GameTiles[here].col, GameTiles[other].col, Game.cols)
+          let sr = GameTiles[other].row - GameTiles[here].row
+          if sc > 0 { n0 = other }
+          if sr > 0 { n1 = other }
+          if sc < 0 { n2 = other }
+          if sr < 0 { n3 = other }
+        }
+      }
+      let before = GameGhosts[g].before
+      let back = if before == n0 || before == n1 || before == n2 || before == n3 { before }
+                 else { -1 }
+      var next = -1
+      if GameGhosts[g].turned && back >= 0 {
+        next = back
+      } else if GameGhosts[g].scared {
+        GameGhosts[g].seed = (GameGhosts[g].seed * 75 + 74) % 65537
+        for k in 0..4 {
+          let other = of_four((GameGhosts[g].seed + k) % 4, n0, n1, n2, n3)
+          if next < 0 && other >= 0 && other != before { next = other }
+        }
+      } else {
+        let kind = g % 4
+        let corner_c = if kind == 0 || kind == 2 { Game.cols - 2 } else { 1 }
+        let corner_r = if kind == 0 || kind == 1 { 0 } else { Game.rows - 1 }
+        let dc0 = GameTiles[here].col - pc
+        let dr0 = GameTiles[here].row - pr
+        // (The first ghost, for the third's target; itself where there is none.)
+        let red = if GameGhosts[g - kind].tile >= 0 { GameGhosts[g - kind].tile } else { here }
+        var tc = corner_c
+        var tr = corner_r
+        if !scatter {
+          if kind == 0 || (kind == 3 && dc0 * dc0 + dr0 * dr0 > 64) {
+            tc = pc
+            tr = pr
+          }
+          if kind == 1 {
+            tc = pc + 4 * Game.dc
+            tr = pr + 4 * Game.dr
+          }
+          if kind == 2 {
+            tc = 2 * (pc + 2 * Game.dc) - GameTiles[red].col
+            tr = 2 * (pr + 2 * Game.dr) - GameTiles[red].row
+          }
+        }
+        // (Of equals: up, left, down, right.)
+        var least = 2000000000
+        for k in 0..4 {
+          let other = of_four(3 - k, n0, n1, n2, n3)
+          if other >= 0 && other != before {
+            let dc = tc - GameTiles[other].col
+            let dr = tr - GameTiles[other].row
+            if dc * dc + dr * dr < least {
+              least = dc * dc + dr * dr
+              next = other
+            }
+          }
+        }
+      }
+      if next < 0 { next = back }
+      GameGhosts[g].turned = false
+      if next >= 0 {
+        GameGhosts[g].before = here
+        GameGhosts[g].tile = next
+        // (At his tile, or the two went through each other.)
+        met = next == Game.at || (next == was && here == Game.at && was != Game.at)
+      }
+    }
+    if met {
+      if GameGhosts[g].scared {
+        put("eaten {g}")
+        GameGhosts[g].tile = -1
+        GameGhosts[g].scared = false
+        GameGhosts[g].wait = Game.turn + Game.back
+      } else { Game.caught = true }
+    }
+    let scared = if GameGhosts[g].scared { 1 } else { 0 }
+    put("ghost {g} {GameGhosts[g].tile} {scared}")
+  }
+  if Game.caught { put("caught") }
+  Game.due = true
   Game.next += Game.period
-  if Game.food == 0 { Multi.done = true }
+  if Game.food == 0 || Game.caught { Multi.done = true }
 }

@@ -10,7 +10,13 @@
 // nearest dot; a tile without one had no pair saying a way (a tile with a
 // dot fires with its neighbours, and nothing is written between them).
 // He reads only the pairs at his own tile, once a wave: 20 ms of the
-// circuit a move, shown slower.
+// circuit a move, shown slower. With ghosts, the tiles marked red are the
+// ones held silent for the wave he read (a ghost's and those next to
+// it): no wave goes through them, and he reads no pair that leads there.
+//
+// With the fear layer (game.ent), F shows its cells' ways, red, in place
+// of the dots' layer's: from each tile the way to the nearest ghost; and
+// AFRAID is said on the moves he went by it. A frightened ghost is blue.
 //
 // Space stops and goes on; Up and Down show it faster and slower; R from
 // the start. Escape or closing the window ends the program.
@@ -20,12 +26,16 @@
 // the picture as "shot.png" and ends.
 //
 // The file: a line of the maze's columns and rows, his first tile's
-// column and row, the moves and the seconds of the circuit between two;
-// the maze's rows (`#` a wall, `o` a dot, `.` open); then for each move
-// a line (the circuit's time, his tile's column and row after it,
-// whether he ate, the dots left, the ratio of the pair he went by) and
-// a line of every tile's way then, a letter a tile (r d l u, `-` none, a
-// blank a wall).
+// column and row, the moves, the seconds of the circuit between two, the
+// ghosts and whether he was caught at the end (1); the maze's rows (`#` a
+// wall, `o` a dot, `O` a power pellet, `.` open); a line of each ghost's
+// first column and row (-1: not yet in the maze) and a 0; then for each
+// move a line (the circuit's time, his tile's column and row after it,
+// what he ate (2: a power pellet), the dots left, the ratio of the pair
+// he went by, whether he was afraid, and each ghost's column and row
+// after it and whether it is frightened), a line of every tile's way
+// then, a letter a tile (r d l u, `-` none, `x` held, a blank a wall),
+// and such a line of the fear layer's ways.
 import window
 import files
 import decimal
@@ -39,12 +49,18 @@ capacity Bytes 67108864
 unique Replay {
   read: bool, cols: i32, rows: i32, col: i32, row: i32, moves: i32, period: f64, at: f32,
   eaten: i32, speed: f32, paused: bool, tile: f32, top: f32, time: f32, shot: bool, frames: i32,
-  over: bool
+  over: bool, ghosts: i32, caught: bool, fears: bool
 }
 buffer Tiles { kind: u8, dot: bool } capacity 4096
-buffer Moves { time: f64, col: i32, row: i32, ate: bool, left: i32, ratio: f64 } capacity 65536
+buffer Moves {
+  time: f64, col: i32, row: i32, ate: bool, left: i32, ratio: f64, afraid: bool
+} capacity 65536
 // (Each move's ways: a byte a tile, the moves one after the other.)
 buffer Ways { way: u8 } capacity 67108864
+buffer Fears { way: u8 } capacity 67108864
+// (Each ghost's tile before the first move, then after each move: the
+// ghosts of one time one after the other.)
+buffer Ghosts { col: i32, row: i32, scared: bool } capacity 1048576
 
 world {
   Window.width = 560
@@ -64,23 +80,37 @@ system load() {
     let (row, a3) = read_real(Bytes, a2)
     let (moves, a4) = read_real(Bytes, a3)
     let (period, a5) = read_real(Bytes, a4)
+    let (ghosts, a6) = read_real(Bytes, a5)
+    let (caught, a7) = read_real(Bytes, a6)
+    Replay.ghosts = ghosts as i32
+    Replay.caught = caught != 0.0
     Replay.cols = cols as i32
     Replay.rows = rows as i32
     Replay.col = col as i32
     Replay.row = row as i32
     Replay.period = period
     let cells = Replay.cols * Replay.rows
-    var at = a5 + 1
+    var at = a7 + 1
     Tiles = []
     for r in 0..Replay.rows {
       for c in 0..Replay.cols {
         let kind = Bytes[at + c].value
-        Tiles += { kind: kind, dot: kind == 111 }
+        Tiles += { kind: kind, dot: kind == 111 || kind == 79 }
       }
       at += Replay.cols + 1
     }
     Moves = []
     Ways = []
+    Ghosts = []
+    Fears = []
+    for g in 0..Replay.ghosts {
+      let (c, g0) = read_real(Bytes, at)
+      let (r, g1) = read_real(Bytes, g0)
+      let (scared, g2) = read_real(Bytes, g1)
+      Ghosts += { col: c as i32, row: r as i32, scared: scared != 0.0 }
+      at = g2
+    }
+    at += 1
     for m in 0..moves as i32 {
       if at < len(Bytes) {
         let (time, b0) = read_real(Bytes, at)
@@ -88,11 +118,21 @@ system load() {
         let (r, b2) = read_real(Bytes, b1)
         let (ate, b3) = read_real(Bytes, b2)
         let (left, b4) = read_real(Bytes, b3)
-        let (ratio, b5) = read_real(Bytes, b4)
+        let (ratio, b4b) = read_real(Bytes, b4)
+        let (afraid, b4c) = read_real(Bytes, b4b)
+        var b5 = b4c
+        for g in 0..Replay.ghosts {
+          let (gc, g0) = read_real(Bytes, b5)
+          let (gr, g1) = read_real(Bytes, g0)
+          let (scared, g2) = read_real(Bytes, g1)
+          Ghosts += { col: gc as i32, row: gr as i32, scared: scared != 0.0 }
+          b5 = g2
+        }
         Moves += { time: time, col: c as i32, row: r as i32, ate: ate != 0.0, left: left as i32,
-                   ratio: ratio }
+                   ratio: ratio, afraid: afraid != 0.0 }
         for k in 0..cells { Ways += { way: Bytes[b5 + 1 + k].value } }
-        at = b5 + 1 + cells + 1
+        for k in 0..cells { Fears += { way: Bytes[b5 + 1 + cells + 1 + k].value } }
+        at = b5 + 1 + 2 * (cells + 1)
       }
     }
     Replay.moves = len(Moves)
@@ -127,11 +167,12 @@ system flow() {
   if key_pressed(32) { Replay.paused = !Replay.paused }
   if key_pressed(265) { Replay.speed = min(Replay.speed * 2.0, 512.0) }
   if key_pressed(264) { Replay.speed = max(Replay.speed / 2.0, 0.5) }
+  if key_pressed(70) { Replay.fears = !Replay.fears }
   if key_pressed(82) {
     Replay.at = 0.0
     Replay.eaten = 0
     Replay.paused = false
-    for k in 0..len(Tiles) { Tiles[k].dot = Tiles[k].kind == 111 }
+    for k in 0..len(Tiles) { Tiles[k].dot = Tiles[k].kind == 111 || Tiles[k].kind == 79 }
   }
   let dt = min(Window.dt, 0.05)
   Replay.time += dt
@@ -214,18 +255,28 @@ system draw_ways() {
   for i in 0..cells {
     let x = ((i % cols) as f32 + 0.5) * Replay.tile
     let y = ((i / cols) as f32 + 0.5) * Replay.tile + Replay.top
-    let way = Ways[m * cells + i].way
+    let held = Ways[m * cells + i].way == 120
+    let way = if Replay.fears { Fears[m * cells + i].way } else { Ways[m * cells + i].way }
+    let dark = if Replay.fears { 0x7a1f1f } else { 0x1f7a3a }
+    let bright = if Replay.fears { 0xd03535 } else { 0x35d063 }
     let dx = if way == 114 { 1.0 } else if way == 108 { -1.0 } else { 0.0 }
     let dy = if way == 100 { 1.0 } else if way == 117 { -1.0 } else { 0.0 }
+    // (A held tile.)
+    if held {
+      rect(x - 8.0 * s, y - 8.0 * s, 16.0 * s, 16.0 * s, 0x4a1010)
+    }
     if dx != 0.0 || dy != 0.0 {
       // (A stroke from the tile's middle the way it says, a knob at its end.)
       let reach = 7.0 * s
       let w = 2.0 * s
       rect(x + min(0.0, dx * reach) - w / 2.0, y + min(0.0, dy * reach) - w / 2.0,
-           abs(dx) * reach + w, abs(dy) * reach + w, 0x1f7a3a)
-      circle(x + dx * reach, y + dy * reach, 2.6 * s, 0x35d063)
+           abs(dx) * reach + w, abs(dy) * reach + w, dark)
+      circle(x + dx * reach, y + dy * reach, 2.6 * s, bright)
     }
-    if Tiles[i].dot { rect(x - 2.0 * s, y - 2.0 * s, 4.0 * s, 4.0 * s, 0xffb8ae) }
+    if Tiles[i].dot && Tiles[i].kind == 111 {
+      rect(x - 2.0 * s, y - 2.0 * s, 4.0 * s, 4.0 * s, 0xffb8ae)
+    }
+    if Tiles[i].dot && Tiles[i].kind == 79 { circle(x, y, 7.0 * s, 0xffb8ae) }
   }
 }
 
@@ -251,6 +302,43 @@ system draw_pac() {
   sector(x, y, 14.0 * s, toward + mouth, toward + 360.0 - mouth, 0xffff00)
 }
 
+system draw_ghosts() {
+  let s = Replay.tile / 20.0
+  let m = min(Replay.at as i32, Replay.moves - 1)
+  let part = if Replay.at >= Replay.moves as f32 { 1.0 } else { Replay.at - m as f32 }
+  for g in 0..Replay.ghosts {
+    let c0 = Ghosts[m * Replay.ghosts + g].col
+    let r0 = Ghosts[m * Replay.ghosts + g].row
+    let c1 = Ghosts[(m + 1) * Replay.ghosts + g].col
+    let r1 = Ghosts[(m + 1) * Replay.ghosts + g].row
+    // (A ghost comes into the maze where it first is; before, none.)
+    let far = abs((c1 - c0) as f32) > 1.5 || c0 < 0
+    let fc = if far { if part < 0.5 { c0 as f32 } else { c1 as f32 } }
+             else { c0 as f32 + (c1 - c0) as f32 * part }
+    let fr = if c0 < 0 { r1 as f32 } else { r0 as f32 + (r1 - r0) as f32 * part }
+    let x = (fc + 0.5) * Replay.tile
+    let y = (fr + 0.5) * Replay.tile + Replay.top
+    let there = fc >= 0.0
+    let scared = Ghosts[(m + 1) * Replay.ghosts + g].scared
+    let color = if scared { 0x2121de } else if g % 4 == 0 { 0xff0000 }
+                else if g % 4 == 1 { 0xffb8ff } else if g % 4 == 2 { 0x00ffff } else { 0xffb852 }
+    if there {
+      circle(x, y - 2.0 * s, 13.0 * s, color)
+      rect(x - 13.0 * s, y - 2.0 * s, 26.0 * s, 11.0 * s, color)
+      circle(x - 8.7 * s, y + 9.0 * s, 4.3 * s, color)
+      circle(x, y + 9.0 * s, 4.3 * s, color)
+      circle(x + 8.7 * s, y + 9.0 * s, 4.3 * s, color)
+      // (They look where they go.)
+      let lx = (if far { 0 } else { c1 - c0 }) as f32 * 2.0 * s
+      let ly = (if c0 < 0 { 0 } else { r1 - r0 }) as f32 * 2.0 * s
+      circle(x - 5.5 * s + lx, y - 4.0 * s + ly, 4.5 * s, 0xffffff)
+      circle(x + 5.5 * s + lx, y - 4.0 * s + ly, 4.5 * s, 0xffffff)
+      circle(x - 5.5 * s + lx * 2.0, y - 4.0 * s + ly * 2.0, 2.2 * s, 0x2121de)
+      circle(x + 5.5 * s + lx * 2.0, y - 4.0 * s + ly * 2.0, 2.2 * s, 0x2121de)
+    }
+  }
+}
+
 system draw_text() {
   let m = min(Replay.at as i32, Replay.moves - 1)
   let done = min(Replay.eaten, Replay.moves)
@@ -269,6 +357,11 @@ system draw_text() {
         below + 6.0, 16.0, 0x35d063)
   label("{slower} times slower than the circuit", 20.0, below + 24.0, 16.0, 0x9a9a9a)
   if Replay.paused { label("stopped", 300.0, below + 24.0, 16.0, 0xffff00) }
+  if Moves[m].afraid { label("AFRAID", 420.0, 8.0, 20.0, 0xd03535) }
+  if Replay.fears { label("the fear layer", 300.0, below + 6.0, 16.0, 0xd03535) }
+  if Replay.caught && Replay.at >= Replay.moves as f32 {
+    label("CAUGHT", 420.0, 32.0, 20.0, 0xff2020)
+  }
 }
 
 system draw_none() {
@@ -282,6 +375,7 @@ schedule frame() {
   draw_maze() run_if Replay.read
   draw_ways() run_if Replay.read
   draw_pac() run_if Replay.read
+  draw_ghosts() run_if Replay.read
   draw_text() run_if Replay.read
   draw_none() run_if !Replay.read
   shoot() run_if Replay.shot

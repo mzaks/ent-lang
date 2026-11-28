@@ -63,6 +63,11 @@ capacity GameTiles 2200000
 capacity GameEdges 3300000
 capacity GameCells 3300000
 capacity GameWays 2200000
+capacity GameGhosts 4096
+capacity GameFears 2200000
+capacity GameSources 3300000
+capacity GameFired 2200000
+capacity GameSwitches 3300000
 
 // `way`, `shown` and `most` as "run.txt" says, and the fixed step it
 // gives and its rule (`step` 0: steps chosen). `refused`: what keeps the
@@ -310,6 +315,8 @@ schedule mr_setup() {
   mr_started() run_if Run.three && Circuit.tran && !Run.refused && !Run.failed
   mr_seen() run_if Run.three && Circuit.tran && !Run.refused && !Run.failed
   game_read() run_if Run.way == 3 && !Multi.refused
+  game_switches() run_if Run.way == 3 && Game.on
+  game_held() run_if Run.way == 3 && Game.due
 }
 schedule mr_ticked() {
   mr_chosen() run_if Run.way == 3
@@ -327,6 +334,7 @@ schedule mr_ended() {
   mr_seen() run_if Run.way == 3
   mr_lines() run_if Run.way == 3
   game_played() run_if Run.way == 3 && Game.on && Multi.low >= Game.next
+  game_held() run_if Run.way == 3 && Game.due
 }
 schedule done() {
   flushed()

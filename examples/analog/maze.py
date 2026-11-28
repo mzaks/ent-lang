@@ -23,7 +23,7 @@ cell's own spread moves its resistance as much as set and reset do, so
 no one reference reads them all. The wave comes again each period of
 the pulses and writes them anew, as the food moves.
 
-  examples/analog/maze.py [stop] [name] [maze=chain] [r=...] [gs=...] [k=...] [c=...] [ug=...] [sigma=s] [seed=n] [game=1]
+  examples/analog/maze.py [stop] [name] [maze=chain] [r=...] [gs=...] [k=...] [c=...] [ug=...] [sigma=s] [seed=n] [game=1] [fear=1]
 
 writes circuits/<name>.cir (maze_chain unless named): the mazes are
 MAZES' below and `pacman`, examples/pacman.ent's (300 tiles, 320 edges
@@ -48,6 +48,9 @@ cells' gate voltage (0.8 V). Each as it is so, tried on the chain and the
 With `game=1` the maze is a game's (game.ent, check/game.py): a dot on
 every tile of Pac-Man's maze that has one (on every tile but the first
 of another maze), each fed its pulse every period until it is eaten.
+With `fear=1` too the maze is there a second time, neurons, synapses
+and cells of its own (nodes f<col>_<row>) and a source at every tile:
+the layer game.ent sends the ghosts' wave through.
 
 The resistor is the cell's own (models/rram_rs.va), so each cell is one
 device between two tiles, its voltage and state solved within it; with
@@ -217,8 +220,19 @@ def name(p):
     return f"t{p[0]}_{p[1]}"
 
 
+def fear_name(p):
+    return f"f{p[0]}_{p[1]}"
+
+
+def power_tiles(which):
+    """A game's power pellets: Pac-Man's four; another maze's last tile."""
+    if which == "pacman":
+        return [(1, 3), (26, 3), (1, 23), (26, 23)]
+    return [tiles(MAZES[which])[0][-1]]
+
+
 def netlist(rows, stop, r, gs, cells, title, k=axon.SCALE, c=1.0, ug=1.0, split=False,
-            pulsed=False):
+            pulsed=False, fear=False):
     open_, food = tiles(rows)
     neuron = (f"ml gl={axon.GL * c!r} el={axon.EL * k!r} gna={axon.GNA * c!r} ena={axon.ENA * k!r} "
               f"una1={axon.UNA1 * k!r} una2={axon.UNA2 * k!r} gk={axon.GK * c!r} ek={axon.EK * k!r} "
@@ -255,7 +269,24 @@ def netlist(rows, stop, r, gs, cells, title, k=axon.SCALE, c=1.0, ug=1.0, split=
             lines.append(f"Xc{e} {name(x)} {name(y)} {cell}")
             lines.append(f"Xd{e} {name(y)} {name(x)} {cell}")
             probes.append(f"i(Xc{e}) i(Xd{e})")
-    lines.append(".ic " + " ".join(f"v({name(p)})={axon.REST * k!r}" for p in open_))
+    if fear:
+        # (The maze a second time, for the wave from the ghosts: a source
+        # at every tile, which game.ent turns on where a ghost is.)
+        pulse = f"PULSE(0 {2.4e-6 * k * c!r} 1e-3 1e-6 1e-6 2e-3 {PERIOD!r})"
+        for n, p in enumerate(open_):
+            lines.append(f"C{fear_name(p)} {fear_name(p)} 0 {2e-9 * c!r}")
+            lines.append(f"X{fear_name(p)} {fear_name(p)} 0 {neuron} w0={axon.opened(axon.REST)!r}")
+            lines.append(f"If{n + 1} 0 {fear_name(p)} {pulse}")
+        for x, y in edges(open_, wrap_of(rows)):
+            e = f"{fear_name(x)}_{fear_name(y)}"
+            cell = cells.memristor().replace("rram ", "rram_rs ", 1).replace(
+                " w0=", f" ug={ug!r} rs={r!r} w0=")
+            lines.append(f"Xs{e} {fear_name(x)} {fear_name(y)} {synapse} w0=0")
+            lines.append(f"Xr{e} {fear_name(y)} {fear_name(x)} {synapse} w0=0")
+            lines.append(f"Xc{e} {fear_name(x)} {fear_name(y)} {cell}")
+            lines.append(f"Xd{e} {fear_name(y)} {fear_name(x)} {cell}")
+    lines.append(".ic " + " ".join(f"v({name(p)})={axon.REST * k!r}" for p in open_) +
+                 ("".join(f" v({fear_name(p)})={axon.REST * k!r}" for p in open_) if fear else ""))
     lines.append(".options vntol=1e-9")
     lines.append(f".tran 0.1m {stop}")
     lines.append(".print tran " + " ".join(f"v({name(p)})" for p in open_) + " " +
@@ -278,7 +309,8 @@ def main():
                    float(settings.get("gs", 20e-6)), cells,
                    f"A maze's ways to its food by a wave of spikes, kept in RRAM cells: {maze}, {stop} s",
                    float(settings.get("k", 20)), float(settings.get("c", 30)),
-                   float(settings.get("ug", 0.8)), settings.get("split", "0") == "1", game)
+                   float(settings.get("ug", 0.8)), settings.get("split", "0") == "1", game,
+                   settings.get("fear", "0") == "1")
     path = os.path.join(HERE, "circuits", title_name + ".cir")
     with open(path, "w") as file:
         file.write(text)

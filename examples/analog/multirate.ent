@@ -65,11 +65,13 @@ const K: i32 = 16
 // `gin` (the voltage of the last round, in the batch), `st`, `snext` (`t`
 // and `next`). `took`: it took a point in this batch, from `tprev`
 // (`vprev` there); `watch`: a neighbour was in the batch. `col`: the column of its
-// voltage in the waves (-1: none).
+// voltage in the waves (-1: none). `fired`: the last time its voltage went
+// up through `Multi.fire` (for who asks when a node spiked: game.ent).
 component Clock {
   slot: i32, n: i32, t: i64, history: i32, cornered: bool, corner: i64, next: i64,
   want: f64, inb: bool, hh: f64, trap: bool, x: f64, settled: bool, failed: bool, g: f64,
-  gin: bool, st: i64, snext: i64, took: bool, tprev: i64, vprev: f64, watch: bool, col: i32
+  gin: bool, st: i64, snext: i64, took: bool, tprev: i64, vprev: f64, watch: bool, col: i32,
+  fired: i64
 }
 
 // A device as one of its nodes sees it. `other`: its other node; `side`:
@@ -97,7 +99,7 @@ unique Multi {
   tau: i64, end: i64, unit: f64, low: i64, first: f64, most: f64, ratio: f64, round: i32,
   unsettled: i32, done: bool, refused: bool, nodes: i32, batches: i64, tried: i64, steps: i64,
   rejected: i64, failed: i64, evals: i64, rounds: i64, line: i64, grid: i64, lost: i64,
-  others: i32
+  others: i32, fire: f64
 }
 
 // Each node's last K points.
@@ -204,7 +206,7 @@ system mr_clocked() {
                    corner: Multi.end, next: 0, want: Multi.first, inb: false, hh: 0.0,
                    trap: false, x: n.v, settled: false, failed: false, g: n.v, gin: false,
                    st: 0, snext: 0, took: false, tprev: 0, vprev: n.v, watch: false,
-                   col: NodeCol[p.index].col })
+                   col: NodeCol[p.index].col , fired: 0})
     Multi.nodes += 1
   }
 }
@@ -472,6 +474,7 @@ system mr_closed() {
       } else {
         Multi.steps += 1
         c.took = true
+        if c.x >= Multi.fire && n.v < Multi.fire { c.fired = tau }
         c.tprev = c.t
         c.vprev = n.v
         c.n += 1
